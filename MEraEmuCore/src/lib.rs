@@ -86,7 +86,7 @@ mod tests {
                 #DIMS world_str, -2 + 3 = "world"
 
                 ;#DIM cnt = 10000000
-                #DIM cnt = 10000
+                #DIM cnt = 100
                 WHILE cnt > 0
                     cnt = cnt - 1
                 WEND

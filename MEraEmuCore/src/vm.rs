@@ -16,6 +16,8 @@ struct EraErrReportContext<'a> {
     callback: &'a mut dyn EraVirtualMachineCallback,
 }
 
+// TODO: Use a JIT backend to improve performance
+
 // TODO: Introduce report error context to simplify invoking
 macro_rules! vm_report_err {
     ($ctx:expr, None, $is_error:expr, $msg:expr) => {
@@ -34,6 +36,7 @@ macro_rules! vm_read_chunk_u8 {
                 None
             }
         }
+        // unsafe { Some(*$chunk.bytecode.get_unchecked($offset)) }
     };
 }
 macro_rules! vm_read_chunk_u16 {
@@ -286,9 +289,10 @@ impl EraVirtualMachine {
             }
 
             let mut ip_offset_delta: isize = 1;
+            // let primary_bytecode = unsafe { *cur_chunk.bytecode.get_unchecked(cur_frame.ip.offset) };
+            // let primary_bytecode = unsafe { std::mem::transmute(primary_bytecode) };
             let primary_bytecode =
                 vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset)?;
-            //let primary_bytecode = self.read_chunk_u8(cur_chunk, cur_frame.ip.offset)?;
             let primary_bytecode = match EraBytecodePrimaryType::try_from_i(primary_bytecode) {
                 Some(x) => x,
                 None => {
@@ -530,7 +534,7 @@ impl EraVirtualMachine {
                 ConvertToInteger => {
                     let value =
                         match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?.into_unpacked() {
-                            FlatValue::Int(x) => Value::new_int_rc(x),
+                            FlatValue::Int(x) => Value::new_int_obj(x),
                             FlatValue::Str(x) => {
                                 let x = match x.val.parse() {
                                     Ok(x) => x,
@@ -755,6 +759,43 @@ impl EraVirtualMachine {
                     );
                     self.stack.push(result);
                 }
+                LogicalAnd | LogicalOr => {
+                    todo!()
+                    // let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
+                    // let result = Value::new_int(match (lhs.into_unpacked(), rhs.into_unpacked()) {
+                    //     (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
+                    //         LogicalAnd => lhs.val && rhs.val,
+                    //         LogicalOr => lhs.val || rhs.val,
+                    //         _ => unreachable!(),
+                    //     },
+                    //     _ => {
+                    //         vm_report_err!(
+                    //             ctx,
+                    //             cur_frame,
+                    //             true,
+                    //             "expected integer values as operands"
+                    //         );
+                    //         return None;
+                    //     }
+                    // });
+                    // self.stack.push(result);
+                }
+                LogicalNot => {
+                    let value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
+                    let result = Value::new_int(match value.into_unpacked() {
+                        FlatValue::Int(x) => (x.val == 0) as _,
+                        _ => {
+                            vm_report_err!(
+                                ctx,
+                                cur_frame,
+                                true,
+                                "expected integer values as operands"
+                            );
+                            return None;
+                        }
+                    });
+                    self.stack.push(result);
+                }
                 Duplicate => {
                     let value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
                     self.stack.push(value.clone());
@@ -908,7 +949,7 @@ impl EraVirtualMachine {
                     let value =
                         match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?.into_unpacked() {
                             FlatValue::ArrInt(x) => {
-                                x.borrow().get(&idxs).map(|x| Value::new_int_rc(x.clone()))
+                                x.borrow().get(&idxs).map(|x| Value::new_int_obj(x.clone()))
                             }
                             FlatValue::ArrStr(x) => {
                                 x.borrow().get(&idxs).map(|x| Value::new_str_rc(x.clone()))
@@ -951,7 +992,7 @@ impl EraVirtualMachine {
                     match (dst_value.into_unpacked(), src_value.clone().into_unpacked()) {
                         (FlatValue::ArrInt(dst), FlatValue::Int(src)) => {
                             match dst.borrow_mut().get_mut(&idxs) {
-                                Some(x) => *x = src,
+                                Some(x) => x.val = src.val,
                                 None => {
                                     vm_report_err!(
                                         ctx,

@@ -22,3 +22,5 @@ num-derive = "0.4.1"
 either = "1.9.0"
 thiserror = "1.0.56"
 rand = "0.8.5"
+smallvec = "1.13.1"
+# inkwell = { version = "0.4.0", features = ["llvm17-0"] }

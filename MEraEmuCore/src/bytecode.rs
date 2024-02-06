@@ -2,6 +2,7 @@ use std::{cell::RefCell, ops::Deref, rc::Rc};
 
 #[repr(u8)]
 #[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug)]
+// TODO: Make bytecode with strongly-typed operands to ease JIT compilation
 pub enum EraBytecodePrimaryType {
     Invalid = 0,
     InvalidWithMessage, // Introduced to report compilation errors during execution
@@ -124,7 +125,7 @@ pub struct StrValue {
 // NOTE: Arr*Value are used as variable references
 #[derive(Debug, Clone)]
 pub struct ArrIntValue {
-    pub vals: Vec<Rc<IntValue>>,
+    pub vals: Vec<IntValue>,
     pub dims: Vec<u32>,
     // immutable: bool,
 }
@@ -140,17 +141,17 @@ pub struct ArrStrValue {
 // }
 
 impl ArrIntValue {
-    pub fn flat_get(&self, idx: usize) -> Option<&Rc<IntValue>> {
+    pub fn flat_get(&self, idx: usize) -> Option<&IntValue> {
         self.vals.get(idx)
     }
-    pub fn flat_get_mut(&mut self, idx: usize) -> Option<&mut Rc<IntValue>> {
+    pub fn flat_get_mut(&mut self, idx: usize) -> Option<&mut IntValue> {
         self.vals.get_mut(idx)
     }
-    pub fn get(&self, idxs: &[u32]) -> Option<&Rc<IntValue>> {
+    pub fn get(&self, idxs: &[u32]) -> Option<&IntValue> {
         let index = self.calc_idx(idxs)?;
         self.vals.get(index)
     }
-    pub fn get_mut(&mut self, idxs: &[u32]) -> Option<&mut Rc<IntValue>> {
+    pub fn get_mut(&mut self, idxs: &[u32]) -> Option<&mut IntValue> {
         let index = self.calc_idx(idxs)?;
         self.vals.get_mut(index)
     }
@@ -245,18 +246,19 @@ impl ValueKind {
 }
 
 //pub type Value = ptr_union::Union4<Box<IntValue>, Box<StrValue>, Box<ArrValue>, Box<()>>;
-pub type ValueInner = ptr_union::Union4<
-    Rc<IntValue>,
-    Rc<StrValue>,
-    Rc<RefCell<ArrIntValue>>,
-    Rc<RefCell<ArrStrValue>>,
->;
+// pub type ValueInner = ptr_union::Union4<
+//     Rc<IntValue>,
+//     Rc<StrValue>,
+//     Rc<RefCell<ArrIntValue>>,
+//     Rc<RefCell<ArrStrValue>>,
+// >;
+pub type ValueInner = FlatValue;
 
 #[derive(Debug, Clone)]
 pub struct Value(ValueInner);
 #[derive(Debug, Clone)]
 pub enum FlatValue {
-    Int(Rc<IntValue>),
+    Int(IntValue),
     Str(Rc<StrValue>),
     ArrInt(Rc<RefCell<ArrIntValue>>),
     ArrStr(Rc<RefCell<ArrStrValue>>),
@@ -269,27 +271,86 @@ pub enum BorrowedFlatValue<'a> {
     ArrStr(&'a Rc<RefCell<ArrStrValue>>),
 }
 
+// impl Value {
+//     pub fn new_int(val: i64) -> Self {
+//         Value(ValueInner::new_a(Rc::new(IntValue { val })).unwrap())
+//     }
+//     pub fn new_str(val: String) -> Self {
+//         Value(ValueInner::new_b(Rc::new(StrValue { val })).unwrap())
+//     }
+//     pub fn new_int_rc(val: Rc<IntValue>) -> Self {
+//         Value(ValueInner::new_a(val).unwrap())
+//     }
+//     pub fn new_str_rc(val: Rc<StrValue>) -> Self {
+//         Value(ValueInner::new_b(val).unwrap())
+//     }
+//     pub fn new_int_arr(mut dims: Vec<u32>, mut vals: Vec<Rc<IntValue>>) -> Self {
+//         if dims.is_empty() {
+//             dims.push(1);
+//         }
+//         let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
+//         //assert_ne!(size, 0, "dimension must not contain zero");
+//         vals.resize(size, Rc::new(IntValue { val: 0 }));
+//         Value(ValueInner::new_c(Rc::new(RefCell::new(ArrIntValue { vals, dims }))).unwrap())
+//     }
+//     pub fn new_str_arr(mut dims: Vec<u32>, mut vals: Vec<Rc<StrValue>>) -> Self {
+//         if dims.is_empty() {
+//             dims.push(1);
+//         }
+//         let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
+//         //assert_ne!(size, 0, "dimension must not contain zero");
+//         vals.resize(size, Rc::new(StrValue { val: String::new() }));
+//         Value(ValueInner::new_d(Rc::new(RefCell::new(ArrStrValue { vals, dims }))).unwrap())
+//     }
+//     pub fn into_unpacked(self) -> FlatValue {
+//         use ptr_union::Enum4::*;
+//         use FlatValue::*;
+//         match self.0.unpack() {
+//             A(x) => Int(x),
+//             B(x) => Str(x),
+//             C(x) => ArrInt(x),
+//             D(x) => ArrStr(x),
+//         }
+//     }
+//     pub fn deep_clone(&self) -> Self {
+//         // use ptr_union::Enum4::*;
+//         // match self.0.clone().unpack() {
+//         //     A(x) => Value(ValueInner::new_a(x.deref().clone().into()).unwrap()),
+//         //     B(x) => Value(ValueInner::new_b(x.deref().clone().into()).unwrap()),
+//         //     C(x) => Value(ValueInner::new_c(x.deref().clone().into()).unwrap()),
+//         //     D(x) => Value(ValueInner::new_d(x.deref().clone().into()).unwrap()),
+//         // }
+//         self.clone().into_unpacked().deep_clone().into_packed()
+//     }
+//     pub fn kind(&self) -> ValueKind {
+//         // TODO: Optimize performance
+//         self.clone().into_unpacked().kind()
+//     }
+// }
 impl Value {
     pub fn new_int(val: i64) -> Self {
-        Value(ValueInner::new_a(Rc::new(IntValue { val })).unwrap())
+        Value(ValueInner::Int(IntValue { val }))
     }
     pub fn new_str(val: String) -> Self {
-        Value(ValueInner::new_b(Rc::new(StrValue { val })).unwrap())
+        Value(ValueInner::Str(Rc::new(StrValue { val })))
     }
     pub fn new_int_rc(val: Rc<IntValue>) -> Self {
-        Value(ValueInner::new_a(val).unwrap())
+        Value(ValueInner::Int(val.deref().clone()))
+    }
+    pub fn new_int_obj(val: IntValue) -> Self {
+        Value(ValueInner::Int(val))
     }
     pub fn new_str_rc(val: Rc<StrValue>) -> Self {
-        Value(ValueInner::new_b(val).unwrap())
+        Value(ValueInner::Str(val))
     }
-    pub fn new_int_arr(mut dims: Vec<u32>, mut vals: Vec<Rc<IntValue>>) -> Self {
+    pub fn new_int_arr(mut dims: Vec<u32>, mut vals: Vec<IntValue>) -> Self {
         if dims.is_empty() {
             dims.push(1);
         }
         let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
         //assert_ne!(size, 0, "dimension must not contain zero");
-        vals.resize(size, Rc::new(IntValue { val: 0 }));
-        Value(ValueInner::new_c(Rc::new(RefCell::new(ArrIntValue { vals, dims }))).unwrap())
+        vals.resize(size, IntValue { val: 0 });
+        Value(ValueInner::ArrInt(Rc::new(RefCell::new(ArrIntValue { vals, dims }))))
     }
     pub fn new_str_arr(mut dims: Vec<u32>, mut vals: Vec<Rc<StrValue>>) -> Self {
         if dims.is_empty() {
@@ -298,16 +359,16 @@ impl Value {
         let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
         //assert_ne!(size, 0, "dimension must not contain zero");
         vals.resize(size, Rc::new(StrValue { val: String::new() }));
-        Value(ValueInner::new_d(Rc::new(RefCell::new(ArrStrValue { vals, dims }))).unwrap())
+        Value(ValueInner::ArrStr(Rc::new(RefCell::new(ArrStrValue { vals, dims }))))
     }
     pub fn into_unpacked(self) -> FlatValue {
         use ptr_union::Enum4::*;
         use FlatValue::*;
-        match self.0.unpack() {
-            A(x) => Int(x),
-            B(x) => Str(x),
-            C(x) => ArrInt(x),
-            D(x) => ArrStr(x),
+        match self.0 {
+            Int(x) => Int(x),
+            Str(x) => Str(x),
+            ArrInt(x) => ArrInt(x),
+            ArrStr(x) => ArrStr(x),
         }
     }
     pub fn deep_clone(&self) -> Self {
@@ -329,10 +390,10 @@ impl FlatValue {
     pub fn into_packed(self) -> Value {
         use FlatValue::*;
         Value(match self {
-            Int(x) => ValueInner::new_a(x).unwrap(),
-            Str(x) => ValueInner::new_b(x).unwrap(),
-            ArrInt(x) => ValueInner::new_c(x).unwrap(),
-            ArrStr(x) => ValueInner::new_d(x).unwrap(),
+            Int(x) => ValueInner::Int(x),
+            Str(x) => ValueInner::Str(x),
+            ArrInt(x) => ValueInner::ArrInt(x),
+            ArrStr(x) => ValueInner::ArrStr(x),
         })
     }
     pub fn deep_clone(&self) -> Self {

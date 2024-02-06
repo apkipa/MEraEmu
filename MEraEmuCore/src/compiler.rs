@@ -459,7 +459,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                     .map(|x| {
                                         self.evaluate_constant(x)
                                             .and_then(|x| self.unwrap_int_constant(x))
-                                            .map(|val| Rc::new(IntValue { val }))
+                                            .map(|val| IntValue { val })
                                     })
                                     .collect::<Option<Vec<_>>>()?;
                                 Value::new_int_arr(x.dims, inits)
@@ -887,7 +887,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             Cmd::While(x) => {
                 let start_index = chunk.cur_bytes_cnt();
                 self.compile_expression(funcs, func_info, x.cond, chunk)?;
-                chunk.emit_bytecode(Negate, x.src_info);
+                chunk.emit_bytecode(LogicalNot, x.src_info);
                 let backtrack_done = chunk.emit_jump_cond_hold(x.src_info);
                 for stmt in x.body {
                     self.compile_statement(funcs, func_info, stmt, chunk)?;
@@ -957,15 +957,15 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         EraTokenKind::CmpLEq => chunk.emit_bytecode(CompareLEq, op.src_info),
                         EraTokenKind::CmpNEq => {
                             chunk.emit_bytecode(CompareEq, op.src_info);
-                            chunk.emit_bytecode(Negate, op.src_info);
+                            chunk.emit_bytecode(LogicalNot, op.src_info);
                         }
                         EraTokenKind::CmpG => {
                             chunk.emit_bytecode(CompareLEq, op.src_info);
-                            chunk.emit_bytecode(Negate, op.src_info);
+                            chunk.emit_bytecode(LogicalNot, op.src_info);
                         }
                         EraTokenKind::CmpGEq => {
                             chunk.emit_bytecode(CompareL, op.src_info);
-                            chunk.emit_bytecode(Negate, op.src_info);
+                            chunk.emit_bytecode(LogicalNot, op.src_info);
                         }
                         // TODO...
                         _ => {
@@ -979,12 +979,13 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 EraTermExpr::Literal(x) => {
                     match x {
                         EraLiteral::Integer(x, src_info) => {
-                            if let Ok(x) = i8::try_from(x) {
-                                chunk.emit_bytecode(LoadIntegerImm8, src_info);
-                                chunk.append_u8(x as _, src_info);
-                            } else {
-                                chunk.emit_load_const(self.new_value_int(x), src_info);
-                            }
+                            // if let Ok(x) = i8::try_from(x) {
+                            //     chunk.emit_bytecode(LoadIntegerImm8, src_info);
+                            //     chunk.append_u8(x as _, src_info);
+                            // } else {
+                            //     chunk.emit_load_const(self.new_value_int(x), src_info);
+                            // }
+                            chunk.emit_load_const(self.new_value_int(x), src_info);
                         },
                         EraLiteral::String(x, src_info) => chunk.emit_load_const(self.new_value_str(x), src_info),
                     };
@@ -1202,7 +1203,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 let inits = inits
                     .into_iter()
                     .map(|x| match x {
-                        EraLiteral::Integer(val, _) => Some(Rc::new(IntValue { val })),
+                        EraLiteral::Integer(val, _) => Some(IntValue { val }),
                         EraLiteral::String(_, src_info) => {
                             self.report_err(src_info, true, "expected integer value, found string");
                             None
