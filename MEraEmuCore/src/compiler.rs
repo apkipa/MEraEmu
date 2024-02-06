@@ -91,6 +91,10 @@ pub struct EraBytecodeChunk {
     pub name: Rc<str>,
     pub constants: EraConstantPool,
 }
+struct EraBytecodeChunkBacktrackHolder {
+    base_idx: usize,
+    write_fn: &'static dyn Fn(&mut EraBytecodeChunk, usize, isize) -> Option<()>,
+}
 impl EraBytecodeChunk {
     fn append_u8(&mut self, value: u8, src_info: SourcePosInfo) {
         self.bytecode.push(value);
@@ -124,6 +128,27 @@ impl EraBytecodeChunk {
         self.bytecode
             .get(idx..idx2)
             .map(|x| u32::from_ne_bytes(x.try_into().unwrap()))
+    }
+    // Useful for backtracking
+    pub fn overwrite_u8(&mut self, value: u8, idx: usize) -> Option<()> {
+        *self.bytecode.get_mut(idx)? = value;
+        Some(())
+    }
+    // Useful for backtracking
+    pub fn overwrite_u16(&mut self, value: u16, idx: usize) -> Option<()> {
+        let idx2 = idx + std::mem::size_of::<u16>();
+        self.bytecode
+            .get_mut(idx..idx2)?
+            .copy_from_slice(&value.to_ne_bytes());
+        Some(())
+    }
+    // Useful for backtracking
+    pub fn overwrite_u32(&mut self, value: u32, idx: usize) -> Option<()> {
+        let idx2 = idx + std::mem::size_of::<u32>();
+        self.bytecode
+            .get_mut(idx..idx2)?
+            .copy_from_slice(&value.to_ne_bytes());
+        Some(())
     }
     pub fn cur_bytes_cnt(&self) -> usize {
         self.bytecode.len()
@@ -165,6 +190,57 @@ impl EraBytecodeChunk {
         } else {
             panic!("too many constants in constant pool");
         }
+    }
+    // Returned value can be used for backtracking
+    // TODO: Determine suitable imm sizes by spliting code into relocatable basic blocks
+    fn emit_jump_hold(&mut self, src_info: SourcePosInfo) -> EraBytecodeChunkBacktrackHolder {
+        let base_idx = self.cur_bytes_cnt();
+        self.emit_bytecode(EraBytecodePrimaryType::JumpW, src_info);
+        self.append_u16(0xffff, src_info);
+        EraBytecodeChunkBacktrackHolder {
+            base_idx,
+            write_fn: &|this, idx, offset| this.overwrite_u16(offset.try_into().ok()?, idx),
+        }
+    }
+    fn emit_jump_cond_hold(&mut self, src_info: SourcePosInfo) -> EraBytecodeChunkBacktrackHolder {
+        let base_idx = self.cur_bytes_cnt();
+        self.emit_bytecode(EraBytecodePrimaryType::JumpCondW, src_info);
+        self.append_u16(0xffff, src_info);
+        EraBytecodeChunkBacktrackHolder {
+            base_idx,
+            write_fn: &|this, idx, offset| this.overwrite_u16(offset.try_into().ok()?, idx),
+        }
+    }
+    fn emit_jump(&mut self, offset: isize, src_info: SourcePosInfo) {
+        if let Ok(offset) = i8::try_from(offset) {
+            self.emit_bytecode(EraBytecodePrimaryType::Jump, src_info);
+            self.append_u8(offset as _, src_info);
+        } else if let Ok(offset) = i16::try_from(offset) {
+            self.emit_bytecode(EraBytecodePrimaryType::JumpW, src_info);
+            self.append_u16(offset as _, src_info);
+        } else {
+            panic!("jump too far to be encoded in bytecode");
+        }
+    }
+    fn emit_jump_cond(&mut self, offset: isize, src_info: SourcePosInfo) {
+        if let Ok(offset) = i8::try_from(offset) {
+            self.emit_bytecode(EraBytecodePrimaryType::JumpCond, src_info);
+            self.append_u8(offset as _, src_info);
+        } else if let Ok(offset) = i16::try_from(offset) {
+            self.emit_bytecode(EraBytecodePrimaryType::JumpCondW, src_info);
+            self.append_u16(offset as _, src_info);
+        } else {
+            panic!("jump too far to be encoded in bytecode");
+        }
+    }
+}
+impl EraBytecodeChunkBacktrackHolder {
+    fn complete(self, chunk: &mut EraBytecodeChunk) -> Option<()> {
+        let offset = isize::try_from(chunk.cur_bytes_cnt())
+            .ok()?
+            .checked_sub_unsigned(self.base_idx)?;
+        // 1 is bytecode size
+        (self.write_fn)(chunk, self.base_idx + 1, offset)
     }
 }
 
@@ -229,15 +305,8 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         global_vars: EraVarPool,
     ) -> Option<EraBytecodeCompilation> {
         let mut const_vars = HashSet::new();
-        // let mut fun_names = HashMap::new();
-        // let mut funcs = Vec::new();
-        // let mut chunks = Vec::new();
         let mut fun_decls = Vec::new();
         let mut global_funcs = EraFuncPool::default();
-        // let mut global_funcs = EraFuncPool {
-        //     func_names: HashMap::new(),
-        //     funcs: Vec::new(),
-        // };
 
         self.vars = global_vars;
 
@@ -341,7 +410,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         let init_val = if x.is_ref {
                             if !x.dims.is_empty() {
                                 self.report_err(
-                                    fun.src_info,
+                                    src_info,
                                     true,
                                     "ref-qualified function parameter must not have dimensions",
                                 );
@@ -349,7 +418,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             }
                             if !x.inits.is_empty() {
                                 self.report_err(
-                                    fun.src_info,
+                                    src_info,
                                     true,
                                     "ref-qualified function parameter must not have init values",
                                 );
@@ -363,6 +432,14 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             }
                         } else {
                             has_init = !x.inits.is_empty();
+                            let arr_len = x.dims.iter().fold(1, |acc, &x| acc * x);
+                            if (arr_len as usize) < x.inits.len() {
+                                self.report_err(
+                                    src_info,
+                                    false,
+                                    "excessive elements in initializer",
+                                );
+                            }
                             if x.is_string {
                                 let inits = x
                                     .inits
@@ -398,7 +475,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                 is_const: x.is_const,
                                 is_dynamic: x.is_dynamic,
                                 is_ref: x.is_ref,
-                                src_info: x.src_info,
+                                src_info,
                             },
                         )
                     }
@@ -420,6 +497,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             }
                         };
                     local_decl.is_in_global_frame = true;
+                } else if local_decl.is_ref {
+                    // Stub marker; must be reassigned later
+                    local_decl.idx_in_frame = usize::MAX;
                 } else {
                     local_decl.idx_in_frame = local_frame_var_counter;
                     local_frame_var_counter += 1;
@@ -438,7 +518,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             }
 
             // Parameters
-            for param in std::mem::take(&mut fun.params) {
+            for (param_idx, param) in std::mem::take(&mut fun.params).into_iter().enumerate() {
                 let arg_info = match param {
                     EraExpr::Binary(
                         lhs,
@@ -517,9 +597,13 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     },
                     EraExpr::Term(EraTermExpr::Var(lhs)) => {
                         let kind = local_vars
-                            .get(CaselessStr::new(&lhs.name))
+                            .get_mut(CaselessStr::new(&lhs.name))
                             .map(|x| match x.is_ref {
-                                true => x.init_val.kind().with_arr(),
+                                true => {
+                                    // Replace with actual parameter position
+                                    x.idx_in_frame = param_idx as _;
+                                    x.init_val.kind().with_arr()
+                                }
                                 false => x.init_val.kind().without_arr(),
                             })
                             .or_else(|| {
@@ -592,23 +676,6 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         for (file_name, func_decl) in fun_decls {
             self.file_name = file_name;
 
-            // let func_idx = funcs.len();
-            // let chunk_idx = *chunks_idxs
-            //     .entry(self.file_name.clone())
-            //     .or_insert_with(|| {
-            //         let idx = chunks.len();
-            //         chunks.push(EraBytecodeChunk {
-            //             bytecode: Vec::new(),
-            //             src_infos: Vec::new(),
-            //         });
-            //         idx
-            //     });
-            // let chunk = &mut chunks[chunk_idx];
-            // let mut func_info =
-            //     self.compile_function(fun.name, &global_funcs.funcs[func_idx], chunk)?;
-            // // TODO: Check overflow
-            // func_info.chunk_idx = chunk_idx as _;
-            // funcs.push(func_info);
             let chunk_idx = *chunks_idxs
                 .entry(self.file_name.clone())
                 .or_insert_with(|| {
@@ -661,19 +728,33 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             args_count: func_info.params.len() as _,
         };
 
-        // Init local variables
+        // Init local variables (including non-DYNAMIC ones)
         for (name, var_info) in func_info.local_vars.iter() {
-            if var_info.has_init {
-                chunk.emit_load_const(var_info.init_val.clone(), var_info.src_info);
-                chunk.emit_bytecode(CopyArrayContent, var_info.src_info);
+            let src_info = var_info.src_info;
+            if var_info.is_in_global_frame {
+                if var_info.has_init {
+                    chunk.emit_load_const(Value::new_int(var_info.idx_in_frame as _), src_info);
+                    chunk.emit_bytecode(GetGlobal, src_info);
+                    chunk.emit_load_const(var_info.init_val.clone(), src_info);
+                    chunk.emit_bytecode(CopyArrayContent, src_info);
+                }
+            } else if var_info.is_ref {
+                if var_info.idx_in_frame == usize::MAX {
+                    self.report_err(
+                        src_info,
+                        true,
+                        "ref-qualified variable was not bound to any valid parameter",
+                    );
+                    return None;
+                }
+            } else {
+                chunk.emit_load_const(var_info.init_val.clone(), src_info);
+                chunk.emit_bytecode(DeepClone, src_info);
             }
         }
 
         // Assign parameters
         for (param_idx, param_info) in func_info.params.iter().enumerate() {
-            //if !local_decl.is_dynamic && !local_decl.is_ref {
-            //param_info.target_var.0
-            //self.compile_expression_assign(func_info, param_info.target_var.0, pa, expr)
             // TODO: Optimize performance
 
             if param_info.default_val.kind().is_arr() {
@@ -692,10 +773,6 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     .collect(),
                 src_info,
             };
-            // self.compile_expression_array(func_info, lhs, false, chunk)?;
-            // chunk.emit_load_const(self.new_value_int(param_idx as _), src_info);
-            // chunk.emit_bytecode(GetLocal, src_info);
-            // chunk.emit_bytecode(?, src_info)
             self.compile_expression_assign(
                 funcs,
                 func_info,
@@ -707,6 +784,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 },
                 chunk,
             )?;
+            chunk.emit_bytecode(Pop, src_info);
         }
 
         // Compile function body
@@ -742,6 +820,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         chunk: &mut EraBytecodeChunk,
     ) -> Option<()> {
         use EraBytecodePrimaryType::*;
+        use EraCommandStmt as Cmd;
 
         let stmt = match stmt {
             EraStmt::Expr(x) => {
@@ -755,7 +834,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         };
 
         match stmt {
-            EraCommandStmt::Print(x) => {
+            Cmd::Print(x) => {
                 let src_info = x.src_info;
                 let args_cnt = x.vals.len();
                 for v in x.vals {
@@ -780,7 +859,48 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     }
                 }
             }
-            // TODO...
+            Cmd::Quit(x) => {
+                chunk.emit_bytecode(Quit, x.src_info);
+            }
+            Cmd::If(x) => {
+                // TODO: Optimize when there is no else body
+                self.compile_expression(funcs, func_info, x.cond, chunk)?;
+                let backtrack_then = chunk.emit_jump_cond_hold(x.src_info);
+                for stmt in x.else_body {
+                    self.compile_statement(funcs, func_info, stmt, chunk)?;
+                }
+                // HACK: Steal source pos info from last statement
+                let last_src_info = chunk.source_info_at(chunk.cur_bytes_cnt() - 1).unwrap();
+                let backtrack_done = chunk.emit_jump_hold(last_src_info);
+                if backtrack_then.complete(chunk).is_none() {
+                    self.report_err(x.src_info, true, "jump too far to be encoded in bytecode");
+                    return None;
+                }
+                for stmt in x.body {
+                    self.compile_statement(funcs, func_info, stmt, chunk)?;
+                }
+                if backtrack_done.complete(chunk).is_none() {
+                    self.report_err(x.src_info, true, "jump too far to be encoded in bytecode");
+                    return None;
+                }
+            }
+            Cmd::While(x) => {
+                let start_index = chunk.cur_bytes_cnt();
+                self.compile_expression(funcs, func_info, x.cond, chunk)?;
+                chunk.emit_bytecode(Negate, x.src_info);
+                let backtrack_done = chunk.emit_jump_cond_hold(x.src_info);
+                for stmt in x.body {
+                    self.compile_statement(funcs, func_info, stmt, chunk)?;
+                }
+                let done_index = chunk.cur_bytes_cnt();
+                // HACK: Steal source pos info from last statement
+                let last_src_info = chunk.source_info_at(chunk.cur_bytes_cnt() - 1).unwrap();
+                chunk.emit_jump(-((done_index - start_index) as isize), last_src_info);
+                if backtrack_done.complete(chunk).is_none() {
+                    self.report_err(x.src_info, true, "jump too far to be encoded in bytecode");
+                    return None;
+                }
+            }
             _ => {
                 self.report_err(stmt.source_pos_info(), true, "unsupported statement");
                 return None;
@@ -829,6 +949,24 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     match op.kind {
                         EraTokenKind::Plus => chunk.emit_bytecode(Add, op.src_info),
                         EraTokenKind::Minus => chunk.emit_bytecode(Subtract, op.src_info),
+                        EraTokenKind::Multiply => chunk.emit_bytecode(Multiply, op.src_info),
+                        EraTokenKind::Divide => chunk.emit_bytecode(Divide, op.src_info),
+                        EraTokenKind::Percentage => chunk.emit_bytecode(Modulo, op.src_info),
+                        EraTokenKind::CmpEq => chunk.emit_bytecode(CompareEq, op.src_info),
+                        EraTokenKind::CmpL => chunk.emit_bytecode(CompareL, op.src_info),
+                        EraTokenKind::CmpLEq => chunk.emit_bytecode(CompareLEq, op.src_info),
+                        EraTokenKind::CmpNEq => {
+                            chunk.emit_bytecode(CompareEq, op.src_info);
+                            chunk.emit_bytecode(Negate, op.src_info);
+                        }
+                        EraTokenKind::CmpG => {
+                            chunk.emit_bytecode(CompareLEq, op.src_info);
+                            chunk.emit_bytecode(Negate, op.src_info);
+                        }
+                        EraTokenKind::CmpGEq => {
+                            chunk.emit_bytecode(CompareL, op.src_info);
+                            chunk.emit_bytecode(Negate, op.src_info);
+                        }
                         // TODO...
                         _ => {
                             self.report_err(op.src_info, true, "invalid arithmetic kind");
@@ -839,11 +977,17 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             }
             EraExpr::Term(x) => match x {
                 EraTermExpr::Literal(x) => {
-                    let (val, src_info) = match x {
-                        EraLiteral::Integer(x, src_info) => (self.new_value_int(x), src_info),
-                        EraLiteral::String(x, src_info) => (self.new_value_str(x), src_info),
+                    match x {
+                        EraLiteral::Integer(x, src_info) => {
+                            if let Ok(x) = i8::try_from(x) {
+                                chunk.emit_bytecode(LoadIntegerImm8, src_info);
+                                chunk.append_u8(x as _, src_info);
+                            } else {
+                                chunk.emit_load_const(self.new_value_int(x), src_info);
+                            }
+                        },
+                        EraLiteral::String(x, src_info) => chunk.emit_load_const(self.new_value_str(x), src_info),
                     };
-                    chunk.emit_load_const(val, src_info);
                 }
                 EraTermExpr::StrForm(x) => {
                     let src_info = x.src_info;
@@ -867,6 +1011,18 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 }
                 EraTermExpr::Var(x) => {
                     self.compile_expression_array(funcs, func_info, x, true, chunk)?;
+                }
+            },
+            EraExpr::PreUnary(op, rhs) => match op.kind {
+                EraTokenKind::Plus => self.compile_expression(funcs, func_info, *rhs, chunk)?,
+                EraTokenKind::Minus => {
+                    self.compile_expression(funcs, func_info, *rhs, chunk)?;
+                    chunk.emit_bytecode(Negate, op.src_info);
+                }
+                EraTokenKind::Increment | EraTokenKind::Decrement => todo!(),
+                _ => {
+                    self.report_err(op.src_info, true, "invalid arithmetic kind");
+                    return None;
                 }
             },
             // TODO...

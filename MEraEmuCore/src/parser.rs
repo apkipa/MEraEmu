@@ -361,6 +361,14 @@ pub struct EraSelectCaseStmt {
     pub cases: Vec<(EraExpr, Vec<EraStmt>)>,
     pub src_info: SourcePosInfo,
 }
+pub struct EraQuitStmt {
+    pub src_info: SourcePosInfo,
+}
+pub struct EraWhileStmt {
+    pub cond: EraExpr,
+    pub body: Vec<EraStmt>,
+    pub src_info: SourcePosInfo,
+}
 
 pub enum EraStmt {
     Expr(EraExpr),
@@ -371,7 +379,9 @@ pub enum EraCommandStmt {
     Print(EraPrintStmt),
     Wait(EraWaitStmt),
     If(EraIfStmt),
+    Quit(EraQuitStmt),
     SelectCase(EraSelectCaseStmt),
+    While(EraWhileStmt),
 }
 impl EraCommandStmt {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -380,7 +390,9 @@ impl EraCommandStmt {
             Print(x) => x.src_info,
             Wait(x) => x.src_info,
             If(x) => x.src_info,
+            Quit(x) => x.src_info,
             SelectCase(x) => x.src_info,
+            While(x) => x.src_info,
         }
     }
 }
@@ -647,13 +659,16 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             .try_consume(EraLexerMode::SharpDecl, EraTokenKind::Comma)
             .is_some()
         {
-            let dim = self.expression(true)?;
+            let dim = self.expression_bp(
+                infix_binding_power(EraTokenKind::Assign).unwrap().1 + 2,
+                true,
+            )?;
             let cur_si = dim.source_pos_info();
             let dim = self.unwrap_int_from_expression(dim)?;
             let dim = match dim.try_into() {
                 Ok(x) => x,
                 _ => {
-                    self.report_err(cur_si, true, "invalid array dimension");
+                    self.report_err(cur_si, true, "invalid array dimension; assuming 1");
                     1
                 }
             };
@@ -741,7 +756,10 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
         // Local declarations
         self.skip_whitespace();
-        while self.lexer.peek(EraLexerMode::Normal).kind == EraTokenKind::NumberSign {
+        while self
+            .try_consume(EraLexerMode::Normal, EraTokenKind::NumberSign)
+            .is_some()
+        {
             let decl = self.sharp_declaration()?;
             match &decl {
                 EraSharpDecl::VarDecl(x) => {
@@ -825,7 +843,9 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"IF" => EraCommandStmt::If(self.r().stmt_if()?),
                         b"SELECTCASE" => EraCommandStmt::SelectCase(self.r().stmt_selectcase()?),
                         b"SIF" => EraCommandStmt::If(self.r().stmt_sif()?),
+                        b"QUIT" => EraCommandStmt::Quit(self.r().stmt_quit()?),
                         b"WAIT" => EraCommandStmt::Wait(self.r().stmt_wait()?),
+                        b"WHILE" => EraCommandStmt::While(self.r().stmt_while()?),
                         _ => return Some(EraStmt::Expr(self.expression(false)?)),
                     }
                 }
@@ -870,7 +890,10 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 let radix =
                     if lexeme.strip_prefix_inplace(b"0x") || lexeme.strip_prefix_inplace(b"0X") {
                         16
-                    } else if lexeme.strip_prefix_inplace(b"0") {
+                    } else if let Some(x) = lexeme.strip_prefix(b"0") {
+                        if !x.is_empty() {
+                            lexeme = x;
+                        }
                         8
                     } else {
                         10
@@ -880,7 +903,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 let lexeme = unsafe { std::str::from_utf8_unchecked(lexeme) };
                 let val = match i64::from_str_radix(lexeme, radix) {
                     Ok(x) => x,
-                    Err(_) => {
+                    Err(e) => {
                         self.synchronize();
                         self.report_token_err(
                             first.into(),
@@ -1234,7 +1257,9 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         })
     }
     fn stmt_if(&mut self) -> Option<EraIfStmt> {
+        let src_info = self.src_info;
         let cond = self.expression(true)?;
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
         let mut body = Vec::new();
         let mut else_body = Vec::new();
         let mut is_at_else = false;
@@ -1269,6 +1294,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             cond,
             body,
             else_body,
+            src_info,
+        })
+    }
+    fn stmt_quit(&mut self) -> Option<EraQuitStmt> {
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+        Some(EraQuitStmt {
             src_info: self.src_info,
         })
     }
@@ -1279,6 +1310,21 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn stmt_selectcase(&mut self) -> Option<EraSelectCaseStmt> {
         // TODO...
         unimplemented!()
+    }
+    fn stmt_while(&mut self) -> Option<EraWhileStmt> {
+        let src_info = self.src_info;
+        let cond = self.expression(true)?;
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+        let mut body = Vec::new();
+        while self.matches_command_end(b"WEND").is_none() {
+            body.push(self.statement()?);
+        }
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+        Some(EraWhileStmt {
+            cond,
+            body,
+            src_info,
+        })
     }
     #[must_use]
     fn consume(

@@ -290,7 +290,7 @@ impl<'a> MEraEngine<'a> {
             offset: entry_info.offset as _,
         };
         let mut vm = crate::vm::EraVirtualMachine::new(compilation);
-        vm.reset_stack_and_ip(entry_ip);
+        vm.reset_exec_and_ip(entry_ip);
         self.vm = Some(vm);
         Ok(())
     }
@@ -336,6 +336,9 @@ impl<'a> MEraEngine<'a> {
             },
         );
         Ok(can_progress)
+    }
+    pub fn get_is_halted(&self) -> bool {
+        self.vm.as_ref().map(|x| x.get_is_halted()).unwrap_or(true)
     }
     // NOTE: This is a convenience helper that creates a temporary code chunk and
     //       points ip to it, then returns evaluated result. The engine will ensure

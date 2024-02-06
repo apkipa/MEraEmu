@@ -246,7 +246,7 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                 make_token_fn(this, nonlink_kind)
             };
 
-        match mode {
+        let token = match mode {
             EraLexerMode::Normal | EraLexerMode::SharpDecl => {
                 //use EraTokenKind as TKind;
                 use EraTokenKind::*;
@@ -270,9 +270,10 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                     b';' => {
                         // Swallow comments, don't return as tokens
                         loop {
-                            if let None | Some(b'\n') = self.advance_char() {
+                            if let None | Some(b'\n') = self.peek_char() {
                                 break;
                             }
+                            self.advance_char();
                         }
                         // Restart read via recursion (ensures correct lexeme)
                         self.read(mode)
@@ -438,7 +439,10 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                     }
                 }
             }
-        }
+        };
+
+        // dbg!(token)
+        token
     }
 
     fn is_whitespace(ch: u8) -> bool {

@@ -15,7 +15,7 @@ pub enum EraBytecodePrimaryType {
     JumpCond,
     JumpCondW,
     //FunJump,
-    FunCall,
+    FunCall, // Stack should contain <args...> <function>
     FunExists,
     // LoadString,
     // LoadStringW,
@@ -31,22 +31,23 @@ pub enum EraBytecodePrimaryType {
     // LoadIntegerImm32,
     // LoadArrayString, // Arrays can be looked up through a string or an integer
     // LoadArrayInteger,
-    LoadBuiltinLocalArray, // Empty string refers to LOCAL@<Current function>
-    LoadBuiltinLocalsArray,
-    LoadBuiltinArgArray,
-    LoadBuiltinArgsArray,
+    // LoadBuiltinLocalArray, // Empty string refers to LOCAL@<Current function>
+    // LoadBuiltinLocalsArray,
+    // LoadBuiltinArgArray,
+    // LoadBuiltinArgsArray,
     ConvertToString,  // For string values, this is no-op
     ConvertToInteger, // For integer values, this is no-op
     BuildString,      // Requires an imm8 describing count of strings to concatenate
     Pop,
-    Duplicate,
+    Duplicate, // Push current value to stack without consuming it
+    DeepClone, // Like Duplicate, but replaces value with a new copy for arrays
     GetGlobal,
     SetGlobal,
     GetLocal,
     SetLocal,
     GetArrayVal,
     SetArrayVal,
-    GetMDArrayVal, // Requires an imm8 to describe dimensions count
+    GetMDArrayVal, // Requires an imm8 to describe dimensions count; may be slow
     SetMDArrayVal,
     CopyArrayContent,
     Add,
@@ -96,6 +97,7 @@ impl EraBytecodePrimaryType {
 
 #[modular_bitfield::bitfield]
 #[repr(u8)]
+#[derive(Debug)]
 pub struct PrintExtendedFlags {
     pub is_single: bool,
     pub use_kana: bool,
@@ -136,6 +138,79 @@ pub struct ArrStrValue {
 //     depth: u16,
 //     slot: u16,
 // }
+
+impl ArrIntValue {
+    pub fn flat_get(&self, idx: usize) -> Option<&Rc<IntValue>> {
+        self.vals.get(idx)
+    }
+    pub fn flat_get_mut(&mut self, idx: usize) -> Option<&mut Rc<IntValue>> {
+        self.vals.get_mut(idx)
+    }
+    pub fn get(&self, idxs: &[u32]) -> Option<&Rc<IntValue>> {
+        let index = self.calc_idx(idxs)?;
+        self.vals.get(index)
+    }
+    pub fn get_mut(&mut self, idxs: &[u32]) -> Option<&mut Rc<IntValue>> {
+        let index = self.calc_idx(idxs)?;
+        self.vals.get_mut(index)
+    }
+    fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
+        if idxs.len() > self.dims.len() {
+            return None;
+        }
+        if idxs.iter().zip(self.dims.iter()).any(|(&a, &b)| a >= b) {
+            return None;
+        }
+        let (_, idx) =
+            self.dims
+                .iter()
+                .enumerate()
+                .rev()
+                .fold((1, 0), |(stride, idx), (i, &dim)| {
+                    (
+                        stride * (dim as usize),
+                        idx + idxs.get(i).map(|&x| x as usize).unwrap_or(0) * stride,
+                    )
+                });
+        Some(idx)
+    }
+}
+impl ArrStrValue {
+    pub fn flat_get(&self, idx: usize) -> Option<&Rc<StrValue>> {
+        self.vals.get(idx)
+    }
+    pub fn flat_get_mut(&mut self, idx: usize) -> Option<&mut Rc<StrValue>> {
+        self.vals.get_mut(idx)
+    }
+    pub fn get(&self, idxs: &[u32]) -> Option<&Rc<StrValue>> {
+        let index = self.calc_idx(idxs)?;
+        self.vals.get(index)
+    }
+    pub fn get_mut(&mut self, idxs: &[u32]) -> Option<&mut Rc<StrValue>> {
+        let index = self.calc_idx(idxs)?;
+        self.vals.get_mut(index)
+    }
+    fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
+        if idxs.len() > self.dims.len() {
+            return None;
+        }
+        if idxs.iter().zip(self.dims.iter()).any(|(&a, &b)| a >= b) {
+            return None;
+        }
+        let (_, idx) =
+            self.dims
+                .iter()
+                .enumerate()
+                .rev()
+                .fold((1, 0), |(stride, idx), (i, &dim)| {
+                    (
+                        stride * (dim as usize),
+                        idx + idxs.get(i).map(|&x| x as usize).unwrap_or(0) * stride,
+                    )
+                });
+        Some(idx)
+    }
+}
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]

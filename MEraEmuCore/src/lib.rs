@@ -71,9 +71,37 @@ mod tests {
     #[test]
     fn basic_engine() -> anyhow::Result<()> {
         let main_erb = indoc! {r#"
+            @DO_COUNT
+                #FUNCTION
+                #DIM result = 0
+                #DIM cnt = 100
+                WHILE cnt > 0
+                    result = result + cnt
+                    cnt = cnt - 1
+                WEND
+                ;RETURNF result
             @SYSTEM_TITLE
-                Printform Hello, {"world"}!
-                ;QUIT
+                ;#DIM REF xre
+                #DIM val = 1 + 1 ;*0
+                #DIMS world_str, -2 + 3 = "world"
+
+                ;#DIM cnt = 10000000
+                #DIM cnt = 10000
+                WHILE cnt > 0
+                    cnt = cnt - 1
+                WEND
+
+                val:0 = val + 1
+                ; Print hello world
+                Printform Hello, {val + 1} the {world_str}!
+                IF 1 + 2 - 3;
+                    PRINTFORM true
+                ELSE
+                    PRINTFORM false
+                ENDIF
+                PRINTFORM Done
+                QUIT
+                PRINTFORM not printed
         "#};
         let mut callback = MockEngineCallback::new();
         let mut engine = MEraEngine::new();
@@ -81,9 +109,10 @@ mod tests {
         engine.load_erb("main.erb", main_erb.as_bytes())?;
         engine.finialize_load_srcs()?;
         let stop_flag = AtomicBool::new(false);
-        engine.do_execution(&stop_flag, 1024)?;
+        engine.do_execution(&stop_flag, u64::MAX)?;
+        assert!(engine.get_is_halted());
         drop(engine);
-        assert_eq!(&callback.output, "Hello, world!");
+        assert_eq!(&callback.output, "Hello, 4 the world!falseDone");
 
         Ok(())
     }
