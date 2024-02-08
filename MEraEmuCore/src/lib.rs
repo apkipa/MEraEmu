@@ -38,18 +38,27 @@ mod tests {
     impl MEraEngineSysCallback for &mut MockEngineCallback<'_> {
         fn on_compile_error(&mut self, info: &EraScriptErrorInfo) {
             *self.errors.borrow_mut() += &format!(
-                "compile error: {}({},{}): {}\n",
-                info.filename, info.src_info.line, info.src_info.column, info.msg
+                "compile {}: {}({},{}): {}\n",
+                if info.is_error { "error" } else { "warning" },
+                info.filename,
+                info.src_info.line,
+                info.src_info.column,
+                info.msg
             );
         }
         fn on_execute_error(&mut self, info: &EraScriptErrorInfo) {
             panic!(
-                "execute error: {}({},{}): {}",
-                info.filename, info.src_info.line, info.src_info.column, info.msg
+                "execute {}: {}({},{}): {}\nlast exec output: {}",
+                if info.is_error { "error" } else { "warning" },
+                info.filename,
+                info.src_info.line,
+                info.src_info.column,
+                info.msg,
+                self.output
             );
         }
         fn on_get_rand(&mut self) -> u64 {
-            0
+            42
         }
         fn on_html_print(&mut self, content: &str) {}
         fn on_input(&mut self, XXXXXXXXXXXX: u32) {}
@@ -80,10 +89,16 @@ mod tests {
                 #DIM result = 0
                 ;#DIM cnt = 100
                 #DIM cnt = 100
-                cnt = upper
+                cnt '= upper
+                ;results = oook
+                ;locals@DO_COUNT = oook
                 ;PRINTFORM [Start with cnt={cnt},result={result}]
                 WHILE cnt > 0
-                    result = result + cnt:0--
+                    ;PRINTFORM []
+                    ;result = result + cnt:0--
+                    result += cnt:0--
+                    ;SIF cnt < 98
+                    ;    BREAK
                     ;cnt = cnt - 1
                     ;cnt = --cnt
                     ;--cnt
@@ -127,8 +142,12 @@ mod tests {
         _ = engine.finialize_load_srcs();
         {
             let errors = errors.borrow();
-            if !errors.is_empty() {
-                panic!("{errors}");
+            if errors.contains("error:") {
+                drop(engine);
+                panic!(
+                    "compile output:\n{errors}\nexec output:\n{}",
+                    callback.output
+                );
             }
         }
         let stop_flag = AtomicBool::new(false);

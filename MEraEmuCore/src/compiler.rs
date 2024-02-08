@@ -279,6 +279,19 @@ enum EraExpressionValueKind {
     TString,
 }
 
+struct EraLoopStructCodeMetadata {
+    continue_pos: usize,
+    done_queue: Vec<EraBytecodeChunkBacktrackHolder>,
+}
+impl EraLoopStructCodeMetadata {
+    fn new(continue_pos: usize) -> Self {
+        EraLoopStructCodeMetadata {
+            continue_pos,
+            done_queue: Vec::new(),
+        }
+    }
+}
+
 pub struct EraBytecodeCompilation {
     pub func_names: HashMap<Rc<CaselessStr>, usize>,
     pub funcs: Vec<EraFuncBytecodeInfo>,
@@ -308,6 +321,7 @@ pub struct EraCompilerImpl<'a, ErrReportFn> {
     // funcs: EraFuncPool,
     vars: EraVarPool,
     // local_vars: Option<EraFunctionFrame>,
+    loop_structs: Vec<EraLoopStructCodeMetadata>,
     intern_vals: HashMap<either::Either<Rc<IntValue>, Rc<StrValue>>, ()>,
 }
 
@@ -331,6 +345,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             file_name: "".into(),
             // funcs: Default::default(),
             vars: Default::default(),
+            loop_structs: Vec::new(),
             intern_vals: HashMap::new(),
         }
     }
@@ -346,6 +361,13 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         self.vars = global_vars;
 
         let empty_str = self.file_name.clone();
+
+        // Add shared global variables
+        // TODO: Move this out to engine part?
+        self.vars
+            .add_var("RESULT", Value::new_int_arr(vec![16], Vec::new()));
+        self.vars
+            .add_var("RESULTS", Value::new_str_arr(vec![16], Vec::new()));
 
         // Build global variables and functions list
         for input in inputs {
@@ -519,6 +541,13 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     _ => continue,
                 };
                 // Insert into global / local var pool
+                if self.vars.get_var(&var_name).is_some() {
+                    self.report_err(
+                        local_decl.src_info,
+                        false,
+                        "this declaration shadows a global variable with the same name",
+                    );
+                }
                 if !local_decl.is_dynamic && !local_decl.is_ref {
                     let var_name = Self::decorate_as_func_local_name(&var_name, func_name.as_str());
                     local_decl.idx_in_frame = match self
@@ -937,6 +966,8 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             }
             Cmd::While(x) => {
                 let start_index = chunk.cur_bytes_cnt();
+                self.loop_structs
+                    .push(EraLoopStructCodeMetadata::new(start_index));
                 self.compile_expression(funcs, func_info, x.cond, chunk)?;
                 chunk.emit_bytecode(LogicalNot, x.src_info);
                 let backtrack_done = chunk.emit_jump_cond_hold(x.src_info);
@@ -949,6 +980,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 chunk.emit_jump(-((done_index - start_index) as isize), last_src_info);
                 if backtrack_done.complete(chunk).is_none() {
                     bail_opt!(self, x.src_info, "jump too far to be encoded in bytecode");
+                }
+                for bt in self.loop_structs.pop().unwrap().done_queue {
+                    bt.complete(chunk)?;
                 }
             }
             Cmd::Return(x) => {
@@ -1019,6 +1053,21 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     chunk.append_u8(0, src_info);
                 }
             },
+            Cmd::Continue(x) => {
+                let Some(loop_struct) = self.loop_structs.last_mut() else {
+                    bail_opt!(self, x.src_info, "loop controlling statements are valid only in the context of a loop structure");
+                };
+                let pos_delta = (chunk.cur_bytes_cnt() - loop_struct.continue_pos) as isize;
+                chunk.emit_jump(-pos_delta, x.src_info);
+            }
+            Cmd::Break(x) => {
+                let Some(loop_struct) = self.loop_structs.last_mut() else {
+                    bail_opt!(self, x.src_info, "loop controlling statements are valid only in the context of a loop structure");
+                };
+                loop_struct
+                    .done_queue
+                    .push(chunk.emit_jump_hold(x.src_info));
+            }
             _ => bail_opt!(self, stmt.source_pos_info(), "unsupported statement"),
         }
 
@@ -1083,6 +1132,88 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         );
                     }
                     rhs_k
+                } else if let EraTokenKind::PlusAssign
+                | EraTokenKind::MinusAssign
+                | EraTokenKind::MultiplyAssign
+                | EraTokenKind::DivideAssign
+                | EraTokenKind::ModuloAssign = op.kind
+                {
+                    match *lhs {
+                        EraExpr::Term(EraTermExpr::Var(lhs)) => {
+                            let lhs_k = self
+                                .compile_expression_array_with_idx(funcs, func_info, lhs, chunk)?;
+                            chunk.emit_bytecode(DuplicateN, op.src_info);
+                            chunk.append_u8(2, op.src_info);
+                            chunk.emit_bytecode(GetArrayVal, op.src_info);
+                            let rhs_k = self.compile_expression(funcs, func_info, *rhs, chunk)?;
+                            let result_k = match op.kind {
+                                EraTokenKind::PlusAssign => match (lhs_k, rhs_k) {
+                                    (TInteger, TInteger) | (TString, TString) => {
+                                        chunk.emit_bytecode(Add, op.src_info);
+                                        lhs_k
+                                    }
+                                    _ => bail_opt!(
+                                        self,
+                                        op.src_info,
+                                        true,
+                                        "operands must be of same primitive types"
+                                    ),
+                                },
+                                EraTokenKind::MinusAssign => match (lhs_k, rhs_k) {
+                                    (TInteger, TInteger) => {
+                                        chunk.emit_bytecode(Subtract, op.src_info);
+                                        lhs_k
+                                    }
+                                    _ => bail_opt!(
+                                        self,
+                                        op.src_info,
+                                        true,
+                                        "operands must be integers"
+                                    ),
+                                },
+                                EraTokenKind::MultiplyAssign => match (lhs_k, rhs_k) {
+                                    (TInteger, TInteger) => {
+                                        chunk.emit_bytecode(Multiply, op.src_info);
+                                        lhs_k
+                                    }
+                                    _ => bail_opt!(
+                                        self,
+                                        op.src_info,
+                                        true,
+                                        "operands must be integers"
+                                    ),
+                                },
+                                EraTokenKind::DivideAssign => match (lhs_k, rhs_k) {
+                                    (TInteger, TInteger) => {
+                                        chunk.emit_bytecode(Divide, op.src_info);
+                                        lhs_k
+                                    }
+                                    _ => bail_opt!(
+                                        self,
+                                        op.src_info,
+                                        true,
+                                        "operands must be integers"
+                                    ),
+                                },
+                                EraTokenKind::ModuloAssign => match (lhs_k, rhs_k) {
+                                    (TInteger, TInteger) => {
+                                        chunk.emit_bytecode(Modulo, op.src_info);
+                                        lhs_k
+                                    }
+                                    _ => bail_opt!(
+                                        self,
+                                        op.src_info,
+                                        true,
+                                        "operands must be integers"
+                                    ),
+                                },
+                                _ => unreachable!(),
+                            };
+                            chunk.emit_bytecode(SetArrayVal, op.src_info);
+                            result_k
+                        }
+                        _ => bail_opt!(self, rhs.source_pos_info(), "invalid assignment target"),
+                    }
                 } else {
                     let lhs = self.compile_expression(funcs, func_info, *lhs, chunk)?;
                     let rhs = self.compile_expression(funcs, func_info, *rhs, chunk)?;
@@ -1270,7 +1401,11 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             .compile_expression_array_with_idx(funcs, func_info, rhs, chunk)?
                         {
                             TInteger => (),
-                            _ => bail_opt!(self, op.src_info, "invalid type for this arithmetic"),
+                            _ => bail_opt!(
+                                self,
+                                op.src_info,
+                                "invalid value type for this arithmetic"
+                            ),
                         }
                         chunk.emit_bytecode(DuplicateN, op.src_info);
                         chunk.append_u8(2, op.src_info);
@@ -1343,6 +1478,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 match (mhs_k, rhs_k) {
                     (TInteger, TInteger) => TInteger,
                     (TString, TString) => TString,
+                    (TVoid, TVoid) => TVoid,
                     _ => bail_opt!(self, op2.src_info, true, "invalid branch expression type"),
                 }
             }
@@ -1419,7 +1555,10 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             };
             is_in_global_frame = var.is_in_global_frame;
             var_idx = var.idx_in_frame;
-        } else if let Some(var) = self.vars.get_var_idx(&var_expr.name) {
+        } else if let Some(var) = self.vars.get_var_idx(&var_expr.name).or_else(|| {
+            self.vars
+                .get_var_idx(&format!("{}@{}", &var_expr.name, func_info.name.as_str(),))
+        }) {
             var_kind = match self.vars.get_var_info(var).unwrap().val.kind() {
                 ValueKind::ArrInt | ValueKind::Int => EraExpressionValueKind::TInteger,
                 ValueKind::ArrStr | ValueKind::Str => EraExpressionValueKind::TString,

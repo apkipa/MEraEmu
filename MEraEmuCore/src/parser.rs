@@ -382,6 +382,14 @@ pub struct EraReturnStmt {
     pub src_info: SourcePosInfo,
 }
 
+pub struct EraContinueStmt {
+    pub src_info: SourcePosInfo,
+}
+
+pub struct EraBreakStmt {
+    pub src_info: SourcePosInfo,
+}
+
 pub enum EraStmt {
     Expr(EraExpr),
     Command(EraCommandStmt),
@@ -396,6 +404,8 @@ pub enum EraCommandStmt {
     While(EraWhileStmt),
     Call(EraCallStmt),
     Return(EraReturnStmt),
+    Continue(EraContinueStmt),
+    Break(EraBreakStmt),
 }
 impl EraCommandStmt {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -409,6 +419,8 @@ impl EraCommandStmt {
             While(x) => x.src_info,
             Call(x) => x.src_info,
             Return(x) => x.src_info,
+            Continue(x) => x.src_info,
+            Break(x) => x.src_info,
         }
     }
 }
@@ -869,6 +881,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"WHILE" => EraCommandStmt::While(self.r().stmt_while()?),
                         b"RETURN" | b"RETURNF" => EraCommandStmt::Return(self.r().stmt_return()?),
                         b"CALL" => EraCommandStmt::Call(self.r().stmt_call()?),
+                        b"CONTINUE" => EraCommandStmt::Continue(self.r().stmt_continue()?),
+                        b"BREAK" => EraCommandStmt::Break(self.r().stmt_break()?),
                         _ => return Some(EraStmt::Expr(self.expression(false)?)),
                     }
                 }
@@ -1230,37 +1244,6 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 vals.push(EraExpr::new_str(cont, token.src_info));
             }
             EraCommandArgFmt::RawStringForm => {
-                // loop {
-                //     let token = self.lexer.read(EraLexerMode::RawStrForm);
-                //     match token.kind {
-                //         EraTokenKind::PlainStringLiteral => vals.push(EraExpr::new_str(
-                //             String::from_utf8_lossy(token.lexeme).into_owned(),
-                //             token.src_info,
-                //         )),
-                //         // TODO: String interpolation type-check
-                //         EraTokenKind::LCurlyBracket => {
-                //             vals.push(self.expression()?);
-                //             self.consume(EraLexerMode::Normal, EraTokenKind::RCurlyBracket)?;
-                //         }
-                //         // TODO: String interpolation type-check
-                //         EraTokenKind::Percentage => {
-                //             vals.push(self.expression()?);
-                //             self.consume(EraLexerMode::Normal, EraTokenKind::Percentage)?;
-                //         }
-                //         EraTokenKind::LineBreak => {
-                //             if !self.is_ignoring_newline() {
-                //                 break;
-                //             }
-                //             vals.push(EraExpr::new_str(" ".to_owned(), token.src_info));
-                //             self.handle_ignore_newline_tokens();
-                //         }
-                //         _ => {
-                //             // TODO: Synchronize here?
-                //             self.report_token_err(token.into(), true, "unexpected token");
-                //             return None;
-                //         }
-                //     }
-                // }
                 vals.push(EraExpr::Term(EraTermExpr::StrForm(
                     self.raw_strform(false)?,
                 )));
@@ -1428,6 +1411,18 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             func,
             args,
             src_info,
+        })
+    }
+    fn stmt_continue(&mut self) -> Option<EraContinueStmt> {
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+        Some(EraContinueStmt {
+            src_info: self.src_info,
+        })
+    }
+    fn stmt_break(&mut self) -> Option<EraBreakStmt> {
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+        Some(EraBreakStmt {
+            src_info: self.src_info,
         })
     }
     #[must_use]
@@ -1674,7 +1669,10 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         if name.starts_with("LOCALS@") || name == "LOCALS" {
             return true;
         }
-        if name.starts_with("ARGS@") || name.starts_with("ARGS@") {
+        if name.starts_with("ARGS@") || name == "ARGS" {
+            return true;
+        }
+        if name == "RESULTS" {
             return true;
         }
         false

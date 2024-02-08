@@ -353,6 +353,7 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                         match self.peek_char() {
                             Some(b'x' | b'X') => {
                                 // Hex
+                                _ = self.advance_char();
                                 self.skip_char_while(|x| x.is_ascii_hexdigit());
                             }
                             Some(b'0'..=b'7') => {
