@@ -309,6 +309,7 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                     b'<' => make_link2_token_fn(self, &[(b'<', BitShiftL), (b'=', CmpLEq)], CmpL),
                     b'>' => make_link2_token_fn(self, &[(b'>', BitShiftR), (b'=', CmpGEq)], CmpG),
                     b'\'' if matches!(self.peek_char(), Some(b'=')) => {
+                        self.advance_char();
                         make_token_fn(self, ExprAssign)
                     }
                     _ if ch.is_ascii_alphabetic() || ch == b'_' || !ch.is_ascii() => {

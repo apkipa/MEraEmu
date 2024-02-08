@@ -1,7 +1,7 @@
 use std::{cell::RefCell, ops::Deref, rc::Rc};
 
 #[repr(u8)]
-#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
 // TODO: Make bytecode with strongly-typed operands to ease JIT compilation
 pub enum EraBytecodePrimaryType {
     Invalid = 0,
@@ -16,7 +16,12 @@ pub enum EraBytecodePrimaryType {
     JumpCond,
     JumpCondW,
     //FunJump,
-    FunCall, // Stack should contain <args...> <function>
+    /*  FunCall:
+        Stack should contain <args...> <function>.
+        Note that for dynamic calls, interaction with arguments & return
+        values are impossible.
+    */
+    FunCall,
     FunExists,
     // LoadString,
     // LoadStringW,
@@ -350,7 +355,10 @@ impl Value {
         let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
         //assert_ne!(size, 0, "dimension must not contain zero");
         vals.resize(size, IntValue { val: 0 });
-        Value(ValueInner::ArrInt(Rc::new(RefCell::new(ArrIntValue { vals, dims }))))
+        Value(ValueInner::ArrInt(Rc::new(RefCell::new(ArrIntValue {
+            vals,
+            dims,
+        }))))
     }
     pub fn new_str_arr(mut dims: Vec<u32>, mut vals: Vec<Rc<StrValue>>) -> Self {
         if dims.is_empty() {
@@ -359,7 +367,10 @@ impl Value {
         let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
         //assert_ne!(size, 0, "dimension must not contain zero");
         vals.resize(size, Rc::new(StrValue { val: String::new() }));
-        Value(ValueInner::ArrStr(Rc::new(RefCell::new(ArrStrValue { vals, dims }))))
+        Value(ValueInner::ArrStr(Rc::new(RefCell::new(ArrStrValue {
+            vals,
+            dims,
+        }))))
     }
     pub fn into_unpacked(self) -> FlatValue {
         use ptr_union::Enum4::*;

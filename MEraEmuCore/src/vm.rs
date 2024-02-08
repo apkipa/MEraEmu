@@ -155,11 +155,13 @@ impl EraVarPool {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct EraExecIp {
     pub chunk: usize,
     pub offset: usize,
 }
 
+#[derive(Debug)]
 struct EraFuncExecFrame {
     stack_start: usize,
     ip: EraExecIp,
@@ -345,6 +347,7 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
+                    ip_offset_delta = 0;
                 }
                 ReturnInteger | ReturnString => {
                     let ret_val = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
@@ -362,6 +365,7 @@ impl EraVirtualMachine {
                         }
                     };
                     self.stack.push(ret_val);
+                    ip_offset_delta = 0;
                 }
                 FunCall => {
                     let args_cnt =
@@ -428,6 +432,8 @@ impl EraVirtualMachine {
                         chunk: cur_frame.ip.chunk,
                         offset: cur_frame.ip.offset.wrapping_add_signed(ip_offset_delta),
                     };
+                    // HACK: Apply ret_ip immediately
+                    cur_frame.ip = ret_ip;
                     ip_offset_delta = 0;
 
                     // Check call stack depth
@@ -487,8 +493,8 @@ impl EraVirtualMachine {
                     self.stack.push(value.clone());
                 }
                 LoadIntegerImm8 => {
-                    let imm =
-                        vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)? as i8;
+                    let imm = vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)?
+                        as i8;
                     ip_offset_delta += 1;
                     self.stack.push(Value::new_int(imm as _));
                 }

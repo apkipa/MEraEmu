@@ -17,26 +17,28 @@ pub use engine::{
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
+    use std::{cell::RefCell, sync::atomic::AtomicBool};
 
     use indoc::indoc;
 
     use super::*;
 
-    struct MockEngineCallback {
+    struct MockEngineCallback<'a> {
+        errors: &'a RefCell<String>,
         output: String,
     }
-    impl MockEngineCallback {
-        fn new() -> Self {
+    impl<'a> MockEngineCallback<'a> {
+        fn new(errors: &'a RefCell<String>) -> Self {
             Self {
+                errors,
                 output: String::new(),
             }
         }
     }
-    impl MEraEngineSysCallback for &mut MockEngineCallback {
+    impl MEraEngineSysCallback for &mut MockEngineCallback<'_> {
         fn on_compile_error(&mut self, info: &EraScriptErrorInfo) {
-            panic!(
-                "compile error: {}({},{}): {}",
+            *self.errors.borrow_mut() += &format!(
+                "compile error: {}({},{}): {}\n",
                 info.filename, info.src_info.line, info.src_info.column, info.msg
             );
         }
@@ -71,25 +73,35 @@ mod tests {
     #[test]
     fn basic_engine() -> anyhow::Result<()> {
         let main_erb = indoc! {r#"
-            @DO_COUNT
+            ; Simple counter pure function
+            @DO_COUNT(upper = 100)
                 #FUNCTION
+                #DIM upper
                 #DIM result = 0
+                ;#DIM cnt = 100
                 #DIM cnt = 100
+                cnt = upper
+                ;PRINTFORM [Start with cnt={cnt},result={result}]
                 WHILE cnt > 0
                     result = result + cnt
                     cnt = cnt - 1
                 WEND
-                ;RETURNF result
-            @SYSTEM_TITLE
+                ;PRINTFORM [Returning {result}]
+                PRINTFORM [Ret]
+                RETURNF result
+            @SYSTEM_TITLE()
                 ;#DIM REF xre
                 #DIM val = 1 + 1 ;*0
-                #DIMS world_str, -2 + 3 = "world"
+                #DIMS world_str, -2 + 3 = ""
 
                 ;#DIM cnt = 10000000
                 #DIM cnt = 100
                 WHILE cnt > 0
                     cnt = cnt - 1
                 WEND
+                cnt = 100
+
+                world_str '= @"worl{"d"}"
 
                 val:0 = val + 1
                 ; Print hello world
@@ -100,19 +112,31 @@ mod tests {
                     PRINTFORM false
                 ENDIF
                 PRINTFORM Done
+                CALL DO_COUNT
+                PRINTV DO_COUNT(10), @"~{-DO_COUNT()}~"
                 QUIT
                 PRINTFORM not printed
         "#};
-        let mut callback = MockEngineCallback::new();
+        let errors = RefCell::new(String::new());
+        let mut callback = MockEngineCallback::new(&errors);
         let mut engine = MEraEngine::new();
         engine.install_sys_callback(Box::new(&mut callback));
-        engine.load_erb("main.erb", main_erb.as_bytes())?;
-        engine.finialize_load_srcs()?;
+        _ = engine.load_erb("main.erb", main_erb.as_bytes());
+        _ = engine.finialize_load_srcs();
+        {
+            let errors = errors.borrow();
+            if !errors.is_empty() {
+                panic!("{errors}");
+            }
+        }
         let stop_flag = AtomicBool::new(false);
         engine.do_execution(&stop_flag, u64::MAX)?;
         assert!(engine.get_is_halted());
         drop(engine);
-        assert_eq!(&callback.output, "Hello, 4 the world!falseDone");
+        assert_eq!(
+            &callback.output,
+            "Hello, 4 the world!falseDone[Ret][Ret][Ret]55~-5050~"
+        );
 
         Ok(())
     }
