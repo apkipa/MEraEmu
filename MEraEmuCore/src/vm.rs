@@ -27,6 +27,16 @@ macro_rules! vm_report_err {
         Self::report_err($ctx.callback, $ctx.chunks, Some($frame), $is_error, $msg);
     };
 }
+macro_rules! bail_opt {
+    ($ctx:expr, None, $is_error:expr, $msg:expr) => {{
+        vm_report_err!($ctx, None, $is_error, $msg);
+        return None;
+    }};
+    ($ctx:expr, $frame:expr, $is_error:expr, $msg:expr) => {{
+        vm_report_err!($ctx, $frame, $is_error, $msg);
+        return None;
+    }};
+}
 macro_rules! vm_read_chunk_u8 {
     ($ctx:expr, $frame:expr, $chunk:expr, $offset:expr) => {
         match $chunk.read_u8($offset) {
@@ -807,6 +817,20 @@ impl EraVirtualMachine {
                     self.stack.push(value.clone());
                     self.stack.push(value);
                 }
+                DuplicateN => {
+                    let count =
+                        vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 1;
+                    match self.stack.len().checked_sub(count as _) {
+                        Some(new_len) => {
+                            for i in new_len..self.stack.len() {
+                                let cloned = self.stack[i].clone();
+                                self.stack.push(cloned);
+                            }
+                        }
+                        None => bail_opt!(ctx, cur_frame, true, "too few elements in stack"),
+                    }
+                }
                 DeepClone => {
                     let value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
                     self.stack.push(value.deep_clone());
@@ -1041,12 +1065,61 @@ impl EraVirtualMachine {
                     self.stack.push(src_value);
                 }
                 GetArrayVal => {
-                    // TODO: GetArrayVal for flat array access
-                    todo!()
+                    let [dst, idx] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
+                    let FlatValue::Int(idx) = idx.into_unpacked() else {
+                        bail_opt!(ctx, cur_frame, true, "invalid indices into array");
+                    };
+                    // TODO: Check overflow
+                    let idx = idx.val as usize;
+                    let value = match dst.into_unpacked() {
+                        FlatValue::ArrInt(x) => x
+                            .borrow()
+                            .flat_get(idx)
+                            .map(|x| Value::new_int_obj(x.clone())),
+                        FlatValue::ArrStr(x) => x
+                            .borrow()
+                            .flat_get(idx)
+                            .map(|x| Value::new_str_rc(x.clone())),
+                        _ => bail_opt!(ctx, cur_frame, true, "expected arrays as operands"),
+                    };
+                    let Some(value) = value else {
+                        bail_opt!(ctx, cur_frame, true, "invalid indices into array");
+                    };
+                    self.stack.push(value);
                 }
                 SetArrayVal => {
-                    // TODO: SetArrayVal for flat array access
-                    todo!()
+                    let [dst, idx, src] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 3)?;
+                    let FlatValue::Int(idx) = idx.into_unpacked() else {
+                        bail_opt!(ctx, cur_frame, true, "invalid indices into array");
+                    };
+                    // TODO: Check overflow
+                    let idx = idx.val as usize;
+                    match (dst.into_unpacked(), src.clone().into_unpacked()) {
+                        (FlatValue::ArrInt(dst), FlatValue::Int(src)) => {
+                            match dst.borrow_mut().flat_get_mut(idx) {
+                                Some(x) => x.val = src.val,
+                                None => {
+                                    bail_opt!(ctx, cur_frame, true, "invalid indices into array")
+                                }
+                            }
+                        }
+                        (FlatValue::ArrStr(dst), FlatValue::Str(src)) => {
+                            match dst.borrow_mut().flat_get_mut(idx) {
+                                Some(x) => *x = src,
+                                None => {
+                                    bail_opt!(ctx, cur_frame, true, "invalid indices into array")
+                                }
+                            }
+                        }
+                        (FlatValue::ArrInt(_) | FlatValue::ArrStr(_), _) => bail_opt!(
+                            ctx,
+                            cur_frame,
+                            true,
+                            "value type mismatches array element type"
+                        ),
+                        _ => bail_opt!(ctx, cur_frame, true, "destination is not an array"),
+                    }
+                    self.stack.push(src);
                 }
                 CopyArrayContent => {
                     let [dst, src] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;

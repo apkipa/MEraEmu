@@ -46,7 +46,8 @@ pub enum EraBytecodePrimaryType {
     BuildString,      // Requires an imm8 describing count of strings to concatenate
     Pop,
     Duplicate, // Push current value to stack without consuming it
-    DeepClone, // Like Duplicate, but replaces value with a new copy for arrays
+    DuplicateN,
+    DeepClone, // Replaces current value with a new copy for arrays
     GetGlobal,
     SetGlobal,
     GetLocal,
@@ -55,6 +56,9 @@ pub enum EraBytecodePrimaryType {
     SetArrayVal,
     GetMDArrayVal, // Requires an imm8 to describe dimensions count; may be slow
     SetMDArrayVal,
+    // HACK: Special bytecode for handling increments & decrements
+    IncMDArrayVal,
+    DecMDArrayVal,
     CopyArrayContent,
     Add,
     Subtract,

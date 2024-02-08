@@ -57,7 +57,7 @@ macro_rules! bail_opt {
         $($self.report_err($src_info, true, $msg);)+
         return None;
     }};
-    ($self:expr, [($src_info0:expr, $msg0:expr),$(($file_name:expr, $src_info:expr, $msg:expr)),+]) => {{
+    ($self:expr, [($src_info0:expr, $msg0:expr), $(($file_name:expr, $src_info:expr, $msg:expr)),+]) => {{
         $self.report_err($src_info0, true, $msg0);
         $($self.report_far_err($file_name, $src_info, true, $msg);)+
         return None;
@@ -271,7 +271,7 @@ impl EraBytecodeChunkBacktrackHolder {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // NOTE: We deliberately do not expose array types
 enum EraExpressionValueKind {
     TVoid,
@@ -1055,6 +1055,34 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             return None;
                         }
                     }
+                } else if let EraTokenKind::LogicalAnd | EraTokenKind::LogicalOr = op.kind {
+                    let lhs_k = self.compile_expression(funcs, func_info, *lhs, chunk)?;
+                    match lhs_k {
+                        TInteger => (),
+                        _ => bail_opt!(
+                            self,
+                            op.src_info,
+                            true,
+                            "only integers can participate in logical arithmetic at the moment"
+                        ),
+                    }
+                    chunk.emit_bytecode(Duplicate, op.src_info);
+                    if let EraTokenKind::LogicalAnd = op.kind {
+                        chunk.emit_bytecode(LogicalNot, op.src_info);
+                    }
+                    let bt_done = chunk.emit_jump_cond_hold(op.src_info);
+                    chunk.emit_bytecode(Pop, op.src_info);
+                    let rhs_k = self.compile_expression(funcs, func_info, *rhs, chunk)?;
+                    bt_done.complete(chunk);
+                    if lhs_k != rhs_k {
+                        bail_opt!(
+                            self,
+                            op.src_info,
+                            true,
+                            "conditional arithmetic requires operands of same type"
+                        );
+                    }
+                    rhs_k
                 } else {
                     let lhs = self.compile_expression(funcs, func_info, *lhs, chunk)?;
                     let rhs = self.compile_expression(funcs, func_info, *rhs, chunk)?;
@@ -1236,12 +1264,88 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     chunk.emit_bytecode(Negate, op.src_info);
                     rhs
                 }
-                EraTokenKind::Increment | EraTokenKind::Decrement => todo!(),
+                EraTokenKind::Increment | EraTokenKind::Decrement => match *rhs {
+                    EraExpr::Term(EraTermExpr::Var(rhs)) => {
+                        match self
+                            .compile_expression_array_with_idx(funcs, func_info, rhs, chunk)?
+                        {
+                            TInteger => (),
+                            _ => bail_opt!(self, op.src_info, "invalid type for this arithmetic"),
+                        }
+                        chunk.emit_bytecode(DuplicateN, op.src_info);
+                        chunk.append_u8(2, op.src_info);
+                        chunk.emit_bytecode(GetArrayVal, op.src_info);
+                        chunk.emit_load_const(self.new_value_int(1), op.src_info);
+                        match op.kind {
+                            EraTokenKind::Increment => chunk.emit_bytecode(Add, op.src_info),
+                            EraTokenKind::Decrement => chunk.emit_bytecode(Subtract, op.src_info),
+                            _ => unreachable!(),
+                        }
+                        chunk.emit_bytecode(SetArrayVal, op.src_info);
+                        TInteger
+                    }
+                    _ => {
+                        self.report_err(rhs.source_pos_info(), true, "invalid assignment target");
+                        return None;
+                    }
+                },
                 _ => {
                     self.report_err(op.src_info, true, "invalid arithmetic kind");
                     return None;
                 }
             },
+            EraExpr::PostUnary(lhs, op) => match op.kind {
+                EraTokenKind::Increment | EraTokenKind::Decrement => match *lhs {
+                    EraExpr::Term(EraTermExpr::Var(lhs)) => {
+                        match self
+                            .compile_expression_array_with_idx(funcs, func_info, lhs, chunk)?
+                        {
+                            TInteger => (),
+                            _ => bail_opt!(self, op.src_info, "invalid type for this arithmetic"),
+                        }
+                        chunk.emit_bytecode(DuplicateN, op.src_info);
+                        chunk.append_u8(2, op.src_info);
+                        chunk.emit_bytecode(GetArrayVal, op.src_info);
+                        chunk.emit_load_const(self.new_value_int(1), op.src_info);
+                        match op.kind {
+                            EraTokenKind::Increment => chunk.emit_bytecode(Add, op.src_info),
+                            EraTokenKind::Decrement => chunk.emit_bytecode(Subtract, op.src_info),
+                            _ => unreachable!(),
+                        }
+                        chunk.emit_bytecode(SetArrayVal, op.src_info);
+                        chunk.emit_load_const(self.new_value_int(1), op.src_info);
+                        match op.kind {
+                            EraTokenKind::Increment => chunk.emit_bytecode(Subtract, op.src_info),
+                            EraTokenKind::Decrement => chunk.emit_bytecode(Add, op.src_info),
+                            _ => unreachable!(),
+                        }
+                        TInteger
+                    }
+                    _ => {
+                        self.report_err(lhs.source_pos_info(), true, "invalid assignment target");
+                        return None;
+                    }
+                },
+                _ => bail_opt!(self, op.src_info, true, "invalid arithmetic kind"),
+            },
+            EraExpr::Ternary(lhs, op1, mhs, op2, rhs) => {
+                let lhs_si = lhs.source_pos_info();
+                match self.compile_expression(funcs, func_info, *lhs, chunk)? {
+                    TInteger | TString => (),
+                    _ => bail_opt!(self, lhs_si, true, "condition must not be void"),
+                }
+                let bt_then = chunk.emit_jump_cond_hold(op1.src_info);
+                let rhs_k = self.compile_expression(funcs, func_info, *rhs, chunk)?;
+                let bt_done = chunk.emit_jump_hold(op2.src_info);
+                bt_then.complete(chunk)?;
+                let mhs_k = self.compile_expression(funcs, func_info, *mhs, chunk)?;
+                bt_done.complete(chunk)?;
+                match (mhs_k, rhs_k) {
+                    (TInteger, TInteger) => TInteger,
+                    (TString, TString) => TString,
+                    _ => bail_opt!(self, op2.src_info, true, "invalid branch expression type"),
+                }
+            }
             EraExpr::FunCall(lhs, args) => match *lhs {
                 // EraExpr::Term(EraTermExpr::Literal(EraLiteral::String(lhs, lhs_si))) => {
                 //     self.compile_static_fun_call(funcs, func_info, &lhs, args, lhs_si, chunk)?
@@ -1369,6 +1473,97 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             }
             chunk.emit_bytecode(GetMDArrayVal, src_info);
             chunk.append_u8(idx_len as _, src_info);
+        }
+        Some(var_kind)
+    }
+    #[must_use]
+    fn compile_expression_array_with_idx(
+        &mut self,
+        funcs: &EraFuncPool,
+        func_info: &EraFuncInfo,
+        var_expr: EraVarExpr,
+        chunk: &mut EraBytecodeChunk,
+    ) -> Option<EraExpressionValueKind> {
+        use crate::bytecode::FlatValue;
+        use EraBytecodePrimaryType::*;
+
+        let src_info = var_expr.src_info;
+        let is_in_global_frame;
+        let var_idx;
+        let var_kind;
+        let var_dims;
+        if let Some(var) = func_info.local_vars.get(CaselessStr::new(&var_expr.name)) {
+            match var.init_val.clone().into_unpacked() {
+                FlatValue::ArrInt(x) => {
+                    var_kind = EraExpressionValueKind::TInteger;
+                    var_dims = x.borrow().dims.clone();
+                }
+                FlatValue::ArrStr(x) => {
+                    var_kind = EraExpressionValueKind::TString;
+                    var_dims = x.borrow().dims.clone();
+                }
+                _ => unimplemented!(),
+            }
+            is_in_global_frame = var.is_in_global_frame;
+            var_idx = var.idx_in_frame;
+        } else if let Some(var) = self.vars.get_var_idx(&var_expr.name) {
+            let var_info = self.vars.get_var_info(var).unwrap();
+            match var_info.val.clone().into_unpacked() {
+                FlatValue::ArrInt(x) => {
+                    var_kind = EraExpressionValueKind::TInteger;
+                    var_dims = x.borrow().dims.clone();
+                }
+                FlatValue::ArrStr(x) => {
+                    var_kind = EraExpressionValueKind::TString;
+                    var_dims = x.borrow().dims.clone();
+                }
+                _ => unimplemented!(),
+            }
+            is_in_global_frame = true;
+            var_idx = var;
+        } else {
+            // NOTE: Cannot be used to access pesudo array (like RAND)
+            bail_opt!(
+                self,
+                src_info,
+                true,
+                format!("undefined variable `{}`", var_expr.name)
+            );
+        }
+        chunk.emit_load_const(self.new_value_int(var_idx as _), src_info);
+        if is_in_global_frame {
+            chunk.emit_bytecode(GetGlobal, src_info);
+        } else {
+            chunk.emit_bytecode(GetLocal, src_info);
+        }
+        // TODO: Check array size & type
+        // FIXME: Insert checks for indices overflow for MD arrays
+        // Decay array values to primitive values
+        let idx_len = var_expr.idxs.len();
+        if idx_len > var_dims.len() {
+            bail_opt!(self, src_info, "too many indices into array");
+        }
+        chunk.emit_load_const(self.new_value_int(0), src_info);
+        let stride = var_dims.iter().skip(idx_len).fold(1, |acc, &x| acc * x);
+        let strides = var_dims
+            .iter()
+            .take(idx_len)
+            .rev()
+            .scan(stride, |acc, x| {
+                let r = Some(*acc);
+                *acc *= x;
+                r
+            })
+            .collect::<Vec<_>>();
+        for (idx, stride) in var_expr.idxs.into_iter().zip(strides.into_iter().rev()) {
+            let src_info = idx.source_pos_info();
+            match self.compile_expression(funcs, func_info, idx, chunk)? {
+                EraExpressionValueKind::TInteger => (),
+                _ => bail_opt!(self, src_info, true, "array indices must be integer"),
+            }
+            chunk.emit_load_const(self.new_value_int(stride as _), src_info);
+            chunk.emit_bytecode(Multiply, src_info);
+            chunk.emit_bytecode(Add, src_info);
         }
         Some(var_kind)
     }

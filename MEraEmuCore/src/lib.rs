@@ -83,8 +83,10 @@ mod tests {
                 cnt = upper
                 ;PRINTFORM [Start with cnt={cnt},result={result}]
                 WHILE cnt > 0
-                    result = result + cnt
-                    cnt = cnt - 1
+                    result = result + cnt:0--
+                    ;cnt = cnt - 1
+                    ;cnt = --cnt
+                    ;--cnt
                 WEND
                 ;PRINTFORM [Returning {result}]
                 PRINTFORM [Ret]
@@ -113,7 +115,7 @@ mod tests {
                 ENDIF
                 PRINTFORM Done
                 CALL DO_COUNT
-                PRINTV DO_COUNT(10), @"~{-DO_COUNT()}~"
+                PRINTV DO_COUNT(0 ? 0 # 10), @"~{-DO_COUNT()}~"
                 QUIT
                 PRINTFORM not printed
         "#};
