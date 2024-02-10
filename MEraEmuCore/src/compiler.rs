@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    bytecode::{EraBytecodePrimaryType, PrintExtendedFlags, ValueKind},
+    bytecode::{EraBytecodePrimaryType, FlatValue, PrintExtendedFlags, ValueKind},
     lexer::{EraTokenKind, EraTokenLite},
     parser::{EraCommandStmt, EraFunDecl, EraFunKind, EraStmt, EraTermExpr, EraVarExpr},
     util::*,
@@ -1068,6 +1068,185 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     .done_queue
                     .push(chunk.emit_jump_hold(x.src_info));
             }
+            Cmd::Throw(x) => {
+                self.compile_expression(funcs, func_info, x.val, chunk)?;
+                chunk.emit_bytecode(Throw, x.src_info);
+            }
+            Cmd::Repeat(x) => {
+                // for (loopCount = ?, COUNT = 0; COUNT < loopCount; COUNT++) {}
+                // Use stack to store temporary loopCount
+                match self.compile_expression(funcs, func_info, x.loop_cnt, chunk)? {
+                    TInteger => (),
+                    TString | TVoid => {
+                        bail_opt!(self, x.src_info, "invalid expression for REPEAT condition")
+                    }
+                }
+                let count_var = EraVarExpr {
+                    name: "COUNT".to_owned(),
+                    idxs: Vec::new(),
+                    src_info: x.src_info,
+                };
+                self.compile_expression_assign(
+                    funcs,
+                    func_info,
+                    count_var.clone(),
+                    |this, chunk| {
+                        chunk.emit_load_const(Value::new_int(0), x.src_info);
+                        Some(TInteger)
+                    },
+                    chunk,
+                )?;
+                chunk.emit_bytecode(Pop, x.src_info);
+                let bt_body = chunk.emit_jump_hold(x.src_info);
+                let start_pos = chunk.cur_bytes_cnt();
+                self.loop_structs
+                    .push(EraLoopStructCodeMetadata::new(start_pos));
+                self.compile_expression(
+                    funcs,
+                    func_info,
+                    EraExpr::PreUnary(
+                        EraTokenLite {
+                            kind: EraTokenKind::Increment,
+                            src_info: x.src_info,
+                        },
+                        Box::new(EraExpr::Term(EraTermExpr::Var(count_var.clone()))),
+                    ),
+                    chunk,
+                )?;
+                chunk.emit_bytecode(Pop, x.src_info);
+                bt_body.complete(chunk)?;
+                chunk.emit_bytecode(Duplicate, x.src_info);
+                self.compile_expression_array(funcs, func_info, count_var.clone(), true, chunk)?;
+                chunk.emit_bytecode(CompareLEq, x.src_info);
+                let bt_done = chunk.emit_jump_cond_hold(x.src_info);
+                for stmt in x.body {
+                    self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
+                }
+                {
+                    let offset = -((chunk.cur_bytes_cnt() - start_pos) as isize);
+                    chunk.emit_jump(offset, x.src_info);
+                }
+                for bt in self.loop_structs.pop().unwrap().done_queue {
+                    bt.complete(chunk)?;
+                }
+                // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
+                self.compile_expression(
+                    funcs,
+                    func_info,
+                    EraExpr::PreUnary(
+                        EraTokenLite {
+                            kind: EraTokenKind::Increment,
+                            src_info: x.src_info,
+                        },
+                        Box::new(EraExpr::Term(EraTermExpr::Var(count_var.clone()))),
+                    ),
+                    chunk,
+                )?;
+                bt_done.complete(chunk)?;
+                chunk.emit_bytecode(Pop, x.src_info);
+            }
+            Cmd::Wait(x) => {
+                chunk.emit_bytecode(Wait, x.src_info);
+            }
+            Cmd::SelectCase(x) => {
+                let cond_k = self.compile_expression(funcs, func_info, x.cond, chunk)?;
+                if let TVoid = cond_k {
+                    bail_opt!(
+                        self,
+                        x.src_info,
+                        "SELECTCASE does not accept void expressions"
+                    );
+                }
+                let mut bt_dones = Vec::new();
+                let mut bt_else: Option<EraBytecodeChunkBacktrackHolder> = None;
+                for (case_conds, case_body) in x.cases {
+                    if let Some(bt) = bt_else.take() {
+                        bt.complete(chunk)?;
+                    }
+                    let mut bt_bodies = Vec::new();
+                    for case_cond in case_conds {
+                        use crate::parser::EraSelectCaseStmtCondition::*;
+                        chunk.emit_bytecode(Duplicate, x.src_info);
+                        match case_cond {
+                            Single(x) => {
+                                let x_si = x.source_pos_info();
+                                if cond_k != self.compile_expression(funcs, func_info, x, chunk)? {
+                                    bail_opt!(self, x_si, "case expression type mismatch");
+                                }
+                                chunk.emit_bytecode(CompareEq, x_si);
+                            }
+                            Range(lhs, rhs) => {
+                                // No short-circuit within single range?
+                                let lhs_si = lhs.source_pos_info();
+                                if cond_k
+                                    != self.compile_expression(funcs, func_info, lhs, chunk)?
+                                {
+                                    bail_opt!(self, lhs_si, "case expression type mismatch");
+                                }
+                                chunk.emit_bytecode(CompareL, lhs_si);
+                                chunk.emit_bytecode(LogicalNot, lhs_si);
+                                chunk.emit_bytecode(DuplicateN, lhs_si);
+                                chunk.append_u8(2, lhs_si);
+                                chunk.emit_bytecode(Pop, lhs_si);
+                                let rhs_si = rhs.source_pos_info();
+                                if cond_k
+                                    != self.compile_expression(funcs, func_info, rhs, chunk)?
+                                {
+                                    bail_opt!(self, rhs_si, "case expression type mismatch");
+                                }
+                                chunk.emit_bytecode(CompareLEq, rhs_si);
+                                chunk.emit_bytecode(BitAnd, rhs_si);
+                            }
+                            Condition(op, x) => {
+                                let x_si = x.source_pos_info();
+                                if cond_k != self.compile_expression(funcs, func_info, x, chunk)? {
+                                    bail_opt!(self, x_si, "case expression type mismatch");
+                                }
+                                let op_si = op.src_info;
+                                match op.kind {
+                                    EraTokenKind::CmpL => chunk.emit_bytecode(CompareL, op_si),
+                                    EraTokenKind::CmpLEq => chunk.emit_bytecode(CompareLEq, op_si),
+                                    EraTokenKind::CmpEq => chunk.emit_bytecode(CompareEq, op_si),
+                                    EraTokenKind::CmpNEq => {
+                                        chunk.emit_bytecode(CompareEq, op_si);
+                                        chunk.emit_bytecode(LogicalNot, op_si);
+                                    }
+                                    EraTokenKind::CmpG => {
+                                        chunk.emit_bytecode(CompareLEq, op_si);
+                                        chunk.emit_bytecode(LogicalNot, op_si);
+                                    }
+                                    EraTokenKind::CmpGEq => {
+                                        chunk.emit_bytecode(CompareL, op_si);
+                                        chunk.emit_bytecode(LogicalNot, op_si);
+                                    }
+                                    _ => {
+                                        bail_opt!(self, op_si, "unsupported operator as case")
+                                    }
+                                }
+                            }
+                        }
+                        bt_bodies.push(chunk.emit_jump_cond_hold(x.src_info));
+                    }
+                    bt_else = Some(chunk.emit_jump_hold(x.src_info));
+                    for bt in bt_bodies {
+                        bt.complete(chunk)?;
+                    }
+                    for stmt in case_body {
+                        self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
+                    }
+                    bt_dones.push(chunk.emit_jump_hold(x.src_info));
+                }
+                if let Some(bt) = bt_else {
+                    bt.complete(chunk)?;
+                }
+                for stmt in x.case_else {
+                    self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
+                }
+                for bt in bt_dones {
+                    bt.complete(chunk)?;
+                }
+                chunk.emit_bytecode(Pop, x.src_info);
+            }
             _ => bail_opt!(self, stmt.source_pos_info(), "unsupported statement"),
         }
 
@@ -1543,15 +1722,18 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         chunk: &mut EraBytecodeChunk,
     ) -> Option<EraExpressionValueKind> {
         use EraBytecodePrimaryType::*;
+        use EraExpressionValueKind::*;
 
         let src_info = var_expr.src_info;
         let is_in_global_frame;
         let var_idx;
         let var_kind;
+        let var_dims_cnt;
         if let Some(var) = func_info.local_vars.get(CaselessStr::new(&var_expr.name)) {
-            var_kind = match var.init_val.kind() {
-                ValueKind::ArrInt | ValueKind::Int => EraExpressionValueKind::TInteger,
-                ValueKind::ArrStr | ValueKind::Str => EraExpressionValueKind::TString,
+            (var_kind, var_dims_cnt) = match var.init_val.clone().into_unpacked() {
+                FlatValue::ArrInt(x) => (TInteger, x.borrow().dims.len()),
+                FlatValue::ArrStr(x) => (TString, x.borrow().dims.len()),
+                _ => unreachable!(),
             };
             is_in_global_frame = var.is_in_global_frame;
             var_idx = var.idx_in_frame;
@@ -1559,9 +1741,17 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             self.vars
                 .get_var_idx(&format!("{}@{}", &var_expr.name, func_info.name.as_str(),))
         }) {
-            var_kind = match self.vars.get_var_info(var).unwrap().val.kind() {
-                ValueKind::ArrInt | ValueKind::Int => EraExpressionValueKind::TInteger,
-                ValueKind::ArrStr | ValueKind::Str => EraExpressionValueKind::TString,
+            (var_kind, var_dims_cnt) = match self
+                .vars
+                .get_var_info(var)
+                .unwrap()
+                .val
+                .clone()
+                .into_unpacked()
+            {
+                FlatValue::ArrInt(x) => (TInteger, x.borrow().dims.len()),
+                FlatValue::ArrStr(x) => (TString, x.borrow().dims.len()),
+                _ => unreachable!(),
             };
             is_in_global_frame = true;
             var_idx = var;
@@ -1600,6 +1790,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             chunk.emit_bytecode(GetLocal, src_info);
         }
         // TODO: Check array size & type
+        if decay_arr && var_dims_cnt > 1 && var_expr.idxs.len() < var_dims_cnt {
+            self.report_err(src_info, false, "non-compliant use of array variable");
+        }
         // Decay array values to primitive values
         if decay_arr {
             let idx_len = var_expr.idxs.len();
@@ -1676,6 +1869,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             chunk.emit_bytecode(GetLocal, src_info);
         }
         // TODO: Check array size & type
+        if var_dims.len() > 1 && var_expr.idxs.len() < var_dims.len() {
+            self.report_err(src_info, false, "non-compliant use of array variable");
+        }
         // FIXME: Insert checks for indices overflow for MD arrays
         // Decay array values to primitive values
         let idx_len = var_expr.idxs.len();

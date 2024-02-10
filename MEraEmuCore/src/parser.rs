@@ -39,6 +39,7 @@ pub struct EraSharpFunctionDecl {
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraVarExpr {
     pub name: String,
     // Array indices. May be empty or smaller than actual array dimensions.
@@ -46,18 +47,21 @@ pub struct EraVarExpr {
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub enum EraStrFormExprPart {
     Literal(String, SourcePosInfo),
     Expression(EraExpr),
 }
 
 /// The string interpolation expression.
+#[derive(Debug, Clone)]
 pub struct EraStrFormExpr {
     pub parts: Vec<EraStrFormExprPart>,
     pub src_info: SourcePosInfo,
 }
 
 /// The leaf expression.
+#[derive(Debug, Clone)]
 pub enum EraTermExpr {
     Var(EraVarExpr),
     Literal(EraLiteral),
@@ -73,6 +77,7 @@ impl EraTermExpr {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum EraExpr {
     /// The leaf expression.
     Term(EraTermExpr),
@@ -287,6 +292,7 @@ impl EraExpr {
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum EraLiteral {
     Integer(i64, SourcePosInfo),
     String(String, SourcePosInfo),
@@ -358,10 +364,18 @@ pub struct EraWaitStmt {
     pub src_info: SourcePosInfo,
 }
 
+pub enum EraSelectCaseStmtCondition {
+    Single(EraExpr),
+    Range(EraExpr, EraExpr),
+    Condition(EraTokenLite, EraExpr),
+}
 pub struct EraSelectCaseStmt {
-    pub cases: Vec<(EraExpr, Vec<EraStmt>)>,
+    pub cond: EraExpr,
+    pub cases: Vec<(Vec<EraSelectCaseStmtCondition>, Vec<EraStmt>)>,
+    pub case_else: Vec<EraStmt>,
     pub src_info: SourcePosInfo,
 }
+
 pub struct EraQuitStmt {
     pub src_info: SourcePosInfo,
 }
@@ -390,9 +404,29 @@ pub struct EraBreakStmt {
     pub src_info: SourcePosInfo,
 }
 
+pub struct EraThrowStmt {
+    pub val: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+pub struct EraRepeatStmt {
+    pub loop_cnt: EraExpr,
+    pub body: Vec<EraStmt>,
+    pub src_info: SourcePosInfo,
+}
+
 pub enum EraStmt {
     Expr(EraExpr),
     Command(EraCommandStmt),
+}
+impl EraStmt {
+    fn source_pos_info(&self) -> SourcePosInfo {
+        use EraStmt::*;
+        match self {
+            Expr(x) => x.source_pos_info(),
+            Command(x) => x.source_pos_info(),
+        }
+    }
 }
 
 pub enum EraCommandStmt {
@@ -406,6 +440,8 @@ pub enum EraCommandStmt {
     Return(EraReturnStmt),
     Continue(EraContinueStmt),
     Break(EraBreakStmt),
+    Throw(EraThrowStmt),
+    Repeat(EraRepeatStmt),
 }
 impl EraCommandStmt {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -421,6 +457,8 @@ impl EraCommandStmt {
             Return(x) => x.src_info,
             Continue(x) => x.src_info,
             Break(x) => x.src_info,
+            Throw(x) => x.src_info,
+            Repeat(x) => x.src_info,
         }
     }
 }
@@ -883,6 +921,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"CALL" => EraCommandStmt::Call(self.r().stmt_call()?),
                         b"CONTINUE" => EraCommandStmt::Continue(self.r().stmt_continue()?),
                         b"BREAK" => EraCommandStmt::Break(self.r().stmt_break()?),
+                        b"THROW" => EraCommandStmt::Throw(self.r().stmt_throw()?),
+                        b"REPEAT" => EraCommandStmt::Repeat(self.r().stmt_repeat()?),
                         _ => return Some(EraStmt::Expr(self.expression(false)?)),
                     }
                 }
@@ -896,6 +936,24 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 //     }
                 // }
             }),
+            EraTokenKind::At => {
+                // TODO: Add suggestion for the most recent open block
+                self.report_token_err(
+                    first.into(),
+                    true,
+                    "unexpected start of function; did you forget to close a block?",
+                );
+                return None;
+            }
+            EraTokenKind::Eof => {
+                // TODO: Add suggestion for the most recent open block
+                self.report_token_err(
+                    first.into(),
+                    true,
+                    "unexpected end of file; did you forget to close a block?",
+                );
+                return None;
+            }
             _ => EraStmt::Expr(self.expression(false)?),
         })
     }
@@ -1317,12 +1375,87 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         })
     }
     fn stmt_wait(&mut self) -> Option<EraWaitStmt> {
-        // TODO...
-        unimplemented!()
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+        Some(EraWaitStmt {
+            src_info: self.src_info,
+        })
     }
     fn stmt_selectcase(&mut self) -> Option<EraSelectCaseStmt> {
-        // TODO...
-        unimplemented!()
+        let src_info = self.src_info;
+        let cond = self.expression(true)?;
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+        let mut cases: Vec<(Vec<EraSelectCaseStmtCondition>, Vec<EraStmt>)> = Vec::new();
+        let mut is_at_else = false;
+        let mut case_else = Vec::new();
+        while self.matches_command_end(b"ENDSELECT").is_none() {
+            if let Some(cmd_token) = self.matches_command_end(b"CASE") {
+                if is_at_else {
+                    self.synchronize();
+                    self.report_token_err(cmd_token.into(), true, "too many CASE command");
+                    return None;
+                }
+                // Read conditions
+                let mut conds = Vec::new();
+                loop {
+                    let cond;
+                    if self.matches_command(b"IS").is_some() {
+                        let token = self.read_token(EraLexerMode::Normal);
+                        let expr = self.expression(true)?;
+                        cond = EraSelectCaseStmtCondition::Condition(token.into(), expr);
+                    } else {
+                        let lhs = self.expression(true)?;
+                        if self.matches_command(b"TO").is_some() {
+                            let rhs = self.expression(true)?;
+                            cond = EraSelectCaseStmtCondition::Range(lhs, rhs);
+                        } else {
+                            cond = EraSelectCaseStmtCondition::Single(lhs);
+                        }
+                    }
+                    conds.push(cond);
+                    if self
+                        .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
+                        .is_none()
+                    {
+                        break;
+                    }
+                }
+                self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+                cases.push((conds, Vec::new()));
+                continue;
+            }
+            if let Some(cmd_token) = self.matches_command_end(b"CASEELSE") {
+                if is_at_else {
+                    self.synchronize();
+                    self.report_token_err(cmd_token.into(), true, "too many CASEELSE command");
+                    return None;
+                }
+                is_at_else = true;
+                self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+                continue;
+            }
+            let stmt = self.statement()?;
+            let target_body = if is_at_else {
+                &mut case_else
+            } else if let Some(cur_case) = cases.last_mut() {
+                &mut cur_case.1
+            } else {
+                self.synchronize();
+                self.report_err(
+                    stmt.source_pos_info(),
+                    true,
+                    "statement does not belong to any case",
+                );
+                return None;
+            };
+            target_body.push(stmt);
+        }
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+        Some(EraSelectCaseStmt {
+            cond,
+            cases,
+            case_else,
+            src_info,
+        })
     }
     fn stmt_while(&mut self) -> Option<EraWhileStmt> {
         let src_info = self.src_info;
@@ -1423,6 +1556,27 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
         Some(EraBreakStmt {
             src_info: self.src_info,
+        })
+    }
+    fn stmt_throw(&mut self) -> Option<EraThrowStmt> {
+        let src_info = self.src_info;
+        let val = self.raw_strform(false)?;
+        let val = EraExpr::Term(EraTermExpr::StrForm(val));
+        Some(EraThrowStmt { val, src_info })
+    }
+    fn stmt_repeat(&mut self) -> Option<EraRepeatStmt> {
+        let src_info = self.src_info;
+        let loop_cnt = self.expression(true)?;
+        let mut body = Vec::new();
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+        while self.matches_command_end(b"REND").is_none() {
+            body.push(self.statement()?);
+        }
+        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+        Some(EraRepeatStmt {
+            loop_cnt,
+            body,
+            src_info,
         })
     }
     #[must_use]
@@ -1538,6 +1692,16 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn matches_command_end(&mut self, cmd: &[u8]) -> Option<EraToken<'b>> {
         self.skip_whitespace();
         let token = self.lexer.peek(EraLexerMode::Normal);
+        if matches!(token.kind, EraTokenKind::Identifier) && token.lexeme.eq_ignore_ascii_case(cmd)
+        {
+            Some(self.lexer.read(EraLexerMode::Normal))
+        } else {
+            None
+        }
+    }
+    #[must_use]
+    fn matches_command(&mut self, cmd: &[u8]) -> Option<EraToken<'b>> {
+        let token = self.peek_token(EraLexerMode::Normal);
         if matches!(token.kind, EraTokenKind::Identifier) && token.lexeme.eq_ignore_ascii_case(cmd)
         {
             Some(self.lexer.read(EraLexerMode::Normal))

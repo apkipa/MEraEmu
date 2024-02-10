@@ -65,16 +65,28 @@ mod tests {
         fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {
             self.output += content;
         }
-        fn on_var_get(&mut self, name: &str, idx: u32) -> Result<crate::bytecode::Value, String> {
-            Err("empty".to_owned())
+        fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
+            Ok(0)
         }
-        fn on_var_set(
+        fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error> {
+            Ok(name.to_string())
+        }
+        fn on_var_set_int(
             &mut self,
             name: &str,
-            idx: u32,
-            val: &crate::bytecode::Value,
-        ) -> Result<(), String> {
-            Err("empty".to_owned())
+            idx: usize,
+            val: i64,
+        ) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+        fn on_var_set_str(
+            &mut self,
+            name: &str,
+            idx: usize,
+            val: &str,
+        ) -> Result<(), anyhow::Error> {
+            println!("Setting variable `{name}` to `{val}`...");
+            Ok(())
         }
         fn on_wait(&mut self, XXXXXXXXXXXX: u32) {}
     }
@@ -86,7 +98,7 @@ mod tests {
             @DO_COUNT(upper = 100)
                 #FUNCTION
                 #DIM upper
-                #DIM result = 0
+                #DIM result, 1, 1 = 0
                 ;#DIM cnt = 100
                 #DIM cnt = 100
                 cnt '= upper
@@ -131,6 +143,27 @@ mod tests {
                 PRINTFORM Done
                 CALL DO_COUNT
                 PRINTV DO_COUNT(0 ? 0 # 10), @"~{-DO_COUNT()}~"
+                PRINTV WINDOW_TITLE += "!"
+
+                SELECTCASE 42
+                    CASE 1, is >= 42
+                        PRINTFORM [1]
+                        ;THROW "??? {4+1}"
+                    CASE 43 to 41, 42
+                        PRINTFORM [2]
+                    CASEELSE
+                        PRINTFORM [else]
+                ENDSELECT
+
+                REPEAT 5
+                    SIF COUNT == 2
+                        CONTINUE
+                    SIF COUNT == 4
+                        BREAK
+                    PRINTFORM {COUNT}
+                REND
+                PRINTFORM {COUNT}
+
                 QUIT
                 PRINTFORM not printed
         "#};
@@ -138,6 +171,8 @@ mod tests {
         let mut callback = MockEngineCallback::new(&errors);
         let mut engine = MEraEngine::new();
         engine.install_sys_callback(Box::new(&mut callback));
+        engine.register_global_var("COUNT", false, 1, false)?;
+        engine.register_global_var("WINDOW_TITLE", true, 1, true)?;
         _ = engine.load_erb("main.erb", main_erb.as_bytes());
         _ = engine.finialize_load_srcs();
         {
@@ -148,6 +183,9 @@ mod tests {
                     "compile output:\n{errors}\nexec output:\n{}",
                     callback.output
                 );
+            }
+            if !errors.is_empty() {
+                println!("compile output:\n{errors}");
             }
         }
         let stop_flag = AtomicBool::new(false);

@@ -8,6 +8,7 @@ pub enum EraBytecodePrimaryType {
     InvalidWithMessage, // Introduced to report compilation errors during execution
     DebugBreak,
     Quit,
+    Throw,
     ReturnVoid,
     ReturnInteger,
     ReturnString,

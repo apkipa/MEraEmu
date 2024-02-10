@@ -1,10 +1,16 @@
-use std::{cell::RefCell, collections::HashMap, ops::DerefMut, sync::atomic::AtomicBool};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    ops::DerefMut,
+    rc::Rc,
+    sync::atomic::AtomicBool,
+};
 
 use crate::{
     bytecode::SourcePosInfo,
     compiler::{EraBytecodeCompilation, EraCompilerFileInput},
     parser::EraParserSlimVarTypeInfo,
-    vm::EraVirtualMachine,
+    vm::{EraVarPool, EraVirtualMachine},
 };
 
 use crate::util::*;
@@ -15,6 +21,9 @@ pub struct MEraEngine<'a> {
     vm: Option<EraVirtualMachine>,
     callback: Box<dyn MEraEngineSysCallback + 'a>,
     config: MEraEngineConfig,
+    //registered_vars: Vec<(String, bool, usize)>,
+    registered_vars: EraVarPool,
+    watching_vars: HashSet<Rc<CaselessStr>>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -60,15 +69,11 @@ pub trait MEraEngineSysCallback {
     /// filled random u64; the engine will internally cache entropy to reduce
     /// the total amount of syscalls.
     fn on_get_rand(&mut self) -> u64;
-    /// Callback for variable getters. May return a string to report as execution errors.
-    fn on_var_get(&mut self, name: &str, idx: u32) -> Result<crate::bytecode::Value, String>;
-    /// Callback for variable setters. May return a string to report as execution errors.
-    fn on_var_set(
-        &mut self,
-        name: &str,
-        idx: u32,
-        val: &crate::bytecode::Value,
-    ) -> Result<(), String>;
+    /// Callbacks for variable getters & setters. May return a string to report as execution errors.
+    fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error>;
+    fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error>;
+    fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error>;
+    fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error>;
     /// Callback for PRINT family statements.
     fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
     /// Callback for HTML_PRINT statements.
@@ -147,16 +152,17 @@ impl MEraEngineSysCallback for EmptyCallback {
     fn on_html_print(&mut self, content: &str) {}
     fn on_input(&mut self, XXXXXXXXXXXX: u32) {}
     fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {}
-    fn on_var_get(&mut self, name: &str, idx: u32) -> Result<crate::bytecode::Value, String> {
-        Err("empty".to_owned())
+    fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
+        Ok(0)
     }
-    fn on_var_set(
-        &mut self,
-        name: &str,
-        idx: u32,
-        val: &crate::bytecode::Value,
-    ) -> Result<(), String> {
-        Err("empty".to_owned())
+    fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error> {
+        Ok(String::new())
+    }
+    fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+    fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error> {
+        Ok(())
     }
     fn on_wait(&mut self, XXXXXXXXXXXX: u32) {}
 }
@@ -169,6 +175,8 @@ impl<'a> MEraEngine<'a> {
             vm: None,
             callback: Box::new(EmptyCallback),
             config: Default::default(),
+            registered_vars: EraVarPool::default(),
+            watching_vars: HashSet::new(),
         }
     }
     pub fn install_sys_callback<'b>(&'b mut self, callback: Box<dyn MEraEngineSysCallback + 'a>)
@@ -252,9 +260,36 @@ impl<'a> MEraEngine<'a> {
     /// * @BGCOLOR
     /// * @FONT
     /// * WINDOW_TITLE
-    pub fn register_global_var(&mut self, name: &str) -> Result<(), MEraEngineError> {
-        // TODO...
-        unimplemented!()
+    pub fn register_global_var(
+        &mut self,
+        name: &str,
+        is_string: bool,
+        dimension: usize,
+        watch: bool,
+    ) -> Result<(), MEraEngineError> {
+        let val = if is_string {
+            crate::bytecode::Value::new_str_arr(vec![dimension as _], Vec::new())
+        } else {
+            crate::bytecode::Value::new_int_arr(vec![dimension as _], Vec::new())
+        };
+        let var_idx = self
+            .registered_vars
+            .add_var(name, val)
+            .ok_or_else(|| MEraEngineError::new("variable already used".to_owned()))?;
+        if watch {
+            self.watching_vars.insert(
+                self.registered_vars
+                    .get_var_info(var_idx)
+                    .unwrap()
+                    .name
+                    .clone(),
+            );
+        }
+        self.global_vars.insert(
+            CaselessString::new(name.to_owned()),
+            EraParserSlimVarTypeInfo { is_string },
+        );
+        Ok(())
     }
     /// Mark the completion of source code loading. All previously loaded code will be assembled
     /// and compiled into bytecode.
@@ -269,15 +304,22 @@ impl<'a> MEraEngine<'a> {
                 msg: &e.msg,
             });
         });
-        let compilation =
-            match compiler.compile_all(std::mem::take(&mut self.file_inputs), EraVarPool::new()) {
-                Some(x) => x,
-                None => {
-                    return Err(MEraEngineError::new(
-                        "could not compile AST nodes".to_owned(),
-                    ));
-                }
-            };
+        // let registered_vars: Vec<_> = self
+        //     .registered_vars
+        //     .iter()
+        //     .map(|x| x.name.as_str().to_owned())
+        //     .collect();
+        let compilation = match compiler.compile_all(
+            std::mem::take(&mut self.file_inputs),
+            std::mem::take(&mut self.registered_vars),
+        ) {
+            Some(x) => x,
+            None => {
+                return Err(MEraEngineError::new(
+                    "could not compile AST nodes".to_owned(),
+                ));
+            }
+        };
         let entry_info = match compilation.func_names.get(CaselessStr::new("SYSTEM_TITLE")) {
             Some(x) => *x,
             None => {
@@ -291,6 +333,12 @@ impl<'a> MEraEngine<'a> {
         };
         let mut vm = crate::vm::EraVirtualMachine::new(compilation);
         vm.reset_exec_and_ip(entry_ip);
+        //for var in registered_vars {
+        for var in std::mem::take(&mut self.watching_vars) {
+            vm.register_var_callback(var.as_str()).ok_or_else(|| {
+                MEraEngineError::new("cannot register variable callback".to_owned())
+            })?;
+        }
         self.vm = Some(vm);
         Ok(())
     }
@@ -325,6 +373,28 @@ impl<'a> MEraEngine<'a> {
             }
             fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {
                 self.callback.on_print(content, flags)
+            }
+            fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
+                self.callback.on_var_get_int(name, idx)
+            }
+            fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error> {
+                self.callback.on_var_get_str(name, idx)
+            }
+            fn on_var_set_int(
+                &mut self,
+                name: &str,
+                idx: usize,
+                val: i64,
+            ) -> Result<(), anyhow::Error> {
+                self.callback.on_var_set_int(name, idx, val)
+            }
+            fn on_var_set_str(
+                &mut self,
+                name: &str,
+                idx: usize,
+                val: &str,
+            ) -> Result<(), anyhow::Error> {
+                self.callback.on_var_set_str(name, idx, val)
             }
         }
 
@@ -362,5 +432,8 @@ impl<'a> MEraEngine<'a> {
     pub fn get_func_info(&self, func: &str) -> Option<EraFuncInfo> {
         // TODO...
         unimplemented!()
+    }
+    pub fn get_version(&self) -> String {
+        "MEraEngine in MEraEmuCore v0.1.0".to_owned()
     }
 }

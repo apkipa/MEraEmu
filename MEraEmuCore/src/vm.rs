@@ -163,6 +163,30 @@ impl EraVarPool {
     pub fn get_var_info(&self, idx: usize) -> Option<&EraVarInfo> {
         self.vars.get(idx)
     }
+    pub fn iter(&self) -> impl Iterator<Item = &EraVarInfo> {
+        self.vars.iter()
+    }
+}
+
+// TODO: Variables requiring callback should be sent to the compiler for better codegen,
+//       avoiding the need for trap representations
+#[derive(Debug, Clone)]
+struct EraTrappableValue {
+    is_trap: bool,
+    val: Value,
+}
+impl From<Value> for EraTrappableValue {
+    fn from(value: Value) -> Self {
+        EraTrappableValue {
+            is_trap: false,
+            val: value,
+        }
+    }
+}
+impl From<EraTrappableValue> for Value {
+    fn from(value: EraTrappableValue) -> Self {
+        value.val
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -183,10 +207,12 @@ pub struct EraVirtualMachine {
     funcs: Vec<EraFuncBytecodeInfo>,
     chunks: Vec<EraBytecodeChunk>,
     global_vars: EraVarPool,
-    stack: Vec<Value>,
+    stack: Vec<EraTrappableValue>,
     frames: Vec<EraFuncExecFrame>,
     is_halted: bool,
     uniform_gen: SimpleUniformGenerator,
+    // Variable address -> metadata index
+    trap_vars: HashMap<*const (), usize>,
 }
 
 pub struct EraRuntimeErrorInfo {
@@ -200,6 +226,10 @@ pub trait EraVirtualMachineCallback {
     fn on_execution_error(&mut self, error: EraRuntimeErrorInfo);
     fn on_get_rand(&mut self) -> u64;
     fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
+    fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error>;
+    fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error>;
+    fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error>;
+    fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error>;
 }
 
 impl EraVirtualMachine {
@@ -213,13 +243,14 @@ impl EraVirtualMachine {
             frames: Vec::new(),
             is_halted: false,
             uniform_gen: SimpleUniformGenerator::new(),
+            trap_vars: HashMap::new(),
         }
     }
     pub fn reset_exec_and_ip(&mut self, ip: EraExecIp) {
         // TODO: Verify input
         self.is_halted = false;
         self.stack.clear();
-        self.stack.push(Value::new_int(0)); // Stub value
+        self.stack.push(Value::new_int(0).into()); // Stub value
         self.frames.clear();
         self.frames.push(EraFuncExecFrame {
             stack_start: 0,
@@ -233,6 +264,20 @@ impl EraVirtualMachine {
     }
     pub fn get_is_halted(&self) -> bool {
         self.is_halted
+    }
+    pub fn register_var_callback(&mut self, name: &str) -> Option<()> {
+        // TODO: When transitioning to JIT, we should mark the trap bit (i.e. the LSB) of
+        //       the data pointer directly; It's OK for trapping to be slow as long as it
+        //       does not affect the normal path too much.
+        let idx = self.global_vars.get_var_idx(name)?;
+        let var = self.global_vars.get_var_by_idx(idx)?;
+        let ptr = match var.clone().into_unpacked() {
+            FlatValue::Int(_) | FlatValue::Str(_) => return None,
+            FlatValue::ArrInt(x) => Rc::as_ptr(&x) as _,
+            FlatValue::ArrStr(x) => Rc::as_ptr(&x) as _,
+        };
+        self.trap_vars.insert(ptr, idx);
+        Some(())
     }
     // Returns whether execution can progress further
     pub fn execute(
@@ -261,17 +306,6 @@ impl EraVirtualMachine {
         callback: &mut dyn EraVirtualMachineCallback,
     ) -> Option<()> {
         use EraBytecodePrimaryType::*;
-
-        // Helpers
-        // let mut read_chunk_u8 = |chunk: &EraBytecodeChunk, offset: usize| -> Option<u8> {
-        //     match chunk.read_u8(offset) {
-        //         Some(x) => Some(x),
-        //         None => {
-        //             self.report_err(true, "ip exceeds bounds of chunk");
-        //             return None;
-        //         }
-        //     }
-        // };
 
         let ctx = EraErrReportContext {
             chunks: self.chunks.as_slice(),
@@ -324,7 +358,7 @@ impl EraVirtualMachine {
                 DebugBreak => break,
                 Quit => return None,
                 InvalidWithMessage => {
-                    let msg = self.stack.pop().and_then(|x| match x.into_unpacked() {
+                    let msg = self.stack.pop().and_then(|x| match x.val.into_unpacked() {
                         FlatValue::Int(x) => Some(Rc::new(StrValue {
                             val: x.val.to_string(),
                         })),
@@ -382,7 +416,7 @@ impl EraVirtualMachine {
                         vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)? as _;
                     ip_offset_delta += 1;
                     let entry = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
-                    let func_info = match entry.into_unpacked() {
+                    let func_info = match entry.val.into_unpacked() {
                         // TODO: Check index overflow
                         FlatValue::Int(x) => self.funcs.get(x.val as usize),
                         FlatValue::Str(x) => self
@@ -500,13 +534,13 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    self.stack.push(value.clone());
+                    self.stack.push(value.clone().into());
                 }
                 LoadIntegerImm8 => {
                     let imm = vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)?
                         as i8;
                     ip_offset_delta += 1;
-                    self.stack.push(Value::new_int(imm as _));
+                    self.stack.push(Value::new_int(imm as _).into());
                 }
                 BuildString => {
                     let count =
@@ -514,7 +548,7 @@ impl EraVirtualMachine {
                     ip_offset_delta += 1;
                     let mut new_str = String::new();
                     for value in vm_pop_stack!(ctx, cur_frame, &mut self.stack, count.into())? {
-                        match value.into_unpacked() {
+                        match value.val.into_unpacked() {
                             FlatValue::Str(x) => new_str += &x.val,
                             _ => {
                                 vm_report_err!(
@@ -528,63 +562,67 @@ impl EraVirtualMachine {
                         }
                     }
                     let new_str = Value::new_str(new_str);
-                    self.stack.push(new_str);
+                    self.stack.push(new_str.into());
                 }
                 ConvertToString => {
-                    let value =
-                        match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?.into_unpacked() {
-                            FlatValue::Int(x) => Value::new_str(x.val.to_string()),
-                            FlatValue::Str(x) => Value::new_str_rc(x),
-                            _ => {
-                                vm_report_err!(
-                                    ctx,
-                                    cur_frame,
-                                    true,
-                                    "expected primitive values as operands"
-                                );
-                                return None;
-                            }
-                        };
-                    self.stack.push(value);
+                    let value = match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?
+                        .val
+                        .into_unpacked()
+                    {
+                        FlatValue::Int(x) => Value::new_str(x.val.to_string()),
+                        FlatValue::Str(x) => Value::new_str_rc(x),
+                        _ => {
+                            vm_report_err!(
+                                ctx,
+                                cur_frame,
+                                true,
+                                "expected primitive values as operands"
+                            );
+                            return None;
+                        }
+                    };
+                    self.stack.push(value.into());
                 }
                 ConvertToInteger => {
-                    let value =
-                        match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?.into_unpacked() {
-                            FlatValue::Int(x) => Value::new_int_obj(x),
-                            FlatValue::Str(x) => {
-                                let x = match x.val.parse() {
-                                    Ok(x) => x,
-                                    Err(_) => {
-                                        vm_report_err!(
-                                            ctx,
-                                            cur_frame,
-                                            true,
-                                            format!(
+                    let value = match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?
+                        .val
+                        .into_unpacked()
+                    {
+                        FlatValue::Int(x) => Value::new_int_obj(x),
+                        FlatValue::Str(x) => {
+                            let x = match x.val.parse() {
+                                Ok(x) => x,
+                                Err(_) => {
+                                    vm_report_err!(
+                                        ctx,
+                                        cur_frame,
+                                        true,
+                                        format!(
                                             "string `{}` cannot be converted to a valid integer",
                                             x.val
                                         )
-                                        );
-                                        return None;
-                                    }
-                                };
-                                Value::new_int(x)
-                            }
-                            _ => {
-                                vm_report_err!(
-                                    ctx,
-                                    cur_frame,
-                                    true,
-                                    "expected primitive values as operands"
-                                );
-                                return None;
-                            }
-                        };
-                    self.stack.push(value);
+                                    );
+                                    return None;
+                                }
+                            };
+                            Value::new_int(x)
+                        }
+                        _ => {
+                            vm_report_err!(
+                                ctx,
+                                cur_frame,
+                                true,
+                                "expected primitive values as operands"
+                            );
+                            return None;
+                        }
+                    };
+                    self.stack.push(value.into());
                 }
                 Print => {
                     let value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
                     let flags = PrintExtendedFlags::new();
-                    match value.into_unpacked() {
+                    match value.val.into_unpacked() {
                         FlatValue::Int(x) => ctx.callback.on_print(&x.val.to_string(), flags),
                         FlatValue::Str(x) => ctx.callback.on_print(&x.val, flags),
                         _ => {
@@ -600,7 +638,7 @@ impl EraVirtualMachine {
                 }
                 Add => {
                     let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    let result = match (lhs.into_unpacked(), rhs.into_unpacked()) {
+                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
                         (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
                             // TODO: Strict integer arithmetic check
                             Value::new_int(lhs.val.wrapping_add(rhs.val))
@@ -618,11 +656,11 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    self.stack.push(result);
+                    self.stack.push(result.into());
                 }
                 Subtract => {
                     let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    let result = match (lhs.into_unpacked(), rhs.into_unpacked()) {
+                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
                         (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
                             // TODO: Strict integer arithmetic check
                             Value::new_int(lhs.val.wrapping_sub(rhs.val))
@@ -637,11 +675,11 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    self.stack.push(result);
+                    self.stack.push(result.into());
                 }
                 Multiply => {
                     let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    let result = match (lhs.into_unpacked(), rhs.into_unpacked()) {
+                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
                         (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
                             // TODO: Strict integer arithmetic check
                             Value::new_int(lhs.val.wrapping_mul(rhs.val))
@@ -657,11 +695,11 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    self.stack.push(result);
+                    self.stack.push(result.into());
                 }
                 Divide => {
                     let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    let result = match (lhs.into_unpacked(), rhs.into_unpacked()) {
+                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
                         (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
                             // TODO: Strict integer arithmetic check
                             if rhs.val == 0 {
@@ -680,11 +718,11 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    self.stack.push(result);
+                    self.stack.push(result.into());
                 }
                 Modulo => {
                     let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    let result = match (lhs.into_unpacked(), rhs.into_unpacked()) {
+                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
                         (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
                             // TODO: Strict integer arithmetic check
                             if rhs.val == 0 {
@@ -704,11 +742,11 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    self.stack.push(result);
+                    self.stack.push(result.into());
                 }
                 Negate => {
                     let value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
-                    let result = match value.into_unpacked() {
+                    let result = match value.val.into_unpacked() {
                         FlatValue::Int(x) => Value::new_int(x.val.wrapping_neg()),
                         _ => {
                             vm_report_err!(
@@ -720,35 +758,36 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    self.stack.push(result);
+                    self.stack.push(result.into());
                 }
                 BitAnd | BitOr | BitXor | BitShiftL | BitShiftR => {
                     let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    let result = Value::new_int(match (lhs.into_unpacked(), rhs.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
-                            BitAnd => lhs.val & rhs.val,
-                            BitOr => lhs.val | rhs.val,
-                            BitXor => lhs.val ^ rhs.val,
-                            BitShiftL => lhs.val.wrapping_shl(rhs.val as _),
-                            BitShiftR => lhs.val.wrapping_shr(rhs.val as _),
-                            _ => unreachable!(),
-                        },
-                        _ => {
-                            vm_report_err!(
-                                ctx,
-                                cur_frame,
-                                true,
-                                "expected integer values as operands"
-                            );
-                            return None;
-                        }
-                    });
-                    self.stack.push(result);
+                    let result =
+                        Value::new_int(match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                            (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
+                                BitAnd => lhs.val & rhs.val,
+                                BitOr => lhs.val | rhs.val,
+                                BitXor => lhs.val ^ rhs.val,
+                                BitShiftL => lhs.val.wrapping_shl(rhs.val as _),
+                                BitShiftR => lhs.val.wrapping_shr(rhs.val as _),
+                                _ => unreachable!(),
+                            },
+                            _ => {
+                                vm_report_err!(
+                                    ctx,
+                                    cur_frame,
+                                    true,
+                                    "expected integer values as operands"
+                                );
+                                return None;
+                            }
+                        });
+                    self.stack.push(result.into());
                 }
                 CompareL | CompareEq | CompareLEq => {
                     let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
                     let result = Value::new_int(
-                        match (lhs.into_unpacked(), rhs.into_unpacked()) {
+                        match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
                             (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
                                 CompareL => lhs.val < rhs.val,
                                 CompareEq => lhs.val == rhs.val,
@@ -773,12 +812,13 @@ impl EraVirtualMachine {
                         }
                         .into(),
                     );
-                    self.stack.push(result);
+                    self.stack.push(result.into());
                 }
                 LogicalAnd | LogicalOr => {
+                    // TODO: Remove this
                     todo!()
                     // let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    // let result = Value::new_int(match (lhs.into_unpacked(), rhs.into_unpacked()) {
+                    // let result = Value::new_int(match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
                     //     (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
                     //         LogicalAnd => lhs.val && rhs.val,
                     //         LogicalOr => lhs.val || rhs.val,
@@ -798,7 +838,7 @@ impl EraVirtualMachine {
                 }
                 LogicalNot => {
                     let value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
-                    let result = Value::new_int(match value.into_unpacked() {
+                    let result = Value::new_int(match value.val.into_unpacked() {
                         FlatValue::Int(x) => (x.val == 0) as _,
                         _ => {
                             vm_report_err!(
@@ -810,7 +850,7 @@ impl EraVirtualMachine {
                             return None;
                         }
                     });
-                    self.stack.push(result);
+                    self.stack.push(result.into());
                 }
                 Duplicate => {
                     let value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
@@ -833,24 +873,26 @@ impl EraVirtualMachine {
                 }
                 DeepClone => {
                     let value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
-                    self.stack.push(value.deep_clone());
+                    self.stack.push(value.val.deep_clone().into());
                 }
                 GetGlobal => {
-                    let value =
-                        match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?.into_unpacked() {
-                            // TODO: Check if index is in function frame
-                            FlatValue::Int(x) => self.global_vars.get_var_by_idx(x.val as _),
-                            FlatValue::Str(x) => self.global_vars.get_var(&x.val),
-                            _ => {
-                                vm_report_err!(
-                                    ctx,
-                                    cur_frame,
-                                    true,
-                                    "expected primitive values as operands"
-                                );
-                                return None;
-                            }
-                        };
+                    let value = match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?
+                        .val
+                        .into_unpacked()
+                    {
+                        // TODO: Check if index is in function frame
+                        FlatValue::Int(x) => self.global_vars.get_var_by_idx(x.val as _),
+                        FlatValue::Str(x) => self.global_vars.get_var(&x.val),
+                        _ => {
+                            vm_report_err!(
+                                ctx,
+                                cur_frame,
+                                true,
+                                "expected primitive values as operands"
+                            );
+                            return None;
+                        }
+                    };
                     let value = match value {
                         Some(x) => x,
                         None => {
@@ -863,11 +905,14 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    self.stack.push(value.clone());
+                    self.stack.push(EraTrappableValue {
+                        is_trap: Self::check_trap_var(&self.trap_vars, value).is_some(),
+                        val: value.clone(),
+                    });
                 }
                 SetGlobal => {
                     let [index, src_value] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    let value = match index.into_unpacked() {
+                    let value = match index.val.into_unpacked() {
                         // TODO: Check if index is in function frame
                         FlatValue::Int(x) => self.global_vars.get_var_by_idx_mut(x.val as _),
                         FlatValue::Str(x) => self.global_vars.get_var_mut(&x.val),
@@ -893,11 +938,11 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    *value = src_value;
+                    *value = src_value.into();
                 }
                 GetLocal => {
                     let index = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
-                    let value = match index.into_unpacked() {
+                    let value = match index.val.into_unpacked() {
                         FlatValue::Int(x) => {
                             // TODO: Check if index is in bounds
                             match self
@@ -930,7 +975,7 @@ impl EraVirtualMachine {
                 }
                 SetLocal => {
                     let [index, src_value] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    let value = match index.into_unpacked() {
+                    let value = match index.val.into_unpacked() {
                         FlatValue::Int(x) => {
                             // TODO: Check if index is in bounds
                             match self
@@ -962,7 +1007,7 @@ impl EraVirtualMachine {
                         vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)?;
                     ip_offset_delta += 1;
                     let idxs = vm_pop_stack!(ctx, cur_frame, &mut self.stack, idxs_cnt as _)?
-                        .map(|x| match x.into_unpacked() {
+                        .map(|x| match x.val.into_unpacked() {
                             // TODO: Check overflow
                             FlatValue::Int(x) => Some(x.val as u32),
                             _ => {
@@ -976,19 +1021,85 @@ impl EraVirtualMachine {
                             }
                         })
                         .collect::<Option<Vec<_>>>()?;
-                    let value =
-                        match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?.into_unpacked() {
-                            FlatValue::ArrInt(x) => {
-                                x.borrow().get(&idxs).map(|x| Value::new_int_obj(x.clone()))
+                    let arr = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
+                    let value = match arr.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let x_ptr = Rc::as_ptr(&x) as _;
+                            let mut x = x.borrow_mut();
+                            if arr.is_trap {
+                                assert_eq!(
+                                    x.dims.len(),
+                                    1,
+                                    "multi-dimensional arrays must not be trapped"
+                                );
+                                let trap_var_info = self
+                                    .global_vars
+                                    .get_var_info(*self.trap_vars.get(&x_ptr).unwrap())
+                                    .unwrap();
+                                if let Some(xi) = x.get_mut(&idxs) {
+                                    let v = match ctx.callback.on_var_get_int(
+                                        trap_var_info.name.as_str(),
+                                        idxs.last().copied().unwrap_or_default() as _,
+                                    ) {
+                                        Ok(v) => v,
+                                        Err(e) => bail_opt!(
+                                            ctx,
+                                            cur_frame,
+                                            true,
+                                            format!("trap handler failed: {e}")
+                                        ),
+                                    };
+                                    xi.val = v;
+                                    Some(Value::new_int_obj(xi.clone()))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                x.get(&idxs).map(|x| Value::new_int_obj(x.clone()))
                             }
-                            FlatValue::ArrStr(x) => {
-                                x.borrow().get(&idxs).map(|x| Value::new_str_rc(x.clone()))
+                            //x.borrow().get(&idxs).map(|x| Value::new_int_obj(x.clone()))
+                        }
+                        FlatValue::ArrStr(x) => {
+                            let x_ptr = Rc::as_ptr(&x) as _;
+                            let mut x = x.borrow_mut();
+                            if arr.is_trap {
+                                assert_eq!(
+                                    x.dims.len(),
+                                    1,
+                                    "multi-dimensional arrays must not be trapped"
+                                );
+                                let trap_var_info = self
+                                    .global_vars
+                                    .get_var_info(*self.trap_vars.get(&x_ptr).unwrap())
+                                    .unwrap();
+                                if let Some(xi) = x.get_mut(&idxs) {
+                                    let v = match ctx.callback.on_var_get_str(
+                                        trap_var_info.name.as_str(),
+                                        idxs.last().copied().unwrap_or_default() as _,
+                                    ) {
+                                        Ok(v) => v,
+                                        Err(e) => bail_opt!(
+                                            ctx,
+                                            cur_frame,
+                                            true,
+                                            format!("trap handler failed: {e}")
+                                        ),
+                                    };
+                                    *xi = Rc::new(StrValue { val: v });
+                                    Some(Value::new_str_rc(xi.clone()))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                x.get(&idxs).map(|x| Value::new_str_rc(x.clone()))
                             }
-                            _ => {
-                                vm_report_err!(ctx, cur_frame, true, "expected arrays as operands");
-                                return None;
-                            }
-                        };
+                            //x.borrow().get(&idxs).map(|x| Value::new_str_rc(x.clone()))
+                        }
+                        _ => {
+                            vm_report_err!(ctx, cur_frame, true, "expected arrays as operands");
+                            return None;
+                        }
+                    };
                     let value = match value {
                         Some(x) => x,
                         None => {
@@ -996,7 +1107,7 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    self.stack.push(value);
+                    self.stack.push(value.into());
                 }
                 SetMDArrayVal => {
                     let idxs_cnt =
@@ -1004,7 +1115,7 @@ impl EraVirtualMachine {
                     ip_offset_delta += 1;
                     let src_value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
                     let idxs = vm_pop_stack!(ctx, cur_frame, &mut self.stack, idxs_cnt as _)?
-                        .map(|x| match x.into_unpacked() {
+                        .map(|x| match x.val.into_unpacked() {
                             // TODO: Check overflow
                             FlatValue::Int(x) => Some(x.val as u32),
                             _ => {
@@ -1019,9 +1130,15 @@ impl EraVirtualMachine {
                         })
                         .collect::<Option<Vec<_>>>()?;
                     let dst_value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
-                    match (dst_value.into_unpacked(), src_value.clone().into_unpacked()) {
+                    let is_trap = dst_value.is_trap;
+                    match (
+                        dst_value.val.into_unpacked(),
+                        src_value.clone().val.into_unpacked(),
+                    ) {
                         (FlatValue::ArrInt(dst), FlatValue::Int(src)) => {
-                            match dst.borrow_mut().get_mut(&idxs) {
+                            let dst_ptr = Rc::as_ptr(&dst) as _;
+                            let mut dst = dst.borrow_mut();
+                            match dst.get_mut(&idxs) {
                                 Some(x) => x.val = src.val,
                                 None => {
                                     vm_report_err!(
@@ -1033,10 +1150,36 @@ impl EraVirtualMachine {
                                     return None;
                                 }
                             }
+                            if is_trap {
+                                assert_eq!(
+                                    dst.dims.len(),
+                                    1,
+                                    "multi-dimensional arrays must not be trapped"
+                                );
+                                let trap_var_info = self
+                                    .global_vars
+                                    .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
+                                    .unwrap();
+                                match ctx.callback.on_var_set_int(
+                                    trap_var_info.name.as_str(),
+                                    *idxs.last().unwrap() as _,
+                                    src.val,
+                                ) {
+                                    Ok(_) => (),
+                                    Err(e) => bail_opt!(
+                                        ctx,
+                                        cur_frame,
+                                        true,
+                                        format!("trap handler failed: {e}")
+                                    ),
+                                }
+                            }
                         }
                         (FlatValue::ArrStr(dst), FlatValue::Str(src)) => {
-                            match dst.borrow_mut().get_mut(&idxs) {
-                                Some(x) => *x = src,
+                            let dst_ptr = Rc::as_ptr(&dst) as _;
+                            let mut dst = dst.borrow_mut();
+                            match dst.get_mut(&idxs) {
+                                Some(x) => *x = src.clone(),
                                 None => {
                                     vm_report_err!(
                                         ctx,
@@ -1045,6 +1188,30 @@ impl EraVirtualMachine {
                                         "invalid indices into array"
                                     );
                                     return None;
+                                }
+                            }
+                            if is_trap {
+                                assert_eq!(
+                                    dst.dims.len(),
+                                    1,
+                                    "multi-dimensional arrays must not be trapped"
+                                );
+                                let trap_var_info = self
+                                    .global_vars
+                                    .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
+                                    .unwrap();
+                                match ctx.callback.on_var_set_str(
+                                    trap_var_info.name.as_str(),
+                                    *idxs.last().unwrap() as _,
+                                    &src.val,
+                                ) {
+                                    Ok(_) => (),
+                                    Err(e) => bail_opt!(
+                                        ctx,
+                                        cur_frame,
+                                        true,
+                                        format!("trap handler failed: {e}")
+                                    ),
                                 }
                             }
                         }
@@ -1066,48 +1233,174 @@ impl EraVirtualMachine {
                 }
                 GetArrayVal => {
                     let [dst, idx] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    let FlatValue::Int(idx) = idx.into_unpacked() else {
+                    let FlatValue::Int(idx) = idx.val.into_unpacked() else {
                         bail_opt!(ctx, cur_frame, true, "invalid indices into array");
                     };
                     // TODO: Check overflow
                     let idx = idx.val as usize;
-                    let value = match dst.into_unpacked() {
-                        FlatValue::ArrInt(x) => x
-                            .borrow()
-                            .flat_get(idx)
-                            .map(|x| Value::new_int_obj(x.clone())),
-                        FlatValue::ArrStr(x) => x
-                            .borrow()
-                            .flat_get(idx)
-                            .map(|x| Value::new_str_rc(x.clone())),
+                    // let value = match dst.val.into_unpacked() {
+                    //     FlatValue::ArrInt(x) => x
+                    //         .borrow()
+                    //         .flat_get(idx)
+                    //         .map(|x| Value::new_int_obj(x.clone())),
+                    //     FlatValue::ArrStr(x) => x
+                    //         .borrow()
+                    //         .flat_get(idx)
+                    //         .map(|x| Value::new_str_rc(x.clone())),
+                    //     _ => bail_opt!(ctx, cur_frame, true, "expected arrays as operands"),
+                    // };
+                    let value = match dst.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let x_ptr = Rc::as_ptr(&x) as _;
+                            let mut x = x.borrow_mut();
+                            if dst.is_trap {
+                                assert_eq!(
+                                    x.dims.len(),
+                                    1,
+                                    "multi-dimensional arrays must not be trapped"
+                                );
+                                let trap_var_info = self
+                                    .global_vars
+                                    .get_var_info(*self.trap_vars.get(&x_ptr).unwrap())
+                                    .unwrap();
+                                if let Some(xi) = x.flat_get_mut(idx) {
+                                    let v = match ctx
+                                        .callback
+                                        .on_var_get_int(trap_var_info.name.as_str(), idx as _)
+                                    {
+                                        Ok(v) => v,
+                                        Err(e) => bail_opt!(
+                                            ctx,
+                                            cur_frame,
+                                            true,
+                                            format!("trap handler failed: {e}")
+                                        ),
+                                    };
+                                    xi.val = v;
+                                    Some(Value::new_int_obj(xi.clone()))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                x.flat_get(idx).map(|x| Value::new_int_obj(x.clone()))
+                            }
+                        }
+                        FlatValue::ArrStr(x) => {
+                            let x_ptr = Rc::as_ptr(&x) as _;
+                            let mut x = x.borrow_mut();
+                            if dst.is_trap {
+                                assert_eq!(
+                                    x.dims.len(),
+                                    1,
+                                    "multi-dimensional arrays must not be trapped"
+                                );
+                                let trap_var_info = self
+                                    .global_vars
+                                    .get_var_info(*self.trap_vars.get(&x_ptr).unwrap())
+                                    .unwrap();
+                                if let Some(xi) = x.flat_get_mut(idx) {
+                                    let v = match ctx
+                                        .callback
+                                        .on_var_get_str(trap_var_info.name.as_str(), idx as _)
+                                    {
+                                        Ok(v) => v,
+                                        Err(e) => bail_opt!(
+                                            ctx,
+                                            cur_frame,
+                                            true,
+                                            format!("trap handler failed: {e}")
+                                        ),
+                                    };
+                                    *xi = Rc::new(StrValue { val: v });
+                                    Some(Value::new_str_rc(xi.clone()))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                x.flat_get(idx).map(|x| Value::new_str_rc(x.clone()))
+                            }
+                        }
                         _ => bail_opt!(ctx, cur_frame, true, "expected arrays as operands"),
                     };
                     let Some(value) = value else {
                         bail_opt!(ctx, cur_frame, true, "invalid indices into array");
                     };
-                    self.stack.push(value);
+                    self.stack.push(value.into());
                 }
                 SetArrayVal => {
                     let [dst, idx, src] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 3)?;
-                    let FlatValue::Int(idx) = idx.into_unpacked() else {
+                    let FlatValue::Int(idx) = idx.val.into_unpacked() else {
                         bail_opt!(ctx, cur_frame, true, "invalid indices into array");
                     };
                     // TODO: Check overflow
                     let idx = idx.val as usize;
-                    match (dst.into_unpacked(), src.clone().into_unpacked()) {
+                    let is_trap = dst.is_trap;
+                    match (dst.val.into_unpacked(), src.clone().val.into_unpacked()) {
                         (FlatValue::ArrInt(dst), FlatValue::Int(src)) => {
-                            match dst.borrow_mut().flat_get_mut(idx) {
+                            let dst_ptr = Rc::as_ptr(&dst) as _;
+                            let mut dst = dst.borrow_mut();
+                            match dst.flat_get_mut(idx) {
                                 Some(x) => x.val = src.val,
                                 None => {
                                     bail_opt!(ctx, cur_frame, true, "invalid indices into array")
                                 }
                             }
+                            if is_trap {
+                                assert_eq!(
+                                    dst.dims.len(),
+                                    1,
+                                    "multi-dimensional arrays must not be trapped"
+                                );
+                                let trap_var_info = self
+                                    .global_vars
+                                    .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
+                                    .unwrap();
+                                match ctx.callback.on_var_set_int(
+                                    trap_var_info.name.as_str(),
+                                    idx,
+                                    src.val,
+                                ) {
+                                    Ok(_) => (),
+                                    Err(e) => bail_opt!(
+                                        ctx,
+                                        cur_frame,
+                                        true,
+                                        format!("trap handler failed: {e}")
+                                    ),
+                                }
+                            }
                         }
                         (FlatValue::ArrStr(dst), FlatValue::Str(src)) => {
-                            match dst.borrow_mut().flat_get_mut(idx) {
-                                Some(x) => *x = src,
+                            let dst_ptr = Rc::as_ptr(&dst) as _;
+                            let mut dst = dst.borrow_mut();
+                            match dst.flat_get_mut(idx) {
+                                Some(x) => *x = src.clone(),
                                 None => {
                                     bail_opt!(ctx, cur_frame, true, "invalid indices into array")
+                                }
+                            }
+                            if is_trap {
+                                assert_eq!(
+                                    dst.dims.len(),
+                                    1,
+                                    "multi-dimensional arrays must not be trapped"
+                                );
+                                let trap_var_info = self
+                                    .global_vars
+                                    .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
+                                    .unwrap();
+                                match ctx.callback.on_var_set_str(
+                                    trap_var_info.name.as_str(),
+                                    idx,
+                                    &src.val,
+                                ) {
+                                    Ok(_) => (),
+                                    Err(e) => bail_opt!(
+                                        ctx,
+                                        cur_frame,
+                                        true,
+                                        format!("trap handler failed: {e}")
+                                    ),
                                 }
                             }
                         }
@@ -1122,8 +1415,9 @@ impl EraVirtualMachine {
                     self.stack.push(src);
                 }
                 CopyArrayContent => {
+                    // TODO: Support trapped arrays???
                     let [dst, src] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    match (dst.into_unpacked(), src.into_unpacked()) {
+                    match (dst.val.into_unpacked(), src.val.into_unpacked()) {
                         (FlatValue::ArrInt(dst), FlatValue::ArrInt(src)) => {
                             // We must not borrow the same array twice
                             if !Rc::ptr_eq(&dst, &src) {
@@ -1171,7 +1465,7 @@ impl EraVirtualMachine {
                 }
                 GetRandomMax => {
                     let upper = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
-                    let upper = match upper.into_unpacked() {
+                    let upper = match upper.val.into_unpacked() {
                         FlatValue::Int(x) if x.val > 0 => x.val as _,
                         _ => {
                             vm_report_err!(
@@ -1187,7 +1481,7 @@ impl EraVirtualMachine {
                     let result = self
                         .uniform_gen
                         .gen_range(0..upper, || ctx.callback.on_get_rand());
-                    self.stack.push(Value::new_int(result as _));
+                    self.stack.push(Value::new_int(result as _).into());
                 }
                 Jump | JumpW => {
                     let imm_ip = cur_frame.ip.offset + 1;
@@ -1213,7 +1507,10 @@ impl EraVirtualMachine {
                         _ => unreachable!(),
                     };
                     ip_offset_delta += offset_delta;
-                    match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?.into_unpacked() {
+                    match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?
+                        .val
+                        .into_unpacked()
+                    {
                         FlatValue::Int(x) => {
                             if x.val != 0 {
                                 ip_offset_delta = offset;
@@ -1230,6 +1527,22 @@ impl EraVirtualMachine {
                             return None;
                         }
                     }
+                }
+                Throw => {
+                    let msg = self.stack.pop().and_then(|x| match x.val.into_unpacked() {
+                        FlatValue::Int(x) => Some(Rc::new(StrValue {
+                            val: x.val.to_string(),
+                        })),
+                        FlatValue::Str(x) => Some(x.clone()),
+                        FlatValue::ArrInt(x) => x.borrow().vals.first().map(|x| {
+                            Rc::new(StrValue {
+                                val: x.val.to_string(),
+                            })
+                        }),
+                        FlatValue::ArrStr(x) => x.borrow().vals.first().map(|x| x.clone()),
+                    });
+                    let msg = msg.as_ref().map(|x| x.val.as_str()).unwrap_or("<invalid>");
+                    bail_opt!(ctx, cur_frame, true, format!("THROW: {msg}"));
                 }
                 Invalid | _ => {
                     vm_report_err!(
@@ -1277,6 +1590,14 @@ impl EraVirtualMachine {
             is_error,
             msg: msg.into(),
         });
+    }
+    fn check_trap_var(trap_vars: &HashMap<*const (), usize>, value: &Value) -> Option<usize> {
+        let addr = match value.clone().into_unpacked() {
+            FlatValue::Int(_) | FlatValue::Str(_) => return None,
+            FlatValue::ArrInt(x) => Rc::as_ptr(&x) as _,
+            FlatValue::ArrStr(x) => Rc::as_ptr(&x) as _,
+        };
+        trap_vars.get(&addr).copied()
     }
 }
 
