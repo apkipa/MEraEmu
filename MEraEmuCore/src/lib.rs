@@ -39,21 +39,21 @@ mod tests {
     impl MEraEngineSysCallback for &mut MockEngineCallback<'_> {
         fn on_compile_error(&mut self, info: &EraScriptErrorInfo) {
             *self.errors.borrow_mut() += &format!(
-                "compile {}: {}({},{}): {}\n",
-                if info.is_error { "error" } else { "warning" },
+                "{}({},{}): compile {}: {}\n",
                 info.filename,
                 info.src_info.line,
                 info.src_info.column,
+                if info.is_error { "error" } else { "warning" },
                 info.msg
             );
         }
         fn on_execute_error(&mut self, info: &EraScriptErrorInfo) {
             panic!(
-                "execute {}: {}({},{}): {}\nlast exec output: {}",
-                if info.is_error { "error" } else { "warning" },
+                "{}({},{}): execute {}: {}\nlast exec output: {}",
                 info.filename,
                 info.src_info.line,
                 info.src_info.column,
+                if info.is_error { "error" } else { "warning" },
                 info.msg,
                 self.output
             );
@@ -267,7 +267,11 @@ mod tests {
                     .as_encoded_bytes()
                     .ends_with(b".erb")
             {
-                let erb = std::fs::read(i.path())?;
+                let mut erb = std::fs::read(i.path())?;
+                // HACK: Fix missing newlines
+                if !erb.ends_with(b"\n") {
+                    erb.push(b'\n');
+                }
                 let erb = erb.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&erb);
                 if engine.load_erb(&i.path().to_string_lossy(), erb).is_ok() {
                     pass_cnt += 1;

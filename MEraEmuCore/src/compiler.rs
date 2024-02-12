@@ -747,7 +747,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 params.push(arg_info);
             }
 
-            // TODO: LocalSize support
+            // TODO: LocalSize & LocalSSize support
 
             global_funcs.funcs.push(EraFuncInfo {
                 name: func_name,

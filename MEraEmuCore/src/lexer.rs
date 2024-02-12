@@ -1,16 +1,38 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ptr::NonNull};
 
 use crate::bytecode::SourcePosInfo;
 
-pub struct EraLexer<'a, ErrReportFn> {
+#[derive(Default)]
+pub struct EraLexerTempStorage {
+    lexemes: Vec<Box<[u8]>>,
+}
+
+struct EraLexerOuterState<'a, ErrReportFn> {
     err_report_fn: ErrReportFn,
+    replace_list: &'a HashMap<Box<[u8]>, Box<[u8]>>,
+    temp_storage: &'a mut EraLexerTempStorage,
+}
+#[derive(Clone, Copy)]
+struct EraLexerInnerState<'a> {
     src: &'a [u8],
     alternative_src: &'a [u8],
-    replace_size: u32,
-    replace_list: &'a HashMap<Box<[u8]>, Box<[u8]>>,
     offset: u64,
     cur_line: u32,
     cur_column: u32,
+    replace_size: u32,
+}
+struct EraLexerInnerStateSite<'a, 'b, ErrReportFn> {
+    o: &'a mut EraLexerOuterState<'b, ErrReportFn>,
+    i: &'a mut EraLexerInnerState<'b>,
+    lexeme_start: Option<NonNull<u8>>,
+    lexeme_len: usize,
+    lexeme_cart: Vec<u8>,
+}
+
+pub struct EraLexer<'a, ErrReportFn> {
+    outer: EraLexerOuterState<'a, ErrReportFn>,
+    inner: EraLexerInnerState<'a>,
+    next_inner: Option<(EraLexerMode, EraToken<'static>, EraLexerInnerState<'a>)>,
 }
 
 #[repr(u8)]
@@ -188,7 +210,7 @@ impl std::fmt::Display for EraTokenLite {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EraLexerMode {
     Normal,
     SharpDecl,  // Such as `#DIM x = 42`
@@ -208,50 +230,110 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
     pub fn new(
         src: &'a [u8],
         replace_list: &'a HashMap<Box<[u8]>, Box<[u8]>>,
+        temp_storage: &'a mut EraLexerTempStorage,
         err_report_fn: T,
     ) -> Self {
         EraLexer {
-            err_report_fn,
-            src,
-            alternative_src: b"",
-            replace_size: 0,
-            replace_list,
-            offset: 0,
-            cur_line: 1,
-            cur_column: 1,
+            outer: EraLexerOuterState {
+                err_report_fn,
+                replace_list,
+                temp_storage,
+            },
+            inner: EraLexerInnerState {
+                src,
+                alternative_src: b"",
+                offset: 0,
+                cur_line: 1,
+                cur_column: 1,
+                replace_size: 0,
+            },
+            next_inner: None,
         }
     }
 
     pub fn peek(&mut self, mode: EraLexerMode) -> EraToken<'a> {
-        // TODO: Omit mut in `&mut self` by creating a new EraLexer?
-        let (src, alternative_src) = (self.src, self.alternative_src);
-        let (offset, cur_line, cur_column) = (self.offset, self.cur_line, self.cur_column);
-        let token = self.read(mode);
-        (self.src, self.alternative_src) = (src, alternative_src);
-        (self.offset, self.cur_line, self.cur_column) = (offset, cur_line, cur_column);
+        if let Some((lmode, ltoken, lstate)) = &self.next_inner {
+            if *lmode == mode {
+                return *ltoken;
+            }
+        }
+        let mut inner = self.inner.clone();
+        let token;
+        unsafe {
+            let cart;
+            (cart, token) = inner.next_token(mode, &mut self.outer);
+            if let Some(cart) = cart {
+                self.outer.temp_storage.lexemes.push(cart);
+            }
+        }
+        self.next_inner = Some((mode, token, inner));
         token
     }
     pub fn read(&mut self, mode: EraLexerMode) -> EraToken<'a> {
+        if let Some((lmode, ltoken, lstate)) = self.next_inner.take() {
+            if lmode == mode {
+                self.inner = lstate;
+                return ltoken;
+            }
+        }
+        let token;
+        unsafe {
+            let cart;
+            (cart, token) = self.inner.next_token(mode, &mut self.outer);
+            if let Some(cart) = cart {
+                self.outer.temp_storage.lexemes.push(cart);
+            }
+        }
+        token
+    }
+}
+
+impl<'a> EraLexerInnerState<'a> {
+    // SAFETY: The returned (<cart>, <token>) has their lifetime erased, with token possibly attached
+    //         to the cart satisfying StableDeref. Special care is required for lifetime issues.
+    unsafe fn next_token<T: FnMut(&EraLexErrorInfo)>(
+        &mut self,
+        mode: EraLexerMode,
+        outer: &mut EraLexerOuterState<'a, T>,
+    ) -> (Option<Box<[u8]>>, EraToken<'static>) {
+        let mut site = EraLexerInnerStateSite {
+            o: outer,
+            i: self,
+            lexeme_start: None,
+            lexeme_len: 0,
+            lexeme_cart: Vec::new(),
+        };
+        let mut token = site.next_token(mode);
+        if let Some(ptr) = site.lexeme_start {
+            token.lexeme = std::slice::from_raw_parts(ptr.as_ptr(), site.lexeme_len);
+            (None, token)
+        } else {
+            // SAFETY: Box<[u8]> implements StableDeref
+            let cart = site.lexeme_cart.into_boxed_slice();
+            // TODO: Make Miri happy (?)
+            token.lexeme = std::slice::from_raw_parts(cart.as_ptr(), cart.len());
+            (Some(cart), token)
+        }
+    }
+}
+
+impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
+    /// Retrieves the next token without lexeme field set.
+    fn next_token(&mut self, mode: EraLexerMode) -> EraToken<'static> {
         // Normal mode should have leading whitespaces removed
         if let EraLexerMode::Normal | EraLexerMode::SharpDecl = mode {
             self.skip_whitespace();
         }
 
-        let old_src = self.src;
         let src_info = self.make_src_info();
 
-        // SAFETY: src and old_src always refer to the same object
-        let get_token_lexeme_fn = |this: &Self| unsafe {
-            let distance = this.src.as_ptr().offset_from(old_src.as_ptr());
-            &old_src[..distance as _]
-        };
-        let make_token_fn = |this: &Self, kind| EraToken {
+        let make_token_fn = |this: &Self, kind| EraToken::<'static> {
             kind,
-            lexeme: get_token_lexeme_fn(this),
+            lexeme: b"",
             src_info,
         };
         let make_link2_token_fn =
-            |this: &mut Self, links: &[(u8, EraTokenKind)], nonlink_kind| -> EraToken<'a> {
+            |this: &mut Self, links: &[(u8, EraTokenKind)], nonlink_kind| -> EraToken<'static> {
                 let peeked_ch = this.peek_char();
                 for &(link_ch, link_kind) in links {
                     if Some(link_ch) == peeked_ch {
@@ -292,7 +374,8 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                             self.advance_char();
                         }
                         // Restart read via recursion (ensures correct lexeme)
-                        self.read(mode)
+                        self.reset_lexeme();
+                        self.next_token(mode)
                     }
                     b'#' => make_token_fn(self, NumberSign),
                     b',' => make_token_fn(self, Comma),
@@ -335,35 +418,38 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                             self.advance_char();
                         }
                         let mut token = make_token_fn(self, Identifier);
-                        // HACK: Some commands (such as PRINT) expects one whitespace to be eaten
-                        if self.peek_char().map(Self::is_whitespace).unwrap_or(false) {
-                            self.advance_char();
-                        }
                         // Handle specific keywords
                         if let EraLexerMode::SharpDecl = mode {
-                            token.kind = if token.lexeme.eq_ignore_ascii_case(b"DIM") {
+                            let lexeme = self.get_lexeme();
+                            token.kind = if lexeme.eq_ignore_ascii_case(b"DIM") {
                                 KwDim
-                            } else if token.lexeme.eq_ignore_ascii_case(b"DIMS") {
+                            } else if lexeme.eq_ignore_ascii_case(b"DIMS") {
                                 KwDimS
-                            } else if token.lexeme.eq_ignore_ascii_case(b"GLOBAL") {
+                            } else if lexeme.eq_ignore_ascii_case(b"GLOBAL") {
                                 KwGlobal
-                            } else if token.lexeme.eq_ignore_ascii_case(b"DYNAMIC") {
+                            } else if lexeme.eq_ignore_ascii_case(b"DYNAMIC") {
                                 KwDynamic
-                            } else if token.lexeme.eq_ignore_ascii_case(b"REF") {
+                            } else if lexeme.eq_ignore_ascii_case(b"REF") {
                                 KwRef
-                            } else if token.lexeme.eq_ignore_ascii_case(b"CONST") {
+                            } else if lexeme.eq_ignore_ascii_case(b"CONST") {
                                 KwConst
-                            } else if token.lexeme.eq_ignore_ascii_case(b"LOCALSIZE") {
+                            } else if lexeme.eq_ignore_ascii_case(b"LOCALSIZE") {
                                 KwLocalSize
-                            } else if token.lexeme.eq_ignore_ascii_case(b"LOCALSSIZE") {
+                            } else if lexeme.eq_ignore_ascii_case(b"LOCALSSIZE") {
                                 KwLocalSSize
-                            } else if token.lexeme.eq_ignore_ascii_case(b"FUNCTION") {
+                            } else if lexeme.eq_ignore_ascii_case(b"FUNCTION") {
                                 KwFunction
-                            } else if token.lexeme.eq_ignore_ascii_case(b"FUNCTIONS") {
+                            } else if lexeme.eq_ignore_ascii_case(b"FUNCTIONS") {
                                 KwFunctionS
                             } else {
                                 token.kind
                             };
+                        }
+                        // HACK: Some commands (such as PRINT) expects one whitespace to be eaten
+                        if self.peek_char().map(Self::is_whitespace).unwrap_or(false) {
+                            self.advance_char();
+                            // HACK: Manually reduce lexeme length
+                            self.lexeme_len -= 1;
                         }
                         token
                     }
@@ -375,9 +461,18 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                                 _ = self.advance_char();
                                 self.skip_char_while(|x| x.is_ascii_hexdigit());
                             }
+                            /*
                             Some(b'0'..=b'7') => {
                                 // Octal
                                 self.skip_char_while(|x| matches!(x, b'0'..=b'7'));
+                            }
+                            _ => {
+                                // Plain zero
+                            }
+                            */
+                            Some(b'0'..=b'9') => {
+                                // Decimal
+                                self.skip_char_while(|x| matches!(x, b'0'..=b'9'));
                             }
                             _ => {
                                 // Plain zero
@@ -405,7 +500,7 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                         make_token_fn(self, StringLiteral)
                     }
                     _ => {
-                        (self.err_report_fn)(&EraLexErrorInfo {
+                        (self.o.err_report_fn)(&EraLexErrorInfo {
                             src_info: src_info,
                             is_error: true,
                             msg: format!("`{ch}`: unrecognized token kind"),
@@ -466,6 +561,18 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
         token
     }
 
+    fn get_lexeme(&self) -> &[u8] {
+        if let Some(ptr) = self.lexeme_start {
+            unsafe { std::slice::from_raw_parts(ptr.as_ptr(), self.lexeme_len) }
+        } else {
+            self.lexeme_cart.as_slice()
+        }
+    }
+    fn reset_lexeme(&mut self) {
+        self.lexeme_start = None;
+        self.lexeme_len = 0;
+        self.lexeme_cart.clear();
+    }
     fn is_whitespace(ch: u8) -> bool {
         matches!(ch, b' ' | b'\t')
     }
@@ -474,12 +581,12 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
         ch.is_ascii_alphanumeric() || ch == b'_' || !ch.is_ascii()
     }
     fn is_at_end(&self) -> bool {
-        self.src.is_empty()
+        self.i.src.is_empty()
     }
     fn skip_whitespace(&mut self) {
-        while let [b' ' | b'\t', rest @ ..] = self.src {
-            self.src = rest;
-            self.cur_column += 1;
+        while let [b' ' | b'\t', rest @ ..] = self.i.src {
+            self.i.src = rest;
+            self.i.cur_column += 1;
         }
     }
     // NOTE: Newline is handled in a specific way
@@ -490,27 +597,62 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
         self.handle_src_replace();
         // NOTE: Replace does not contain any newlines; also we need to treat source
         //       pos info carefully.
-        if let [ch, rest @ ..] = self.alternative_src {
-            self.alternative_src = rest;
+        let advance_lexeme_fn = |this: &mut Self, old_src: &[u8], ch: &u8| unsafe {
+            if this.lexeme_len == 0 {
+                this.lexeme_start = Some(NonNull::new_unchecked(old_src.as_ptr() as _));
+            } else if this.lexeme_start.map(|x| x.as_ptr().add(this.lexeme_len))
+                != Some(ch as *const _ as _)
+            {
+                // Impossible to stay continuous without extra allocation
+                if let Some(ptr) = this.lexeme_start {
+                    let lexeme = std::slice::from_raw_parts(ptr.as_ptr(), this.lexeme_len);
+                    this.lexeme_start = None;
+                    this.lexeme_cart.extend_from_slice(lexeme);
+                }
+                this.lexeme_cart.push(*ch);
+            }
+            this.lexeme_len += 1;
+        };
+        if let [ch, rest @ ..] = self.i.alternative_src {
+            // unsafe {
+            //     if self.lexeme_len == 0 {
+            //         self.lexeme_start =
+            //             Some(NonNull::new_unchecked(self.i.alternative_src.as_ptr() as _));
+            //     } else if self.lexeme_start.map(|x| x.as_ptr().add(self.lexeme_len))
+            //         != Some(ch as *const _ as _)
+            //     {
+            //         if let Some(ptr) = self.lexeme_start {
+            //             self.lexeme_start = None;
+            //             self.lexeme_cart
+            //                 .extend_from_slice(std::slice::from_raw_parts(
+            //                     ptr.as_ptr(),
+            //                     self.lexeme_len,
+            //                 ));
+            //         }
+            //         self.lexeme_cart.push(*ch);
+            //     }
+            // }
+            advance_lexeme_fn(self, self.i.alternative_src, ch);
+            self.i.alternative_src = rest;
             if rest.is_empty() {
-                // Transition to normal
-                self.cur_column += self.replace_size;
+                self.i.cur_column += self.i.replace_size;
             }
             return Some(*ch);
         }
         // Handle newline
-        if let [b'\r', b'\n', rest @ ..] | [b'\r' | b'\n', rest @ ..] = self.src {
-            self.src = rest;
-            (self.cur_line, self.cur_column) = (self.cur_line + 1, 1);
+        if let [b'\r', b'\n', rest @ ..] | [b'\r' | b'\n', rest @ ..] = self.i.src {
+            self.i.src = rest;
+            (self.i.cur_line, self.i.cur_column) = (self.i.cur_line + 1, 1);
             return Some(b'\n');
         }
         // Handle normal
-        if let [ch, rest @ ..] = self.src {
+        if let [ch, rest @ ..] = self.i.src {
+            advance_lexeme_fn(self, self.i.src, ch);
             let ch = *ch;
-            self.src = rest;
+            self.i.src = rest;
             // Count in chars; assuming UTF-8 input is good
             if (ch & 0xc0) != 0x80 {
-                self.cur_column += 1;
+                self.i.cur_column += 1;
             }
             Some(ch)
         } else {
@@ -519,34 +661,36 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
     }
     fn peek_char(&mut self) -> Option<u8> {
         self.handle_src_replace();
-        if let &[ch, ..] = self.alternative_src {
+        if let &[ch, ..] = self.i.alternative_src {
             return Some(ch);
         }
-        self.src
+        self.i
+            .src
             .get(0)
             .copied()
             .map(|x| if x == b'\r' { b'\n' } else { x })
     }
     fn handle_src_replace(&mut self) {
-        if !self.alternative_src.is_empty() {
+        if !self.i.alternative_src.is_empty() {
             return;
         }
-        if let [b'[', b'[', rest @ ..] = self.src {
+        if let [b'[', b'[', rest @ ..] = self.i.src {
             let src_info = self.make_src_info();
 
             let search_len = memchr::memchr2(b'\r', b'\n', rest).unwrap_or(rest.len());
             let Some(end_pos) = memchr::memmem::find(&rest[..search_len], b"]]") else {
-                (self.err_report_fn)(&EraLexErrorInfo {
-                    src_info,
-                    is_error: true,
-                    msg: "replacement `[[` does not have corresponding closing `]]`".to_owned(),
-                });
+                // Closing not found; treat as if it were not a replace, without emitting errors
+                // (self.o.err_report_fn)(&EraLexErrorInfo {
+                //     src_info,
+                //     is_error: true,
+                //     msg: "replacement `[[` does not have corresponding closing `]]`".to_owned(),
+                // });
                 return;
             };
             let in_replace = &rest[..end_pos];
-            self.src = &rest[(end_pos + 2)..];
-            let Some(out_replace) = self.replace_list.get(in_replace) else {
-                (self.err_report_fn)(&EraLexErrorInfo {
+            self.i.src = &rest[(end_pos + 2)..];
+            let Some(out_replace) = self.o.replace_list.get(in_replace) else {
+                (self.o.err_report_fn)(&EraLexErrorInfo {
                     src_info,
                     is_error: true,
                     msg: format!(
@@ -557,23 +701,23 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                 return;
             };
             // Count in chars; assuming UTF-8 input is good
-            self.replace_size = in_replace
+            self.i.replace_size = in_replace
                 .iter()
-                .fold(0, |acc, x| acc + ((*x & 0xc0) != 0x80) as u32);
-            self.alternative_src = out_replace;
+                .fold(2 + 2, |acc, x| acc + ((*x & 0xc0) != 0x80) as u32);
+            self.i.alternative_src = out_replace;
         }
     }
     fn make_src_info(&self) -> SourcePosInfo {
         SourcePosInfo {
-            line: self.cur_line,
-            column: self.cur_column,
+            line: self.i.cur_line,
+            column: self.i.cur_column,
         }
     }
     // Precondition: self.is_at_end() == true
-    fn make_eof_token(&self) -> EraToken<'a> {
+    fn make_eof_token(&self) -> EraToken<'static> {
         EraToken {
             kind: EraTokenKind::Eof,
-            lexeme: self.src,
+            lexeme: b"",
             src_info: self.make_src_info(),
         }
     }

@@ -23,6 +23,7 @@ pub enum EraDecl {
 pub enum EraSharpDecl {
     VarDecl(EraVarDecl),
     LocalSizeDecl(EraLocalSizeDecl),
+    LocalSSizeDecl(EraLocalSSizeDecl),
     FunctionDecl(EraSharpFunctionDecl),
 }
 impl EraSharpDecl {
@@ -30,6 +31,7 @@ impl EraSharpDecl {
         match self {
             Self::FunctionDecl(x) => x.src_info,
             Self::LocalSizeDecl(x) => x.src_info,
+            Self::LocalSSizeDecl(x) => x.src_info,
             Self::VarDecl(x) => x.src_info,
         }
     }
@@ -339,6 +341,11 @@ pub struct EraVarDecl {
 }
 
 pub struct EraLocalSizeDecl {
+    pub size: u64,
+    pub src_info: SourcePosInfo,
+}
+
+pub struct EraLocalSSizeDecl {
     pub size: u64,
     pub src_info: SourcePosInfo,
 }
@@ -655,7 +662,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         match first.kind {
             EraTokenKind::KwDim => Some(EraSharpDecl::VarDecl(self.var_declaration(false)?)),
             EraTokenKind::KwDimS => Some(EraSharpDecl::VarDecl(self.var_declaration(true)?)),
-            EraTokenKind::KwLocalSize => {
+            EraTokenKind::KwLocalSize | EraTokenKind::KwLocalSSize => {
                 let size = self.expression(true)?;
                 let size_si = size.source_pos_info();
                 let size = match self.evaluate_expression_ast(size) {
@@ -679,15 +686,22 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         self.report_token_err(
                             first.into(),
                             true,
-                            "LOCALSIZE size must be non-negative",
+                            "local size size must be non-negative",
                         );
                         return None;
                     }
                 };
-                Some(EraSharpDecl::LocalSizeDecl(EraLocalSizeDecl {
-                    size,
-                    src_info: first.src_info,
-                }))
+                Some(match first.kind {
+                    EraTokenKind::KwLocalSize => EraSharpDecl::LocalSizeDecl(EraLocalSizeDecl {
+                        size,
+                        src_info: first.src_info,
+                    }),
+                    EraTokenKind::KwLocalSSize => EraSharpDecl::LocalSSizeDecl(EraLocalSSizeDecl {
+                        size,
+                        src_info: first.src_info,
+                    }),
+                    _ => unreachable!(),
+                })
             }
             EraTokenKind::KwFunction => Some(EraSharpDecl::FunctionDecl(EraSharpFunctionDecl {
                 returns_string: false,
@@ -1038,7 +1052,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         if !x.is_empty() {
                             lexeme = x;
                         }
-                        8
+                        //8
+                        10
                     } else {
                         10
                     };
