@@ -1,0 +1,9 @@
+namespace MEraEmuWin
+{
+    [default_interface]
+    runtimeclass EngineControl : Windows.UI.Xaml.Controls.UserControl
+    {
+        EngineControl();
+        Int32 MyProperty;
+    }
+}

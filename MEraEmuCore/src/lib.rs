@@ -1,5 +1,6 @@
 mod bytecode;
 mod compiler;
+mod csv;
 mod engine;
 mod lexer;
 mod parser;
@@ -60,10 +61,28 @@ mod tests {
         fn on_get_rand(&mut self) -> u64 {
             42
         }
-        fn on_html_print(&mut self, content: &str) {}
-        fn on_input(&mut self, XXXXXXXXXXXX: u32) {}
         fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {
             self.output += content;
+        }
+        fn on_html_print(&mut self, content: &str) {
+            self.output += content;
+        }
+        fn on_wait(&mut self, is_force: bool) {}
+        fn on_input_int(
+            &mut self,
+            default_value: i64,
+            can_click: bool,
+            allow_skip: bool,
+        ) -> Option<i64> {
+            Some(0)
+        }
+        fn on_input_str(
+            &mut self,
+            default_value: &str,
+            can_click: bool,
+            allow_skip: bool,
+        ) -> Option<String> {
+            Some(String::new())
         }
         fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
             Ok(0)
@@ -88,7 +107,16 @@ mod tests {
             println!("Setting variable `{name}` to `{val}`...");
             Ok(())
         }
-        fn on_wait(&mut self, XXXXXXXXXXXX: u32) {}
+        // Graphics
+        fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
+            0
+        }
+        fn on_gdispose(&mut self, gid: i64) -> i64 {
+            0
+        }
+        fn on_gcreated(&mut self, gid: i64) -> i64 {
+            0
+        }
     }
 
     #[test]
@@ -118,6 +146,11 @@ mod tests {
                 ;PRINTFORM [Returning {result}]
                 PRINTFORM [Ret]
                 RETURNF result
+            @BAD_GOTO
+                ;$LABEL1
+                REPEAT 1
+                    ;GOTO LABEL1
+                REND
             @SYSTEM_TITLE()
                 ;#DIM REF xre
                 #DIM val = 1 + 1 ;*0
@@ -134,7 +167,7 @@ mod tests {
 
                 val:0 = val + 1
                 ; Print hello world
-                Printform Hello, {val + 1} the {world_str}!
+                Printform Hello, {val + 1,2,LEFT}the %world_str%!
                 IF 1 + 2 - 3;
                     PRINTFORM true
                 ELSE
@@ -196,6 +229,70 @@ mod tests {
             &callback.output,
             "Hello, 4 the world!falseDone[Ret][Ret][Ret]55~-5050~"
         );
+
+        Ok(())
+    }
+    #[test]
+    fn assembled_game() -> anyhow::Result<()> {
+        // TODO: Redact this
+        let game_base_dir = r#"D:\MyData\Games\Others\1\eraTW\TW4.881画蛇添足版（04.07更新）\"#;
+
+        let errors = RefCell::new(String::new());
+        let mut callback = MockEngineCallback::new(&errors);
+        let mut engine = MEraEngine::new();
+        engine.install_sys_callback(Box::new(&mut callback));
+        engine.register_global_var("COUNT", false, 1, false)?;
+        engine.register_global_var("WINDOW_TITLE", true, 1, true)?;
+        let mut total_cnt = 0usize;
+        let mut pass_cnt = 0usize;
+        for i in walkdir::WalkDir::new(format!("{game_base_dir}CSV")) {
+            use crate::engine::EraCsvLoadKind;
+            let i = i?;
+            if !i.file_type().is_file() {
+                continue;
+            }
+            let file_name = i.file_name().to_ascii_lowercase();
+            let file_name = file_name.as_encoded_bytes();
+            if file_name.eq_ignore_ascii_case(b"_Rename.csv") {
+                let csv = std::fs::read(i.path())?;
+                let csv = csv.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&csv);
+                engine.load_csv(&i.path().to_string_lossy(), csv, EraCsvLoadKind::_Rename)?;
+            }
+        }
+        for i in walkdir::WalkDir::new(format!("{game_base_dir}ERB")) {
+            let i = i?;
+            if i.file_type().is_file()
+                && i.file_name()
+                    .to_ascii_lowercase()
+                    .as_encoded_bytes()
+                    .ends_with(b".erb")
+            {
+                let erb = std::fs::read(i.path())?;
+                let erb = erb.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&erb);
+                if engine.load_erb(&i.path().to_string_lossy(), erb).is_ok() {
+                    pass_cnt += 1;
+                }
+                total_cnt += 1;
+            }
+        }
+        _ = engine.finialize_load_srcs();
+        {
+            let errors = errors.borrow();
+            if errors.contains("error:") {
+                drop(engine);
+                panic!(
+                    "compile output:\n{errors}\nexec output:\n{}\nCompiled {}/{} files",
+                    callback.output, pass_cnt, total_cnt
+                );
+            }
+            if !errors.is_empty() {
+                println!("compile output:\n{errors}");
+            }
+        }
+        let stop_flag = AtomicBool::new(false);
+        engine.do_execution(&stop_flag, u64::MAX)?;
+        assert!(engine.get_is_halted());
+        drop(engine);
 
         Ok(())
     }

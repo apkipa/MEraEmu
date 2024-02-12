@@ -23,6 +23,7 @@ pub enum EraBytecodePrimaryType {
         values are impossible.
     */
     FunCall,
+    TryFunCall,
     FunExists,
     // LoadString,
     // LoadStringW,
@@ -45,6 +46,7 @@ pub enum EraBytecodePrimaryType {
     ConvertToString,  // For string values, this is no-op
     ConvertToInteger, // For integer values, this is no-op
     BuildString,      // Requires an imm8 describing count of strings to concatenate
+    PadString,        // <string> <width>, imm8: PadStringFlags
     Pop,
     Duplicate, // Push current value to stack without consuming it
     DuplicateN,
@@ -108,7 +110,7 @@ impl EraBytecodePrimaryType {
 
 #[modular_bitfield::bitfield]
 #[repr(u8)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct PrintExtendedFlags {
     pub is_single: bool,
     pub use_kana: bool,
@@ -118,6 +120,15 @@ pub struct PrintExtendedFlags {
     pub force_plain: bool,
     pub left_pad: bool,
     pub right_pad: bool,
+}
+
+#[modular_bitfield::bitfield]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub struct PadStringFlags {
+    pub left_pad: bool,
+    pub right_pad: bool,
+    __: modular_bitfield::specifiers::B6,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

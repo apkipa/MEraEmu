@@ -74,6 +74,7 @@ pub struct EraFuncBytecodeInfo {
     pub chunk_idx: u32,
     pub offset: u32,
     pub args_count: u32,
+    pub func_kind: EraFunKind,
 }
 
 #[derive(Default)]
@@ -262,8 +263,15 @@ impl EraBytecodeChunk {
     }
 }
 impl EraBytecodeChunkBacktrackHolder {
+    fn source_pos_info(&self, chunk: &EraBytecodeChunk) -> Option<SourcePosInfo> {
+        chunk.source_info_at(self.base_idx)
+    }
     fn complete(self, chunk: &mut EraBytecodeChunk) -> Option<()> {
-        let offset = isize::try_from(chunk.cur_bytes_cnt())
+        let pos = chunk.cur_bytes_cnt();
+        self.complete_at(chunk, pos)
+    }
+    fn complete_at(self, chunk: &mut EraBytecodeChunk, pos: usize) -> Option<()> {
+        let offset = isize::try_from(pos)
             .ok()?
             .checked_sub_unsigned(self.base_idx)?;
         // 1 is bytecode size
@@ -315,6 +323,17 @@ pub struct EraCompileErrorInfo {
     pub msg: String,
 }
 
+struct EraGotoLabelInfo {
+    stack_balance: usize,
+    pos: usize,
+    src_info: SourcePosInfo,
+}
+struct EraGotoJumpInfo {
+    backtrack: EraBytecodeChunkBacktrackHolder,
+    stack_balance: usize,
+    target: CaselessString,
+}
+
 pub struct EraCompilerImpl<'a, ErrReportFn> {
     err_report_fn: &'a mut ErrReportFn,
     file_name: Rc<str>,
@@ -323,6 +342,9 @@ pub struct EraCompilerImpl<'a, ErrReportFn> {
     // local_vars: Option<EraFunctionFrame>,
     loop_structs: Vec<EraLoopStructCodeMetadata>,
     intern_vals: HashMap<either::Either<Rc<IntValue>, Rc<StrValue>>, ()>,
+    stack_balance: usize,
+    goto_labels: HashMap<CaselessString, EraGotoLabelInfo>,
+    goto_backtracks: Vec<EraGotoJumpInfo>,
 }
 
 impl<T: FnMut(&EraCompileErrorInfo)> EraCompiler<T> {
@@ -343,10 +365,12 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         EraCompilerImpl {
             err_report_fn: &mut parser.err_report_fn,
             file_name: "".into(),
-            // funcs: Default::default(),
             vars: Default::default(),
             loop_structs: Vec::new(),
             intern_vals: HashMap::new(),
+            stack_balance: 0,
+            goto_labels: HashMap::new(),
+            goto_backtracks: Vec::new(),
         }
     }
     fn compile_all(
@@ -797,7 +821,13 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             chunk_idx: u32::MAX, // Stub
             offset: chunk.cur_bytes_cnt() as _,
             args_count: func_info.params.len() as _,
+            func_kind: func_decl.kind,
         };
+
+        // Reset GOTO context
+        self.stack_balance = 0;
+        self.goto_labels = HashMap::new();
+        self.goto_backtracks = Vec::new();
 
         // Init local variables (including non-DYNAMIC ones)
         for (name, var_info) in func_info.local_vars.iter() {
@@ -884,6 +914,44 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             }
         }
 
+        // Complete GOTOs
+        _ = std::mem::take(&mut self.stack_balance);
+        let goto_labels = std::mem::take(&mut self.goto_labels);
+        let goto_backtracks = std::mem::take(&mut self.goto_backtracks);
+        for backtrack in goto_backtracks {
+            let src_si = backtrack.backtrack.source_pos_info(chunk)?;
+            let dst_si;
+            let Some(target) = goto_labels.get(&backtrack.target) else {
+                bail_opt!(
+                    self,
+                    [
+                        (
+                            src_si,
+                            format!(
+                                "label `${}` not defined in current function",
+                                backtrack.target
+                            )
+                        ),
+                        (func_info.src_info, "note: function definition starts here")
+                    ]
+                );
+            };
+            dst_si = target.src_info;
+            if backtrack.stack_balance != target.stack_balance {
+                bail_opt!(
+                    self,
+                    [
+                        (
+                            src_si,
+                            "this jump will corrupt the integrity of control flow"
+                        ),
+                        (dst_si, "note: see the destination of this jump")
+                    ]
+                );
+            }
+            backtrack.backtrack.complete_at(chunk, target.pos)?;
+        }
+
         Some(bytecode_info)
     }
     #[must_use]
@@ -908,6 +976,24 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 return Some(());
             }
             EraStmt::Command(x) => x,
+            EraStmt::Label(x) => {
+                let label = EraGotoLabelInfo {
+                    stack_balance: self.stack_balance,
+                    pos: chunk.cur_bytes_cnt(),
+                    src_info: x.src_info,
+                };
+                if let Some(label) = self.goto_labels.insert(x.name.into(), label) {
+                    let si = label.src_info;
+                    bail_opt!(
+                        self,
+                        [
+                            (x.src_info, "redefinition of label"),
+                            (si, "note: see the previous definition of label")
+                        ]
+                    );
+                }
+                return Some(());
+            }
         };
 
         match stmt {
@@ -1075,6 +1161,8 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             Cmd::Repeat(x) => {
                 // for (loopCount = ?, COUNT = 0; COUNT < loopCount; COUNT++) {}
                 // Use stack to store temporary loopCount
+                self.stack_balance += 1;
+
                 match self.compile_expression(funcs, func_info, x.loop_cnt, chunk)? {
                     TInteger => (),
                     TString | TVoid => {
@@ -1144,11 +1232,15 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 )?;
                 bt_done.complete(chunk)?;
                 chunk.emit_bytecode(Pop, x.src_info);
+
+                self.stack_balance -= 1;
             }
             Cmd::Wait(x) => {
                 chunk.emit_bytecode(Wait, x.src_info);
             }
             Cmd::SelectCase(x) => {
+                self.stack_balance += 1;
+
                 let cond_k = self.compile_expression(funcs, func_info, x.cond, chunk)?;
                 if let TVoid = cond_k {
                     bail_opt!(
@@ -1246,6 +1338,16 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     bt.complete(chunk)?;
                 }
                 chunk.emit_bytecode(Pop, x.src_info);
+
+                self.stack_balance -= 1;
+            }
+            Cmd::Goto(x) => {
+                let backtrack = chunk.emit_jump_hold(x.src_info);
+                self.goto_backtracks.push(EraGotoJumpInfo {
+                    backtrack,
+                    stack_balance: self.stack_balance,
+                    target: x.target.into(),
+                });
             }
             _ => bail_opt!(self, stmt.source_pos_info(), "unsupported statement"),
         }
@@ -1547,9 +1649,23 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             crate::parser::EraStrFormExprPart::Expression(x) => {
                                 let src_info = x.source_pos_info();
                                 if let TInteger =
-                                    self.compile_expression(funcs, func_info, x, chunk)?
+                                    self.compile_expression(funcs, func_info, x.expr, chunk)?
                                 {
                                     chunk.emit_bytecode(ConvertToString, src_info);
+                                }
+                                if let Some(width) = x.width {
+                                    let width_si = width.source_pos_info();
+                                    let TInteger =
+                                        self.compile_expression(funcs, func_info, width, chunk)?
+                                    else {
+                                        bail_opt!(
+                                            self,
+                                            width_si,
+                                            "width must be an integer expression"
+                                        );
+                                    };
+                                    chunk.emit_bytecode(PadString, src_info);
+                                    chunk.append_u8(x.alignment.into(), src_info);
                                 }
                             }
                             crate::parser::EraStrFormExprPart::Literal(x, src_info) => {

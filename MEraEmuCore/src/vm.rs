@@ -1,6 +1,7 @@
 use crate::{
     bytecode::{
-        EraBytecodePrimaryType, FlatValue, PrintExtendedFlags, SourcePosInfo, StrValue, Value,
+        EraBytecodePrimaryType, FlatValue, PadStringFlags, PrintExtendedFlags, SourcePosInfo,
+        StrValue, Value,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
     util::*,
@@ -200,6 +201,7 @@ struct EraFuncExecFrame {
     stack_start: usize,
     ip: EraExecIp,
     ret_ip: EraExecIp,
+    ignore_return_value: bool,
 }
 
 pub struct EraVirtualMachine {
@@ -226,15 +228,35 @@ pub trait EraVirtualMachineCallback {
     fn on_execution_error(&mut self, error: EraRuntimeErrorInfo);
     fn on_get_rand(&mut self) -> u64;
     fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
+    // TODO: Debug is a global flag inside VM?
+    fn on_debugprint(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
+    fn on_html_print(&mut self, content: &str);
+    fn on_wait(&mut self, is_force: bool);
+    fn on_input_int(
+        &mut self,
+        default_value: i64,
+        can_click: bool,
+        allow_skip: bool,
+    ) -> Option<i64>;
+    fn on_input_str(
+        &mut self,
+        default_value: &str,
+        can_click: bool,
+        allow_skip: bool,
+    ) -> Option<String>;
     fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error>;
     fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error>;
     fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error>;
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error>;
+    // Graphics
+    fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64;
+    fn on_gdispose(&mut self, gid: i64) -> i64;
+    fn on_gcreated(&mut self, gid: i64) -> i64;
 }
 
 impl EraVirtualMachine {
     pub fn new(compilation: EraBytecodeCompilation) -> Self {
-        EraVirtualMachine {
+        let mut this = EraVirtualMachine {
             func_names: compilation.func_names,
             funcs: compilation.funcs,
             chunks: compilation.chunks,
@@ -244,7 +266,8 @@ impl EraVirtualMachine {
             is_halted: false,
             uniform_gen: SimpleUniformGenerator::new(),
             trap_vars: HashMap::new(),
-        }
+        };
+        this
     }
     pub fn reset_exec_and_ip(&mut self, ip: EraExecIp) {
         // TODO: Verify input
@@ -259,6 +282,7 @@ impl EraVirtualMachine {
                 chunk: 0,
                 offset: 0,
             },
+            ignore_return_value: true,
         });
         self.uniform_gen = SimpleUniformGenerator::new();
     }
@@ -396,7 +420,7 @@ impl EraVirtualMachine {
                 ReturnInteger | ReturnString => {
                     let ret_val = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
                     self.stack.drain(cur_frame.stack_start..);
-                    self.frames.pop();
+                    let ignore_return_value = self.frames.pop().unwrap().ignore_return_value;
                     cur_frame = match self.frames.last_mut() {
                         Some(x) => x,
                         None => return None,
@@ -408,7 +432,9 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    self.stack.push(ret_val);
+                    if !ignore_return_value {
+                        self.stack.push(ret_val);
+                    }
                     ip_offset_delta = 0;
                 }
                 FunCall => {
@@ -486,6 +512,7 @@ impl EraVirtualMachine {
                         stack_start,
                         ip,
                         ret_ip,
+                        ignore_return_value: false,
                     });
                     let call_depth = self.frames.len();
                     cur_frame = self.frames.last_mut().unwrap();
@@ -497,6 +524,83 @@ impl EraVirtualMachine {
                             format!("call stack exceeds limit of depth {MAX_CALL_DEPTH}")
                         );
                         return None;
+                    }
+                }
+                TryFunCall => {
+                    let args_cnt = 0;
+                    let entry = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
+                    let func_info = match entry.val.into_unpacked() {
+                        // TODO: Check index overflow
+                        FlatValue::Int(x) => self.funcs.get(x.val as usize),
+                        FlatValue::Str(x) => self
+                            .func_names
+                            .get(CaselessStr::new(&x.val))
+                            .map(|&x| &self.funcs[x]),
+                        _ => {
+                            vm_report_err!(
+                                ctx,
+                                cur_frame,
+                                true,
+                                "expected primitive values as operands"
+                            );
+                            return None;
+                        }
+                    };
+                    if let Some(func_info) = func_info {
+                        if func_info.args_count != args_cnt {
+                            vm_report_err!(
+                                ctx,
+                                cur_frame,
+                                true,
+                                "runtime function argument mismatch (broken codegen?)"
+                            );
+                            return None;
+                        }
+                        cur_chunk = &self.chunks[func_info.chunk_idx as usize];
+                        // TODO: Check whether stack_start exceeds bounds of current frame
+                        let stack_start = match self.stack.len().checked_sub(args_cnt as _) {
+                            Some(x) => x,
+                            None => {
+                                vm_report_err!(
+                                    ctx,
+                                    cur_frame,
+                                    true,
+                                    "too few arguments for function call"
+                                );
+                                return None;
+                            }
+                        };
+                        let ip = EraExecIp {
+                            chunk: func_info.chunk_idx as _,
+                            offset: func_info.offset as _,
+                        };
+                        let ret_ip = EraExecIp {
+                            chunk: cur_frame.ip.chunk,
+                            offset: cur_frame.ip.offset.wrapping_add_signed(ip_offset_delta),
+                        };
+                        // HACK: Apply ret_ip immediately
+                        cur_frame.ip = ret_ip;
+                        ip_offset_delta = 0;
+
+                        // Check call stack depth
+                        const MAX_CALL_DEPTH: usize = 1024;
+                        self.frames.push(EraFuncExecFrame {
+                            stack_start,
+                            ip,
+                            ret_ip,
+                            ignore_return_value: true,
+                        });
+                        let call_depth = self.frames.len();
+                        cur_frame = self.frames.last_mut().unwrap();
+                        if call_depth > MAX_CALL_DEPTH {
+                            vm_report_err!(
+                                ctx,
+                                cur_frame,
+                                true,
+                                format!("call stack exceeds limit of depth {MAX_CALL_DEPTH}")
+                            );
+                            return None;
+                        }
                     }
                 }
                 LoadConst | LoadConstW | LoadConstWW => {
@@ -564,6 +668,34 @@ impl EraVirtualMachine {
                     let new_str = Value::new_str(new_str);
                     self.stack.push(new_str.into());
                 }
+                PadString => {
+                    use unicode_width::UnicodeWidthStr;
+
+                    let flags =
+                        vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)?;
+                    let flags: PadStringFlags = flags.into();
+                    ip_offset_delta += 1;
+                    let [value, width] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
+                    let width: usize = match width.val.into_unpacked() {
+                        FlatValue::Int(x) => x.val.try_into().unwrap_or_default(),
+                        _ => bail_opt!(ctx, cur_frame, true, "pad width must be an integer"),
+                    };
+                    let value = match value.val.into_unpacked() {
+                        FlatValue::Str(x) => {
+                            if x.val.width() >= width {
+                                Value::new_str_rc(x)
+                            } else {
+                                let x = &x.val;
+                                Value::new_str(match (flags.left_pad(), flags.right_pad()) {
+                                    (true, false) => format!("{x:<width$}"),
+                                    (false, true) | _ => format!("{x:>width$}"),
+                                })
+                            }
+                        }
+                        _ => bail_opt!(ctx, cur_frame, true, "pad target must be a string"),
+                    };
+                    self.stack.push(value.into());
+                }
                 ConvertToString => {
                     let value = match vm_pop_stack!(ctx, cur_frame, &mut self.stack)?
                         .val
@@ -619,9 +751,22 @@ impl EraVirtualMachine {
                     };
                     self.stack.push(value.into());
                 }
-                Print => {
+                Print | PrintExtended => {
                     let value = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
-                    let flags = PrintExtendedFlags::new();
+                    let flags = match primary_bytecode {
+                        Print => PrintExtendedFlags::new(),
+                        PrintExtended => {
+                            let flags = vm_read_chunk_u8!(
+                                ctx,
+                                cur_frame,
+                                cur_chunk,
+                                cur_frame.ip.offset + 1
+                            )?;
+                            ip_offset_delta += 1;
+                            flags.into()
+                        }
+                        _ => unreachable!(),
+                    };
                     match value.val.into_unpacked() {
                         FlatValue::Int(x) => ctx.callback.on_print(&x.val.to_string(), flags),
                         FlatValue::Str(x) => ctx.callback.on_print(&x.val, flags),

@@ -24,6 +24,7 @@ pub struct MEraEngine<'a> {
     //registered_vars: Vec<(String, bool, usize)>,
     registered_vars: EraVarPool,
     watching_vars: HashSet<Rc<CaselessStr>>,
+    replace_list: HashMap<Box<[u8]>, Box<[u8]>>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -34,6 +35,11 @@ pub struct MEraEngineError {
 impl MEraEngineError {
     pub fn new(msg: String) -> Self {
         MEraEngineError { msg }
+    }
+}
+impl From<anyhow::Error> for MEraEngineError {
+    fn from(value: anyhow::Error) -> Self {
+        Self::new(value.to_string())
     }
 }
 
@@ -69,17 +75,33 @@ pub trait MEraEngineSysCallback {
     /// filled random u64; the engine will internally cache entropy to reduce
     /// the total amount of syscalls.
     fn on_get_rand(&mut self) -> u64;
+    /// Callback for PRINT family statements.
+    fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
+    //fn on_debugprint(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
+    /// Callback for HTML_PRINT statements.
+    fn on_html_print(&mut self, content: &str);
+    fn on_wait(&mut self, is_force: bool);
+    fn on_input_int(
+        &mut self,
+        default_value: i64,
+        can_click: bool,
+        allow_skip: bool,
+    ) -> Option<i64>;
+    fn on_input_str(
+        &mut self,
+        default_value: &str,
+        can_click: bool,
+        allow_skip: bool,
+    ) -> Option<String>;
     /// Callbacks for variable getters & setters. May return a string to report as execution errors.
     fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error>;
     fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error>;
     fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error>;
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error>;
-    /// Callback for PRINT family statements.
-    fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
-    /// Callback for HTML_PRINT statements.
-    fn on_html_print(&mut self, content: &str);
-    fn on_wait(&mut self, XXXXXXXXXXXX: u32);
-    fn on_input(&mut self, XXXXXXXXXXXX: u32);
+    // Graphics
+    fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64;
+    fn on_gdispose(&mut self, gid: i64) -> i64;
+    fn on_gcreated(&mut self, gid: i64) -> i64;
 }
 
 pub struct ExecSourceInfo {
@@ -149,9 +171,26 @@ impl MEraEngineSysCallback for EmptyCallback {
     fn on_get_rand(&mut self) -> u64 {
         0
     }
-    fn on_html_print(&mut self, content: &str) {}
-    fn on_input(&mut self, XXXXXXXXXXXX: u32) {}
     fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {}
+    //fn on_debugprint(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {}
+    fn on_html_print(&mut self, content: &str) {}
+    fn on_wait(&mut self, is_force: bool) {}
+    fn on_input_int(
+        &mut self,
+        default_value: i64,
+        can_click: bool,
+        allow_skip: bool,
+    ) -> Option<i64> {
+        None
+    }
+    fn on_input_str(
+        &mut self,
+        default_value: &str,
+        can_click: bool,
+        allow_skip: bool,
+    ) -> Option<String> {
+        None
+    }
     fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
         Ok(0)
     }
@@ -164,7 +203,16 @@ impl MEraEngineSysCallback for EmptyCallback {
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error> {
         Ok(())
     }
-    fn on_wait(&mut self, XXXXXXXXXXXX: u32) {}
+    // Graphics
+    fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
+        0
+    }
+    fn on_gdispose(&mut self, gid: i64) -> i64 {
+        0
+    }
+    fn on_gcreated(&mut self, gid: i64) -> i64 {
+        0
+    }
 }
 
 impl<'a> MEraEngine<'a> {
@@ -177,6 +225,7 @@ impl<'a> MEraEngine<'a> {
             config: Default::default(),
             registered_vars: EraVarPool::default(),
             watching_vars: HashSet::new(),
+            replace_list: HashMap::new(),
         }
     }
     pub fn install_sys_callback<'b>(&'b mut self, callback: Box<dyn MEraEngineSysCallback + 'a>)
@@ -197,8 +246,29 @@ impl<'a> MEraEngine<'a> {
         content: &[u8],
         kind: EraCsvLoadKind,
     ) -> Result<(), MEraEngineError> {
-        // TODO...
-        unimplemented!()
+        match kind {
+            EraCsvLoadKind::_Rename => {
+                //self.replace_list.clear();
+                let rows = match crate::csv::parse_csv::<2>(content) {
+                    Ok(x) => x,
+                    Err((src_info, msg)) => {
+                        (self.callback.on_compile_error(&EraScriptErrorInfo {
+                            filename,
+                            src_info: src_info.into(),
+                            is_error: true,
+                            msg: msg.as_str(),
+                        }));
+                        return Err(MEraEngineError::new(msg));
+                    }
+                };
+                for [out_replace, in_replace] in rows {
+                    // TODO: Detect duplication?
+                    self.replace_list.insert(in_replace, out_replace);
+                }
+            }
+            _ => todo!(),
+        }
+        Ok(())
     }
     pub fn load_erh(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
         self.load_erb(filename, content)
@@ -207,7 +277,7 @@ impl<'a> MEraEngine<'a> {
         use crate::parser::{EraDecl, EraSharpDecl};
         // TODO: Handle UTF-8 BOM?
         let callback = RefCell::new(self.callback.deref_mut());
-        let mut lexer = crate::lexer::EraLexer::new(content, |e| {
+        let mut lexer = crate::lexer::EraLexer::new(content, &self.replace_list, |e| {
             callback.borrow_mut().on_compile_error(&EraScriptErrorInfo {
                 filename,
                 src_info: e.src_info.into(),
@@ -374,6 +444,34 @@ impl<'a> MEraEngine<'a> {
             fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {
                 self.callback.on_print(content, flags)
             }
+            // TODO: on_debugprint is a callback?
+            fn on_debugprint(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {
+                todo!()
+            }
+            fn on_html_print(&mut self, content: &str) {
+                self.callback.on_html_print(content)
+            }
+            fn on_wait(&mut self, is_force: bool) {
+                self.callback.on_wait(is_force)
+            }
+            fn on_input_int(
+                &mut self,
+                default_value: i64,
+                can_click: bool,
+                allow_skip: bool,
+            ) -> Option<i64> {
+                self.callback
+                    .on_input_int(default_value, can_click, allow_skip)
+            }
+            fn on_input_str(
+                &mut self,
+                default_value: &str,
+                can_click: bool,
+                allow_skip: bool,
+            ) -> Option<String> {
+                self.callback
+                    .on_input_str(default_value, can_click, allow_skip)
+            }
             fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
                 self.callback.on_var_get_int(name, idx)
             }
@@ -395,6 +493,16 @@ impl<'a> MEraEngine<'a> {
                 val: &str,
             ) -> Result<(), anyhow::Error> {
                 self.callback.on_var_set_str(name, idx, val)
+            }
+            // Graphics
+            fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
+                self.callback.on_gcreate(gid, width, height)
+            }
+            fn on_gdispose(&mut self, gid: i64) -> i64 {
+                self.callback.on_gdispose(gid)
+            }
+            fn on_gcreated(&mut self, gid: i64) -> i64 {
+                self.callback.on_gcreated(gid)
             }
         }
 

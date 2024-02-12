@@ -1,8 +1,13 @@
+use std::collections::HashMap;
+
 use crate::bytecode::SourcePosInfo;
 
 pub struct EraLexer<'a, ErrReportFn> {
     err_report_fn: ErrReportFn,
     src: &'a [u8],
+    alternative_src: &'a [u8],
+    replace_size: u32,
+    replace_list: &'a HashMap<Box<[u8]>, Box<[u8]>>,
     offset: u64,
     cur_line: u32,
     cur_column: u32,
@@ -49,6 +54,7 @@ pub enum EraTokenKind {
     // TODO: Remove SemiColon enum?
     SemiColon,
     Colon,
+    Dollar,
     LBracket,
     RBracket,
     LCurlyBracket,
@@ -71,6 +77,7 @@ pub enum EraTokenKind {
     KwRef,
     KwConst,
     KwLocalSize,
+    KwLocalSSize,
     KwFunction,
     KwFunctionS,
 }
@@ -144,6 +151,7 @@ impl std::fmt::Display for EraTokenKind {
                 Comma => ",",
                 SemiColon => ";",
                 Colon => ":",
+                Dollar => "$",
                 LBracket => "(",
                 RBracket => ")",
                 LCurlyBracket => "{",
@@ -166,6 +174,7 @@ impl std::fmt::Display for EraTokenKind {
                 KwRef => "REF",
                 KwConst => "CONST",
                 KwLocalSize => "LOCALSIZE",
+                KwLocalSSize => "LOCALSSIZE",
                 KwFunction => "FUNCTION",
                 KwFunctionS => "FUNCTIONS",
                 Invalid | _ => "<invalid>",
@@ -196,10 +205,17 @@ pub struct EraLexErrorInfo {
 }
 
 impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
-    pub fn new(src: &'a [u8], err_report_fn: T) -> Self {
+    pub fn new(
+        src: &'a [u8],
+        replace_list: &'a HashMap<Box<[u8]>, Box<[u8]>>,
+        err_report_fn: T,
+    ) -> Self {
         EraLexer {
             err_report_fn,
             src,
+            alternative_src: b"",
+            replace_size: 0,
+            replace_list,
             offset: 0,
             cur_line: 1,
             cur_column: 1,
@@ -208,10 +224,10 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
 
     pub fn peek(&mut self, mode: EraLexerMode) -> EraToken<'a> {
         // TODO: Omit mut in `&mut self` by creating a new EraLexer?
-        let src = self.src;
+        let (src, alternative_src) = (self.src, self.alternative_src);
         let (offset, cur_line, cur_column) = (self.offset, self.cur_line, self.cur_column);
         let token = self.read(mode);
-        self.src = src;
+        (self.src, self.alternative_src) = (src, alternative_src);
         (self.offset, self.cur_line, self.cur_column) = (offset, cur_line, cur_column);
         token
     }
@@ -281,6 +297,7 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                     b'#' => make_token_fn(self, NumberSign),
                     b',' => make_token_fn(self, Comma),
                     b':' => make_token_fn(self, Colon),
+                    b'$' => make_token_fn(self, Dollar),
                     b'+' => {
                         make_link2_token_fn(self, &[(b'=', PlusAssign), (b'+', Increment)], Plus)
                     }
@@ -338,6 +355,8 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                                 KwConst
                             } else if token.lexeme.eq_ignore_ascii_case(b"LOCALSIZE") {
                                 KwLocalSize
+                            } else if token.lexeme.eq_ignore_ascii_case(b"LOCALSSIZE") {
+                                KwLocalSSize
                             } else if token.lexeme.eq_ignore_ascii_case(b"FUNCTION") {
                                 KwFunction
                             } else if token.lexeme.eq_ignore_ascii_case(b"FUNCTIONS") {
@@ -465,6 +484,20 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
     }
     // NOTE: Newline is handled in a specific way
     fn advance_char(&mut self) -> Option<u8> {
+        // Try find replace
+        // NOTE: If replace failed (such as not found), we still carry on as if
+        //       it were not a replace.
+        self.handle_src_replace();
+        // NOTE: Replace does not contain any newlines; also we need to treat source
+        //       pos info carefully.
+        if let [ch, rest @ ..] = self.alternative_src {
+            self.alternative_src = rest;
+            if rest.is_empty() {
+                // Transition to normal
+                self.cur_column += self.replace_size;
+            }
+            return Some(*ch);
+        }
         // Handle newline
         if let [b'\r', b'\n', rest @ ..] | [b'\r' | b'\n', rest @ ..] = self.src {
             self.src = rest;
@@ -473,18 +506,62 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
         }
         // Handle normal
         if let [ch, rest @ ..] = self.src {
+            let ch = *ch;
             self.src = rest;
-            self.cur_column += 1;
-            Some(*ch)
+            // Count in chars; assuming UTF-8 input is good
+            if (ch & 0xc0) != 0x80 {
+                self.cur_column += 1;
+            }
+            Some(ch)
         } else {
             None
         }
     }
-    fn peek_char(&self) -> Option<u8> {
+    fn peek_char(&mut self) -> Option<u8> {
+        self.handle_src_replace();
+        if let &[ch, ..] = self.alternative_src {
+            return Some(ch);
+        }
         self.src
             .get(0)
             .copied()
             .map(|x| if x == b'\r' { b'\n' } else { x })
+    }
+    fn handle_src_replace(&mut self) {
+        if !self.alternative_src.is_empty() {
+            return;
+        }
+        if let [b'[', b'[', rest @ ..] = self.src {
+            let src_info = self.make_src_info();
+
+            let search_len = memchr::memchr2(b'\r', b'\n', rest).unwrap_or(rest.len());
+            let Some(end_pos) = memchr::memmem::find(&rest[..search_len], b"]]") else {
+                (self.err_report_fn)(&EraLexErrorInfo {
+                    src_info,
+                    is_error: true,
+                    msg: "replacement `[[` does not have corresponding closing `]]`".to_owned(),
+                });
+                return;
+            };
+            let in_replace = &rest[..end_pos];
+            self.src = &rest[(end_pos + 2)..];
+            let Some(out_replace) = self.replace_list.get(in_replace) else {
+                (self.err_report_fn)(&EraLexErrorInfo {
+                    src_info,
+                    is_error: true,
+                    msg: format!(
+                        "replacement `[[{}]]` does not exist",
+                        String::from_utf8_lossy(in_replace)
+                    ),
+                });
+                return;
+            };
+            // Count in chars; assuming UTF-8 input is good
+            self.replace_size = in_replace
+                .iter()
+                .fold(0, |acc, x| acc + ((*x & 0xc0) != 0x80) as u32);
+            self.alternative_src = out_replace;
+        }
     }
     fn make_src_info(&self) -> SourcePosInfo {
         SourcePosInfo {

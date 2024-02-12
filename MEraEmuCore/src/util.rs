@@ -132,3 +132,8 @@ impl Display for CaselessStr {
         self.0.fmt(f)
     }
 }
+impl Display for CaselessString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.deref().fmt(f)
+    }
+}
