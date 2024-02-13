@@ -7,7 +7,11 @@ use std::{
 };
 
 use crate::{
-    bytecode::SourcePosInfo, compiler::{EraBytecodeCompilation, EraCompilerFileInput}, lexer::EraLexerTempStorage, parser::EraParserSlimVarTypeInfo, vm::{EraVarPool, EraVirtualMachine}
+    bytecode::SourcePosInfo,
+    compiler::{EraBytecodeCompilation, EraCompilerFileInput},
+    lexer::EraLexerTempStorage,
+    parser::EraParserSlimVarTypeInfo,
+    vm::{EraVarPool, EraVirtualMachine},
 };
 
 use crate::util::*;
@@ -275,14 +279,15 @@ impl<'a> MEraEngine<'a> {
         // TODO: Handle UTF-8 BOM?
         let mut temp_storage = EraLexerTempStorage::default();
         let callback = RefCell::new(self.callback.deref_mut());
-        let mut lexer = crate::lexer::EraLexer::new(content, &self.replace_list, &mut temp_storage, |e| {
-            callback.borrow_mut().on_compile_error(&EraScriptErrorInfo {
-                filename,
-                src_info: e.src_info.into(),
-                is_error: e.is_error,
-                msg: &e.msg,
+        let mut lexer =
+            crate::lexer::EraLexer::new(content, &self.replace_list, &mut temp_storage, |e| {
+                callback.borrow_mut().on_compile_error(&EraScriptErrorInfo {
+                    filename,
+                    src_info: e.src_info.into(),
+                    is_error: e.is_error,
+                    msg: &e.msg,
+                });
             });
-        });
         let mut parser = crate::parser::EraParser::new(|e| {
             callback.borrow_mut().on_compile_error(&EraScriptErrorInfo {
                 filename,

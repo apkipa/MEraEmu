@@ -1085,6 +1085,9 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             EraTokenKind::StringFormStart => {
                 EraExpr::Term(EraTermExpr::StrForm(self.expression_strform(first)?))
             }
+            EraTokenKind::TernaryStrFormMarker => {
+                self.ternary_strform()?
+            }
             EraTokenKind::LBracket => {
                 let lhs = self.expression(true)?;
                 self.consume(EraLexerMode::Normal, EraTokenKind::RBracket)?;
@@ -1240,6 +1243,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn expression_strform(&mut self, first: EraToken<'b>) -> Option<EraStrFormExpr> {
         let mut parts = Vec::new();
         let mut token = self.lexer.read(EraLexerMode::StrForm);
+        let src_info = token.src_info;
         loop {
             match token.kind {
                 EraTokenKind::PlainStringLiteral => parts.push(EraStrFormExprPart::Literal(
@@ -1248,7 +1252,6 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 )),
                 // TODO: String interpolation type-check
                 EraTokenKind::LCurlyBracket => {
-                    // parts.push(EraStrFormExprPart::Expression(self.expression(true)?));
                     parts.push(EraStrFormExprPart::Expression(
                         self.strform_expr_part_expr(EraTokenKind::Eof)?,
                     ));
@@ -1256,15 +1259,18 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 }
                 // TODO: String interpolation type-check
                 EraTokenKind::Percentage => {
-                    // parts.push(EraStrFormExprPart::Expression(self.expression_bp(
-                    //     0,
-                    //     true,
-                    //     EraTokenKind::Percentage,
-                    // )?));
                     parts.push(EraStrFormExprPart::Expression(
                         self.strform_expr_part_expr(EraTokenKind::Percentage)?,
                     ));
                     self.consume(EraLexerMode::Normal, EraTokenKind::Percentage)?;
+                }
+                EraTokenKind::TernaryStrFormMarker => {
+                    let part = EraStrFormExprPartExpression {
+                        expr: self.ternary_strform()?,
+                        width: None,
+                        alignment: PadStringFlags::new(),
+                    };
+                    parts.push(EraStrFormExprPart::Expression(part));
                 }
                 EraTokenKind::DoubleQuote => {
                     break;
@@ -1277,15 +1283,134 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             }
             token = self.lexer.read(EraLexerMode::StrForm);
         }
-        Some(EraStrFormExpr {
-            parts,
-            src_info: token.src_info,
-        })
+        Some(EraStrFormExpr { parts, src_info })
+    }
+    fn ternary_strform(&mut self) -> Option<EraExpr> {
+        let cond = self.expression_bp(
+            infix_binding_power(EraTokenKind::QuestionMark).unwrap().1 + 2,
+            true,
+            EraTokenKind::Eof,
+        )?;
+        let mut is_first = true;
+        let mut then_parts = Vec::new();
+        let mut else_parts = Vec::new();
+        let op1 = self.consume(EraLexerMode::Normal, EraTokenKind::QuestionMark)?;
+        // Mid
+        let op2 = loop {
+            let token = self.lexer.read(EraLexerMode::TernaryStrForm);
+            match token.kind {
+                EraTokenKind::PlainStringLiteral => {
+                    let mut lexeme = token.lexeme;
+                    if is_first {
+                        while let [b' ' | b'\t', rest @ ..] = lexeme {
+                            lexeme = rest;
+                        }
+                    }
+                    then_parts.push(EraStrFormExprPart::Literal(
+                        String::from_utf8_lossy(lexeme).into_owned(),
+                        token.src_info,
+                    ));
+                }
+                // TODO: String interpolation type-check
+                EraTokenKind::LCurlyBracket => {
+                    then_parts.push(EraStrFormExprPart::Expression(
+                        self.strform_expr_part_expr(EraTokenKind::Eof)?,
+                    ));
+                    self.consume(EraLexerMode::Normal, EraTokenKind::RCurlyBracket)?;
+                }
+                // TODO: String interpolation type-check
+                EraTokenKind::Percentage => {
+                    then_parts.push(EraStrFormExprPart::Expression(
+                        self.strform_expr_part_expr(EraTokenKind::Percentage)?,
+                    ));
+                    self.consume(EraLexerMode::Normal, EraTokenKind::Percentage)?;
+                }
+                EraTokenKind::TernaryStrFormMarker => {
+                    // NOTE: We disallow recursion here
+                    // TODO: Synchronize here?
+                    self.report_token_err(token.into(), true, "unexpected token, expected `#`");
+                    return None;
+                }
+                EraTokenKind::NumberSign => {
+                    if let Some(EraStrFormExprPart::Literal(x, _)) = then_parts.last_mut() {
+                        x.truncate(x.trim_end_matches(&[' ', '\t']).len());
+                    }
+                    break token;
+                },
+                _ => {
+                    // TODO: Synchronize here?
+                    self.report_token_err(token.into(), true, "unexpected token");
+                    return None;
+                }
+            }
+            is_first = false;
+        };
+        // Right
+        is_first = true;
+        loop {
+            let token = self.lexer.read(EraLexerMode::StrForm);
+            match token.kind {
+                EraTokenKind::PlainStringLiteral => {
+                    let mut lexeme = token.lexeme;
+                    if is_first {
+                        while let [b' ' | b'\t', rest @ ..] = lexeme {
+                            lexeme = rest;
+                        }
+                    }
+                    else_parts.push(EraStrFormExprPart::Literal(
+                        String::from_utf8_lossy(lexeme).into_owned(),
+                        token.src_info,
+                    ));
+                }
+                // TODO: String interpolation type-check
+                EraTokenKind::LCurlyBracket => {
+                    else_parts.push(EraStrFormExprPart::Expression(
+                        self.strform_expr_part_expr(EraTokenKind::Eof)?,
+                    ));
+                    self.consume(EraLexerMode::Normal, EraTokenKind::RCurlyBracket)?;
+                }
+                // TODO: String interpolation type-check
+                EraTokenKind::Percentage => {
+                    else_parts.push(EraStrFormExprPart::Expression(
+                        self.strform_expr_part_expr(EraTokenKind::Percentage)?,
+                    ));
+                    self.consume(EraLexerMode::Normal, EraTokenKind::Percentage)?;
+                }
+                EraTokenKind::TernaryStrFormMarker => {
+                    if let Some(EraStrFormExprPart::Literal(x, _)) = else_parts.last_mut() {
+                        x.truncate(x.trim_end_matches(&[' ', '\t']).len());
+                    }
+                    break;
+                },
+                _ => {
+                    // TODO: Synchronize here?
+                    self.report_token_err(token.into(), true, "unexpected token");
+                    return None;
+                }
+            }
+            is_first = false;
+        }
+        Some(EraExpr::Ternary(
+            cond.into(),
+            op1.into(),
+            EraExpr::Term(EraTermExpr::StrForm(EraStrFormExpr {
+                parts: then_parts,
+                src_info: op1.src_info,
+            }))
+            .into(),
+            op2.into(),
+            EraExpr::Term(EraTermExpr::StrForm(EraStrFormExpr {
+                parts: else_parts,
+                src_info: op2.src_info,
+            }))
+            .into(),
+        ))
     }
     fn raw_strform(&mut self, trim_leading_whitespace: bool) -> Option<EraStrFormExpr> {
         let mut parts = Vec::new();
         let mut token = self.lexer.read(EraLexerMode::RawStrForm);
         let mut is_first = true;
+        let src_info = token.src_info;
         loop {
             match token.kind {
                 EraTokenKind::PlainStringLiteral => {
@@ -1302,7 +1427,6 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 }
                 // TODO: String interpolation type-check
                 EraTokenKind::LCurlyBracket => {
-                    // parts.push(EraStrFormExprPart::Expression(self.expression(true)?));
                     parts.push(EraStrFormExprPart::Expression(
                         self.strform_expr_part_expr(EraTokenKind::Eof)?,
                     ));
@@ -1310,11 +1434,6 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 }
                 // TODO: String interpolation type-check
                 EraTokenKind::Percentage => {
-                    // parts.push(EraStrFormExprPart::Expression(self.expression_bp(
-                    //     0,
-                    //     true,
-                    //     EraTokenKind::Percentage,
-                    // )?));
                     parts.push(EraStrFormExprPart::Expression(
                         self.strform_expr_part_expr(EraTokenKind::Percentage)?,
                     ));
@@ -1327,6 +1446,14 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     parts.push(EraStrFormExprPart::Literal(" ".to_owned(), token.src_info));
                     self.handle_ignore_newline_tokens();
                 }
+                EraTokenKind::TernaryStrFormMarker => {
+                    let part = EraStrFormExprPartExpression {
+                        expr: self.ternary_strform()?,
+                        width: None,
+                        alignment: PadStringFlags::new(),
+                    };
+                    parts.push(EraStrFormExprPart::Expression(part));
+                }
                 _ => {
                     // TODO: Synchronize here?
                     self.report_token_err(token.into(), true, "unexpected token");
@@ -1336,10 +1463,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             is_first = false;
             token = self.lexer.read(EraLexerMode::RawStrForm);
         }
-        Some(EraStrFormExpr {
-            parts,
-            src_info: token.src_info,
-        })
+        Some(EraStrFormExpr { parts, src_info })
     }
     fn strform_expr_part_expr(
         &mut self,

@@ -127,7 +127,10 @@ mod tests {
                 #FUNCTION
                 #DIM upper
                 #DIM result, 1, 1 = 0
+                ;[SKIPSTART]
                 ;#DIM cnt = 100
+                ;wdwd
+                ;[SKIPEND]
                 #DIM cnt = 100
                 cnt '= upper
                 ;results = oook
@@ -163,6 +166,9 @@ mod tests {
                 WEND
                 cnt = 100
 
+                ;world_str = \@ 0 ? aaa # bb{4+1}b \@
+                ;world_str '= @"~\@ 0 ? aaa # bb{4+1}b \@~"
+                ;PRINTV world_str
                 world_str '= @"worl{"d"}"
 
                 val:0 = val + 1

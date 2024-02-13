@@ -27,6 +27,7 @@ struct EraLexerInnerStateSite<'a, 'b, ErrReportFn> {
     lexeme_start: Option<NonNull<u8>>,
     lexeme_len: usize,
     lexeme_cart: Vec<u8>,
+    last_is_newline: bool,
 }
 
 pub struct EraLexer<'a, ErrReportFn> {
@@ -87,6 +88,7 @@ pub enum EraTokenKind {
     StringLiteral,
     PlainStringLiteral,
     StringFormStart, // Caller should manually enter StrForm mode on encountering this
+    TernaryStrFormMarker,
     SingleComment,
     Identifier, // Even built-in commands are recognized as identifiers first
     DoubleQuote,
@@ -184,6 +186,7 @@ impl std::fmt::Display for EraTokenKind {
                 StringLiteral => "<string literal>",
                 PlainStringLiteral => "<plain string literal>",
                 StringFormStart => "@\"",
+                TernaryStrFormMarker => "\\@",
                 SingleComment => "<single-line comment>",
                 Identifier => "<identifier>",
                 DoubleQuote => "\"",
@@ -217,7 +220,8 @@ pub enum EraLexerMode {
     StrForm,    // Quoted string form expression
     RawStrForm, // Unquoted string form
     RawStr,     // Unquoted string
-                // TODO: Reject comments inside StrForm properly by introducing a new EraLexerMode
+    // TODO: Reject comments inside StrForm properly by introducing a new EraLexerMode
+    TernaryStrForm,
 }
 
 pub struct EraLexErrorInfo {
@@ -302,9 +306,12 @@ impl<'a> EraLexerInnerState<'a> {
             lexeme_start: None,
             lexeme_len: 0,
             lexeme_cart: Vec::new(),
+            last_is_newline: true,
         };
         let mut token = site.next_token(mode);
-        if let Some(ptr) = site.lexeme_start {
+        if matches!(token.kind, EraTokenKind::Eof) {
+            (None, token)
+        } else if let Some(ptr) = site.lexeme_start {
             token.lexeme = std::slice::from_raw_parts(ptr.as_ptr(), site.lexeme_len);
             (None, token)
         } else {
@@ -326,6 +333,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
         }
 
         let src_info = self.make_src_info();
+        let last_is_newline = self.last_is_newline;
 
         let make_token_fn = |this: &Self, kind| EraToken::<'static> {
             kind,
@@ -412,6 +420,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                         self.advance_char();
                         make_token_fn(self, ExprAssign)
                     }
+                    b'\\' => make_link2_token_fn(self, &[(b'@', TernaryStrFormMarker)], Invalid),
                     _ if ch.is_ascii_alphabetic() || ch == b'_' || !ch.is_ascii() => {
                         // Handle identifier & command
                         while self.peek_char().map(Self::is_ident_char).unwrap_or(false) {
@@ -499,9 +508,80 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                         }
                         make_token_fn(self, StringLiteral)
                     }
+                    b'[' if last_is_newline => {
+                        // Special preprocessing (macro?)
+                        let read_fn = |this: &mut Self| -> Option<Box<[u8]>> {
+                            loop {
+                                if let None | Some(b']' | b'\n') = this.advance_char() {
+                                    break;
+                                }
+                            }
+                            let lexeme = this.get_lexeme()[..this.lexeme_len].into();
+                            this.skip_whitespace();
+                            if matches!(this.advance_char(), Some(b'\n')) {
+                                Some(lexeme)
+                            } else {
+                                None
+                            }
+                        };
+                        self.reset_lexeme();
+                        let Some(lexeme) = read_fn(self) else {
+                            return make_token_fn(self, EraTokenKind::Invalid);
+                        };
+                        if let Some(lexeme) = lexeme.strip_suffix(b"]") {
+                            if lexeme.eq_ignore_ascii_case(b"SKIPSTART") {
+                                // Scan until found `[SKIPEND]`
+                                loop {
+                                    loop {
+                                        let last_is_newline = self.last_is_newline;
+                                        self.skip_whitespace();
+                                        let Some(ch) = self.advance_char() else {
+                                            (self.o.err_report_fn)(&EraLexErrorInfo {
+                                                src_info,
+                                                is_error: false,
+                                                msg: "`[SKIPSTART]` does not have a matching `[SKIPEND]`".to_owned(),
+                                            });
+                                            return self.make_eof_token();
+                                        };
+                                        if last_is_newline && ch == b'[' {
+                                            break;
+                                        }
+                                    }
+                                    self.reset_lexeme();
+                                    let Some(lexeme) = read_fn(self) else {
+                                        return make_token_fn(self, EraTokenKind::Invalid);
+                                    };
+                                    if lexeme.eq_ignore_ascii_case(b"SKIPEND]") {
+                                        break;
+                                    }
+                                }
+                                // Restart read via recursion (ensures correct lexeme)
+                                self.reset_lexeme();
+                                self.next_token(mode)
+                            } else {
+                                let msg = format!(
+                                    "`[{}]` is unsupported",
+                                    String::from_utf8_lossy(lexeme)
+                                );
+                                (self.o.err_report_fn)(&EraLexErrorInfo {
+                                    src_info,
+                                    is_error: true,
+                                    msg,
+                                });
+                                make_token_fn(self, EraTokenKind::Invalid)
+                            }
+                        } else {
+                            (self.o.err_report_fn)(&EraLexErrorInfo {
+                                src_info,
+                                is_error: true,
+                                msg: "`[` does not have corresponding closing `]`".to_owned(),
+                            });
+                            make_token_fn(self, EraTokenKind::Invalid)
+                        }
+                    }
                     _ => {
                         (self.o.err_report_fn)(&EraLexErrorInfo {
-                            src_info: src_info,
+                            src_info,
                             is_error: true,
                             msg: format!("`{ch}`: unrecognized token kind"),
                         });
@@ -533,8 +613,12 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                     b'{' => make_token_fn(self, EraTokenKind::LCurlyBracket),
                     b'\n' => make_token_fn(self, EraTokenKind::LineBreak),
                     b'%' => make_token_fn(self, EraTokenKind::Percentage),
+                    b'\\' if self.peek_char() == Some(b'@') => {
+                        self.advance_char();
+                        make_token_fn(self, EraTokenKind::TernaryStrFormMarker)
+                    }
                     _ => {
-                        self.skip_char_while(|x| !matches!(x, b'{' | b'\n' | b'%'));
+                        self.skip_char_while(|x| !matches!(x, b'{' | b'\n' | b'%' | b'\\'));
                         make_token_fn(self, EraTokenKind::PlainStringLiteral)
                     }
                 }
@@ -549,8 +633,33 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                     b'{' => make_token_fn(self, EraTokenKind::LCurlyBracket),
                     b'"' => make_token_fn(self, EraTokenKind::DoubleQuote),
                     b'%' => make_token_fn(self, EraTokenKind::Percentage),
+                    b'\\' if self.peek_char() == Some(b'@') => {
+                        self.advance_char();
+                        make_token_fn(self, EraTokenKind::TernaryStrFormMarker)
+                    }
                     _ => {
-                        self.skip_char_while(|x| !matches!(x, b'{' | b'"' | b'%'));
+                        self.skip_char_while(|x| !matches!(x, b'{' | b'"' | b'%' | b'\\'));
+                        make_token_fn(self, EraTokenKind::PlainStringLiteral)
+                    }
+                }
+            }
+            EraLexerMode::TernaryStrForm => {
+                let ch = match self.advance_char() {
+                    Some(ch) => ch,
+                    None => return self.make_eof_token(),
+                };
+
+                match ch {
+                    b'{' => make_token_fn(self, EraTokenKind::LCurlyBracket),
+                    b'"' => make_token_fn(self, EraTokenKind::DoubleQuote),
+                    b'%' => make_token_fn(self, EraTokenKind::Percentage),
+                    b'#' => make_token_fn(self, EraTokenKind::NumberSign),
+                    b'\\' if self.peek_char() == Some(b'@') => {
+                        self.advance_char();
+                        make_token_fn(self, EraTokenKind::TernaryStrFormMarker)
+                    }
+                    _ => {
+                        self.skip_char_while(|x| !matches!(x, b'{' | b'"' | b'%' | b'#' | b'\\'));
                         make_token_fn(self, EraTokenKind::PlainStringLiteral)
                     }
                 }
@@ -584,6 +693,18 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
         self.i.src.is_empty()
     }
     fn skip_whitespace(&mut self) {
+        // NOTE: self.last_is_newline remains untouched
+        // NOTE: lexeme is automatically reset
+        self.reset_lexeme();
+        while let [b' ' | b'\t', rest @ ..] = self.i.alternative_src {
+            self.i.alternative_src = rest;
+            if rest.is_empty() {
+                self.i.cur_column += self.i.replace_size;
+            }
+        }
+        if !self.i.alternative_src.is_empty() {
+            return;
+        }
         while let [b' ' | b'\t', rest @ ..] = self.i.src {
             self.i.src = rest;
             self.i.cur_column += 1;
@@ -591,6 +712,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
     }
     // NOTE: Newline is handled in a specific way
     fn advance_char(&mut self) -> Option<u8> {
+        self.last_is_newline = false;
         // Try find replace
         // NOTE: If replace failed (such as not found), we still carry on as if
         //       it were not a replace.
@@ -641,6 +763,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
         }
         // Handle newline
         if let [b'\r', b'\n', rest @ ..] | [b'\r' | b'\n', rest @ ..] = self.i.src {
+            self.last_is_newline = true;
             self.i.src = rest;
             (self.i.cur_line, self.i.cur_column) = (self.i.cur_line + 1, 1);
             return Some(b'\n');
