@@ -123,6 +123,9 @@ struct EraBytecodeChunkBacktrackHolder {
     base_idx: usize,
     write_fn: &'static dyn Fn(&mut EraBytecodeChunk, usize, isize) -> Option<()>,
 }
+struct EraBytecodeChunkSnapshot {
+    len: usize,
+}
 impl EraBytecodeChunk {
     fn append_u8(&mut self, value: u8, src_info: SourcePosInfo) {
         self.bytecode.push(value);
@@ -261,6 +264,19 @@ impl EraBytecodeChunk {
             panic!("jump too far to be encoded in bytecode");
         }
     }
+    fn emit_duplicate_n(&mut self, count: u8, src_info: SourcePosInfo) {
+        self.emit_bytecode(EraBytecodePrimaryType::DuplicateN, src_info);
+        self.append_u8(count, src_info);
+    }
+    fn emit_duplicate_one_n(&mut self, count: u8, src_info: SourcePosInfo) {
+        self.emit_bytecode(EraBytecodePrimaryType::DuplicateOneN, src_info);
+        self.append_u8(count, src_info);
+    }
+    fn take_snapshot(&self) -> EraBytecodeChunkSnapshot {
+        EraBytecodeChunkSnapshot {
+            len: self.bytecode.len(),
+        }
+    }
 }
 impl EraBytecodeChunkBacktrackHolder {
     fn source_pos_info(&self, chunk: &EraBytecodeChunk) -> Option<SourcePosInfo> {
@@ -276,6 +292,12 @@ impl EraBytecodeChunkBacktrackHolder {
             .checked_sub_unsigned(self.base_idx)?;
         // 1 is bytecode size
         (self.write_fn)(chunk, self.base_idx + 1, offset)
+    }
+}
+impl EraBytecodeChunkSnapshot {
+    fn regret(self, chunk: &mut EraBytecodeChunk) {
+        chunk.bytecode.truncate(self.len);
+        chunk.src_infos.truncate(self.len);
     }
 }
 
@@ -378,7 +400,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         inputs: Vec<EraCompilerFileInput>,
         global_vars: EraVarPool,
     ) -> Option<EraBytecodeCompilation> {
-        let mut const_vars = HashSet::new();
+        // let mut const_vars = HashSet::new();
         let mut fun_decls = Vec::new();
         let mut global_funcs = EraFuncPool::default();
 
@@ -401,31 +423,31 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 match decl {
                     EraDecl::SharpDecl(x) => match x {
                         EraSharpDecl::VarDecl(x) => {
-                            let src_info = x.src_info;
-                            if x.is_dynamic || x.is_ref {
-                                self.report_err(
-                                    src_info,
-                                    true,
-                                    "invalid qualifier for file-scope variable",
-                                );
-                                return None;
-                            }
-                            let is_const = x.is_const;
-                            let (name, var_val) = self.materialize_var_decl(x)?;
-                            let var_idx = match self.vars.add_var(&name, var_val) {
-                                Some(x) => x,
-                                None => {
-                                    self.report_err(
-                                        src_info,
-                                        true,
-                                        format!("redefinition of variable `{name}`"),
-                                    );
-                                    return None;
-                                }
-                            };
-                            if is_const {
-                                const_vars.insert(name);
-                            }
+                            // let src_info = x.src_info;
+                            // if x.is_dynamic || x.is_ref {
+                            //     self.report_err(
+                            //         src_info,
+                            //         true,
+                            //         "invalid qualifier for file-scope variable",
+                            //     );
+                            //     return None;
+                            // }
+                            // let is_const = x.is_const;
+                            // let (name, var_val) = self.materialize_var_decl(x)?;
+                            // let var_idx = match self.vars.add_var(&name, var_val) {
+                            //     Some(x) => x,
+                            //     None => {
+                            //         self.report_err(
+                            //             src_info,
+                            //             true,
+                            //             format!("redefinition of variable `{name}`"),
+                            //         );
+                            //         return None;
+                            //     }
+                            // };
+                            // if is_const {
+                            //     const_vars.insert(name);
+                            // }
                         }
                         _ => {
                             self.report_err(
@@ -1349,6 +1371,163 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     target: x.target.into(),
                 });
             }
+            Cmd::For(x) => {
+                // var(2) + end(1) + step(1)
+                self.stack_balance += 4;
+
+                match self.compile_expression_array_with_idx(funcs, func_info, x.var, chunk)? {
+                    TInteger => (),
+                    TString | TVoid => {
+                        bail_opt!(self, x.src_info, "invalid expression for FOR statement")
+                    }
+                }
+                chunk.emit_duplicate_n(2, x.src_info);
+                match self.compile_expression(funcs, func_info, x.start, chunk)? {
+                    TInteger => (),
+                    TString | TVoid => {
+                        bail_opt!(self, x.src_info, "invalid expression for FOR statement")
+                    }
+                }
+                chunk.emit_bytecode(SetArrayVal, x.src_info);
+                chunk.emit_bytecode(Pop, x.src_info);
+                match self.compile_expression(funcs, func_info, x.end, chunk)? {
+                    TInteger => (),
+                    TString | TVoid => {
+                        bail_opt!(self, x.src_info, "invalid expression for FOR statement")
+                    }
+                }
+                match self.compile_expression(funcs, func_info, x.step, chunk)? {
+                    TInteger => (),
+                    TString | TVoid => {
+                        bail_opt!(self, x.src_info, "invalid expression for FOR statement")
+                    }
+                }
+                let emit_ternary_fn = |chunk: &mut EraBytecodeChunk,
+                                       src_info,
+                                       then_fn: &mut dyn Fn(
+                    &mut EraBytecodeChunk,
+                    SourcePosInfo,
+                ),
+                                       else_fn: &mut dyn Fn(
+                    &mut EraBytecodeChunk,
+                    SourcePosInfo,
+                )| {
+                    // Assuming stack has condition pushed
+                    let bt_then = chunk.emit_jump_cond_hold(src_info);
+                    else_fn(chunk, src_info);
+                    let bt_else = chunk.emit_jump_hold(src_info);
+                    bt_then.complete(chunk);
+                    then_fn(chunk, src_info);
+                    bt_else.complete(chunk);
+                };
+                let zero_val = self.new_value_int(0);
+                let emit_cond_fn = |chunk: &mut EraBytecodeChunk, src_info| {
+                    chunk.emit_duplicate_n(2, src_info);
+                    chunk.emit_load_const(zero_val.clone(), src_info);
+                    chunk.emit_bytecode(CompareL, src_info);
+                    emit_ternary_fn(
+                        chunk,
+                        x.src_info,
+                        &mut |chunk, src_info| {
+                            chunk.emit_duplicate_one_n(5, src_info);
+                            chunk.emit_duplicate_one_n(5, src_info);
+                            chunk.emit_bytecode(GetArrayVal, src_info);
+                            chunk.emit_bytecode(CompareL, src_info);
+                            chunk.emit_bytecode(LogicalNot, src_info);
+                        },
+                        &mut |chunk, src_info| {
+                            chunk.emit_duplicate_one_n(5, src_info);
+                            chunk.emit_duplicate_one_n(5, src_info);
+                            chunk.emit_bytecode(GetArrayVal, src_info);
+                            chunk.emit_bytecode(CompareLEq, src_info);
+                        },
+                    );
+                };
+                let emit_step_fn = |chunk: &mut EraBytecodeChunk, src_info| {
+                    chunk.emit_duplicate_one_n(4, src_info);
+                    chunk.emit_duplicate_one_n(4, src_info);
+                    chunk.emit_duplicate_n(2, src_info);
+                    chunk.emit_bytecode(GetArrayVal, src_info);
+                    chunk.emit_duplicate_one_n(4, src_info);
+                    chunk.emit_bytecode(Add, src_info);
+                    chunk.emit_bytecode(SetArrayVal, src_info);
+                    chunk.emit_bytecode(Pop, src_info);
+                };
+                let bt_body = chunk.emit_jump_hold(x.src_info);
+                let start_pos = chunk.cur_bytes_cnt();
+                self.loop_structs
+                    .push(EraLoopStructCodeMetadata::new(start_pos));
+                emit_step_fn(chunk, x.src_info);
+                bt_body.complete(chunk)?;
+                emit_cond_fn(chunk, x.src_info);
+                let bt_done = chunk.emit_jump_cond_hold(x.src_info);
+                for stmt in x.body {
+                    self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
+                }
+                {
+                    let offset = -((chunk.cur_bytes_cnt() - start_pos) as isize);
+                    chunk.emit_jump(offset, x.src_info);
+                }
+                for bt in self.loop_structs.pop().unwrap().done_queue {
+                    bt.complete(chunk)?;
+                }
+                // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
+                emit_step_fn(chunk, x.src_info);
+                bt_done.complete(chunk)?;
+                chunk.emit_bytecode(Pop, x.src_info);
+                chunk.emit_bytecode(Pop, x.src_info);
+                chunk.emit_bytecode(Pop, x.src_info);
+                chunk.emit_bytecode(Pop, x.src_info);
+
+                self.stack_balance -= 4;
+            }
+            Cmd::Split(x) => {
+                let TString = self.compile_expression(funcs, func_info, x.input, chunk)? else {
+                    bail_opt!(self, x.src_info, "SPLIT expects string arguments");
+                };
+                let TString = self.compile_expression(funcs, func_info, x.separator, chunk)? else {
+                    bail_opt!(self, x.src_info, "SPLIT expects string arguments");
+                };
+                let TString =
+                    self.compile_expression_array(funcs, func_info, x.dest, false, chunk)?
+                else {
+                    bail_opt!(self, x.src_info, "SPLIT expects string arguments");
+                };
+                chunk.emit_bytecode(SplitString, x.src_info);
+            }
+            Cmd::ResultCmdCall(x) => {
+                let mut should_assign = false;
+                match self.try_compile_builtin_fun_call(
+                    funcs,
+                    func_info,
+                    &x.name,
+                    x.args,
+                    x.src_info,
+                    |this, chunk, src_info, ret_kind| {
+                        let name = match ret_kind {
+                            TInteger => "RESULT",
+                            TString => "RESULTS",
+                            TVoid => return Some(()),
+                        };
+                        let var = EraVarExpr {
+                            name: name.to_owned(),
+                            idxs: Vec::new(),
+                            src_info,
+                        };
+                        this.compile_expression_array(funcs, func_info, var, false, chunk)?;
+                        should_assign = true;
+                        Some(())
+                    },
+                    chunk,
+                ) {
+                    Some(_) => {
+                        if should_assign {
+                            chunk.emit_bytecode(SetMDArrayVal, x.src_info);
+                        }
+                    }
+                    None => bail_opt!(self, x.src_info, "invalid statement call"),
+                }
+            }
             _ => bail_opt!(self, stmt.source_pos_info(), "unsupported statement"),
         }
 
@@ -2031,7 +2210,23 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         use EraBytecodePrimaryType::*;
 
         let Some(&target_idx) = funcs.func_names.get(CaselessStr::new(&target)) else {
-            bail_opt!(self, target_src_info, "undefined function");
+            // Check for built-in functions as fallback
+            match self.try_compile_builtin_fun_call(
+                funcs,
+                func_info,
+                target,
+                args,
+                target_src_info,
+                |_, _, _, _| Some(()),
+                chunk,
+            ) {
+                Some(x) => return Some(x),
+                None => bail_opt!(
+                    self,
+                    target_src_info,
+                    format!("function `{target}` is undefined or has no matching overloads")
+                ),
+            }
         };
         let target = funcs.funcs.get(target_idx).unwrap();
         let args_len = args.len();
@@ -2133,6 +2328,76 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         })
     }
     #[must_use]
+    fn try_compile_builtin_fun_call(
+        &mut self,
+        funcs: &EraFuncPool,
+        func_info: &EraFuncInfo,
+        target: &str,
+        args: Vec<EraExpr>,
+        src_info: SourcePosInfo,
+        pre_run_fn: impl FnOnce(
+            &mut Self,
+            &mut EraBytecodeChunk,
+            SourcePosInfo,
+            EraExpressionValueKind,
+        ) -> Option<()>,
+        chunk: &mut EraBytecodeChunk,
+    ) -> Option<EraExpressionValueKind> {
+        use EraBytecodePrimaryType::*;
+        use EraExpressionValueKind::*;
+        use ValueKind::*;
+        // TODO: try_compile_builtin_fun_call
+        struct BuiltInFuncOverload {
+            args: &'static [ValueKind],
+            bytecodes: &'static [EraBytecodePrimaryType],
+        }
+        struct BuiltInFunc {
+            ret_val: EraExpressionValueKind,
+            overloads: &'static [BuiltInFuncOverload],
+        }
+        macro_rules! builtin_func {
+            ($ret_val:expr, [$(($args:expr, $bytecodes:expr)),+]) => {
+                BuiltInFunc { ret_val: $ret_val, overloads: &[$(BuiltInFuncOverload { args: $args, bytecodes: $bytecodes }),+] }
+            };
+        }
+        static FUNCS: phf::Map<&'static [u8], BuiltInFunc> = phf::phf_map! {
+            b"GCREATE" => builtin_func!{ TInteger, [(&[Int, Int, Int], &[Invalid])] },
+            b"GDISPOSE" => builtin_func!{ TInteger, [(&[Int], &[Invalid])] },
+            b"GDRAWSPRITE" => builtin_func!{ TInteger, [(&[Int, Str], &[Invalid])] },
+        };
+        match FUNCS.get(target.to_ascii_uppercase().as_bytes()) {
+            Some(x) => {
+                pre_run_fn(self, chunk, src_info, x.ret_val)?;
+                for overload in x.overloads {
+                    if overload.args.len() != args.len() {
+                        continue;
+                    }
+                    let chunk_snapshot = chunk.take_snapshot();
+                    let mut ok = true;
+                    for (arg, &param_kind) in args.iter().cloned().zip(overload.args.iter()) {
+                        let arg_kind = self.compile_expression(funcs, func_info, arg, chunk)?;
+                        match (arg_kind, param_kind) {
+                            (TInteger, Int) | (TString, Str) => (),
+                            _ => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        for &bc in overload.bytecodes {
+                            chunk.emit_bytecode(bc, src_info);
+                        }
+                        return Some(x.ret_val);
+                    }
+                    chunk_snapshot.regret(chunk);
+                }
+                None
+            }
+            None => None,
+        }
+    }
+    #[must_use]
     fn decorate_as_func_local_name(name: &str, func_name: &str) -> String {
         format!("$LOCALVAR_{name}@{func_name}")
     }
@@ -2166,7 +2431,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         });
     }
     fn evaluate_constant(&mut self, expr: EraExpr) -> Option<EraLiteral> {
-        match expr.try_evaluate_constant() {
+        match expr.try_evaluate_constant(&self.vars) {
             Ok(x) => Some(x),
             Err(x) => {
                 self.report_err(x.src_info, x.is_error, x.msg);

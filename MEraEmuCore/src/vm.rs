@@ -117,6 +117,7 @@ pub struct EraVarPool {
 pub struct EraVarInfo {
     pub name: Rc<CaselessStr>,
     pub val: Value,
+    pub is_const: bool,
 }
 
 impl EraVarPool {
@@ -133,7 +134,25 @@ impl EraVarPool {
         if self.var_names.insert(name.clone(), var_idx).is_some() {
             return None;
         }
-        self.vars.push(EraVarInfo { name, val });
+        self.vars.push(EraVarInfo {
+            name,
+            val,
+            is_const: false,
+        });
+        Some(var_idx)
+    }
+    #[must_use]
+    pub fn add_var_ex(&mut self, name: &str, val: Value, is_const: bool) -> Option<usize> {
+        let name: Rc<CaselessStr> = CaselessStr::new(name).into();
+        let var_idx = self.vars.len();
+        if self.var_names.insert(name.clone(), var_idx).is_some() {
+            return None;
+        }
+        self.vars.push(EraVarInfo {
+            name,
+            val,
+            is_const,
+        });
         Some(var_idx)
     }
     #[must_use]
@@ -163,6 +182,10 @@ impl EraVarPool {
     #[must_use]
     pub fn get_var_info(&self, idx: usize) -> Option<&EraVarInfo> {
         self.vars.get(idx)
+    }
+    #[must_use]
+    pub fn get_var_info_by_name(&self, name: &str) -> Option<&EraVarInfo> {
+        self.get_var_idx(name).and_then(|idx| self.vars.get(idx))
     }
     pub fn iter(&self) -> impl Iterator<Item = &EraVarInfo> {
         self.vars.iter()
@@ -1012,6 +1035,21 @@ impl EraVirtualMachine {
                                 let cloned = self.stack[i].clone();
                                 self.stack.push(cloned);
                             }
+                        }
+                        None => bail_opt!(ctx, cur_frame, true, "too few elements in stack"),
+                    }
+                }
+                DuplicateOneN => {
+                    let count =
+                        vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 1;
+                    if count <= 0 {
+                        bail_opt!(ctx, cur_frame, true, "invalid count for DuplicateOneN");
+                    }
+                    match self.stack.len().checked_sub(count as _) {
+                        Some(new_idx) => {
+                            let cloned = self.stack[new_idx].clone();
+                            self.stack.push(cloned);
                         }
                         None => bail_opt!(ctx, cur_frame, true, "too few elements in stack"),
                     }

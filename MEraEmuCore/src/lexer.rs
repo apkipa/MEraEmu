@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ptr::NonNull};
+use std::{collections::HashMap, ptr::NonNull, rc::Rc};
 
 use crate::bytecode::SourcePosInfo;
 
@@ -10,6 +10,7 @@ pub struct EraLexerTempStorage {
 struct EraLexerOuterState<'a, ErrReportFn> {
     err_report_fn: ErrReportFn,
     replace_list: &'a HashMap<Box<[u8]>, Box<[u8]>>,
+    define_list: &'a mut HashMap<Box<[u8]>, Box<[u8]>>,
     temp_storage: &'a mut EraLexerTempStorage,
 }
 #[derive(Clone, Copy)]
@@ -20,6 +21,7 @@ struct EraLexerInnerState<'a> {
     cur_line: u32,
     cur_column: u32,
     replace_size: u32,
+    last_is_newline: bool,
 }
 struct EraLexerInnerStateSite<'a, 'b, ErrReportFn> {
     o: &'a mut EraLexerOuterState<'b, ErrReportFn>,
@@ -27,7 +29,6 @@ struct EraLexerInnerStateSite<'a, 'b, ErrReportFn> {
     lexeme_start: Option<NonNull<u8>>,
     lexeme_len: usize,
     lexeme_cart: Vec<u8>,
-    last_is_newline: bool,
 }
 
 pub struct EraLexer<'a, ErrReportFn> {
@@ -100,10 +101,13 @@ pub enum EraTokenKind {
     KwDynamic,
     KwRef,
     KwConst,
+    KwSavedata,
+    KwCharadata,
     KwLocalSize,
     KwLocalSSize,
     KwFunction,
     KwFunctionS,
+    KwDefine,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -198,10 +202,13 @@ impl std::fmt::Display for EraTokenKind {
                 KwDynamic => "DYNAMIC",
                 KwRef => "REF",
                 KwConst => "CONST",
+                KwSavedata => "SAVEDATA",
+                KwCharadata => "CHARADATA",
                 KwLocalSize => "LOCALSIZE",
                 KwLocalSSize => "LOCALSSIZE",
                 KwFunction => "FUNCTION",
                 KwFunctionS => "FUNCTIONS",
+                KwDefine => "DEFINE",
                 Invalid | _ => "<invalid>",
             }
         )
@@ -234,6 +241,7 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
     pub fn new(
         src: &'a [u8],
         replace_list: &'a HashMap<Box<[u8]>, Box<[u8]>>,
+        define_list: &'a mut HashMap<Box<[u8]>, Box<[u8]>>,
         temp_storage: &'a mut EraLexerTempStorage,
         err_report_fn: T,
     ) -> Self {
@@ -241,6 +249,7 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
             outer: EraLexerOuterState {
                 err_report_fn,
                 replace_list,
+                define_list,
                 temp_storage,
             },
             inner: EraLexerInnerState {
@@ -250,6 +259,7 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
                 cur_line: 1,
                 cur_column: 1,
                 replace_size: 0,
+                last_is_newline: true,
             },
             next_inner: None,
         }
@@ -290,6 +300,10 @@ impl<'a, T: FnMut(&EraLexErrorInfo)> EraLexer<'a, T> {
         }
         token
     }
+
+    pub fn push_define(&mut self, key: Box<[u8]>, value: Box<[u8]>) {
+        self.outer.define_list.insert(key, value);
+    }
 }
 
 impl<'a> EraLexerInnerState<'a> {
@@ -306,7 +320,6 @@ impl<'a> EraLexerInnerState<'a> {
             lexeme_start: None,
             lexeme_len: 0,
             lexeme_cart: Vec::new(),
-            last_is_newline: true,
         };
         let mut token = site.next_token(mode);
         if matches!(token.kind, EraTokenKind::Eof) {
@@ -333,7 +346,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
         }
 
         let src_info = self.make_src_info();
-        let last_is_newline = self.last_is_newline;
+        let last_is_newline = self.i.last_is_newline;
 
         let make_token_fn = |this: &Self, kind| EraToken::<'static> {
             kind,
@@ -427,6 +440,21 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                             self.advance_char();
                         }
                         let mut token = make_token_fn(self, Identifier);
+                        // Try handle #DEFINE replacements
+                        if self.i.alternative_src.is_empty() {
+                            let lexeme = self.get_lexeme();
+                            let lexeme_len = self.lexeme_len;
+                            if let Some(v) = self.o.define_list.get(lexeme) {
+                                // SAFETY: We never remove entries from define_list, so we
+                                //         can transmute lifetimes without UB
+                                self.i.alternative_src = unsafe { std::mem::transmute(&v[..]) };
+                                self.i.replace_size = lexeme_len as _;
+                                (self.i.cur_column,) = (src_info.column,);
+                                // Restart read via recursion (ensures correct lexeme)
+                                self.reset_lexeme();
+                                return self.next_token(mode);
+                            }
+                        }
                         // Handle specific keywords
                         if let EraLexerMode::SharpDecl = mode {
                             let lexeme = self.get_lexeme();
@@ -442,6 +470,10 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                                 KwRef
                             } else if lexeme.eq_ignore_ascii_case(b"CONST") {
                                 KwConst
+                            } else if lexeme.eq_ignore_ascii_case(b"SAVEDATA") {
+                                KwSavedata
+                            } else if lexeme.eq_ignore_ascii_case(b"CHARADATA") {
+                                KwCharadata
                             } else if lexeme.eq_ignore_ascii_case(b"LOCALSIZE") {
                                 KwLocalSize
                             } else if lexeme.eq_ignore_ascii_case(b"LOCALSSIZE") {
@@ -450,6 +482,8 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                                 KwFunction
                             } else if lexeme.eq_ignore_ascii_case(b"FUNCTIONS") {
                                 KwFunctionS
+                            } else if lexeme.eq_ignore_ascii_case(b"DEFINE") {
+                                KwDefine
                             } else {
                                 token.kind
                             };
@@ -487,12 +521,20 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                                 // Plain zero
                             }
                         }
+                        if matches!(self.peek_char(), Some(b'p' | b'P')) {
+                            _ = self.advance_char();
+                            self.skip_char_while(|x| matches!(x, b'0'..=b'9'));
+                        }
                         make_token_fn(self, IntLiteral)
                     }
                     b'1'..=b'9' => {
                         // Handle decimal integer literal
                         // TODO: Support scientific notation
                         self.skip_char_while(|x| x.is_ascii_digit());
+                        if matches!(self.peek_char(), Some(b'p' | b'P')) {
+                            _ = self.advance_char();
+                            self.skip_char_while(|x| matches!(x, b'0'..=b'9'));
+                        }
                         make_token_fn(self, IntLiteral)
                     }
                     b'"' => {
@@ -529,11 +571,12 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                             return make_token_fn(self, EraTokenKind::Invalid);
                         };
                         if let Some(lexeme) = lexeme.strip_suffix(b"]") {
+                            const IS_DEBUG: bool = false;
                             if lexeme.eq_ignore_ascii_case(b"SKIPSTART") {
                                 // Scan until found `[SKIPEND]`
                                 loop {
                                     loop {
-                                        let last_is_newline = self.last_is_newline;
+                                        let last_is_newline = self.i.last_is_newline;
                                         self.skip_whitespace();
                                         let Some(ch) = self.advance_char() else {
                                             (self.o.err_report_fn)(&EraLexErrorInfo {
@@ -558,6 +601,39 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                                 // Restart read via recursion (ensures correct lexeme)
                                 self.reset_lexeme();
                                 self.next_token(mode)
+                            } else if lexeme.eq_ignore_ascii_case(b"IF_DEBUG") {
+                                if IS_DEBUG {
+                                    todo!()
+                                } else {
+                                    // Scan until found `[ENDIF]`
+                                    loop {
+                                        loop {
+                                            let last_is_newline = self.i.last_is_newline;
+                                            self.skip_whitespace();
+                                            let Some(ch) = self.advance_char() else {
+                                                (self.o.err_report_fn)(&EraLexErrorInfo {
+                                                src_info,
+                                                is_error: false,
+                                                msg: "`[IF_DEBUG]` does not have a matching `[ENDIF]`".to_owned(),
+                                            });
+                                                return self.make_eof_token();
+                                            };
+                                            if last_is_newline && ch == b'[' {
+                                                break;
+                                            }
+                                        }
+                                        self.reset_lexeme();
+                                        let Some(lexeme) = read_fn(self) else {
+                                            return make_token_fn(self, EraTokenKind::Invalid);
+                                        };
+                                        if lexeme.eq_ignore_ascii_case(b"ENDIF]") {
+                                            break;
+                                        }
+                                    }
+                                    // Restart read via recursion (ensures correct lexeme)
+                                    self.reset_lexeme();
+                                    self.next_token(mode)
+                                }
                             } else {
                                 let msg = format!(
                                     "`[{}]` is unsupported",
@@ -580,10 +656,15 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                         }
                     }
                     _ => {
+                        let msg = if ch.is_ascii_graphic() {
+                            format!("`{}`: unrecognized token kind", ch as char)
+                        } else {
+                            format!("`{ch}`: unrecognized token kind")
+                        };
                         (self.o.err_report_fn)(&EraLexErrorInfo {
                             src_info,
                             is_error: true,
-                            msg: format!("`{ch}`: unrecognized token kind"),
+                            msg,
                         });
                         make_token_fn(self, EraTokenKind::Invalid)
                     }
@@ -693,7 +774,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
         self.i.src.is_empty()
     }
     fn skip_whitespace(&mut self) {
-        // NOTE: self.last_is_newline remains untouched
+        // NOTE: self.i.last_is_newline remains untouched
         // NOTE: lexeme is automatically reset
         self.reset_lexeme();
         while let [b' ' | b'\t', rest @ ..] = self.i.alternative_src {
@@ -712,7 +793,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
     }
     // NOTE: Newline is handled in a specific way
     fn advance_char(&mut self) -> Option<u8> {
-        self.last_is_newline = false;
+        self.i.last_is_newline = false;
         // Try find replace
         // NOTE: If replace failed (such as not found), we still carry on as if
         //       it were not a replace.
@@ -763,7 +844,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
         }
         // Handle newline
         if let [b'\r', b'\n', rest @ ..] | [b'\r' | b'\n', rest @ ..] = self.i.src {
-            self.last_is_newline = true;
+            self.i.last_is_newline = true;
             self.i.src = rest;
             (self.i.cur_line, self.i.cur_column) = (self.i.cur_line + 1, 1);
             return Some(b'\n');
@@ -813,14 +894,15 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
             let in_replace = &rest[..end_pos];
             self.i.src = &rest[(end_pos + 2)..];
             let Some(out_replace) = self.o.replace_list.get(in_replace) else {
-                (self.o.err_report_fn)(&EraLexErrorInfo {
-                    src_info,
-                    is_error: true,
-                    msg: format!(
-                        "replacement `[[{}]]` does not exist",
-                        String::from_utf8_lossy(in_replace)
-                    ),
-                });
+                // Slience the `error`
+                // (self.o.err_report_fn)(&EraLexErrorInfo {
+                //     src_info,
+                //     is_error: true,
+                //     msg: format!(
+                //         "replacement `[[{}]]` does not exist",
+                //         String::from_utf8_lossy(in_replace)
+                //     ),
+                // });
                 return;
             };
             // Count in chars; assuming UTF-8 input is good

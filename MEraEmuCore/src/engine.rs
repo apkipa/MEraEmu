@@ -17,15 +17,14 @@ use crate::{
 use crate::util::*;
 
 pub struct MEraEngine<'a> {
-    global_vars: HashMap<CaselessString, EraParserSlimVarTypeInfo>,
     file_inputs: Vec<EraCompilerFileInput>,
     vm: Option<EraVirtualMachine>,
     callback: Box<dyn MEraEngineSysCallback + 'a>,
     config: MEraEngineConfig,
-    //registered_vars: Vec<(String, bool, usize)>,
-    registered_vars: EraVarPool,
+    global_vars: EraVarPool,
     watching_vars: HashSet<Rc<CaselessStr>>,
     replace_list: HashMap<Box<[u8]>, Box<[u8]>>,
+    define_list: HashMap<Box<[u8]>, Box<[u8]>>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -219,14 +218,14 @@ impl MEraEngineSysCallback for EmptyCallback {
 impl<'a> MEraEngine<'a> {
     pub fn new() -> Self {
         MEraEngine {
-            global_vars: HashMap::new(),
             file_inputs: Vec::new(),
             vm: None,
             callback: Box::new(EmptyCallback),
             config: Default::default(),
-            registered_vars: EraVarPool::default(),
+            global_vars: EraVarPool::default(),
             watching_vars: HashSet::new(),
             replace_list: HashMap::new(),
+            define_list: HashMap::new(),
         }
     }
     pub fn install_sys_callback<'b>(&'b mut self, callback: Box<dyn MEraEngineSysCallback + 'a>)
@@ -279,15 +278,20 @@ impl<'a> MEraEngine<'a> {
         // TODO: Handle UTF-8 BOM?
         let mut temp_storage = EraLexerTempStorage::default();
         let callback = RefCell::new(self.callback.deref_mut());
-        let mut lexer =
-            crate::lexer::EraLexer::new(content, &self.replace_list, &mut temp_storage, |e| {
+        let mut lexer = crate::lexer::EraLexer::new(
+            content,
+            &self.replace_list,
+            &mut self.define_list,
+            &mut temp_storage,
+            |e| {
                 callback.borrow_mut().on_compile_error(&EraScriptErrorInfo {
                     filename,
                     src_info: e.src_info.into(),
                     is_error: e.is_error,
                     msg: &e.msg,
                 });
-            });
+            },
+        );
         let mut parser = crate::parser::EraParser::new(|e| {
             callback.borrow_mut().on_compile_error(&EraScriptErrorInfo {
                 filename,
@@ -296,7 +300,7 @@ impl<'a> MEraEngine<'a> {
                 msg: &e.msg,
             });
         });
-        let root_ast = match parser.parse(&mut lexer, &self.global_vars) {
+        let root_ast = match parser.parse(&mut lexer, &mut self.global_vars) {
             Some(x) => x,
             None => {
                 return Err(MEraEngineError::new(
@@ -307,12 +311,12 @@ impl<'a> MEraEngine<'a> {
         for decl in &root_ast.decls {
             match decl {
                 EraDecl::SharpDecl(EraSharpDecl::VarDecl(x)) => {
-                    self.global_vars.insert(
-                        CaselessString::new(x.name.clone()),
-                        EraParserSlimVarTypeInfo {
-                            is_string: x.is_string,
-                        },
-                    );
+                    // self.global_vars.insert(
+                    //     CaselessString::new(x.name.clone()),
+                    //     EraParserSlimVarTypeInfo {
+                    //         is_string: x.is_string,
+                    //     },
+                    // );
                 }
                 _ => (),
             }
@@ -346,22 +350,13 @@ impl<'a> MEraEngine<'a> {
             crate::bytecode::Value::new_int_arr(vec![dimension as _], Vec::new())
         };
         let var_idx = self
-            .registered_vars
+            .global_vars
             .add_var(name, val)
             .ok_or_else(|| MEraEngineError::new("variable already used".to_owned()))?;
         if watch {
-            self.watching_vars.insert(
-                self.registered_vars
-                    .get_var_info(var_idx)
-                    .unwrap()
-                    .name
-                    .clone(),
-            );
+            self.watching_vars
+                .insert(self.global_vars.get_var_info(var_idx).unwrap().name.clone());
         }
-        self.global_vars.insert(
-            CaselessString::new(name.to_owned()),
-            EraParserSlimVarTypeInfo { is_string },
-        );
         Ok(())
     }
     /// Mark the completion of source code loading. All previously loaded code will be assembled
@@ -384,7 +379,7 @@ impl<'a> MEraEngine<'a> {
         //     .collect();
         let compilation = match compiler.compile_all(
             std::mem::take(&mut self.file_inputs),
-            std::mem::take(&mut self.registered_vars),
+            std::mem::take(&mut self.global_vars),
         ) {
             Some(x) => x,
             None => {

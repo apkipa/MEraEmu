@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use indoc::concatdoc;
 
-use crate::bytecode::PadStringFlags;
+use crate::bytecode::{FlatValue, IntValue, PadStringFlags, StrValue, Value, ValueKind};
 use crate::util::*;
 
+use crate::vm::EraVarPool;
 use crate::{
     bytecode::{PrintExtendedFlags, SourcePosInfo},
     lexer::{EraLexerMode, EraToken, EraTokenKind, EraTokenLite},
@@ -25,6 +27,7 @@ pub enum EraSharpDecl {
     LocalSizeDecl(EraLocalSizeDecl),
     LocalSSizeDecl(EraLocalSSizeDecl),
     FunctionDecl(EraSharpFunctionDecl),
+    DefineDecl(EraDefineDecl),
 }
 impl EraSharpDecl {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -33,12 +36,17 @@ impl EraSharpDecl {
             Self::LocalSizeDecl(x) => x.src_info,
             Self::LocalSSizeDecl(x) => x.src_info,
             Self::VarDecl(x) => x.src_info,
+            Self::DefineDecl(x) => x.src_info,
         }
     }
 }
 
 pub struct EraSharpFunctionDecl {
     pub returns_string: bool,
+    pub src_info: SourcePosInfo,
+}
+
+pub struct EraDefineDecl {
     pub src_info: SourcePosInfo,
 }
 
@@ -158,8 +166,18 @@ impl EraExpr {
 }
 
 impl EraExpr {
+    pub fn unwrap_int_constant(lit: EraLiteral) -> Result<i64, EraParseErrorInfo> {
+        match lit {
+            EraLiteral::Integer(x, _) => Ok(x),
+            EraLiteral::String(_, src_info) => Err(EraParseErrorInfo {
+                src_info,
+                is_error: true,
+                msg: "expected integer here".into(),
+            }),
+        }
+    }
     // TODO: Finish EraExpr::try_evaluate_constant
-    pub fn try_evaluate_constant(self) -> Result<EraLiteral, EraParseErrorInfo> {
+    pub fn try_evaluate_constant(self, vars: &EraVarPool) -> Result<EraLiteral, EraParseErrorInfo> {
         let src_info = self.source_pos_info();
 
         fn make_err(
@@ -176,19 +194,66 @@ impl EraExpr {
 
         Ok(match self {
             EraExpr::Term(x) => match x {
-                EraTermExpr::Var(x) => {
-                    return Err(make_err(x.src_info, true, "not a constant expression"));
-                }
+                EraTermExpr::Var(x) => match vars.get_var_info_by_name(&x.name) {
+                    Some(info) if info.is_const => {
+                        let idxs = x
+                            .idxs
+                            .into_iter()
+                            .map(|x| match x.try_evaluate_constant(vars)? {
+                                EraLiteral::Integer(x, _) => Ok(x as u32),
+                                EraLiteral::String(_, src_info) => {
+                                    Err(make_err(src_info, true, "expected integer here"))
+                                }
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        match info.val.clone().into_unpacked() {
+                            FlatValue::ArrInt(v) => EraLiteral::Integer(
+                                v.borrow()
+                                    .get(&idxs)
+                                    .ok_or_else(|| {
+                                        make_err(x.src_info, true, "not a constant expression")
+                                    })?
+                                    .val,
+                                src_info,
+                            ),
+                            FlatValue::ArrStr(v) => EraLiteral::String(
+                                v.borrow()
+                                    .get(&idxs)
+                                    .ok_or_else(|| {
+                                        make_err(x.src_info, true, "not a constant expression")
+                                    })?
+                                    .val
+                                    .clone(),
+                                src_info,
+                            ),
+                            _ => todo!(),
+                        }
+                    }
+                    _ => return Err(make_err(x.src_info, true, "not a constant expression")),
+                },
                 EraTermExpr::StrForm(x) => {
-                    return Err(make_err(x.src_info, true, "not a constant expression"));
+                    let mut result = String::new();
+                    for part in x.parts {
+                        match part {
+                            EraStrFormExprPart::Literal(x, _) => result.push_str(&x),
+                            // FIXME: Constant string interpolation formatting
+                            EraStrFormExprPart::Expression(x) => {
+                                match x.expr.try_evaluate_constant(vars)? {
+                                    EraLiteral::Integer(x, _) => result.push_str(&x.to_string()),
+                                    EraLiteral::String(x, _) => result.push_str(&x),
+                                }
+                            }
+                        }
+                    }
+                    EraLiteral::String(result, x.src_info)
                 }
                 EraTermExpr::Literal(x) => match x {
                     EraLiteral::Integer(x, _) => EraLiteral::Integer(x, src_info),
                     EraLiteral::String(x, _) => EraLiteral::String(x, src_info),
                 },
             },
-            EraExpr::Grouping(_, x, _) => x.try_evaluate_constant()?,
-            EraExpr::PreUnary(op, x) => match (op.kind, x.try_evaluate_constant()?) {
+            EraExpr::Grouping(_, x, _) => x.try_evaluate_constant(vars)?,
+            EraExpr::PreUnary(op, x) => match (op.kind, x.try_evaluate_constant(vars)?) {
                 (EraTokenKind::Plus, EraLiteral::Integer(x, _)) => EraLiteral::Integer(x, src_info),
                 (EraTokenKind::Minus, EraLiteral::Integer(x, cur_si)) => {
                     let x = match 0i64.checked_sub(x) {
@@ -211,7 +276,7 @@ impl EraExpr {
                     ));
                 }
             },
-            EraExpr::PostUnary(x, op) => match (x.try_evaluate_constant()?, op.kind) {
+            EraExpr::PostUnary(x, op) => match (x.try_evaluate_constant(vars)?, op.kind) {
                 _ => {
                     return Err(make_err(
                         op.src_info,
@@ -220,17 +285,46 @@ impl EraExpr {
                     ));
                 }
             },
-            EraExpr::FunCall(x, _) => {
-                return Err(make_err(
-                    x.source_pos_info(),
-                    true,
-                    "invalid arithmetic during constant expression evaluation",
-                ));
+            EraExpr::FunCall(fun, args) => {
+                let fun_si = fun.source_pos_info();
+                let EraExpr::Term(EraTermExpr::Var(mut fun)) = *fun else {
+                    return Err(make_err(
+                        fun_si,
+                        true,
+                        "invalid function call during constant expression evaluation",
+                    ));
+                };
+                fun.name.make_ascii_uppercase();
+                // HACK: Whitelist specific functions
+                match fun.name.as_str() {
+                    "UNICODE" => {
+                        if args.len() != 1 {
+                            return Err(make_err(
+                                fun_si,
+                                true,
+                                "invalid function call during constant expression evaluation",
+                            ));
+                        }
+                        let arg = args.into_iter().next().unwrap();
+                        let arg = Self::unwrap_int_constant(arg.try_evaluate_constant(vars)?)?;
+                        let mut result = String::new();
+                        result
+                            .push(char::from_u32(arg as _).unwrap_or(char::REPLACEMENT_CHARACTER));
+                        EraLiteral::String(result, fun_si)
+                    }
+                    _ => {
+                        return Err(make_err(
+                            fun_si,
+                            true,
+                            "invalid function call during constant expression evaluation",
+                        ))
+                    }
+                }
             }
             EraExpr::Binary(x1, op, x2) => match (
-                x1.try_evaluate_constant()?,
+                x1.try_evaluate_constant(vars)?,
                 op.kind,
-                x2.try_evaluate_constant()?,
+                x2.try_evaluate_constant(vars)?,
             ) {
                 (EraLiteral::Integer(x1, _), EraTokenKind::Plus, EraLiteral::Integer(x2, _)) => {
                     let x = match x1.checked_add(x2) {
@@ -244,6 +338,10 @@ impl EraExpr {
                         }
                     };
                     EraLiteral::Integer(x, src_info)
+                }
+                (EraLiteral::String(x1, _), EraTokenKind::Plus, EraLiteral::String(x2, _)) => {
+                    let x = x1 + &x2;
+                    EraLiteral::String(x, src_info)
                 }
                 (EraLiteral::Integer(x1, _), EraTokenKind::Minus, EraLiteral::Integer(x2, _)) => {
                     let x = match x1.checked_sub(x2) {
@@ -292,14 +390,14 @@ impl EraExpr {
                     return Err(make_err(
                         op.src_info,
                         true,
-                        "overflow during constant expression evaluation",
+                        "invalid arithmetic during constant expression evaluation",
                     ));
                 }
             },
             EraExpr::Ternary(x1, _, x2, _, x3) => {
-                let x1 = x1.try_evaluate_constant()?;
-                let x2 = x2.try_evaluate_constant()?;
-                let x3 = x3.try_evaluate_constant()?;
+                let x1 = x1.try_evaluate_constant(vars)?;
+                let x2 = x2.try_evaluate_constant(vars)?;
+                let x3 = x3.try_evaluate_constant(vars)?;
                 let x1 = match x1 {
                     EraLiteral::Integer(x, _) => x != 0,
                     EraLiteral::String(_, _) => true,
@@ -328,6 +426,7 @@ impl EraLiteral {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct EraVarDecl {
     pub name: String,
     pub dims: Vec<u32>,
@@ -337,6 +436,8 @@ pub struct EraVarDecl {
     pub is_const: bool,
     pub is_global: bool,
     pub is_dynamic: bool,
+    pub is_savedata: bool,
+    pub is_charadata: bool,
     pub src_info: SourcePosInfo,
 }
 
@@ -452,6 +553,47 @@ pub struct EraGotoStmt {
     pub src_info: SourcePosInfo,
 }
 
+pub struct EraForStmt {
+    pub var: EraVarExpr,
+    pub start: EraExpr,
+    pub end: EraExpr,
+    pub step: EraExpr,
+    pub body: Vec<EraStmt>,
+    pub src_info: SourcePosInfo,
+}
+
+// pub struct EraGCreateStmt {
+//     pub gid: EraExpr,
+//     pub width: EraExpr,
+//     pub height: EraExpr,
+//     pub src_info: SourcePosInfo,
+// }
+
+// pub struct EraGDisposeStmt {
+//     pub gid: EraExpr,
+//     pub src_info: SourcePosInfo,
+// }
+
+// pub struct EraGDrawSpriteStmt {
+//     pub gid: EraExpr,
+//     pub sprite_name: EraExpr,
+//     // TODO: EraGDrawSpriteStmt overloads
+//     pub src_info: SourcePosInfo,
+// }
+
+pub struct EraSplitStmt {
+    pub input: EraExpr,
+    pub separator: EraExpr,
+    pub dest: EraVarExpr,
+    pub src_info: SourcePosInfo,
+}
+
+pub struct EraResultCmdCallStmt {
+    pub name: String,
+    pub args: Vec<EraExpr>,
+    pub src_info: SourcePosInfo,
+}
+
 pub enum EraStmt {
     Expr(EraExpr),
     Command(EraCommandStmt),
@@ -483,6 +625,12 @@ pub enum EraCommandStmt {
     Throw(EraThrowStmt),
     Repeat(EraRepeatStmt),
     Goto(EraGotoStmt),
+    For(EraForStmt),
+    // GCreate(EraGCreateStmt),
+    // GDispose(EraGDisposeStmt),
+    // GDrawSprite(EraGDrawSpriteStmt),
+    Split(EraSplitStmt),
+    ResultCmdCall(EraResultCmdCallStmt),
 }
 impl EraCommandStmt {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -502,6 +650,12 @@ impl EraCommandStmt {
             Throw(x) => x.src_info,
             Repeat(x) => x.src_info,
             Goto(x) => x.src_info,
+            For(x) => x.src_info,
+            // GCreate(x) => x.src_info,
+            // GDispose(x) => x.src_info,
+            // GDrawSprite(x) => x.src_info,
+            Split(x) => x.src_info,
+            ResultCmdCall(x) => x.src_info,
         }
     }
 }
@@ -532,7 +686,7 @@ impl<T: FnMut(&EraParseErrorInfo)> EraParser<T> {
     pub fn parse<'b, U: FnMut(&crate::lexer::EraLexErrorInfo)>(
         &mut self,
         lexer: &'b mut crate::lexer::EraLexer<'b, U>,
-        global_vars: &HashMap<CaselessString, EraParserSlimVarTypeInfo>,
+        global_vars: &mut EraVarPool,
     ) -> Option<EraRootASTNode> {
         EraParserImpl::new(self, lexer, global_vars).program()
     }
@@ -541,7 +695,7 @@ impl<T: FnMut(&EraParseErrorInfo)> EraParser<T> {
 struct EraParserImpl<'a, 'b, ErrReportFn, LexErrReportFn> {
     err_report_fn: &'a mut ErrReportFn,
     lexer: &'b mut crate::lexer::EraLexer<'b, LexErrReportFn>,
-    global_vars: HashMap<CaselessString, EraParserSlimVarTypeInfo>,
+    global_vars: &'a mut EraVarPool,
     local_vars: HashMap<CaselessString, EraParserSlimVarTypeInfo>,
     curly_brackets_cnt: u32,
     src_info: SourcePosInfo,
@@ -553,12 +707,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn new(
         parser: &'a mut EraParser<T>,
         lexer: &'b mut crate::lexer::EraLexer<'b, U>,
-        global_vars: &HashMap<CaselessString, EraParserSlimVarTypeInfo>,
+        global_vars: &'a mut EraVarPool,
     ) -> Self {
         Self {
             err_report_fn: &mut parser.err_report_fn,
             lexer,
-            global_vars: global_vars.clone(),
+            global_vars: global_vars,
             local_vars: HashMap::new(),
             curly_brackets_cnt: 0,
             src_info: SourcePosInfo { line: 1, column: 1 },
@@ -587,10 +741,62 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn is_ignoring_newline(&self) -> bool {
         self.curly_brackets_cnt > 0
     }
+    fn evaluate_constant(&mut self, expr: EraExpr) -> Option<EraLiteral> {
+        match expr.try_evaluate_constant(&self.global_vars) {
+            Ok(x) => Some(x),
+            Err(x) => {
+                self.report_err(x.src_info, x.is_error, x.msg);
+                None
+            }
+        }
+    }
+    fn materialize_var_decl(
+        &mut self,
+        mut decl: EraVarDecl,
+    ) -> Option<(String, crate::bytecode::Value)> {
+        if decl.dims.is_empty() {
+            let dim = (decl.inits.len() as u32).max(1);
+            decl.dims.push(dim);
+        }
+        let inits = decl
+            .inits
+            .into_iter()
+            .map(|x| self.evaluate_constant(x))
+            .collect::<Option<Vec<_>>>()?;
+        Some((
+            decl.name,
+            if decl.is_string {
+                let inits = inits
+                    .into_iter()
+                    .map(|x| match x {
+                        EraLiteral::Integer(_, src_info) => {
+                            self.report_err(src_info, true, "expected string value, found integer");
+                            None
+                        }
+                        // TODO: Perform interning
+                        EraLiteral::String(val, _) => Some(Rc::new(StrValue { val })),
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Value::new_str_arr(decl.dims, inits)
+            } else {
+                let inits = inits
+                    .into_iter()
+                    .map(|x| match x {
+                        EraLiteral::Integer(val, _) => Some(IntValue { val }),
+                        EraLiteral::String(_, src_info) => {
+                            self.report_err(src_info, true, "expected integer value, found string");
+                            None
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Value::new_int_arr(decl.dims, inits)
+            },
+        ))
+    }
     fn program(&mut self) -> Option<EraRootASTNode> {
         self.skip_whitespace();
         let first_token = self.lexer.peek(EraLexerMode::Normal);
-        if matches!(first_token.kind, EraTokenKind::Eof | EraTokenKind::Invalid) {
+        if matches!(first_token.kind, EraTokenKind::Invalid) {
             self.report_token_err(
                 first_token.into(),
                 true,
@@ -612,13 +818,11 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 match x {
                     EraSharpDecl::FunctionDecl(_) => (),
                     EraSharpDecl::VarDecl(x) => {
-                        let info = EraParserSlimVarTypeInfo {
-                            is_string: x.is_string,
-                        };
+                        let (var_name, var_val) = self.materialize_var_decl(x.clone())?;
                         if self
                             .global_vars
-                            .insert(CaselessString::new(x.name.clone()), info)
-                            .is_some()
+                            .add_var_ex(&var_name, var_val, x.is_const)
+                            .is_none()
                         {
                             self.report_err(
                                 x.src_info,
@@ -626,7 +830,36 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                                 format!("redefinition of global variable `{}`", x.name),
                             );
                         }
+                        // if x.is_const {
+                        //     let value = if x.is_string {
+                        //         let inits = x
+                        //             .inits
+                        //             .iter()
+                        //             .cloned()
+                        //             .map(|x| {
+                        //                 Some(Rc::new(StrValue {
+                        //                     val: self.unwrap_str_from_expression(x)?,
+                        //                 }))
+                        //             })
+                        //             .collect::<Option<Vec<_>>>()?;
+                        //         Value::new_str_arr(x.dims.clone(), inits)
+                        //     } else {
+                        //         let inits = x
+                        //             .inits
+                        //             .iter()
+                        //             .cloned()
+                        //             .map(|x| {
+                        //                 Some(IntValue {
+                        //                     val: self.unwrap_int_from_expression(x)?,
+                        //                 })
+                        //             })
+                        //             .collect::<Option<Vec<_>>>()?;
+                        //         Value::new_int_arr(x.dims.clone(), inits)
+                        //     };
+                        //     self.const_vars.insert(x.name.clone().into(), value);
+                        // }
                     }
+                    EraSharpDecl::DefineDecl(_) => (),
                     _ => {
                         self.report_err(
                             x.source_pos_info(),
@@ -640,11 +873,21 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
         Some(root)
     }
+    #[must_use]
     fn matches_newline(&mut self) -> Option<EraToken<'b>> {
         self.try_consume(EraLexerMode::Normal, EraTokenKind::LineBreak)
     }
+    #[must_use]
     fn consume_newline(&mut self) -> Option<EraToken<'b>> {
         self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)
+    }
+    #[must_use]
+    fn matches_comma(&mut self) -> Option<EraToken<'b>> {
+        self.try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
+    }
+    #[must_use]
+    fn consume_comma(&mut self) -> Option<EraToken<'b>> {
+        self.consume(EraLexerMode::Normal, EraTokenKind::Comma)
     }
     fn declaration(&mut self) -> Option<EraDecl> {
         self.skip_whitespace();
@@ -711,6 +954,18 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 returns_string: true,
                 src_info: first.src_info,
             })),
+            EraTokenKind::KwDefine => {
+                // HACK: We need to manually handle #DEFINE's and feed them back to lexer
+                let in_def = self.consume(EraLexerMode::SharpDecl, EraTokenKind::Identifier)?;
+                let out_def =
+                    self.consume(EraLexerMode::RawStr, EraTokenKind::PlainStringLiteral)?;
+                self.consume_newline()?;
+                self.lexer
+                    .push_define(in_def.lexeme.into(), out_def.lexeme.into());
+                Some(EraSharpDecl::DefineDecl(EraDefineDecl {
+                    src_info: first.src_info,
+                }))
+            }
             _ => {
                 self.synchronize_with_token(first.into());
                 self.report_token_err(
@@ -727,6 +982,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         let mut is_const = false;
         let mut is_global = false;
         let mut is_dynamic = false;
+        let mut is_savedata = false;
+        let mut is_charadata = false;
         let mut dims = Vec::new();
         let mut inits = Vec::new();
         let name = loop {
@@ -758,6 +1015,26 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         );
                     }
                     is_const = true;
+                }
+                EraTokenKind::KwSavedata => {
+                    if is_savedata {
+                        self.report_token_err(
+                            token.into(),
+                            false,
+                            "redundant savedata qualifier in variable declaration",
+                        );
+                    }
+                    is_savedata = true;
+                }
+                EraTokenKind::KwCharadata => {
+                    if is_charadata {
+                        self.report_token_err(
+                            token.into(),
+                            false,
+                            "redundant charadata qualifier in variable declaration",
+                        );
+                    }
+                    is_charadata = true;
                 }
                 EraTokenKind::Identifier => break token,
                 _ => {
@@ -807,7 +1084,15 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 {
                     break;
                 }
+                // Allow trailing comma
+                if matches!(
+                    self.peek_token(EraLexerMode::SharpDecl).kind,
+                    EraTokenKind::LineBreak
+                ) {
+                    break;
+                }
             }
+            self.consume_newline()?;
         }
         Some(EraVarDecl {
             name: String::from_utf8_lossy(name.lexeme).into_owned(),
@@ -818,6 +1103,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             is_const,
             is_global,
             is_dynamic,
+            is_savedata,
+            is_charadata,
             src_info: name.src_info,
         })
     }
@@ -971,12 +1258,20 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"WAIT" => EraCommandStmt::Wait(self.r().stmt_wait()?),
                         b"WHILE" => EraCommandStmt::While(self.r().stmt_while()?),
                         b"RETURN" | b"RETURNF" => EraCommandStmt::Return(self.r().stmt_return()?),
-                        b"CALL" => EraCommandStmt::Call(self.r().stmt_call()?),
+                        b"CALL" | b"CALLF" => EraCommandStmt::Call(self.r().stmt_call()?),
                         b"CONTINUE" => EraCommandStmt::Continue(self.r().stmt_continue()?),
                         b"BREAK" => EraCommandStmt::Break(self.r().stmt_break()?),
                         b"THROW" => EraCommandStmt::Throw(self.r().stmt_throw()?),
                         b"REPEAT" => EraCommandStmt::Repeat(self.r().stmt_repeat()?),
                         b"GOTO" => EraCommandStmt::Goto(self.r().stmt_goto()?),
+                        b"FOR" => EraCommandStmt::For(self.r().stmt_for()?),
+                        // b"GCREATE" => EraCommandStmt::GCreate(self.r().stmt_gcreate()?),
+                        // b"GDISPOSE" => EraCommandStmt::GDispose(self.r().stmt_gdispose()?),
+                        // b"GDRAWSPRITE" => EraCommandStmt::GDrawSprite(self.r().stmt_gdrawsprite()?),
+                        b"SPLIT" => EraCommandStmt::Split(self.r().stmt_split()?),
+                        b"GCREATE" | b"GDISPOSE" | b"GDRAWSPRITE" => {
+                            EraCommandStmt::ResultCmdCall(self.stmt_result_cmd_call()?)
+                        }
                         _ => return Some(EraStmt::Expr(self.expression(false)?)),
                     }
                 }
@@ -1040,7 +1335,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.expression_bp(0, pure, EraTokenKind::Eof)
     }
     fn expression_bp(&mut self, min_bp: u8, pure: bool, break_at: EraTokenKind) -> Option<EraExpr> {
-        let first = self.lexer.read(EraLexerMode::Normal);
+        let first = self.read_token(EraLexerMode::Normal);
         let mut lhs = match first.kind {
             EraTokenKind::IntLiteral => {
                 // TODO: use atoi_simd?
@@ -1060,21 +1355,37 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 // TODO: Support scientific notation
                 // SAFETY: Input is guaranteed to be ASCII-only bytes
                 let lexeme = unsafe { std::str::from_utf8_unchecked(lexeme) };
-                let val = match i64::from_str_radix(lexeme, radix) {
+                let (num, exp) = lexeme
+                    .split_once("p")
+                    .or_else(|| lexeme.split_once("P"))
+                    .unwrap_or((lexeme, ""));
+                const INVALID_MSG: &'static str = concatdoc! {"
+                    invalid integer literal (if you need integer literals that can overflow ",
+                    "i64, consider configuring the engine with flag use_inf_prec_int set)
+                "};
+                let mut val = match i64::from_str_radix(num, radix) {
                     Ok(x) => x,
                     Err(_) => {
                         self.synchronize();
-                        self.report_token_err(
-                            first.into(),
-                            true,
-                            concatdoc! {"
-                            invalid integer literal (if you need integer literals that can overflow ",
-                            "i64, consider configuring the engine with flag use_inf_prec_int set)
-                            "},
-                        );
+                        self.report_token_err(first.into(), true, INVALID_MSG);
                         return None;
                     }
                 };
+                if !exp.is_empty() {
+                    let Ok(exp) = u8::from_str_radix(exp, 10) else {
+                        self.synchronize();
+                        self.report_token_err(first.into(), true, INVALID_MSG);
+                        return None;
+                    };
+                    val = match val.checked_shl(exp.into()) {
+                        Some(x) => x,
+                        None => {
+                            self.synchronize();
+                            self.report_token_err(first.into(), true, INVALID_MSG);
+                            return None;
+                        }
+                    };
+                }
                 EraExpr::new_int(val, first.src_info)
             }
             // TODO: Handle escape characters for StringLiteral
@@ -1085,9 +1396,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             EraTokenKind::StringFormStart => {
                 EraExpr::Term(EraTermExpr::StrForm(self.expression_strform(first)?))
             }
-            EraTokenKind::TernaryStrFormMarker => {
-                self.ternary_strform()?
-            }
+            EraTokenKind::TernaryStrFormMarker => self.ternary_strform()?,
             EraTokenKind::LBracket => {
                 let lhs = self.expression(true)?;
                 self.consume(EraLexerMode::Normal, EraTokenKind::RBracket)?;
@@ -1336,7 +1645,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         x.truncate(x.trim_end_matches(&[' ', '\t']).len());
                     }
                     break token;
-                },
+                }
                 _ => {
                     // TODO: Synchronize here?
                     self.report_token_err(token.into(), true, "unexpected token");
@@ -1381,7 +1690,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         x.truncate(x.trim_end_matches(&[' ', '\t']).len());
                     }
                     break;
-                },
+                }
                 _ => {
                     // TODO: Synchronize here?
                     self.report_token_err(token.into(), true, "unexpected token");
@@ -1657,10 +1966,20 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         }
                     }
                     conds.push(cond);
-                    if self
-                        .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
-                        .is_none()
+                    let mut last_comma =
+                        match self.try_consume(EraLexerMode::Normal, EraTokenKind::Comma) {
+                            Some(x) => x,
+                            None => break,
+                        };
+                    while let Some(comma) =
+                        self.try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
                     {
+                        self.report_token_err(last_comma.into(), false, "too many commas in case");
+                        last_comma = comma;
+                    }
+                    let token = self.peek_token(EraLexerMode::Normal);
+                    if matches!(token.kind, EraTokenKind::LineBreak) {
+                        self.report_token_err(last_comma.into(), false, "too many commas in case");
                         break;
                     }
                 }
@@ -1831,6 +2150,116 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.consume_newline()?;
         Some(EraGotoStmt { target, src_info })
     }
+    fn stmt_for(&mut self) -> Option<EraForStmt> {
+        let src_info = self.src_info;
+        let var = self.expression(true)?;
+        let EraExpr::Term(EraTermExpr::Var(var)) = var else {
+            self.report_err(var.source_pos_info(), true, "expected a variable here");
+            self.synchronize();
+            return None;
+        };
+        self.consume(EraLexerMode::Normal, EraTokenKind::Comma)?;
+        let start = self.expression(true)?;
+        self.consume(EraLexerMode::Normal, EraTokenKind::Comma)?;
+        let end = self.expression(true)?;
+        let step = if self
+            .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
+            .is_some()
+        {
+            self.expression(true)?
+        } else {
+            EraExpr::Term(EraTermExpr::Literal(EraLiteral::Integer(1, src_info)))
+        };
+        let mut body = Vec::new();
+        self.consume_newline()?;
+        while self.matches_command_end(b"NEXT").is_none() {
+            body.push(self.statement()?);
+        }
+        self.consume_newline()?;
+        Some(EraForStmt {
+            var,
+            start,
+            end,
+            step,
+            body,
+            src_info,
+        })
+    }
+    // fn stmt_gcreate(&mut self) -> Option<EraGCreateStmt> {
+    //     let src_info = self.src_info;
+    //     let gid = self.expression(true)?;
+    //     self.consume_comma()?;
+    //     let width = self.expression(true)?;
+    //     self.consume_comma()?;
+    //     let height = self.expression(true)?;
+    //     Some(EraGCreateStmt {
+    //         gid,
+    //         width,
+    //         height,
+    //         src_info,
+    //     })
+    // }
+    // fn stmt_gdispose(&mut self) -> Option<EraGDisposeStmt> {
+    //     let src_info = self.src_info;
+    //     let gid = self.expression(true)?;
+    //     Some(EraGDisposeStmt { gid, src_info })
+    // }
+    // fn stmt_gdrawsprite(&mut self) -> Option<EraGDrawSpriteStmt> {
+    //     let src_info = self.src_info;
+    //     let gid = self.expression(true)?;
+    //     self.consume_comma()?;
+    //     let sprite_name = self.expression(true)?;
+    //     Some(EraGDrawSpriteStmt {
+    //         gid,
+    //         sprite_name,
+    //         src_info,
+    //     })
+    // }
+    fn stmt_split(&mut self) -> Option<EraSplitStmt> {
+        let src_info = self.src_info;
+        let input = self.expression(true)?;
+        self.consume_comma()?;
+        let separator = self.expression(true)?;
+        self.consume_comma()?;
+        let dest = self.expression(true)?;
+        let EraExpr::Term(EraTermExpr::Var(dest)) = dest else {
+            self.report_err(dest.source_pos_info(), true, "expected a variable here");
+            self.synchronize();
+            return None;
+        };
+        self.consume_newline()?;
+        Some(EraSplitStmt {
+            input,
+            separator,
+            dest,
+            src_info,
+        })
+    }
+    fn stmt_result_cmd_call(&mut self) -> Option<EraResultCmdCallStmt> {
+        let name = self.lexer.read(EraLexerMode::Normal);
+        let src_info = name.src_info;
+        let name = String::from_utf8_lossy(name.lexeme).into_owned();
+        let mut args = Vec::new();
+        if self.matches_newline().is_some() {
+            return Some(EraResultCmdCallStmt {
+                name,
+                args,
+                src_info,
+            });
+        }
+        loop {
+            args.push(self.expression(true)?);
+            if self.matches_comma().is_none() {
+                break;
+            }
+        }
+        self.consume_newline()?;
+        Some(EraResultCmdCallStmt {
+            name,
+            args,
+            src_info,
+        })
+    }
     #[must_use]
     fn consume(
         &mut self,
@@ -1840,6 +2269,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         let token = loop {
             let token = self.lexer.read(lexer_mode);
             if self.is_ignoring_newline() && matches!(token.kind, EraTokenKind::LineBreak) {
+                self.handle_ignore_newline_tokens();
                 continue;
             }
             break token;
@@ -1867,6 +2297,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             let token = self.lexer.peek(lexer_mode);
             if self.is_ignoring_newline() && matches!(token.kind, EraTokenKind::LineBreak) {
                 self.lexer.read(lexer_mode);
+                self.handle_ignore_newline_tokens();
                 continue;
             }
             break token;
@@ -1879,7 +2310,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     }
     #[must_use]
     fn evaluate_expression_ast(&mut self, expr: EraExpr) -> Option<EraLiteral> {
-        match expr.try_evaluate_constant() {
+        match expr.try_evaluate_constant(&self.global_vars) {
             Ok(x) => Some(x),
             Err(x) => {
                 (self.err_report_fn)(&x);
@@ -1899,6 +2330,17 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
     }
     #[must_use]
+    fn unwrap_str_literal(&mut self, lit: EraLiteral) -> Option<String> {
+        match lit {
+            EraLiteral::Integer(_, cur_si) => {
+                self.synchronize();
+                self.report_err(cur_si, true, "expected string constant expression here");
+                None
+            }
+            EraLiteral::String(x, _) => Some(x),
+        }
+    }
+    #[must_use]
     fn unwrap_literal_from_expression(&mut self, expr: EraExpr) -> Option<EraLiteral> {
         match self.evaluate_expression_ast(expr) {
             Some(x) => Some(x),
@@ -1912,6 +2354,11 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn unwrap_int_from_expression(&mut self, expr: EraExpr) -> Option<i64> {
         let lit = self.unwrap_literal_from_expression(expr)?;
         self.unwrap_int_literal(lit)
+    }
+    #[must_use]
+    fn unwrap_str_from_expression(&mut self, expr: EraExpr) -> Option<String> {
+        let lit = self.unwrap_literal_from_expression(expr)?;
+        self.unwrap_str_literal(lit)
     }
     // Recovers from error by discarding unrecognized tokens
     fn synchronize(&mut self) {
@@ -2064,6 +2511,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             let token = self.lexer.peek(mode);
             if self.is_ignoring_newline() && matches!(token.kind, EraTokenKind::LineBreak) {
                 self.lexer.read(mode);
+                self.handle_ignore_newline_tokens();
                 continue;
             }
             break token;
@@ -2074,6 +2522,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         loop {
             let token = self.lexer.read(mode);
             if self.is_ignoring_newline() && matches!(token.kind, EraTokenKind::LineBreak) {
+                self.handle_ignore_newline_tokens();
                 continue;
             }
             break token;
@@ -2114,22 +2563,22 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
     }
     fn var_is_str(&self, name: &[u8]) -> bool {
-        let name = CaselessString::new(String::from_utf8_lossy(name).to_ascii_uppercase());
+        let name = String::from_utf8_lossy(name);
         if self
             .global_vars
-            .get(&name)
-            .map(|x| x.is_string)
+            .get_var(&name)
+            .map(|x| matches!(x.kind(), ValueKind::ArrStr | ValueKind::Str))
             .unwrap_or(false)
             || self
                 .local_vars
-                .get(&name)
+                .get(CaselessStr::new(&name))
                 .map(|x| x.is_string)
                 .unwrap_or(false)
         {
             return true;
         }
         // HACK: Check for built-in string variables; use external lists in the future?
-        let name = name.as_str();
+        let name = name.to_ascii_uppercase();
         if name.starts_with("LOCALS@") || name == "LOCALS" {
             return true;
         }
@@ -2206,7 +2655,7 @@ fn infix_binding_power(op: EraTokenKind) -> Option<(u8, u8)> {
         Plus | Minus => (21, 22),
         Multiply | Divide | Percentage => (23, 24),
         Colon => (27, 28), // Array subscripting
-        At => (29, 30),    // Special (namespaced) variable access
+        At => (31, 32),    // Special (namespaced) variable access
         _ => return None,
     })
 }
@@ -2214,7 +2663,7 @@ fn postfix_binding_power(op: EraTokenKind) -> Option<(u8, ())> {
     use EraTokenKind::*;
     Some(match op {
         Increment | Decrement => (27, ()),
-        LBracket => (27, ()),
+        LBracket => (29, ()),
         _ => return None,
     })
 }

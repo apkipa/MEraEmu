@@ -132,6 +132,7 @@ mod tests {
                 ;wdwd
                 ;[SKIPEND]
                 #DIM cnt = 100
+                ;upper:d():1
                 cnt '= upper
                 ;results = oook
                 ;locals@DO_COUNT = oook
@@ -265,25 +266,34 @@ mod tests {
                 engine.load_csv(&i.path().to_string_lossy(), csv, EraCsvLoadKind::_Rename)?;
             }
         }
+        let mut erhs = Vec::new();
+        let mut erbs = Vec::new();
         for i in walkdir::WalkDir::new(format!("{game_base_dir}ERB")) {
             let i = i?;
-            if i.file_type().is_file()
-                && i.file_name()
-                    .to_ascii_lowercase()
-                    .as_encoded_bytes()
-                    .ends_with(b".erb")
-            {
-                let mut erb = std::fs::read(i.path())?;
-                // HACK: Fix missing newlines
-                if !erb.ends_with(b"\n") {
-                    erb.push(b'\n');
-                }
-                let erb = erb.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&erb);
-                if engine.load_erb(&i.path().to_string_lossy(), erb).is_ok() {
-                    pass_cnt += 1;
-                }
-                total_cnt += 1;
+            if !i.file_type().is_file() {
+                continue;
             }
+            let file_name = i.file_name().to_ascii_lowercase();
+            let file_name = file_name.as_encoded_bytes();
+            if file_name.ends_with(b".erb") {
+                erbs.push(i.path().to_owned());
+            } else if file_name.ends_with(b".erh") {
+                erhs.push(i.path().to_owned());
+            } else {
+                // println!("warn: skipping file `{}`", i.path().display());
+            }
+        }
+        for erb_path in erhs.into_iter().chain(erbs.into_iter()) {
+            let mut erb = std::fs::read(&erb_path)?;
+            // HACK: Fix missing newlines
+            if !erb.ends_with(b"\n") {
+                erb.push(b'\n');
+            }
+            let erb = erb.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&erb);
+            if engine.load_erb(&erb_path.to_string_lossy(), erb).is_ok() {
+                pass_cnt += 1;
+            }
+            total_cnt += 1;
         }
         _ = engine.finialize_load_srcs();
         {

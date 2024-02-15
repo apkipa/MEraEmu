@@ -23,7 +23,7 @@ pub enum EraBytecodePrimaryType {
         values are impossible.
     */
     FunCall,
-    TryFunCall,
+    TryFunCall, // Returns whether function exists
     FunExists,
     // LoadString,
     // LoadStringW,
@@ -50,6 +50,7 @@ pub enum EraBytecodePrimaryType {
     Pop,
     Duplicate, // Push current value to stack without consuming it
     DuplicateN,
+    DuplicateOneN,
     DeepClone, // Replaces current value with a new copy for arrays
     GetGlobal,
     SetGlobal,
@@ -83,6 +84,7 @@ pub enum EraBytecodePrimaryType {
     LogicalNot,
     GetRandom,
     GetRandomMax,
+    SplitString,
     // -----
     Print,
     PrintLine,
