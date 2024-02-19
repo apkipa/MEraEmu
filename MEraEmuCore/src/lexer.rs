@@ -92,6 +92,7 @@ pub enum EraTokenKind {
     TernaryStrFormMarker,
     SingleComment,
     Identifier, // Even built-in commands are recognized as identifiers first
+    SingleQuote,
     DoubleQuote,
     LineBreak,
     // -----
@@ -193,6 +194,7 @@ impl std::fmt::Display for EraTokenKind {
                 TernaryStrFormMarker => "\\@",
                 SingleComment => "<single-line comment>",
                 Identifier => "<identifier>",
+                SingleQuote => "'",
                 DoubleQuote => "\"",
                 LineBreak => "<newline>",
                 // -----
@@ -229,6 +231,7 @@ pub enum EraLexerMode {
     RawStr,     // Unquoted string
     // TODO: Reject comments inside StrForm properly by introducing a new EraLexerMode
     TernaryStrForm,
+    CallForm,
 }
 
 pub struct EraLexErrorInfo {
@@ -429,10 +432,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                     b'=' => make_link2_token_fn(self, &[(b'=', CmpEq)], Assign),
                     b'<' => make_link2_token_fn(self, &[(b'<', BitShiftL), (b'=', CmpLEq)], CmpL),
                     b'>' => make_link2_token_fn(self, &[(b'>', BitShiftR), (b'=', CmpGEq)], CmpG),
-                    b'\'' if matches!(self.peek_char(), Some(b'=')) => {
-                        self.advance_char();
-                        make_token_fn(self, ExprAssign)
-                    }
+                    b'\'' => make_link2_token_fn(self, &[(b'=', ExprAssign)], SingleQuote),
                     b'\\' => make_link2_token_fn(self, &[(b'@', TernaryStrFormMarker)], Invalid),
                     _ if ch.is_ascii_alphabetic() || ch == b'_' || !ch.is_ascii() => {
                         // Handle identifier & command
@@ -601,7 +601,9 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                                 // Restart read via recursion (ensures correct lexeme)
                                 self.reset_lexeme();
                                 self.next_token(mode)
-                            } else if lexeme.eq_ignore_ascii_case(b"IF_DEBUG") {
+                            } else if lexeme.eq_ignore_ascii_case(b"IF_DEBUG")
+                                || lexeme.eq_ignore_ascii_case(b"IF DEBUG")
+                            {
                                 if IS_DEBUG {
                                     todo!()
                                 } else {
@@ -699,6 +701,9 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                         make_token_fn(self, EraTokenKind::TernaryStrFormMarker)
                     }
                     _ => {
+                        if ch == b'\\' {
+                            self.advance_char();
+                        }
                         self.skip_char_while(|x| !matches!(x, b'{' | b'\n' | b'%' | b'\\'));
                         make_token_fn(self, EraTokenKind::PlainStringLiteral)
                     }
@@ -719,6 +724,9 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                         make_token_fn(self, EraTokenKind::TernaryStrFormMarker)
                     }
                     _ => {
+                        if ch == b'\\' {
+                            self.advance_char();
+                        }
                         self.skip_char_while(|x| !matches!(x, b'{' | b'"' | b'%' | b'\\'));
                         make_token_fn(self, EraTokenKind::PlainStringLiteral)
                     }
@@ -740,7 +748,34 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                         make_token_fn(self, EraTokenKind::TernaryStrFormMarker)
                     }
                     _ => {
+                        if ch == b'\\' {
+                            self.advance_char();
+                        }
                         self.skip_char_while(|x| !matches!(x, b'{' | b'"' | b'%' | b'#' | b'\\'));
+                        make_token_fn(self, EraTokenKind::PlainStringLiteral)
+                    }
+                }
+            }
+            EraLexerMode::CallForm => {
+                let ch = match self.advance_char() {
+                    Some(ch) => ch,
+                    None => return self.make_eof_token(),
+                };
+
+                match ch {
+                    b'{' => make_token_fn(self, EraTokenKind::LCurlyBracket),
+                    b'\n' => make_token_fn(self, EraTokenKind::LineBreak),
+                    b'%' => make_token_fn(self, EraTokenKind::Percentage),
+                    b'(' => make_token_fn(self, EraTokenKind::LBracket),
+                    b',' => make_token_fn(self, EraTokenKind::Comma),
+                    b'\\' if self.peek_char() == Some(b'@') => {
+                        self.advance_char();
+                        make_token_fn(self, EraTokenKind::TernaryStrFormMarker)
+                    }
+                    _ => {
+                        self.skip_char_while(|x| {
+                            !matches!(x, b'{' | b'\n' | b'%' | b'(' | b',' | b'\\')
+                        });
                         make_token_fn(self, EraTokenKind::PlainStringLiteral)
                     }
                 }

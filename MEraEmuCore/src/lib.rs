@@ -4,6 +4,7 @@ mod csv;
 mod engine;
 mod lexer;
 mod parser;
+mod routine;
 mod util;
 mod vm;
 
@@ -181,7 +182,12 @@ mod tests {
                     PRINTFORM false
                 ENDIF
                 PRINTFORM Done
-                CALL DO_COUNT
+                ;CALL DO_COUNT
+                TRYCCALLFORM DO_%"COUN"+"T"%(50)
+                    PRINTFORM [OK]
+                CATCH
+                    PRINTFORM [FAIL]
+                ENDCATCH
                 PRINTV DO_COUNT(0 ? 0 # 10), @"~{-DO_COUNT()}~"
                 PRINTV WINDOW_TITLE += "!"
 
@@ -211,7 +217,7 @@ mod tests {
         let mut callback = MockEngineCallback::new(&errors);
         let mut engine = MEraEngine::new();
         engine.install_sys_callback(Box::new(&mut callback));
-        engine.register_global_var("COUNT", false, 1, false)?;
+        // engine.register_global_var("COUNT", false, 1, false)?;
         engine.register_global_var("WINDOW_TITLE", true, 1, true)?;
         _ = engine.load_erb("main.erb", main_erb.as_bytes());
         _ = engine.finialize_load_srcs();
@@ -248,23 +254,91 @@ mod tests {
         let mut callback = MockEngineCallback::new(&errors);
         let mut engine = MEraEngine::new();
         engine.install_sys_callback(Box::new(&mut callback));
-        engine.register_global_var("COUNT", false, 1, false)?;
         engine.register_global_var("WINDOW_TITLE", true, 1, true)?;
         let mut total_cnt = 0usize;
         let mut pass_cnt = 0usize;
+        // Load CSV files
+        let mut load_csv = |file_path: &std::path::Path, kind| -> anyhow::Result<()> {
+            // let Ok(content) = std::fs::read(file_path) else {
+            //     // Proceed if we cannot read the file
+            //     return Ok(());
+            // };
+            let content = std::fs::read(file_path)?;
+            let content = content
+                .strip_prefix("\u{feff}".as_bytes())
+                .unwrap_or(&content);
+            engine.load_csv(&file_path.to_string_lossy(), content, kind)?;
+            Ok(())
+        };
+        let mut misc_csvs = Vec::new();
+        let mut chara_csvs = Vec::new();
         for i in walkdir::WalkDir::new(format!("{game_base_dir}CSV")) {
-            use crate::engine::EraCsvLoadKind;
+            use crate::engine::EraCsvLoadKind::*;
             let i = i?;
             if !i.file_type().is_file() {
                 continue;
             }
             let file_name = i.file_name().to_ascii_lowercase();
             let file_name = file_name.as_encoded_bytes();
+            let path = i.path();
             if file_name.eq_ignore_ascii_case(b"_Rename.csv") {
-                let csv = std::fs::read(i.path())?;
-                let csv = csv.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&csv);
-                engine.load_csv(&i.path().to_string_lossy(), csv, EraCsvLoadKind::_Rename)?;
+                load_csv(path, _Rename)?;
+            } else if file_name.eq_ignore_ascii_case(b"VariableSize.csv") {
+                load_csv(path, VariableSize)?;
+            } else {
+                let file_name = file_name.to_ascii_uppercase();
+                if !file_name.ends_with(b".CSV") {
+                    continue;
+                }
+                if file_name.starts_with(b"CHARA") {
+                    chara_csvs.push(path.to_owned());
+                } else {
+                    misc_csvs.push(path.to_owned());
+                }
             }
+        }
+        for csv in misc_csvs {
+            use engine::EraCsvLoadKind::*;
+            let csv_name = csv
+                .file_name()
+                .unwrap()
+                .as_encoded_bytes()
+                .to_ascii_uppercase();
+            let kind = match &csv_name[..] {
+                b"ABL.CSV" => Abl,
+                b"EXP.CSV" => Exp,
+                b"TALENT.CSV" => Talent,
+                b"PALAM.CSV" => Palam,
+                b"TRAIN.CSV" => Train,
+                b"MARK.CSV" => Mark,
+                b"ITEM.CSV" => Item,
+                b"BASE.CSV" => Base,
+                b"SOURCE.CSV" => Source,
+                b"EX.CSV" => Ex,
+                b"STR.CSV" => Str,
+                b"EQUIP.CSV" => Equip,
+                b"TEQUIP.CSV" => TEquip,
+                b"FLAG.CSV" => Flag,
+                b"TFLAG.CSV" => TFlag,
+                b"CFLAG.CSV" => CFlag,
+                b"TCVAR.CSV" => TCVar,
+                b"CSTR.CSV" => CStr,
+                b"STAIN.CSV" => Stain,
+                b"CDFLAG1.CSV" => CDFlag1,
+                b"CDFLAG2.CSV" => CDFlag2,
+                b"STRNAME.CSV" => StrName,
+                b"TSTR.CSV" => TStr,
+                b"SAVESTR.CSV" => SaveStr,
+                b"GLOBAL.CSV" => Global,
+                b"GLOBALS.CSV" => Globals,
+                b"GAMEBASE.CSV" => GameBase,
+                _ => continue,
+            };
+            //load_csv(&csv, kind)?;
+            _ = load_csv(&csv, kind);
+        }
+        for csv in chara_csvs {
+            load_csv(&csv, engine::EraCsvLoadKind::Chara_)?;
         }
         let mut erhs = Vec::new();
         let mut erbs = Vec::new();
@@ -295,6 +369,7 @@ mod tests {
             }
             total_cnt += 1;
         }
+        *errors.borrow_mut() += "[FINIALIZE]\n";
         _ = engine.finialize_load_srcs();
         {
             let errors = errors.borrow();

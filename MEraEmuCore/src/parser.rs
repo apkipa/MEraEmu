@@ -127,7 +127,7 @@ pub enum EraExpr {
     Grouping(EraTokenLite, Box<EraExpr>, EraTokenLite),
     PreUnary(EraTokenLite, Box<EraExpr>),
     PostUnary(Box<EraExpr>, EraTokenLite),
-    FunCall(Box<EraExpr>, Vec<EraExpr>),
+    FunCall(Box<EraExpr>, Vec<Option<EraExpr>>),
     Binary(Box<EraExpr>, EraTokenLite, Box<EraExpr>),
     // NOTE: Erabasic only has simple assignment semantics, so we use EraVarExpr as lhs here.
     // Assign(EraVarExpr, EraTermExpr),
@@ -306,7 +306,11 @@ impl EraExpr {
                             ));
                         }
                         let arg = args.into_iter().next().unwrap();
-                        let arg = Self::unwrap_int_constant(arg.try_evaluate_constant(vars)?)?;
+                        let arg = if let Some(arg) = arg {
+                            Self::unwrap_int_constant(arg.try_evaluate_constant(vars)?)?
+                        } else {
+                            0
+                        };
                         let mut result = String::new();
                         result
                             .push(char::from_u32(arg as _).unwrap_or(char::REPLACEMENT_CHARACTER));
@@ -475,12 +479,22 @@ pub struct EraFunDecl {
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraPrintStmt {
     pub vals: Vec<EraExpr>,
     pub flags: PrintExtendedFlags,
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
+pub struct EraPrintDataStmt {
+    pub dest: Option<EraVarExpr>,
+    pub data: Vec<Vec<EraExpr>>,
+    pub flags: PrintExtendedFlags,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
 pub struct EraIfStmt {
     pub cond: EraExpr,
     pub body: Vec<EraStmt>,
@@ -488,15 +502,18 @@ pub struct EraIfStmt {
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraWaitStmt {
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub enum EraSelectCaseStmtCondition {
     Single(EraExpr),
     Range(EraExpr, EraExpr),
     Condition(EraTokenLite, EraExpr),
 }
+#[derive(Debug, Clone)]
 pub struct EraSelectCaseStmt {
     pub cond: EraExpr,
     pub cases: Vec<(Vec<EraSelectCaseStmtCondition>, Vec<EraStmt>)>,
@@ -504,55 +521,74 @@ pub struct EraSelectCaseStmt {
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraQuitStmt {
     pub src_info: SourcePosInfo,
 }
+#[derive(Debug, Clone)]
 pub struct EraWhileStmt {
     pub cond: EraExpr,
     pub body: Vec<EraStmt>,
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraCallStmt {
     pub func: EraExpr,
-    pub args: Vec<EraExpr>,
+    pub args: Vec<Option<EraExpr>>,
+    pub src_info: SourcePosInfo,
+}
+#[derive(Debug, Clone)]
+pub struct EraTryCCallStmt {
+    pub func: EraExpr,
+    pub args: Vec<Option<EraExpr>>,
+    pub then_body: Vec<EraStmt>,
+    pub catch_body: Vec<EraStmt>,
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraReturnStmt {
     pub vals: Vec<EraExpr>,
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraContinueStmt {
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraBreakStmt {
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraThrowStmt {
     pub val: EraExpr,
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraRepeatStmt {
     pub loop_cnt: EraExpr,
     pub body: Vec<EraStmt>,
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraLabelStmt {
     pub name: String,
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraGotoStmt {
     pub target: String,
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraForStmt {
     pub var: EraVarExpr,
     pub start: EraExpr,
@@ -581,6 +617,7 @@ pub struct EraForStmt {
 //     pub src_info: SourcePosInfo,
 // }
 
+#[derive(Debug, Clone)]
 pub struct EraSplitStmt {
     pub input: EraExpr,
     pub separator: EraExpr,
@@ -588,16 +625,117 @@ pub struct EraSplitStmt {
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
 pub struct EraResultCmdCallStmt {
     pub name: String,
-    pub args: Vec<EraExpr>,
+    pub args: Vec<Option<EraExpr>>,
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
+pub struct EraTimesStmt {
+    pub target: EraVarExpr,
+    pub factor: f64,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraSetBitStmt {
+    pub target: EraVarExpr,
+    pub bits: Vec<EraExpr>,
+    pub src_info: SourcePosInfo,
+}
+#[derive(Debug, Clone)]
+pub struct EraClearBitStmt {
+    pub target: EraVarExpr,
+    pub bits: Vec<EraExpr>,
+    pub src_info: SourcePosInfo,
+}
+#[derive(Debug, Clone)]
+pub struct EraInvertBitStmt {
+    pub target: EraVarExpr,
+    pub bits: Vec<EraExpr>,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraSetColorStmt {
+    pub color: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+#[derive(Debug, Clone)]
+pub struct EraResetColorStmt {
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraVarSetStmt {
+    pub target: EraVarExpr,
+    pub value: Option<EraExpr>,
+    pub start_index: Option<EraExpr>,
+    pub end_index: Option<EraExpr>,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraHtmlPrintStmt {
+    pub expr: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraPrintButtonStmt {
+    pub content: EraExpr,
+    pub value: EraExpr,
+    pub flags: PrintExtendedFlags,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraArrayRemoveStmt {
+    pub target: EraVarExpr,
+    pub start_index: EraExpr,
+    pub count: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraArraySortStmt {
+    pub target: EraVarExpr,
+    pub is_ascending: bool,
+    pub start_index: Option<EraExpr>,
+    pub count: Option<EraExpr>,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraArrayMSortStmt {
+    pub primary: EraVarExpr,
+    pub subs: Vec<EraVarExpr>,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraArrayCopyStmt {
+    pub from_name: EraExpr,
+    pub to_name: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraRowAssignStmt {
+    pub dest: EraVarExpr,
+    pub srcs: Vec<EraExpr>,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
 pub enum EraStmt {
     Expr(EraExpr),
     Command(EraCommandStmt),
     Label(EraLabelStmt),
+    RowAssign(EraRowAssignStmt),
+    Invalid(SourcePosInfo),
 }
 impl EraStmt {
     fn source_pos_info(&self) -> SourcePosInfo {
@@ -606,19 +744,25 @@ impl EraStmt {
             Expr(x) => x.source_pos_info(),
             Command(x) => x.source_pos_info(),
             Label(x) => x.src_info,
+            RowAssign(x) => x.src_info,
+            Invalid(src_info) => *src_info,
         }
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum EraCommandStmt {
     DebugPrint(EraPrintStmt),
     Print(EraPrintStmt),
+    PrintData(EraPrintDataStmt),
     Wait(EraWaitStmt),
     If(EraIfStmt),
     Quit(EraQuitStmt),
     SelectCase(EraSelectCaseStmt),
     While(EraWhileStmt),
     Call(EraCallStmt),
+    TryCall(EraCallStmt),
+    TryCCall(EraTryCCallStmt),
     Return(EraReturnStmt),
     Continue(EraContinueStmt),
     Break(EraBreakStmt),
@@ -631,6 +775,19 @@ pub enum EraCommandStmt {
     // GDrawSprite(EraGDrawSpriteStmt),
     Split(EraSplitStmt),
     ResultCmdCall(EraResultCmdCallStmt),
+    Times(EraTimesStmt),
+    SetBit(EraSetBitStmt),
+    ClearBit(EraClearBitStmt),
+    InvertBit(EraInvertBitStmt),
+    SetColor(EraSetColorStmt),
+    ResetColor(EraResetColorStmt),
+    VarSet(EraVarSetStmt),
+    HtmlPrint(EraHtmlPrintStmt),
+    PrintButton(EraPrintButtonStmt),
+    ArrayRemove(EraArrayRemoveStmt),
+    ArraySort(EraArraySortStmt),
+    ArrayMSort(EraArrayMSortStmt),
+    ArrayCopy(EraArrayCopyStmt),
 }
 impl EraCommandStmt {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -638,12 +795,15 @@ impl EraCommandStmt {
         match self {
             DebugPrint(x) => x.src_info,
             Print(x) => x.src_info,
+            PrintData(x) => x.src_info,
             Wait(x) => x.src_info,
             If(x) => x.src_info,
             Quit(x) => x.src_info,
             SelectCase(x) => x.src_info,
             While(x) => x.src_info,
             Call(x) => x.src_info,
+            TryCall(x) => x.src_info,
+            TryCCall(x) => x.src_info,
             Return(x) => x.src_info,
             Continue(x) => x.src_info,
             Break(x) => x.src_info,
@@ -656,6 +816,19 @@ impl EraCommandStmt {
             // GDrawSprite(x) => x.src_info,
             Split(x) => x.src_info,
             ResultCmdCall(x) => x.src_info,
+            Times(x) => x.src_info,
+            SetBit(x) => x.src_info,
+            ClearBit(x) => x.src_info,
+            InvertBit(x) => x.src_info,
+            SetColor(x) => x.src_info,
+            ResetColor(x) => x.src_info,
+            VarSet(x) => x.src_info,
+            HtmlPrint(x) => x.src_info,
+            PrintButton(x) => x.src_info,
+            ArrayRemove(x) => x.src_info,
+            ArraySort(x) => x.src_info,
+            ArrayMSort(x) => x.src_info,
+            ArrayCopy(x) => x.src_info,
         }
     }
 }
@@ -698,6 +871,7 @@ struct EraParserImpl<'a, 'b, ErrReportFn, LexErrReportFn> {
     global_vars: &'a mut EraVarPool,
     local_vars: HashMap<CaselessString, EraParserSlimVarTypeInfo>,
     curly_brackets_cnt: u32,
+    last_ate_newline: bool,
     src_info: SourcePosInfo,
 }
 
@@ -715,6 +889,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             global_vars: global_vars,
             local_vars: HashMap::new(),
             curly_brackets_cnt: 0,
+            last_ate_newline: false,
             src_info: SourcePosInfo { line: 1, column: 1 },
         }
     }
@@ -821,7 +996,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         let (var_name, var_val) = self.materialize_var_decl(x.clone())?;
                         if self
                             .global_vars
-                            .add_var_ex(&var_name, var_val, x.is_const)
+                            .add_var_ex(&var_name, var_val, x.is_const, x.is_charadata)
                             .is_none()
                         {
                             self.report_err(
@@ -1125,10 +1300,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             EraTokenKind::Comma => {
                 loop {
                     params.push(self.expression(true)?);
-                    if self
-                        .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
-                        .is_none()
-                    {
+                    if self.matches_comma().is_none() {
                         break;
                     }
                 }
@@ -1141,10 +1313,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 {
                     loop {
                         params.push(self.expression(true)?);
-                        if self
-                            .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
-                            .is_none()
-                        {
+                        if self.matches_comma().is_none() {
                             break;
                         }
                     }
@@ -1210,10 +1379,13 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     self.report_token_err(
                         token.into(),
                         false,
-                        "this declaration should not appear within function body; ignoring",
+                        "sharp declaration should not appear within function body; ignoring",
                     );
                 }
-                _ => body.push(self.statement()?),
+                _ => {
+                    let stmt = self.statement().unwrap_or(EraStmt::Invalid(token.src_info));
+                    body.push(stmt);
+                }
             }
         }
 
@@ -1249,6 +1421,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     EraCommandStmt::Print(self.r().stmt_print(arg_fmt, flags)?)
                 } else if let Some((arg_fmt, flags)) = Self::try_recognize_debugprint_cmd(cmd) {
                     EraCommandStmt::DebugPrint(self.r().stmt_print(arg_fmt, flags)?)
+                } else if let Some(flags) = Self::try_recognize_printdata_cmd(cmd) {
+                    EraCommandStmt::PrintData(self.r().stmt_printdata(flags)?)
                 } else {
                     match cmd {
                         b"IF" => EraCommandStmt::If(self.r().stmt_if()?),
@@ -1259,6 +1433,19 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"WHILE" => EraCommandStmt::While(self.r().stmt_while()?),
                         b"RETURN" | b"RETURNF" => EraCommandStmt::Return(self.r().stmt_return()?),
                         b"CALL" | b"CALLF" => EraCommandStmt::Call(self.r().stmt_call()?),
+                        b"CALLFORM" | b"CALLFORMF" => {
+                            EraCommandStmt::Call(self.r().stmt_callform()?)
+                        }
+                        b"TRYCALL" | b"TRYCALLF" => EraCommandStmt::TryCall(self.r().stmt_call()?),
+                        b"TRYCALLFORM" | b"TRYCALLFORMF" => {
+                            EraCommandStmt::TryCall(self.r().stmt_callform()?)
+                        }
+                        b"TRYCCALL" | b"TRYCCALLF" => {
+                            EraCommandStmt::TryCCall(self.r().stmt_tryccall()?)
+                        }
+                        b"TRYCCALLFORM" | b"TRYCCALLFORMF" => {
+                            EraCommandStmt::TryCCall(self.r().stmt_tryccallform()?)
+                        }
                         b"CONTINUE" => EraCommandStmt::Continue(self.r().stmt_continue()?),
                         b"BREAK" => EraCommandStmt::Break(self.r().stmt_break()?),
                         b"THROW" => EraCommandStmt::Throw(self.r().stmt_throw()?),
@@ -1269,21 +1456,33 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         // b"GDISPOSE" => EraCommandStmt::GDispose(self.r().stmt_gdispose()?),
                         // b"GDRAWSPRITE" => EraCommandStmt::GDrawSprite(self.r().stmt_gdrawsprite()?),
                         b"SPLIT" => EraCommandStmt::Split(self.r().stmt_split()?),
-                        b"GCREATE" | b"GDISPOSE" | b"GDRAWSPRITE" => {
+                        b"GCREATE" | b"GDISPOSE" | b"GDRAWSPRITE" | b"GETBIT" => {
                             EraCommandStmt::ResultCmdCall(self.stmt_result_cmd_call()?)
                         }
-                        _ => return Some(EraStmt::Expr(self.expression(false)?)),
+                        b"TIMES" => EraCommandStmt::Times(self.r().stmt_times()?),
+                        b"SETBIT" => EraCommandStmt::SetBit(self.r().stmt_setbit()?),
+                        b"CLEARBIT" => EraCommandStmt::ClearBit(self.r().stmt_clearbit()?),
+                        b"INVERTBIT" => EraCommandStmt::InvertBit(self.r().stmt_invertbit()?),
+                        b"SETCOLOR" => EraCommandStmt::SetColor(self.r().stmt_setcolor()?),
+                        b"RESETCOLOR" => EraCommandStmt::ResetColor(self.r().stmt_resetcolor()?),
+                        b"VARSET" => EraCommandStmt::VarSet(self.r().stmt_varset()?),
+                        b"HTML_PRINT" => EraCommandStmt::HtmlPrint(self.r().stmt_html_print()?),
+                        b"PRINTBUTTON" | b"PRINTBUTTONC" | b"PRINTBUTTONLC" => {
+                            let mut flags = PrintExtendedFlags::new();
+                            match cmd {
+                                b"PRINTBUTTONC" => flags.set_right_pad(true),
+                                b"PRINTBUTTONLC" => flags.set_left_pad(true),
+                                _ => (),
+                            }
+                            EraCommandStmt::PrintButton(self.r().stmt_printbutton(flags)?)
+                        }
+                        b"ARRAYREMOVE" => EraCommandStmt::ArrayRemove(self.r().stmt_arrayremove()?),
+                        b"ARRAYSORT" => EraCommandStmt::ArraySort(self.r().stmt_arraysort()?),
+                        b"ARRAYMSORT" => EraCommandStmt::ArrayMSort(self.r().stmt_arraymsort()?),
+                        b"ARRAYCOPY" => EraCommandStmt::ArrayCopy(self.r().stmt_arraycopy()?),
+                        _ => return Some(self.stmt_expression()?),
                     }
                 }
-
-                // if let Some((arg_fmt, flags)) = Self::try_recognize_print_cmd(cmd) {
-                //     EraCommandStmt::Print(self.stmt_print(arg_fmt, flags)?)
-                // } else {
-                //     match cmd {
-                //         b"WAIT" => EraCommandStmt::Wait(self.stmt_wait()?),
-                //         _ => return Some(EraStmt::Expr(self.expression()?)),
-                //     }
-                // }
             }),
             EraTokenKind::Dollar => {
                 _ = self.lexer.read(EraLexerMode::Normal);
@@ -1312,12 +1511,10 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 );
                 return None;
             }
-            _ => EraStmt::Expr(self.expression(false)?),
+            _ => self.stmt_expression()?,
         })
     }
-    // TODO: Remove var_expression?
     fn var_expression(&mut self) -> Option<EraVarExpr> {
-        //let name = self.consume(EraLexerMode::Normal, EraTokenKind::Identifier)?;
         let expr = self.expression(true)?;
         Some(match expr {
             EraExpr::Term(EraTermExpr::Var(x)) => x,
@@ -1439,11 +1636,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                             .is_none()
                         {
                             loop {
-                                args.push(self.expression(true)?);
-                                if self
-                                    .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
-                                    .is_none()
-                                {
+                                if self.matches_comma().is_some() {
+                                    args.push(None);
+                                    continue;
+                                }
+                                args.push(Some(self.expression(true)?));
+                                if self.matches_comma().is_none() {
                                     break;
                                 }
                                 if matches!(
@@ -1507,6 +1705,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     EraTokenKind::Assign => match lhs {
                         EraExpr::Term(EraTermExpr::Var(x)) => {
                             let rhs = if self.var_is_str(x.name.as_bytes()) && !pure {
+                                self.last_ate_newline = true;
                                 EraExpr::Term(EraTermExpr::StrForm(self.raw_strform(true)?))
                             } else {
                                 self.expression_bp(r_bp, pure, break_at)?
@@ -1774,6 +1973,59 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
         Some(EraStrFormExpr { parts, src_info })
     }
+    fn raw_str(&mut self) -> Option<EraExpr> {
+        let mut cont = String::new();
+        let mut token = self.lexer.read(EraLexerMode::RawStr);
+        let src_info = token.src_info;
+        loop {
+            match token.kind {
+                EraTokenKind::PlainStringLiteral => {
+                    cont.push_str(&String::from_utf8_lossy(token.lexeme))
+                }
+                EraTokenKind::LineBreak => {
+                    if !self.is_ignoring_newline() {
+                        break;
+                    }
+                    cont.push(' ');
+                    self.handle_ignore_newline_tokens();
+                }
+                _ => {
+                    // TODO: Synchronize here?
+                    self.report_token_err(token.into(), true, "unexpected token");
+                    return None;
+                }
+            }
+            token = self.lexer.read(EraLexerMode::RawStr);
+        }
+        Some(EraExpr::new_str(cont, src_info))
+    }
+    fn generic_rawstr(&mut self, break_at: &[EraTokenKind]) -> Option<(EraExpr, EraToken<'b>)> {
+        let mut cont = String::new();
+        let mut token = self.lexer.read(EraLexerMode::RawStr);
+        let src_info = token.src_info;
+        loop {
+            match token.kind {
+                EraTokenKind::PlainStringLiteral => {
+                    cont.push_str(&String::from_utf8_lossy(token.lexeme))
+                }
+                EraTokenKind::LineBreak => {
+                    if !self.is_ignoring_newline() {
+                        break;
+                    }
+                    cont.push(' ');
+                    self.handle_ignore_newline_tokens();
+                }
+                _ if break_at.contains(&token.kind) => break,
+                _ => {
+                    // TODO: Synchronize here?
+                    self.report_token_err(token.into(), true, "unexpected token");
+                    return None;
+                }
+            }
+            token = self.lexer.read(EraLexerMode::RawStr);
+        }
+        Some((EraExpr::new_str(cont, src_info), token))
+    }
     fn strform_expr_part_expr(
         &mut self,
         break_at: EraTokenKind,
@@ -1807,10 +2059,51 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             alignment,
         })
     }
-    // fn command(&mut self, cmd_token: &EraToken) -> Option<EraCommandStmt> {
-    //     // TODO...
-    //     unimplemented!()
-    // }
+    fn stmt_expression(&mut self) -> Option<EraStmt> {
+        self.last_ate_newline = false;
+        let expr = self.expression(false)?;
+        if self.last_ate_newline {
+            return Some(EraStmt::Expr(expr));
+        }
+        let stmt = if matches!(
+            self.peek_token(EraLexerMode::Normal).kind,
+            EraTokenKind::Comma
+        ) {
+            // Inspect the expression
+            if let EraExpr::Binary(
+                lhs,
+                EraTokenLite {
+                    kind: EraTokenKind::Assign | EraTokenKind::ExprAssign,
+                    src_info,
+                },
+                rhs,
+            ) = expr
+            {
+                let EraExpr::Term(EraTermExpr::Var(dest)) = *lhs else {
+                    self.report_err(lhs.source_pos_info(), true, "invalid assignment target");
+                    return None;
+                };
+                // Extended array range-assignment
+                let src_info = dest.src_info;
+                let mut srcs = vec![*rhs];
+                while self.matches_comma().is_some() {
+                    srcs.push(self.expression(true)?);
+                }
+                EraStmt::RowAssign(EraRowAssignStmt {
+                    dest,
+                    srcs,
+                    src_info,
+                })
+            } else {
+                // Ignore the trailing comma as we cannot handle it
+                EraStmt::Expr(expr)
+            }
+        } else {
+            EraStmt::Expr(expr)
+        };
+        self.consume_newline()?;
+        Some(stmt)
+    }
     fn stmt_print(
         &mut self,
         arg_fmt: EraCommandArgFmt,
@@ -1820,40 +2113,28 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         match arg_fmt {
             // TODO: PRINT statement type-check
             EraCommandArgFmt::Expression | EraCommandArgFmt::ExpressionS => loop {
-                vals.push(self.expression(true)?);
                 if self
-                    .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
+                    .try_consume(EraLexerMode::Normal, EraTokenKind::SingleQuote)
                     .is_some()
                 {
+                    // HACK: Raw string inside PRINTV
+                    let (val, token) = self.generic_rawstr(&[EraTokenKind::Comma])?;
+                    vals.push(val);
+                    match token.kind {
+                        EraTokenKind::Comma => continue,
+                        EraTokenKind::LineBreak => break,
+                        _ => unreachable!(),
+                    }
+                }
+                vals.push(self.expression(true)?);
+                if self.matches_comma().is_some() {
                     continue;
                 }
                 self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
                 break;
             },
             EraCommandArgFmt::RawString => {
-                let mut cont = String::new();
-                let mut token = self.lexer.read(EraLexerMode::RawStr);
-                loop {
-                    match token.kind {
-                        EraTokenKind::PlainStringLiteral => {
-                            cont.push_str(&String::from_utf8_lossy(token.lexeme))
-                        }
-                        EraTokenKind::LineBreak => {
-                            if !self.is_ignoring_newline() {
-                                break;
-                            }
-                            cont.push(' ');
-                            self.handle_ignore_newline_tokens();
-                        }
-                        _ => {
-                            // TODO: Synchronize here?
-                            self.report_token_err(token.into(), true, "unexpected token");
-                            return None;
-                        }
-                    }
-                    token = self.lexer.read(EraLexerMode::RawStr);
-                }
-                vals.push(EraExpr::new_str(cont, token.src_info));
+                vals.push(self.raw_str()?);
             }
             EraCommandArgFmt::RawStringForm => {
                 vals.push(EraExpr::Term(EraTermExpr::StrForm(
@@ -1865,6 +2146,53 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             vals,
             flags,
             src_info: self.src_info,
+        })
+    }
+    fn stmt_printdata(&mut self, flags: PrintExtendedFlags) -> Option<EraPrintDataStmt> {
+        let src_info = self.src_info;
+        let dest = if self.matches_newline().is_none() {
+            Some(self.var_expression()?)
+        } else {
+            None
+        };
+        let mut data = Vec::new();
+        while self.matches_command_end(b"ENDDATA").is_none() {
+            if self.matches_command_end(b"DATA").is_some() {
+                data.push(vec![self.raw_str()?]);
+            } else if self.matches_command_end(b"DATAFORM").is_some() {
+                data.push(vec![EraExpr::Term(EraTermExpr::StrForm(
+                    self.raw_strform(false)?,
+                ))]);
+            } else if self.matches_command_end(b"DATALIST").is_some() {
+                let mut data_list = Vec::new();
+                self.consume_newline()?;
+                while self.matches_command_end(b"ENDLIST").is_none() {
+                    if self.matches_command_end(b"DATA").is_some() {
+                        data_list.push(self.raw_str()?);
+                    } else if self.matches_command_end(b"DATAFORM").is_some() {
+                        data_list.push(EraExpr::Term(EraTermExpr::StrForm(
+                            self.raw_strform(false)?,
+                        )));
+                    } else {
+                        let token = self.lexer.read(EraLexerMode::Normal).into();
+                        self.report_token_err(token, true, "unknown command inside DATALIST");
+                        return None;
+                    }
+                }
+                self.consume_newline()?;
+                data.push(data_list);
+            } else {
+                let token = self.lexer.read(EraLexerMode::Normal).into();
+                self.report_token_err(token, true, "unknown command inside PRINTDATA");
+                return None;
+            }
+        }
+        self.consume_newline()?;
+        Some(EraPrintDataStmt {
+            dest,
+            data,
+            flags,
+            src_info,
         })
     }
     fn stmt_sif(&mut self) -> Option<EraIfStmt> {
@@ -2056,25 +2384,19 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
         Some(EraReturnStmt { vals, src_info })
     }
-    fn stmt_call(&mut self) -> Option<EraCallStmt> {
-        // TODO: Support CALLFORM
-        let src_info = self.src_info;
-        let func = self.consume(EraLexerMode::Normal, EraTokenKind::Identifier)?;
-        let func = EraExpr::new_str(
-            String::from_utf8_lossy(func.lexeme).into_owned(),
-            func.src_info,
-        );
-        let token = self.read_token(EraLexerMode::Normal);
+    fn stmt_call_args(&mut self, first: EraToken) -> Option<Vec<Option<EraExpr>>> {
+        let token = first;
         let mut args = Vec::new();
         match token.kind {
             EraTokenKind::LineBreak => (),
             EraTokenKind::Comma => loop {
+                if self.matches_comma().is_some() {
+                    args.push(None);
+                    continue;
+                }
                 let expr = self.expression(true)?;
-                args.push(expr);
-                if self
-                    .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
-                    .is_some()
-                {
+                args.push(Some(expr));
+                if self.matches_comma().is_some() {
                     continue;
                 }
                 self.consume_newline()?;
@@ -2086,12 +2408,19 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     .is_none()
                 {
                     loop {
+                        if self.matches_comma().is_some() {
+                            args.push(None);
+                            continue;
+                        }
+                        if matches!(
+                            self.peek_token(EraLexerMode::Normal).kind,
+                            EraTokenKind::RBracket
+                        ) {
+                            break;
+                        }
                         let expr = self.expression(true)?;
-                        args.push(expr);
-                        if self
-                            .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
-                            .is_none()
-                        {
+                        args.push(Some(expr));
+                        if self.matches_comma().is_none() {
                             break;
                         }
                     }
@@ -2104,11 +2433,139 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 return None;
             }
         }
+        Some(args)
+    }
+    fn stmt_call(&mut self) -> Option<EraCallStmt> {
+        let src_info = self.src_info;
+        let func = self.consume(EraLexerMode::Normal, EraTokenKind::Identifier)?;
+        let func = EraExpr::new_str(
+            String::from_utf8_lossy(func.lexeme).into_owned(),
+            func.src_info,
+        );
+        let token = self.read_token(EraLexerMode::Normal);
+        let args = self.stmt_call_args(token)?;
         Some(EraCallStmt {
             func,
             args,
             src_info,
         })
+    }
+    fn generic_strform(
+        &mut self,
+        mode: EraLexerMode,
+        break_at: &[EraTokenKind],
+        trim_start: bool,
+        trim_end: bool,
+    ) -> Option<(EraStrFormExpr, EraToken<'b>)> {
+        let mut parts = Vec::new();
+        let mut token = self.lexer.read(mode);
+        let mut is_first = true;
+        let src_info = token.src_info;
+        loop {
+            match token.kind {
+                EraTokenKind::PlainStringLiteral => {
+                    let mut lexeme = token.lexeme;
+                    if trim_start && is_first {
+                        while let [b' ' | b'\t', rest @ ..] = lexeme {
+                            lexeme = rest;
+                        }
+                    }
+                    parts.push(EraStrFormExprPart::Literal(
+                        String::from_utf8_lossy(lexeme).into_owned(),
+                        token.src_info,
+                    ))
+                }
+                // TODO: String interpolation type-check
+                EraTokenKind::LCurlyBracket => {
+                    parts.push(EraStrFormExprPart::Expression(
+                        self.strform_expr_part_expr(EraTokenKind::Eof)?,
+                    ));
+                    self.consume(EraLexerMode::Normal, EraTokenKind::RCurlyBracket)?;
+                }
+                // TODO: String interpolation type-check
+                EraTokenKind::Percentage => {
+                    parts.push(EraStrFormExprPart::Expression(
+                        self.strform_expr_part_expr(EraTokenKind::Percentage)?,
+                    ));
+                    self.consume(EraLexerMode::Normal, EraTokenKind::Percentage)?;
+                }
+                EraTokenKind::LineBreak => {
+                    if !self.is_ignoring_newline() {
+                        // Force break
+                        break;
+                    }
+                    parts.push(EraStrFormExprPart::Literal(" ".to_owned(), token.src_info));
+                    self.handle_ignore_newline_tokens();
+                }
+                EraTokenKind::TernaryStrFormMarker => {
+                    let part = EraStrFormExprPartExpression {
+                        expr: self.ternary_strform()?,
+                        width: None,
+                        alignment: PadStringFlags::new(),
+                    };
+                    parts.push(EraStrFormExprPart::Expression(part));
+                }
+                _ if break_at.contains(&token.kind) => {
+                    break;
+                }
+                _ => {
+                    // TODO: Synchronize here?
+                    self.report_token_err(token.into(), true, "unexpected token");
+                    return None;
+                }
+            }
+            is_first = false;
+            token = self.lexer.read(mode);
+        }
+        if trim_end {
+            if let Some(EraStrFormExprPart::Literal(x, _)) = parts.last_mut() {
+                x.truncate(x.trim_end_matches(&[' ', '\t']).len());
+            }
+        }
+        Some((EraStrFormExpr { parts, src_info }, token))
+    }
+    fn stmt_callform(&mut self) -> Option<EraCallStmt> {
+        let src_info = self.src_info;
+        let (func, token) = self.generic_strform(
+            EraLexerMode::CallForm,
+            &[EraTokenKind::Comma, EraTokenKind::LBracket],
+            true,
+            true,
+        )?;
+        let func = EraExpr::Term(EraTermExpr::StrForm(func));
+        let args = self.stmt_call_args(token)?;
+        Some(EraCallStmt {
+            func,
+            args,
+            src_info,
+        })
+    }
+    fn stmt_tryccall(&mut self) -> Option<EraTryCCallStmt> {
+        let EraCallStmt {
+            func,
+            args,
+            src_info,
+        } = self.stmt_callform()?;
+        let mut then_body = Vec::new();
+        let mut catch_body = Vec::new();
+        while self.matches_command_end(b"CATCH").is_none() {
+            then_body.push(self.statement()?);
+        }
+        self.consume_newline()?;
+        while self.matches_command_end(b"ENDCATCH").is_none() {
+            catch_body.push(self.statement()?);
+        }
+        self.consume_newline()?;
+        Some(EraTryCCallStmt {
+            func,
+            args,
+            then_body,
+            catch_body,
+            src_info,
+        })
+    }
+    fn stmt_tryccallform(&mut self) -> Option<EraTryCCallStmt> {
+        self.stmt_tryccall()
     }
     fn stmt_continue(&mut self) -> Option<EraContinueStmt> {
         self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
@@ -2248,7 +2705,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             });
         }
         loop {
-            args.push(self.expression(true)?);
+            args.push(Some(self.expression(true)?));
             if self.matches_comma().is_none() {
                 break;
             }
@@ -2257,6 +2714,253 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         Some(EraResultCmdCallStmt {
             name,
             args,
+            src_info,
+        })
+    }
+    fn stmt_times(&mut self) -> Option<EraTimesStmt> {
+        let src_info = self.src_info;
+        let target = self.var_expression()?;
+        self.consume_comma()?;
+        let factor = self.consume(EraLexerMode::RawStr, EraTokenKind::PlainStringLiteral)?;
+        let Ok(factor) = String::from_utf8_lossy(factor.lexeme).trim().parse() else {
+            self.report_err(factor.src_info, true, "expected a float here");
+            self.synchronize();
+            return None;
+        };
+        self.consume_newline()?;
+        Some(EraTimesStmt {
+            target,
+            factor,
+            src_info,
+        })
+    }
+    fn stmt_setbit(&mut self) -> Option<EraSetBitStmt> {
+        let src_info = self.src_info;
+        let target = self.var_expression()?;
+        self.consume_comma()?;
+        let mut bits = Vec::new();
+        loop {
+            bits.push(self.expression(true)?);
+            if self
+                .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
+                .is_none()
+            {
+                break;
+            }
+        }
+        self.consume_newline()?;
+        Some(EraSetBitStmt {
+            target,
+            bits,
+            src_info,
+        })
+    }
+    fn stmt_clearbit(&mut self) -> Option<EraClearBitStmt> {
+        let src_info = self.src_info;
+        let target = self.var_expression()?;
+        self.consume_comma()?;
+        let mut bits = Vec::new();
+        loop {
+            bits.push(self.expression(true)?);
+            if self
+                .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
+                .is_none()
+            {
+                break;
+            }
+        }
+        self.consume_newline()?;
+        Some(EraClearBitStmt {
+            target,
+            bits,
+            src_info,
+        })
+    }
+    fn stmt_invertbit(&mut self) -> Option<EraInvertBitStmt> {
+        let src_info = self.src_info;
+        let target = self.var_expression()?;
+        self.consume_comma()?;
+        let mut bits = Vec::new();
+        loop {
+            bits.push(self.expression(true)?);
+            if self
+                .try_consume(EraLexerMode::Normal, EraTokenKind::Comma)
+                .is_none()
+            {
+                break;
+            }
+        }
+        self.consume_newline()?;
+        Some(EraInvertBitStmt {
+            target,
+            bits,
+            src_info,
+        })
+    }
+    fn stmt_setcolor(&mut self) -> Option<EraSetColorStmt> {
+        let src_info = self.src_info;
+        let color;
+        let a1 = self.expression(true)?;
+        if let Some(comma1) = self.matches_comma() {
+            let a2 = self.expression(true)?;
+            let comma2 = self.consume_comma()?;
+            let a3 = self.expression(true)?;
+            let a1_si = a1.source_pos_info();
+            let a2_si = a2.source_pos_info();
+            let a3_si = a3.source_pos_info();
+            let add_fn = |a: EraExpr, si, b: EraExpr| {
+                EraExpr::Binary(
+                    a.into(),
+                    EraTokenLite {
+                        kind: EraTokenKind::Plus,
+                        src_info: si,
+                    },
+                    b.into(),
+                )
+            };
+            let shift_fn = |a: EraExpr, si, b: i64| {
+                EraExpr::Binary(
+                    a.into(),
+                    EraTokenLite {
+                        kind: EraTokenKind::BitShiftL,
+                        src_info: si,
+                    },
+                    EraExpr::new_int(b, si).into(),
+                )
+            };
+            color = add_fn(
+                add_fn(
+                    shift_fn(a1, a1_si, 16),
+                    comma1.src_info,
+                    shift_fn(a2, a2_si, 8),
+                ),
+                comma2.src_info,
+                a3,
+            );
+        } else {
+            color = a1;
+        }
+        self.consume_newline()?;
+        Some(EraSetColorStmt { color, src_info })
+    }
+    fn stmt_resetcolor(&mut self) -> Option<EraResetColorStmt> {
+        let src_info = self.src_info;
+        self.consume_newline()?;
+        Some(EraResetColorStmt { src_info })
+    }
+    fn stmt_varset(&mut self) -> Option<EraVarSetStmt> {
+        let src_info = self.src_info;
+        let target = self.var_expression()?;
+        let mut value = None;
+        let mut start_index = None;
+        let mut end_index = None;
+        if self.matches_comma().is_some() {
+            value = Some(self.expression(true)?);
+            if self.matches_comma().is_some() {
+                start_index = Some(self.expression(true)?);
+                if self.matches_comma().is_some() {
+                    end_index = Some(self.expression(true)?);
+                }
+            }
+        }
+        self.consume_newline()?;
+        Some(EraVarSetStmt {
+            target,
+            value,
+            start_index,
+            end_index,
+            src_info,
+        })
+    }
+    fn stmt_html_print(&mut self) -> Option<EraHtmlPrintStmt> {
+        let src_info = self.src_info;
+        let expr = self.expression(true)?;
+        self.consume_newline()?;
+        Some(EraHtmlPrintStmt { expr, src_info })
+    }
+    fn stmt_printbutton(&mut self, flags: PrintExtendedFlags) -> Option<EraPrintButtonStmt> {
+        let src_info = self.src_info;
+        let content = self.expression(true)?;
+        self.consume_comma()?;
+        let value = self.expression(true)?;
+        self.consume_newline()?;
+        Some(EraPrintButtonStmt {
+            content,
+            value,
+            flags,
+            src_info,
+        })
+    }
+    fn stmt_arrayremove(&mut self) -> Option<EraArrayRemoveStmt> {
+        let src_info = self.src_info;
+        let target = self.var_expression()?;
+        self.consume_comma()?;
+        let start_index = self.expression(true)?;
+        self.consume_comma()?;
+        let count = self.expression(true)?;
+        self.consume_newline()?;
+        Some(EraArrayRemoveStmt {
+            target,
+            start_index,
+            count,
+            src_info,
+        })
+    }
+    fn stmt_arraysort(&mut self) -> Option<EraArraySortStmt> {
+        let src_info = self.src_info;
+        let target = self.var_expression()?;
+        let mut is_ascending = true;
+        let mut start_index = None;
+        let mut count = None;
+        if self.matches_comma().is_some() {
+            let token = self.read_token(EraLexerMode::Normal);
+            if token.lexeme.eq_ignore_ascii_case(b"FORWARD") {
+                is_ascending = true;
+            } else if token.lexeme.eq_ignore_ascii_case(b"BACK") {
+                is_ascending = false;
+            } else {
+                self.report_token_err(token.into(), true, "expected `FORWARD` or `BACK`");
+                return None;
+            }
+            if self.matches_comma().is_some() {
+                start_index = Some(self.expression(true)?);
+                if self.matches_comma().is_some() {
+                    count = Some(self.expression(true)?);
+                }
+            }
+        }
+        self.consume_newline()?;
+        Some(EraArraySortStmt {
+            target,
+            is_ascending,
+            start_index,
+            count,
+            src_info,
+        })
+    }
+    fn stmt_arraymsort(&mut self) -> Option<EraArrayMSortStmt> {
+        let src_info = self.src_info;
+        let primary = self.var_expression()?;
+        let mut subs = Vec::new();
+        while self.matches_comma().is_some() {
+            subs.push(self.var_expression()?);
+        }
+        self.consume_newline()?;
+        Some(EraArrayMSortStmt {
+            primary,
+            subs,
+            src_info,
+        })
+    }
+    fn stmt_arraycopy(&mut self) -> Option<EraArrayCopyStmt> {
+        let src_info = self.src_info;
+        let from_name = self.expression(true)?;
+        self.consume_comma()?;
+        let to_name = self.expression(true)?;
+        self.consume_newline()?;
+        Some(EraArrayCopyStmt {
+            from_name,
+            to_name,
             src_info,
         })
     }
@@ -2503,6 +3207,25 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             flags.set_is_wait(true);
         }
         cmd.is_empty().then_some((arg_fmt, flags))
+    }
+    #[must_use]
+    fn try_recognize_printdata_cmd(cmd: &[u8]) -> Option<PrintExtendedFlags> {
+        let cmd = cmd.to_ascii_uppercase();
+        let mut cmd = cmd.as_slice();
+        let mut flags = PrintExtendedFlags::new();
+        cmd = cmd.strip_prefix(b"PRINTDATA")?;
+        // Handle rest
+        cmd.strip_prefix_inplace(b"K")
+            .then(|| flags.set_use_kana(true));
+        cmd.strip_prefix_inplace(b"D")
+            .then(|| flags.set_ignore_color(true));
+        if cmd.strip_prefix_inplace(b"L") {
+            flags.set_is_line(true);
+        } else if cmd.strip_prefix_inplace(b"W") {
+            flags.set_is_line(true);
+            flags.set_is_wait(true);
+        }
+        cmd.is_empty().then_some(flags)
     }
     // NOTE: If you need to take special care of newline token, don't use this function.
     #[must_use]

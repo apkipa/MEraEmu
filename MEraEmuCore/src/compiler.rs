@@ -8,6 +8,7 @@ use crate::{
     bytecode::{EraBytecodePrimaryType, FlatValue, PrintExtendedFlags, ValueKind},
     lexer::{EraTokenKind, EraTokenLite},
     parser::{EraCommandStmt, EraFunDecl, EraFunKind, EraStmt, EraTermExpr, EraVarExpr},
+    routine,
     util::*,
 };
 
@@ -73,7 +74,7 @@ pub struct EraFuncBytecodeInfo {
     pub name: Rc<CaselessStr>,
     pub chunk_idx: u32,
     pub offset: u32,
-    pub args_count: u32,
+    pub args: Vec<Value>,
     pub func_kind: EraFunKind,
 }
 
@@ -308,6 +309,44 @@ enum EraExpressionValueKind {
     TInteger,
     TString,
 }
+impl EraExpressionValueKind {
+    fn expect_int<T: FnMut(&EraCompileErrorInfo)>(
+        self,
+        that: &mut EraCompilerImpl<'_, T>,
+        si: SourcePosInfo,
+    ) -> Option<()> {
+        if matches!(self, Self::TInteger) {
+            Some(())
+        } else {
+            that.report_err(si, true, "expected expression of type integer");
+            None
+        }
+    }
+    fn expect_str<T: FnMut(&EraCompileErrorInfo)>(
+        self,
+        that: &mut EraCompilerImpl<'_, T>,
+        si: SourcePosInfo,
+    ) -> Option<()> {
+        if matches!(self, Self::TString) {
+            Some(())
+        } else {
+            that.report_err(si, true, "expected expression of type string");
+            None
+        }
+    }
+    fn expect_void<T: FnMut(&EraCompileErrorInfo)>(
+        self,
+        that: &mut EraCompilerImpl<'_, T>,
+        si: SourcePosInfo,
+    ) -> Option<()> {
+        if matches!(self, Self::TVoid) {
+            Some(())
+        } else {
+            that.report_err(si, true, "expected expression of type void");
+            None
+        }
+    }
+}
 
 struct EraLoopStructCodeMetadata {
     continue_pos: usize,
@@ -367,6 +406,7 @@ pub struct EraCompilerImpl<'a, ErrReportFn> {
     stack_balance: usize,
     goto_labels: HashMap<CaselessString, EraGotoLabelInfo>,
     goto_backtracks: Vec<EraGotoJumpInfo>,
+    contextual_indices: HashMap<Ascii<String>, u32>,
 }
 
 impl<T: FnMut(&EraCompileErrorInfo)> EraCompiler<T> {
@@ -377,13 +417,17 @@ impl<T: FnMut(&EraCompileErrorInfo)> EraCompiler<T> {
         &mut self,
         inputs: Vec<EraCompilerFileInput>,
         global_vars: EraVarPool,
+        contextual_indices: HashMap<Ascii<String>, u32>,
     ) -> Option<EraBytecodeCompilation> {
-        EraCompilerImpl::new(self).compile_all(inputs, global_vars)
+        EraCompilerImpl::new(self, contextual_indices).compile_all(inputs, global_vars)
     }
 }
 
 impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
-    fn new(parser: &'a mut EraCompiler<T>) -> Self {
+    fn new(
+        parser: &'a mut EraCompiler<T>,
+        contextual_indices: HashMap<Ascii<String>, u32>,
+    ) -> Self {
         EraCompilerImpl {
             err_report_fn: &mut parser.err_report_fn,
             file_name: "".into(),
@@ -393,6 +437,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             stack_balance: 0,
             goto_labels: HashMap::new(),
             goto_backtracks: Vec::new(),
+            contextual_indices,
         }
     }
     fn compile_all(
@@ -407,13 +452,6 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         self.vars = global_vars;
 
         let empty_str = self.file_name.clone();
-
-        // Add shared global variables
-        // TODO: Move this out to engine part?
-        self.vars
-            .add_var("RESULT", Value::new_int_arr(vec![16], Vec::new()));
-        self.vars
-            .add_var("RESULTS", Value::new_str_arr(vec![16], Vec::new()));
 
         // Build global variables and functions list
         for input in inputs {
@@ -449,11 +487,12 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             //     const_vars.insert(name);
                             // }
                         }
+                        EraSharpDecl::DefineDecl(_) => (),
                         _ => {
                             self.report_err(
                                 x.source_pos_info(),
                                 false,
-                                "this declaration should not appear here; ignoring",
+                                "this kind of declaration should not appear here; ignoring",
                             );
                         }
                     },
@@ -475,17 +514,33 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             let fun_idx = global_funcs.funcs.len();
             let mut local_vars = HashMap::new();
             let mut params = Vec::new();
-            if global_funcs
-                .func_names
-                .insert(Rc::clone(&func_name), fun_idx)
-                .is_some()
-            {
-                self.report_err(
-                    fun.src_info,
-                    true,
-                    format!("redefinition of function `{func_name}`"),
-                );
-                return None;
+            match global_funcs.func_names.entry(Rc::clone(&func_name)) {
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    let old_func = *e.get();
+                    let old_func = &global_funcs.funcs[old_func];
+                    // HACK: Ignore error and skip this function
+                    // TODO: Refactor error reporting mechanism
+                    _ = (|| -> Option<()> {
+                        bail_opt!(
+                            self,
+                            [
+                                (
+                                    fun.src_info,
+                                    format!("redefinition of function `{func_name}`")
+                                ),
+                                (
+                                    &old_func.file_name,
+                                    old_func.src_info,
+                                    "note: see previous definition of function"
+                                )
+                            ]
+                        );
+                    })();
+                    continue;
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(fun_idx);
+                }
             }
             self.vars.add_var(
                 &format!("LOCAL@{}", func_name),
@@ -509,11 +564,11 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             for decl in std::mem::take(&mut fun.decls) {
                 let src_info;
                 let (var_name, mut local_decl) = match decl {
-                    EraSharpDecl::VarDecl(x) => {
+                    EraSharpDecl::VarDecl(mut x) => {
                         src_info = x.src_info;
                         let has_init;
                         let init_val = if x.is_ref {
-                            if !x.dims.is_empty() {
+                            if !x.dims.is_empty() && x.dims[0] != 0 {
                                 self.report_err(
                                     src_info,
                                     true,
@@ -537,6 +592,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             }
                         } else {
                             has_init = !x.inits.is_empty();
+                            if x.dims.is_empty() {
+                                x.dims = vec![(x.inits.len() as u32).max(1)];
+                            }
                             let arr_len = x.dims.iter().fold(1, |acc, &x| acc * x);
                             if (arr_len as usize) < x.inits.len() {
                                 self.report_err(
@@ -644,14 +702,20 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     ) => match *lhs {
                         EraExpr::Term(EraTermExpr::Var(lhs)) => {
                             // Check parameter type
+                            let lhs_name = CaselessStr::new(&lhs.name);
                             let kind = local_vars
-                                .get(CaselessStr::new(&lhs.name))
+                                .get(lhs_name)
                                 .map(|x| match x.is_ref {
                                     true => x.init_val.kind().with_arr(),
                                     false => x.init_val.kind().without_arr(),
                                 })
                                 .or_else(|| {
                                     self.vars.get_var(&lhs.name).map(|x| x.kind().without_arr())
+                                })
+                                .or_else(|| {
+                                    self.vars
+                                        .get_var(&format!("{}@{}", lhs_name, func_name))
+                                        .map(|x| x.kind().without_arr())
                                 });
                             let kind = match kind {
                                 Some(x) => x,
@@ -695,7 +759,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             };
 
                             EraFuncArgInfo {
-                                target_var: (CaselessStr::new(&lhs.name).into(), idxs),
+                                target_var: (lhs_name.into(), idxs),
                                 default_val: rhs,
                                 src_info: lhs.src_info,
                             }
@@ -710,6 +774,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         }
                     },
                     EraExpr::Term(EraTermExpr::Var(lhs)) => {
+                        let lhs_name = CaselessStr::new(&lhs.name);
                         let kind = local_vars
                             .get_mut(CaselessStr::new(&lhs.name))
                             .map(|x| match x.is_ref {
@@ -722,6 +787,11 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             })
                             .or_else(|| {
                                 self.vars.get_var(&lhs.name).map(|x| x.kind().without_arr())
+                            })
+                            .or_else(|| {
+                                self.vars
+                                    .get_var(&format!("{}@{}", lhs_name, func_name))
+                                    .map(|x| x.kind().without_arr())
                             });
                         let kind = match kind {
                             Some(x) => x,
@@ -752,7 +822,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         };
 
                         EraFuncArgInfo {
-                            target_var: (CaselessStr::new(&lhs.name).into(), idxs),
+                            target_var: (lhs_name.into(), idxs),
                             default_val: rhs,
                             src_info: lhs.src_info,
                         }
@@ -842,7 +912,11 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             name: CaselessStr::new(&func_decl.name).into(),
             chunk_idx: u32::MAX, // Stub
             offset: chunk.cur_bytes_cnt() as _,
-            args_count: func_info.params.len() as _,
+            args: func_info
+                .params
+                .iter()
+                .map(|x| x.default_val.clone())
+                .collect(),
             func_kind: func_decl.kind,
         };
 
@@ -1014,6 +1088,14 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         ]
                     );
                 }
+                return Some(());
+            }
+            EraStmt::RowAssign(x) => {
+                todo!()
+            }
+            EraStmt::Invalid(src_info) => {
+                chunk.emit_load_const(self.new_value_str("invalid statement".to_owned()), src_info);
+                chunk.emit_bytecode(InvalidWithMessage, src_info);
                 return Some(());
             }
         };
@@ -1528,7 +1610,15 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     None => bail_opt!(self, x.src_info, "invalid statement call"),
                 }
             }
-            _ => bail_opt!(self, stmt.source_pos_info(), "unsupported statement"),
+            Cmd::DebugPrint(x) => {
+                // TODO: Cmd::DebugPrint
+                // Ignore debug print for now
+            }
+            _ => bail_opt!(
+                self,
+                stmt.source_pos_info(),
+                format!("unsupported statement: {stmt:?}")
+            ),
         }
 
         Some(())
@@ -1721,7 +1811,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         EraTokenKind::CmpEq => match (lhs, rhs) {
                             (TInteger, TInteger) | (TString, TString) => {
                                 chunk.emit_bytecode(CompareEq, op.src_info);
-                                lhs
+                                TInteger
                             }
                             _ => bail_opt!(
                                 self,
@@ -1733,7 +1823,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         EraTokenKind::CmpL => match (lhs, rhs) {
                             (TInteger, TInteger) | (TString, TString) => {
                                 chunk.emit_bytecode(CompareL, op.src_info);
-                                lhs
+                                TInteger
                             }
                             _ => bail_opt!(
                                 self,
@@ -1745,7 +1835,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         EraTokenKind::CmpLEq => match (lhs, rhs) {
                             (TInteger, TInteger) | (TString, TString) => {
                                 chunk.emit_bytecode(CompareLEq, op.src_info);
-                                lhs
+                                TInteger
                             }
                             _ => bail_opt!(
                                 self,
@@ -1758,7 +1848,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             (TInteger, TInteger) | (TString, TString) => {
                                 chunk.emit_bytecode(CompareEq, op.src_info);
                                 chunk.emit_bytecode(LogicalNot, op.src_info);
-                                lhs
+                                TInteger
                             }
                             _ => bail_opt!(
                                 self,
@@ -1771,7 +1861,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             (TInteger, TInteger) | (TString, TString) => {
                                 chunk.emit_bytecode(CompareLEq, op.src_info);
                                 chunk.emit_bytecode(LogicalNot, op.src_info);
-                                lhs
+                                TInteger
                             }
                             _ => bail_opt!(
                                 self,
@@ -1784,7 +1874,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             (TInteger, TInteger) | (TString, TString) => {
                                 chunk.emit_bytecode(CompareL, op.src_info);
                                 chunk.emit_bytecode(LogicalNot, op.src_info);
-                                lhs
+                                TInteger
                             }
                             _ => bail_opt!(
                                 self,
@@ -2093,8 +2183,27 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             let idx_len = var_expr.idxs.len();
             for idx in var_expr.idxs {
                 let src_info = idx.source_pos_info();
-                match self.compile_expression(funcs, func_info, idx, chunk)? {
-                    EraExpressionValueKind::TInteger => (),
+                let idx_kind = match idx {
+                    // HACK: Contextual indices replacing
+                    EraExpr::Term(EraTermExpr::Var(x))
+                        if x.idxs.is_empty()
+                            && routine::is_csv_var(&var_expr.name)
+                            && self
+                                .contextual_indices
+                                .contains_key(Ascii::new_str(&x.name)) =>
+                    {
+                        let idx = self
+                            .contextual_indices
+                            .get(Ascii::new_str(&x.name))
+                            .copied()
+                            .unwrap();
+                        chunk.emit_load_const(self.new_value_int(idx as _), x.src_info);
+                        TInteger
+                    }
+                    _ => self.compile_expression(funcs, func_info, idx, chunk)?,
+                };
+                match idx_kind {
+                    TInteger => (),
                     _ => bail_opt!(self, src_info, true, "array indices must be integer"),
                 }
             }
@@ -2111,8 +2220,8 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         var_expr: EraVarExpr,
         chunk: &mut EraBytecodeChunk,
     ) -> Option<EraExpressionValueKind> {
-        use crate::bytecode::FlatValue;
         use EraBytecodePrimaryType::*;
+        use EraExpressionValueKind::*;
 
         let src_info = var_expr.src_info;
         let is_in_global_frame;
@@ -2187,10 +2296,31 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             .collect::<Vec<_>>();
         for (idx, stride) in var_expr.idxs.into_iter().zip(strides.into_iter().rev()) {
             let src_info = idx.source_pos_info();
-            match self.compile_expression(funcs, func_info, idx, chunk)? {
-                EraExpressionValueKind::TInteger => (),
+
+            let idx_kind = match idx {
+                // HACK: Contextual indices replacing
+                EraExpr::Term(EraTermExpr::Var(x))
+                    if x.idxs.is_empty()
+                        && routine::is_csv_var(&var_expr.name)
+                        && self
+                            .contextual_indices
+                            .contains_key(Ascii::new_str(&x.name)) =>
+                {
+                    let idx = self
+                        .contextual_indices
+                        .get(Ascii::new_str(&x.name))
+                        .copied()
+                        .unwrap();
+                    chunk.emit_load_const(self.new_value_int(idx as _), x.src_info);
+                    TInteger
+                }
+                _ => self.compile_expression(funcs, func_info, idx, chunk)?,
+            };
+            match idx_kind {
+                TInteger => (),
                 _ => bail_opt!(self, src_info, true, "array indices must be integer"),
             }
+
             chunk.emit_load_const(self.new_value_int(stride as _), src_info);
             chunk.emit_bytecode(Multiply, src_info);
             chunk.emit_bytecode(Add, src_info);
@@ -2203,7 +2333,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         funcs: &EraFuncPool,
         func_info: &EraFuncInfo,
         target: &str,
-        args: Vec<EraExpr>,
+        args: Vec<Option<EraExpr>>,
         target_src_info: SourcePosInfo,
         chunk: &mut EraBytecodeChunk,
     ) -> Option<EraExpressionValueKind> {
@@ -2244,6 +2374,26 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             );
         }
         for (arg, param) in args.into_iter().zip(target.params.iter()) {
+            let Some(arg) = arg else {
+                // Omitted argument
+                // HACK: Steal source info from last line
+                let src_info = chunk.source_info_at(chunk.cur_bytes_cnt() - 1).unwrap();
+                if param.default_val.kind().is_arr() {
+                    bail_opt!(
+                        self,
+                        [
+                            (src_info, "reference parameter cannot be omitted"),
+                            (
+                                &target.file_name,
+                                target.src_info,
+                                "note: see signature of callee here"
+                            )
+                        ]
+                    );
+                }
+                chunk.emit_load_const(param.default_val.clone(), src_info);
+                continue;
+            };
             let arg_si = arg.source_pos_info();
             let param_kind = param.default_val.kind();
             match param_kind {
@@ -2328,12 +2478,52 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         })
     }
     #[must_use]
+    fn compile_dynamic_fun_call(
+        &mut self,
+        funcs: &EraFuncPool,
+        func_info: &EraFuncInfo,
+        target: EraExpr,
+        args: Vec<Option<EraExpr>>,
+        chunk: &mut EraBytecodeChunk,
+    ) -> Option<EraExpressionValueKind> {
+        use EraBytecodePrimaryType::*;
+        use EraExpressionValueKind::*;
+
+        // NOTE: We know nothing about the target, so we must emit args pack which contains
+        //       enough information to carry out args resolution at run-time.
+        let args_len = args.len();
+        let target_si = target.source_pos_info();
+        for arg in args {
+            let Some(arg) = arg else {
+                bail_opt!(
+                    self,
+                    target_si,
+                    "omission of arguments are unsupported at the moment"
+                );
+            };
+            let arg_si = arg.source_pos_info();
+            if let EraExpr::Term(EraTermExpr::Var(x)) = arg {
+                self.compile_expression_array_with_idx(funcs, func_info, x, chunk)?;
+            } else {
+                chunk.emit_load_const(self.new_value_int(0), arg_si);
+                self.compile_expression(funcs, func_info, arg, chunk)?;
+            }
+        }
+        let TString = self.compile_expression(funcs, func_info, target, chunk)? else {
+            bail_opt!(self, target_si, "invalid type as dynamic function callee");
+        };
+        chunk.emit_bytecode(TryFunCall, target_si);
+        chunk.append_u8(args_len as _, target_si);
+
+        Some(TInteger)
+    }
+    #[must_use]
     fn try_compile_builtin_fun_call(
         &mut self,
         funcs: &EraFuncPool,
         func_info: &EraFuncInfo,
         target: &str,
-        args: Vec<EraExpr>,
+        args: Vec<Option<EraExpr>>,
         src_info: SourcePosInfo,
         pre_run_fn: impl FnOnce(
             &mut Self,
@@ -2375,6 +2565,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     let chunk_snapshot = chunk.take_snapshot();
                     let mut ok = true;
                     for (arg, &param_kind) in args.iter().cloned().zip(overload.args.iter()) {
+                        let Some(arg) = arg else {
+                            todo!("omission of built-in method arguments");
+                        };
                         let arg_kind = self.compile_expression(funcs, func_info, arg, chunk)?;
                         match (arg_kind, param_kind) {
                             (TInteger, Int) | (TString, Str) => (),

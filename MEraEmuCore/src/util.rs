@@ -1,3 +1,6 @@
+mod ascii;
+mod hstring;
+
 use std::{borrow::Borrow, fmt::Display, hash::Hash, ops::Deref, rc::Rc};
 
 /// An ASCII-caseless string slice type.
@@ -137,3 +140,5 @@ impl Display for CaselessString {
         self.deref().fmt(f)
     }
 }
+
+pub use ascii::Ascii;

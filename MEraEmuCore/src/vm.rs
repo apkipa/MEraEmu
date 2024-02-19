@@ -1,7 +1,7 @@
 use crate::{
     bytecode::{
         EraBytecodePrimaryType, FlatValue, PadStringFlags, PrintExtendedFlags, SourcePosInfo,
-        StrValue, Value,
+        StrValue, Value, ValueKind,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
     util::*,
@@ -118,6 +118,7 @@ pub struct EraVarInfo {
     pub name: Rc<CaselessStr>,
     pub val: Value,
     pub is_const: bool,
+    pub is_charadata: bool,
 }
 
 impl EraVarPool {
@@ -129,29 +130,29 @@ impl EraVarPool {
     }
     #[must_use]
     pub fn add_var(&mut self, name: &str, val: Value) -> Option<usize> {
-        let name: Rc<CaselessStr> = CaselessStr::new(name).into();
-        let var_idx = self.vars.len();
-        if self.var_names.insert(name.clone(), var_idx).is_some() {
-            return None;
-        }
-        self.vars.push(EraVarInfo {
-            name,
-            val,
-            is_const: false,
-        });
-        Some(var_idx)
+        self.add_var_ex(name, val, false, false)
     }
     #[must_use]
-    pub fn add_var_ex(&mut self, name: &str, val: Value, is_const: bool) -> Option<usize> {
+    pub fn add_var_ex(
+        &mut self,
+        name: &str,
+        val: Value,
+        is_const: bool,
+        is_charadata: bool,
+    ) -> Option<usize> {
         let name: Rc<CaselessStr> = CaselessStr::new(name).into();
         let var_idx = self.vars.len();
-        if self.var_names.insert(name.clone(), var_idx).is_some() {
-            return None;
+        match self.var_names.entry(name.clone()) {
+            std::collections::hash_map::Entry::Occupied(e) => return None,
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(var_idx);
+            }
         }
         self.vars.push(EraVarInfo {
             name,
             val,
             is_const,
+            is_charadata,
         });
         Some(var_idx)
     }
@@ -494,7 +495,7 @@ impl EraVirtualMachine {
                             return None;
                         }
                     };
-                    if func_info.args_count != args_cnt {
+                    if func_info.args.len() != args_cnt {
                         vm_report_err!(
                             ctx,
                             cur_frame,
@@ -550,7 +551,9 @@ impl EraVirtualMachine {
                     }
                 }
                 TryFunCall => {
-                    let args_cnt = 0;
+                    let args_cnt =
+                        vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)? as _;
+                    ip_offset_delta += 1;
                     let entry = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
                     let func_info = match entry.val.into_unpacked() {
                         // TODO: Check index overflow
@@ -570,29 +573,67 @@ impl EraVirtualMachine {
                         }
                     };
                     if let Some(func_info) = func_info {
-                        if func_info.args_count != args_cnt {
+                        if func_info.args.len() != args_cnt {
                             vm_report_err!(
                                 ctx,
                                 cur_frame,
                                 true,
-                                "runtime function argument mismatch (broken codegen?)"
+                                "runtime function argument mismatch"
                             );
                             return None;
                         }
-                        cur_chunk = &self.chunks[func_info.chunk_idx as usize];
                         // TODO: Check whether stack_start exceeds bounds of current frame
-                        let stack_start = match self.stack.len().checked_sub(args_cnt as _) {
-                            Some(x) => x,
-                            None => {
-                                vm_report_err!(
-                                    ctx,
-                                    cur_frame,
-                                    true,
-                                    "too few arguments for function call"
-                                );
-                                return None;
+                        // Transform args pack into ordinary forms
+                        let args_pack =
+                            vm_pop_stack!(ctx, cur_frame, &mut self.stack, args_cnt * 2)?
+                                .collect::<Vec<_>>();
+                        let stack_start = self.stack.len();
+                        for (arg_pack, param) in
+                            args_pack.chunks_exact(2).zip(func_info.args.iter())
+                        {
+                            let param_kind = param.kind();
+                            match param_kind {
+                                ValueKind::ArrInt | ValueKind::ArrStr => {
+                                    if arg_pack[0].val.kind() != param_kind {
+                                        bail_opt!(ctx, cur_frame, true, "wrong arg pack");
+                                    }
+                                    self.stack.push(arg_pack[0].val.clone().into());
+                                }
+                                ValueKind::Int | ValueKind::Str => {
+                                    match (
+                                        arg_pack[0].val.clone().into_unpacked(),
+                                        arg_pack[1].val.clone().into_unpacked(),
+                                    ) {
+                                        (FlatValue::ArrInt(x), FlatValue::Int(y))
+                                            if param_kind == ValueKind::Int =>
+                                        {
+                                            let x = x.borrow();
+                                            let Some(val) = x.flat_get(y.val as _) else {
+                                                bail_opt!(ctx, cur_frame, true, "wrong arg pack");
+                                            };
+                                            self.stack.push(Value::new_int_obj(val.clone()).into());
+                                        }
+                                        (FlatValue::ArrStr(x), FlatValue::Int(y))
+                                            if param_kind == ValueKind::Str =>
+                                        {
+                                            let x = x.borrow();
+                                            let Some(val) = x.flat_get(y.val as _) else {
+                                                bail_opt!(ctx, cur_frame, true, "wrong arg pack");
+                                            };
+                                            self.stack.push(Value::new_str_rc(val.clone()).into());
+                                        }
+                                        (_, FlatValue::Int(y)) if param_kind == ValueKind::Int => {
+                                            self.stack.push(Value::new_int_obj(y.clone()).into());
+                                        }
+                                        (_, FlatValue::Str(y)) if param_kind == ValueKind::Str => {
+                                            self.stack.push(Value::new_str_rc(y.clone()).into());
+                                        }
+                                        _ => bail_opt!(ctx, cur_frame, true, "wrong arg pack"),
+                                    }
+                                }
                             }
-                        };
+                        }
+                        cur_chunk = &self.chunks[func_info.chunk_idx as usize];
                         let ip = EraExecIp {
                             chunk: func_info.chunk_idx as _,
                             offset: func_info.offset as _,
@@ -624,6 +665,10 @@ impl EraVirtualMachine {
                             );
                             return None;
                         }
+
+                        self.stack.push(Value::new_int(1).into());
+                    } else {
+                        self.stack.push(Value::new_int(0).into());
                     }
                 }
                 LoadConst | LoadConstW | LoadConstWW => {

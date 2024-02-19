@@ -1,13 +1,16 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::DerefMut,
     rc::Rc,
     sync::atomic::AtomicBool,
 };
 
+use once_cell::sync::Lazy;
+use regex::Regex;
+
 use crate::{
-    bytecode::SourcePosInfo,
+    bytecode::{IntValue, SourcePosInfo, StrValue, Value},
     compiler::{EraBytecodeCompilation, EraCompilerFileInput},
     lexer::EraLexerTempStorage,
     parser::EraParserSlimVarTypeInfo,
@@ -15,6 +18,14 @@ use crate::{
 };
 
 use crate::util::*;
+
+struct InitialVarDesc {
+    pub is_string: bool,
+    pub dims: Vec<u32>,
+    pub is_const: bool,
+    pub is_charadata: bool,
+    pub initial_sval: Option<Vec<Rc<StrValue>>>,
+}
 
 pub struct MEraEngine<'a> {
     file_inputs: Vec<EraCompilerFileInput>,
@@ -25,7 +36,12 @@ pub struct MEraEngine<'a> {
     watching_vars: HashSet<Rc<CaselessStr>>,
     replace_list: HashMap<Box<[u8]>, Box<[u8]>>,
     define_list: HashMap<Box<[u8]>, Box<[u8]>>,
+    chara_list: BTreeMap<usize, Vec<(Box<[u8]>, Box<[u8]>, Box<[u8]>)>>,
+    initial_vars: Option<HashMap<Ascii<String>, InitialVarDesc>>,
+    contextual_indices: HashMap<Ascii<String>, u32>,
 }
+
+const MAX_CHARA_COUNT: u32 = 1024;
 
 #[derive(thiserror::Error, Debug)]
 #[error("{msg}")]
@@ -143,6 +159,7 @@ pub enum EraCsvLoadKind {
     Base,
     Source,
     Ex,
+    Str,
     Equip,
     TEquip,
     Flag,
@@ -162,6 +179,7 @@ pub enum EraCsvLoadKind {
     _Replace,
     _Rename,
     GameBase,
+    VariableSize,
 }
 
 struct EmptyCallback;
@@ -217,6 +235,190 @@ impl MEraEngineSysCallback for EmptyCallback {
 
 impl<'a> MEraEngine<'a> {
     pub fn new() -> Self {
+        type T1 = HashMap<Ascii<String>, InitialVarDesc>;
+        let mut iv: T1 = HashMap::new();
+        // let mut add_var = |name: &str, is_string, dims| {
+        //     initial_vars.insert(name.into(), InitialVarDesc { is_string, dims });
+        // };
+        trait Adhoc {
+            fn add_item(
+                &mut self,
+                name: &str,
+                dims: Vec<u32>,
+                is_string: bool,
+                is_const: bool,
+                is_charadata: bool,
+            );
+            fn add_int(&mut self, name: &str, dims: Vec<u32>) {
+                self.add_item(name, dims, false, false, false)
+            }
+            fn add_str(&mut self, name: &str, dims: Vec<u32>) {
+                self.add_item(name, dims, true, false, false)
+            }
+            fn add_const_int(&mut self, name: &str, dims: Vec<u32>) {
+                self.add_item(name, dims, false, true, false)
+            }
+            fn add_const_str(&mut self, name: &str, dims: Vec<u32>) {
+                self.add_item(name, dims, true, true, false)
+            }
+            fn add_chara_int(&mut self, name: &str, dims: Vec<u32>) {
+                self.add_item(name, dims, false, false, true)
+            }
+            fn add_chara_str(&mut self, name: &str, dims: Vec<u32>) {
+                self.add_item(name, dims, true, false, true)
+            }
+        }
+        impl Adhoc for T1 {
+            fn add_item(
+                &mut self,
+                name: &str,
+                dims: Vec<u32>,
+                is_string: bool,
+                is_const: bool,
+                is_charadata: bool,
+            ) {
+                self.insert(
+                    name.to_owned().into(),
+                    InitialVarDesc {
+                        is_string,
+                        dims,
+                        is_const,
+                        is_charadata,
+                        initial_sval: None,
+                    },
+                );
+            }
+        }
+        // ………………………………………………
+        // 数値配列型変数
+        // ………………………………………………
+        iv.add_int("DAY", vec![1]);
+        iv.add_int("MONEY", vec![1]);
+        iv.add_int("TIME", vec![1]);
+        iv.add_int("ITEM", vec![1]);
+        iv.add_int("ITEMSALES", vec![1]);
+        iv.add_int("NOITEM", vec![1]);
+        iv.add_int("BOUGHT", vec![1]);
+        iv.add_int("PBAND", vec![1]);
+        iv.add_int("FLAG", vec![1]);
+        iv.add_int("TFLAG", vec![1]);
+        iv.add_int("TARGET", vec![1]);
+        iv.add_int("MASTER", vec![1]);
+        iv.add_int("PLAYER", vec![1]);
+        iv.add_int("ASSI", vec![1]);
+        iv.add_int("ASSIPLAY", vec![1]);
+        iv.add_int("UP", vec![1]);
+        iv.add_int("DOWN", vec![1]);
+        iv.add_int("LOSEBASE", vec![1]);
+        iv.add_int("PALAMLV", vec![1]);
+        iv.add_int("EXPLV", vec![1]);
+        iv.add_int("EJAC", vec![1]);
+        iv.add_int("PREVCOM", vec![1]);
+        iv.add_int("SELECTCOM", vec![1]);
+        iv.add_int("NEXTCOM", vec![1]);
+        iv.add_int("RESULT", vec![1]);
+        iv.add_int("COUNT", vec![1]);
+        iv.add_int("A", vec![1]);
+        iv.add_int("B", vec![1]);
+        iv.add_int("C", vec![1]);
+        iv.add_int("D", vec![1]);
+        iv.add_int("E", vec![1]);
+        iv.add_int("F", vec![1]);
+        iv.add_int("G", vec![1]);
+        iv.add_int("H", vec![1]);
+        iv.add_int("I", vec![1]);
+        iv.add_int("J", vec![1]);
+        iv.add_int("K", vec![1]);
+        iv.add_int("L", vec![1]);
+        iv.add_int("M", vec![1]);
+        iv.add_int("N", vec![1]);
+        iv.add_int("O", vec![1]);
+        iv.add_int("P", vec![1]);
+        iv.add_int("Q", vec![1]);
+        iv.add_int("R", vec![1]);
+        iv.add_int("S", vec![1]);
+        iv.add_int("T", vec![1]);
+        iv.add_int("U", vec![1]);
+        iv.add_int("V", vec![1]);
+        iv.add_int("W", vec![1]);
+        iv.add_int("X", vec![1]);
+        iv.add_int("Y", vec![1]);
+        iv.add_int("Z", vec![1]);
+        iv.add_int("ITEMPRICE", vec![1]);
+        // ………………………………………………
+        // 文字列配列型変数
+        // ………………………………………………
+        iv.add_str("SAVESTR", vec![1]);
+        iv.add_str("RESULTS", vec![1]);
+        iv.add_str("TSTR", vec![1]);
+        iv.add_str("STR", vec![1]);
+        // ITEMNAMEとITEMPRICEは片方を変更すると他方も同じ値に変更されます
+        iv.add_str("ITEMNAME", vec![1]);
+        iv.add_str("ABLNAME", vec![1]);
+        iv.add_str("EXPNAME", vec![1]);
+        iv.add_str("TALENTNAME", vec![1]);
+        iv.add_str("PALAMNAME", vec![1]);
+        iv.add_str("TRAINNAME", vec![1]);
+        iv.add_str("MARKNAME", vec![1]);
+        iv.add_str("ITEMNAME", vec![1]);
+        iv.add_str("BASENAME", vec![1]);
+        iv.add_str("SOURCENAME", vec![1]);
+        iv.add_str("EXNAME", vec![1]);
+        iv.add_str("EQUIPNAME", vec![1]);
+        iv.add_str("TEQUIPNAME", vec![1]);
+        iv.add_str("FLAGNAME", vec![1]);
+        iv.add_str("CFLAGNAME", vec![1]);
+        iv.add_str("TFLAGNAME", vec![1]);
+        iv.add_str("TCVARNAME", vec![1]);
+        iv.add_str("CSTRNAME", vec![1]);
+        iv.add_str("STAINNAME", vec![1]);
+        iv.add_str("STRNAME", vec![1]);
+        iv.add_str("TSTRNAME", vec![1]);
+        iv.add_str("SAVESTRNAME", vec![1]);
+        // ………………………………………………
+        // 角色変数
+        // ………………………………………………
+        iv.add_chara_int("BASE", vec![1]);
+        iv.add_chara_int("MAXBASE", vec![1]);
+        iv.add_chara_int("ABL", vec![1]);
+        iv.add_chara_int("TALENT", vec![1]);
+        iv.add_chara_int("EXP", vec![1]);
+        iv.add_chara_int("MARK", vec![1]);
+        iv.add_chara_int("PALAM", vec![1]);
+        iv.add_chara_int("SOURCE", vec![1]);
+        iv.add_chara_int("EX", vec![1]);
+        iv.add_chara_int("CFLAG", vec![1]);
+        iv.add_chara_int("JUEL", vec![1]);
+        iv.add_chara_int("RELATION", vec![1]);
+        iv.add_chara_int("EQUIP", vec![1]);
+        iv.add_chara_int("TEQUIP", vec![1]);
+        iv.add_chara_int("STAIN", vec![1]);
+        iv.add_chara_int("GOTJUEL", vec![1]);
+        iv.add_chara_int("NOWEX", vec![1]);
+        iv.add_chara_int("TCVAR", vec![1]);
+        // ………………………………………………
+        // 角色文字列変数
+        // ………………………………………………
+        iv.add_chara_str("CSTR", vec![1]);
+        // ………………………………………………
+        // 特殊一時変数・一時文字列変数
+        // ………………………………………………
+        // LOCAL,500
+        // LOCALS,100
+        // ARG,200
+        // ARGS,100
+        // GLOBAL,1000
+        // GLOBALS,100
+        // ………………………………………………
+        // 二次元配列型変数
+        // ………………………………………………
+        // DITEMTYPE,1000,1000
+        // DA,100,100
+        // DB,100,100
+        // DC,100,100
+        // DD,100,100
+        // DE,100,100
+
         MEraEngine {
             file_inputs: Vec::new(),
             vm: None,
@@ -226,6 +428,9 @@ impl<'a> MEraEngine<'a> {
             watching_vars: HashSet::new(),
             replace_list: HashMap::new(),
             define_list: HashMap::new(),
+            chara_list: BTreeMap::new(),
+            initial_vars: Some(iv),
+            contextual_indices: HashMap::new(),
         }
     }
     pub fn install_sys_callback<'b>(&'b mut self, callback: Box<dyn MEraEngineSysCallback + 'a>)
@@ -246,6 +451,50 @@ impl<'a> MEraEngine<'a> {
         content: &[u8],
         kind: EraCsvLoadKind,
     ) -> Result<(), MEraEngineError> {
+        let mut load_2_fn = |target_name: &str, no_define: bool| {
+            let Some(iv) = &mut self.initial_vars else {
+                return Err(MEraEngineError::new("csv loaded too late".to_owned()));
+            };
+            let Some(var_desc) = iv.get_mut(Ascii::new_str(target_name)) else {
+                panic!("csv loader: invalid target name `{target_name}`");
+            };
+            if var_desc.dims.len() != 1 {
+                return Err(MEraEngineError::new(
+                    "variable dimension mismatch".to_owned(),
+                ));
+            }
+            let items = match crate::csv::parse_csv::<2>(content) {
+                Ok(x) => x,
+                Err((src_info, e)) => {
+                    self.callback.on_compile_error(&EraScriptErrorInfo {
+                        filename,
+                        src_info: src_info.into(),
+                        is_error: true,
+                        msg: &e,
+                    });
+                    return Err(MEraEngineError::new("invalid csv input".to_owned()));
+                }
+            };
+            let mut initial_sval =
+                vec![Rc::new(StrValue { val: String::new() }); var_desc.dims[0] as _];
+            for item in items {
+                let [index, name] = item;
+                // Add to *NAME array
+                let index: u32 = match atoi_simd::parse_pos(&index) {
+                    Ok(x) => x,
+                    Err(e) => return Err(MEraEngineError::new(format!("{e}"))),
+                };
+                let name = String::from_utf8_lossy(&name).into_owned();
+                initial_sval[index as usize] = Rc::new(StrValue { val: name.clone() });
+                // Add to define list
+                if !no_define {
+                    //self.define_list.insert(orig_name, orig_index);
+                    self.contextual_indices.insert(Ascii::new(name), index);
+                }
+            }
+            var_desc.initial_sval = Some(initial_sval);
+            Ok(())
+        };
         match kind {
             EraCsvLoadKind::_Rename => {
                 //self.replace_list.clear();
@@ -266,7 +515,121 @@ impl<'a> MEraEngine<'a> {
                     self.replace_list.insert(in_replace, out_replace);
                 }
             }
-            _ => todo!(),
+            EraCsvLoadKind::VariableSize => {
+                let rows = crate::csv::parse_csv_loose(content).unwrap();
+                for (irow, row) in rows {
+                    let src_info: ExecSourceInfo = SourcePosInfo {
+                        line: irow,
+                        column: 1,
+                    }
+                    .into();
+                    match row.len() {
+                        2 => {
+                            let name = Ascii::new_str(&row[0]);
+                            let size: u32 = match row[1].parse() {
+                                Ok(x) => x,
+                                Err(e) => {
+                                    self.callback.on_compile_error(&EraScriptErrorInfo {
+                                        filename,
+                                        src_info,
+                                        is_error: true,
+                                        msg: "invalid variable size",
+                                    });
+                                    continue;
+                                }
+                            };
+                            let Some(iv) = &mut self.initial_vars else {
+                                return Err(MEraEngineError::new("csv loaded too late".to_owned()));
+                            };
+                            let Some(var_desc) = iv.get_mut(name) else {
+                                self.callback.on_compile_error(&EraScriptErrorInfo {
+                                    filename,
+                                    src_info,
+                                    is_error: true,
+                                    msg: &format!("unsupported variable size line"),
+                                });
+                                continue;
+                            };
+                            var_desc.dims[0] = size;
+                            // Apply dimension to associated variables
+                            if let Some(name) = name.as_ref().strip_suffix("NAME") {
+                                let name = Ascii::new_str(name);
+                                if let Some(var_desc) = iv.get_mut(name) {
+                                    var_desc.dims[0] = size;
+                                }
+                            } else if let Some(var_desc) =
+                                iv.get_mut(&Ascii::new(format!("{name}NAME")))
+                            {
+                                var_desc.dims[0] = size;
+                            }
+                        }
+                        3 => {
+                            self.callback.on_compile_error(&EraScriptErrorInfo {
+                                filename,
+                                src_info,
+                                is_error: true,
+                                msg: &format!("unsupported variable size line"),
+                            });
+                        }
+                        _ => return Err(MEraEngineError::new(format!("invalid csv line {irow}"))),
+                    }
+                }
+            }
+            EraCsvLoadKind::Chara_ => {
+                static RE: Lazy<Regex> =
+                    Lazy::new(|| Regex::new(r"^(?:|.*[/\\])Chara(\d+).*\.(?i:csv)$").unwrap());
+                let Some(chara_id) = RE.captures(filename) else {
+                    return Err(MEraEngineError::new(
+                        "Chara csv must be numbered".to_owned(),
+                    ));
+                };
+                let Ok(chara_id) = chara_id[1].parse() else {
+                    return Err(MEraEngineError::new(
+                        "Chara csv number is invalid".to_owned(),
+                    ));
+                };
+                match self.chara_list.entry(chara_id) {
+                    std::collections::btree_map::Entry::Occupied(_) => {
+                        return Err(MEraEngineError::new(format!(
+                            "Character id {chara_id} already exists"
+                        )));
+                    }
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        //e.insert(todo!());
+                    }
+                }
+            }
+            EraCsvLoadKind::Abl => load_2_fn("ABLNAME", false)?,
+            EraCsvLoadKind::Exp => load_2_fn("EXPNAME", false)?,
+            EraCsvLoadKind::Talent => load_2_fn("TALENTNAME", false)?,
+            EraCsvLoadKind::Palam => load_2_fn("PALAMNAME", false)?,
+            EraCsvLoadKind::Train => load_2_fn("TRAINNAME", false)?,
+            EraCsvLoadKind::Mark => load_2_fn("MARKNAME", false)?,
+            // EraCsvLoadKind::Item => load_2_fn("ITEMNAME", false)?,
+            EraCsvLoadKind::Base => load_2_fn("BASENAME", false)?,
+            EraCsvLoadKind::Source => load_2_fn("SOURCENAME", false)?,
+            EraCsvLoadKind::Ex => load_2_fn("EXNAME", false)?,
+            EraCsvLoadKind::Str => load_2_fn("STR", true)?,
+            EraCsvLoadKind::Equip => load_2_fn("EQUIPNAME", false)?,
+            EraCsvLoadKind::TEquip => load_2_fn("TEQUIPNAME", false)?,
+            EraCsvLoadKind::Flag => load_2_fn("FLAGNAME", false)?,
+            EraCsvLoadKind::TFlag => load_2_fn("TFLAGNAME", false)?,
+            EraCsvLoadKind::CFlag => load_2_fn("CFLAGNAME", false)?,
+            EraCsvLoadKind::TCVar => load_2_fn("TCVARNAME", false)?,
+            EraCsvLoadKind::CStr => load_2_fn("CSTRNAME", false)?,
+            EraCsvLoadKind::Stain => load_2_fn("STAINNAME", false)?,
+            // EraCsvLoadKind::CDFlag1 => load_2_fn("CDFLAGNAME1", false)?,
+            // EraCsvLoadKind::CDFlag2 => load_2_fn("CDFLAGNAME2", false)?,
+            EraCsvLoadKind::StrName => load_2_fn("STRNAME", false)?,
+            EraCsvLoadKind::TStr => load_2_fn("TSTRNAME", false)?,
+            EraCsvLoadKind::SaveStr => load_2_fn("SAVESTRNAME", false)?,
+            EraCsvLoadKind::Global => load_2_fn("GLOBALNAME", false)?,
+            EraCsvLoadKind::Globals => load_2_fn("GLOBALSNAME", false)?,
+            _ => {
+                return Err(MEraEngineError::new(
+                    "csv loading not yet implemented".to_owned(),
+                ));
+            }
         }
         Ok(())
     }
@@ -276,6 +639,28 @@ impl<'a> MEraEngine<'a> {
     pub fn load_erb(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
         use crate::parser::{EraDecl, EraSharpDecl};
         // TODO: Handle UTF-8 BOM?
+
+        if let Some(initial_vars) = self.initial_vars.take() {
+            for (name, mut var_desc) in initial_vars {
+                let name = name.into_inner();
+                if var_desc.is_charadata {
+                    var_desc.dims.insert(0, MAX_CHARA_COUNT);
+                }
+                let val = if var_desc.is_string {
+                    Value::new_str_arr(var_desc.dims, Vec::new())
+                } else {
+                    Value::new_int_arr(var_desc.dims, Vec::new())
+                };
+                if self
+                    .global_vars
+                    .add_var_ex(&name, val, var_desc.is_const, var_desc.is_charadata)
+                    .is_none()
+                {
+                    panic!("variable `{name}` redefined");
+                }
+            }
+        }
+
         let mut temp_storage = EraLexerTempStorage::default();
         let callback = RefCell::new(self.callback.deref_mut());
         let mut lexer = crate::lexer::EraLexer::new(
@@ -380,6 +765,7 @@ impl<'a> MEraEngine<'a> {
         let compilation = match compiler.compile_all(
             std::mem::take(&mut self.file_inputs),
             std::mem::take(&mut self.global_vars),
+            std::mem::take(&mut self.contextual_indices),
         ) {
             Some(x) => x,
             None => {
