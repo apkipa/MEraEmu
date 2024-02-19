@@ -740,7 +740,6 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
 
                 match ch {
                     b'{' => make_token_fn(self, EraTokenKind::LCurlyBracket),
-                    b'"' => make_token_fn(self, EraTokenKind::DoubleQuote),
                     b'%' => make_token_fn(self, EraTokenKind::Percentage),
                     b'#' => make_token_fn(self, EraTokenKind::NumberSign),
                     b'\\' if self.peek_char() == Some(b'@') => {
@@ -751,7 +750,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                         if ch == b'\\' {
                             self.advance_char();
                         }
-                        self.skip_char_while(|x| !matches!(x, b'{' | b'"' | b'%' | b'#' | b'\\'));
+                        self.skip_char_while(|x| !matches!(x, b'{' | b'%' | b'#' | b'\\'));
                         make_token_fn(self, EraTokenKind::PlainStringLiteral)
                     }
                 }

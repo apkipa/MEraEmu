@@ -12,6 +12,24 @@ use crate::{
     lexer::{EraLexerMode, EraToken, EraTokenKind, EraTokenLite},
 };
 
+/// Guards statement reading unless encountered `@`, which indicates start of a new function
+macro_rules! stmt_at_guard {
+    ($self:expr) => {{
+        match $self.statement() {
+            Some(stmt) => Some(stmt),
+            None => {
+                $self.skip_whitespace();
+                let token = $self.peek_token(EraLexerMode::Normal);
+                if matches!(token.kind, EraTokenKind::At | EraTokenKind::Eof) {
+                    None
+                } else {
+                    Some(EraStmt::Invalid(token.src_info))
+                }
+            }
+        }
+    }};
+}
+
 pub struct EraRootASTNode {
     pub decls: Vec<EraDecl>,
     pub src_info: SourcePosInfo,
@@ -598,6 +616,13 @@ pub struct EraForStmt {
     pub src_info: SourcePosInfo,
 }
 
+#[derive(Debug, Clone)]
+pub struct EraDoLoopStmt {
+    pub body: Vec<EraStmt>,
+    pub cond: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
 // pub struct EraGCreateStmt {
 //     pub gid: EraExpr,
 //     pub width: EraExpr,
@@ -723,9 +748,85 @@ pub struct EraArrayCopyStmt {
 }
 
 #[derive(Debug, Clone)]
+pub struct EraInputStmt {
+    pub default_value: Option<EraExpr>,
+    pub can_click: EraExpr,
+    pub allow_skip: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraTInputStmt {
+    pub time_limit: EraExpr,
+    pub default_value: EraExpr,
+    pub show_prompt: EraExpr,
+    pub expiry_msg: EraExpr,
+    pub can_click: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraOneInputStmt {
+    pub default_value: Option<EraExpr>,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraTOneInputStmt {
+    pub time_limit: EraExpr,
+    pub default_value: EraExpr,
+    pub show_prompt: EraExpr,
+    pub expiry_msg: EraExpr,
+    pub can_click: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraReuseLastLineStmt {
+    pub content: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraClearLineStmt {
+    pub count: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraCustomDrawLineStmt {
+    pub content: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraTWaitStmt {
+    pub duration: EraExpr,
+    pub force_wait: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraFontStyleStmt {
+    pub style: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraSetFontStmt {
+    pub font_name: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
 pub struct EraRowAssignStmt {
     pub dest: EraVarExpr,
     pub srcs: Vec<EraExpr>,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraCmdEmptyStmt {
     pub src_info: SourcePosInfo,
 }
 
@@ -770,6 +871,7 @@ pub enum EraCommandStmt {
     Repeat(EraRepeatStmt),
     Goto(EraGotoStmt),
     For(EraForStmt),
+    DoLoop(EraDoLoopStmt),
     // GCreate(EraGCreateStmt),
     // GDispose(EraGDisposeStmt),
     // GDrawSprite(EraGDrawSpriteStmt),
@@ -788,6 +890,23 @@ pub enum EraCommandStmt {
     ArraySort(EraArraySortStmt),
     ArrayMSort(EraArrayMSortStmt),
     ArrayCopy(EraArrayCopyStmt),
+    Input(EraInputStmt),
+    InputS(EraInputStmt),
+    TInput(EraTInputStmt),
+    TInputS(EraTInputStmt),
+    OneInput(EraOneInputStmt),
+    OneInputS(EraOneInputStmt),
+    TOneInput(EraTOneInputStmt),
+    TOneInputS(EraTOneInputStmt),
+    ReuseLastLine(EraReuseLastLineStmt),
+    ClearLine(EraClearLineStmt),
+    CustomDrawLine(EraCustomDrawLineStmt),
+    TWait(EraTWaitStmt),
+    FontStyle(EraFontStyleStmt),
+    FontBold(EraCmdEmptyStmt),
+    FontItalic(EraCmdEmptyStmt),
+    FontRegular(EraCmdEmptyStmt),
+    SetFont(EraSetFontStmt),
 }
 impl EraCommandStmt {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -811,6 +930,7 @@ impl EraCommandStmt {
             Repeat(x) => x.src_info,
             Goto(x) => x.src_info,
             For(x) => x.src_info,
+            DoLoop(x) => x.src_info,
             // GCreate(x) => x.src_info,
             // GDispose(x) => x.src_info,
             // GDrawSprite(x) => x.src_info,
@@ -829,6 +949,23 @@ impl EraCommandStmt {
             ArraySort(x) => x.src_info,
             ArrayMSort(x) => x.src_info,
             ArrayCopy(x) => x.src_info,
+            Input(x) => x.src_info,
+            InputS(x) => x.src_info,
+            TInput(x) => x.src_info,
+            TInputS(x) => x.src_info,
+            OneInput(x) => x.src_info,
+            OneInputS(x) => x.src_info,
+            TOneInput(x) => x.src_info,
+            TOneInputS(x) => x.src_info,
+            ReuseLastLine(x) => x.src_info,
+            ClearLine(x) => x.src_info,
+            CustomDrawLine(x) => x.src_info,
+            TWait(x) => x.src_info,
+            FontStyle(x) => x.src_info,
+            FontBold(x) => x.src_info,
+            FontItalic(x) => x.src_info,
+            FontRegular(x) => x.src_info,
+            SetFont(x) => x.src_info,
         }
     }
 }
@@ -1399,6 +1536,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         })
     }
     fn statement(&mut self) -> Option<EraStmt> {
+        use EraCommandStmt as Cmd;
+
         let first = self.lexer.peek(EraLexerMode::Normal);
         Some(match first.kind {
             EraTokenKind::Identifier => EraStmt::Command({
@@ -1407,66 +1546,65 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
 
                 trait Adhoc {
                     fn r(&mut self) -> &mut Self;
+                    fn empty(&mut self) -> Option<EraCmdEmptyStmt>;
                 }
-                impl<T, U: FnMut(&crate::lexer::EraLexErrorInfo)> Adhoc for EraParserImpl<'_, '_, T, U> {
+                impl<T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorInfo)> Adhoc for EraParserImpl<'_, '_, T, U> {
                     fn r(&mut self) -> &mut Self {
                         // Discard command token
                         let token = self.lexer.read(EraLexerMode::Normal);
                         self.src_info = token.src_info;
                         self
                     }
+                    fn empty(&mut self) -> Option<EraCmdEmptyStmt> {
+                        // Discard command token and finish the line
+                        let token = self.lexer.read(EraLexerMode::Normal);
+                        self.consume_newline()?;
+                        Some(EraCmdEmptyStmt { src_info: token.src_info })
+                    }
                 }
 
                 if let Some((arg_fmt, flags)) = Self::try_recognize_print_cmd(cmd) {
-                    EraCommandStmt::Print(self.r().stmt_print(arg_fmt, flags)?)
+                    Cmd::Print(self.r().stmt_print(arg_fmt, flags)?)
                 } else if let Some((arg_fmt, flags)) = Self::try_recognize_debugprint_cmd(cmd) {
-                    EraCommandStmt::DebugPrint(self.r().stmt_print(arg_fmt, flags)?)
+                    Cmd::DebugPrint(self.r().stmt_print(arg_fmt, flags)?)
                 } else if let Some(flags) = Self::try_recognize_printdata_cmd(cmd) {
-                    EraCommandStmt::PrintData(self.r().stmt_printdata(flags)?)
+                    Cmd::PrintData(self.r().stmt_printdata(flags)?)
                 } else {
                     match cmd {
-                        b"IF" => EraCommandStmt::If(self.r().stmt_if()?),
-                        b"SELECTCASE" => EraCommandStmt::SelectCase(self.r().stmt_selectcase()?),
-                        b"SIF" => EraCommandStmt::If(self.r().stmt_sif()?),
-                        b"QUIT" => EraCommandStmt::Quit(self.r().stmt_quit()?),
-                        b"WAIT" => EraCommandStmt::Wait(self.r().stmt_wait()?),
-                        b"WHILE" => EraCommandStmt::While(self.r().stmt_while()?),
-                        b"RETURN" | b"RETURNF" => EraCommandStmt::Return(self.r().stmt_return()?),
-                        b"CALL" | b"CALLF" => EraCommandStmt::Call(self.r().stmt_call()?),
-                        b"CALLFORM" | b"CALLFORMF" => {
-                            EraCommandStmt::Call(self.r().stmt_callform()?)
-                        }
-                        b"TRYCALL" | b"TRYCALLF" => EraCommandStmt::TryCall(self.r().stmt_call()?),
-                        b"TRYCALLFORM" | b"TRYCALLFORMF" => {
-                            EraCommandStmt::TryCall(self.r().stmt_callform()?)
-                        }
-                        b"TRYCCALL" | b"TRYCCALLF" => {
-                            EraCommandStmt::TryCCall(self.r().stmt_tryccall()?)
-                        }
+                        b"IF" => Cmd::If(self.r().stmt_if()?),
+                        b"SELECTCASE" => Cmd::SelectCase(self.r().stmt_selectcase()?),
+                        b"SIF" => Cmd::If(self.r().stmt_sif()?),
+                        b"QUIT" => Cmd::Quit(self.r().stmt_quit()?),
+                        b"WAIT" => Cmd::Wait(self.r().stmt_wait()?),
+                        b"WHILE" => Cmd::While(self.r().stmt_while()?),
+                        b"RETURN" | b"RETURNF" => Cmd::Return(self.r().stmt_return()?),
+                        b"CALL" | b"CALLF" => Cmd::Call(self.r().stmt_call()?),
+                        b"CALLFORM" | b"CALLFORMF" => Cmd::Call(self.r().stmt_callform()?),
+                        b"TRYCALL" | b"TRYCALLF" => Cmd::TryCall(self.r().stmt_call()?),
+                        b"TRYCALLFORM" | b"TRYCALLFORMF" => Cmd::TryCall(self.r().stmt_callform()?),
+                        b"TRYCCALL" | b"TRYCCALLF" => Cmd::TryCCall(self.r().stmt_tryccall()?),
                         b"TRYCCALLFORM" | b"TRYCCALLFORMF" => {
-                            EraCommandStmt::TryCCall(self.r().stmt_tryccallform()?)
+                            Cmd::TryCCall(self.r().stmt_tryccallform()?)
                         }
-                        b"CONTINUE" => EraCommandStmt::Continue(self.r().stmt_continue()?),
-                        b"BREAK" => EraCommandStmt::Break(self.r().stmt_break()?),
-                        b"THROW" => EraCommandStmt::Throw(self.r().stmt_throw()?),
-                        b"REPEAT" => EraCommandStmt::Repeat(self.r().stmt_repeat()?),
-                        b"GOTO" => EraCommandStmt::Goto(self.r().stmt_goto()?),
-                        b"FOR" => EraCommandStmt::For(self.r().stmt_for()?),
-                        // b"GCREATE" => EraCommandStmt::GCreate(self.r().stmt_gcreate()?),
-                        // b"GDISPOSE" => EraCommandStmt::GDispose(self.r().stmt_gdispose()?),
-                        // b"GDRAWSPRITE" => EraCommandStmt::GDrawSprite(self.r().stmt_gdrawsprite()?),
-                        b"SPLIT" => EraCommandStmt::Split(self.r().stmt_split()?),
-                        b"GCREATE" | b"GDISPOSE" | b"GDRAWSPRITE" | b"GETBIT" => {
-                            EraCommandStmt::ResultCmdCall(self.stmt_result_cmd_call()?)
-                        }
-                        b"TIMES" => EraCommandStmt::Times(self.r().stmt_times()?),
-                        b"SETBIT" => EraCommandStmt::SetBit(self.r().stmt_setbit()?),
-                        b"CLEARBIT" => EraCommandStmt::ClearBit(self.r().stmt_clearbit()?),
-                        b"INVERTBIT" => EraCommandStmt::InvertBit(self.r().stmt_invertbit()?),
-                        b"SETCOLOR" => EraCommandStmt::SetColor(self.r().stmt_setcolor()?),
-                        b"RESETCOLOR" => EraCommandStmt::ResetColor(self.r().stmt_resetcolor()?),
-                        b"VARSET" => EraCommandStmt::VarSet(self.r().stmt_varset()?),
-                        b"HTML_PRINT" => EraCommandStmt::HtmlPrint(self.r().stmt_html_print()?),
+                        b"CONTINUE" => Cmd::Continue(self.r().stmt_continue()?),
+                        b"BREAK" => Cmd::Break(self.r().stmt_break()?),
+                        b"THROW" => Cmd::Throw(self.r().stmt_throw()?),
+                        b"REPEAT" => Cmd::Repeat(self.r().stmt_repeat()?),
+                        b"GOTO" => Cmd::Goto(self.r().stmt_goto()?),
+                        b"FOR" => Cmd::For(self.r().stmt_for()?),
+                        b"DO" => Cmd::DoLoop(self.r().stmt_do_loop()?),
+                        // b"GCREATE" => Cmd::GCreate(self.r().stmt_gcreate()?),
+                        // b"GDISPOSE" => Cmd::GDispose(self.r().stmt_gdispose()?),
+                        // b"GDRAWSPRITE" => Cmd::GDrawSprite(self.r().stmt_gdrawsprite()?),
+                        b"SPLIT" => Cmd::Split(self.r().stmt_split()?),
+                        b"TIMES" => Cmd::Times(self.r().stmt_times()?),
+                        b"SETBIT" => Cmd::SetBit(self.r().stmt_setbit()?),
+                        b"CLEARBIT" => Cmd::ClearBit(self.r().stmt_clearbit()?),
+                        b"INVERTBIT" => Cmd::InvertBit(self.r().stmt_invertbit()?),
+                        b"SETCOLOR" => Cmd::SetColor(self.r().stmt_setcolor()?),
+                        b"RESETCOLOR" => Cmd::ResetColor(self.r().stmt_resetcolor()?),
+                        b"VARSET" => Cmd::VarSet(self.r().stmt_varset()?),
+                        b"HTML_PRINT" => Cmd::HtmlPrint(self.r().stmt_html_print()?),
                         b"PRINTBUTTON" | b"PRINTBUTTONC" | b"PRINTBUTTONLC" => {
                             let mut flags = PrintExtendedFlags::new();
                             match cmd {
@@ -1474,12 +1612,35 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                                 b"PRINTBUTTONLC" => flags.set_left_pad(true),
                                 _ => (),
                             }
-                            EraCommandStmt::PrintButton(self.r().stmt_printbutton(flags)?)
+                            Cmd::PrintButton(self.r().stmt_printbutton(flags)?)
                         }
-                        b"ARRAYREMOVE" => EraCommandStmt::ArrayRemove(self.r().stmt_arrayremove()?),
-                        b"ARRAYSORT" => EraCommandStmt::ArraySort(self.r().stmt_arraysort()?),
-                        b"ARRAYMSORT" => EraCommandStmt::ArrayMSort(self.r().stmt_arraymsort()?),
-                        b"ARRAYCOPY" => EraCommandStmt::ArrayCopy(self.r().stmt_arraycopy()?),
+                        b"ARRAYREMOVE" => Cmd::ArrayRemove(self.r().stmt_arrayremove()?),
+                        b"ARRAYSORT" => Cmd::ArraySort(self.r().stmt_arraysort()?),
+                        b"ARRAYMSORT" => Cmd::ArrayMSort(self.r().stmt_arraymsort()?),
+                        b"ARRAYCOPY" => Cmd::ArrayCopy(self.r().stmt_arraycopy()?),
+                        b"INPUT" => Cmd::Input(self.r().stmt_input()?),
+                        b"INPUTS" => Cmd::InputS(self.r().stmt_input()?),
+                        b"TINPUT" => Cmd::TInput(self.r().stmt_tinput()?),
+                        b"TINPUTS" => Cmd::TInputS(self.r().stmt_tinput()?),
+                        b"ONEINPUT" => Cmd::OneInput(self.r().stmt_oneinput()?),
+                        b"ONEINPUTS" => Cmd::OneInputS(self.r().stmt_oneinput()?),
+                        b"TONEINPUT" => Cmd::TOneInput(self.r().stmt_toneinput()?),
+                        b"TONEINPUTS" => Cmd::TOneInputS(self.r().stmt_toneinput()?),
+                        b"REUSELASTLINE" => Cmd::ReuseLastLine(self.r().stmt_reuselastline()?),
+                        b"CLEARLINE" => Cmd::ClearLine(self.r().stmt_clearline()?),
+                        b"CUSTOMDRAWLINE" => {
+                            Cmd::CustomDrawLine(self.r().stmt_customdrawline(false)?)
+                        }
+                        b"DRAWLINEFORM" => Cmd::CustomDrawLine(self.r().stmt_customdrawline(true)?),
+                        b"TWAIT" => Cmd::TWait(self.r().stmt_twait()?),
+                        b"FONTSTYLE" => Cmd::FontStyle(self.r().stmt_fontstyle()?),
+                        b"FONTBOLD" => Cmd::FontBold(self.empty()?),
+                        b"FONTITALIC" => Cmd::FontItalic(self.empty()?),
+                        b"FONTREGULAR" => Cmd::FontRegular(self.empty()?),
+                        b"SETFONT" => Cmd::SetFont(self.r().stmt_setfont()?),
+                        b"GCREATE" | b"GDISPOSE" | b"GDRAWSPRITE" | b"GETBIT" | b"GETSTYLE" | b"CHKFONT" | b"GETFONT" => {
+                            Cmd::ResultCmdCall(self.stmt_result_cmd_call()?)
+                        }
                         _ => return Some(self.stmt_expression()?),
                     }
                 }
@@ -2201,7 +2362,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.skip_whitespace();
         // TODO: Emuera does not allow statements like if-else here, should we also
         //       disallow it?
-        let body = vec![self.statement()?];
+        let body = vec![stmt_at_guard!(self)?];
         Some(EraIfStmt {
             cond,
             body,
@@ -2236,7 +2397,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
                 break;
             } else {
-                let stmt = self.statement()?;
+                let stmt = stmt_at_guard!(self)?;
                 is_at_else
                     .then_some(&mut else_body)
                     .unwrap_or(&mut body)
@@ -2325,7 +2486,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
                 continue;
             }
-            let stmt = self.statement()?;
+            let stmt = stmt_at_guard!(self)?;
             let target_body = if is_at_else {
                 &mut case_else
             } else if let Some(cur_case) = cases.last_mut() {
@@ -2355,7 +2516,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
         let mut body = Vec::new();
         while self.matches_command_end(b"WEND").is_none() {
-            body.push(self.statement()?);
+            body.push(stmt_at_guard!(self)?);
         }
         self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
         Some(EraWhileStmt {
@@ -2549,11 +2710,11 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         let mut then_body = Vec::new();
         let mut catch_body = Vec::new();
         while self.matches_command_end(b"CATCH").is_none() {
-            then_body.push(self.statement()?);
+            then_body.push(stmt_at_guard!(self)?);
         }
         self.consume_newline()?;
         while self.matches_command_end(b"ENDCATCH").is_none() {
-            catch_body.push(self.statement()?);
+            catch_body.push(stmt_at_guard!(self)?);
         }
         self.consume_newline()?;
         Some(EraTryCCallStmt {
@@ -2591,7 +2752,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         let mut body = Vec::new();
         self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
         while self.matches_command_end(b"REND").is_none() {
-            body.push(self.statement()?);
+            body.push(stmt_at_guard!(self)?);
         }
         self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
         Some(EraRepeatStmt {
@@ -2630,7 +2791,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         let mut body = Vec::new();
         self.consume_newline()?;
         while self.matches_command_end(b"NEXT").is_none() {
-            body.push(self.statement()?);
+            body.push(stmt_at_guard!(self)?);
         }
         self.consume_newline()?;
         Some(EraForStmt {
@@ -2641,6 +2802,16 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             body,
             src_info,
         })
+    }
+    fn stmt_do_loop(&mut self) -> Option<EraDoLoopStmt> {
+        let src_info = self.src_info;
+        self.consume_newline()?;
+        let mut body = Vec::new();
+        while self.matches_command_end(b"LOOP").is_none() {
+            body.push(stmt_at_guard!(self)?);
+        }
+        let cond = self.expression(true)?;
+        Some(EraDoLoopStmt { body, cond, src_info })
     }
     // fn stmt_gcreate(&mut self) -> Option<EraGCreateStmt> {
     //     let src_info = self.src_info;
@@ -2963,6 +3134,134 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             to_name,
             src_info,
         })
+    }
+    fn stmt_input(&mut self) -> Option<EraInputStmt> {
+        let src_info = self.src_info;
+        let mut default_value = None;
+        let mut can_click = EraExpr::new_int(0, src_info);
+        let mut allow_skip = EraExpr::new_int(0, src_info);
+        if self.matches_newline().is_none() {
+            default_value = Some(self.expression(true)?);
+            if self.matches_comma().is_some() {
+                can_click = self.expression(true)?;
+                if self.matches_comma().is_some() {
+                    allow_skip = self.expression(true)?;
+                }
+            }
+            self.consume_newline()?;
+        }
+        Some(EraInputStmt {
+            default_value,
+            can_click,
+            allow_skip,
+            src_info,
+        })
+    }
+    fn stmt_tinput(&mut self) -> Option<EraTInputStmt> {
+        let src_info = self.src_info;
+        let time_limit = self.expression(true)?;
+        self.consume_comma()?;
+        let default_value = self.expression(true)?;
+        let mut show_prompt = EraExpr::new_int(1, src_info);
+        let mut expiry_msg = EraExpr::new_str(String::new(), src_info);
+        let mut can_click = EraExpr::new_int(0, src_info);
+        if self.matches_comma().is_some() {
+            show_prompt = self.expression(true)?;
+            if self.matches_comma().is_some() {
+                expiry_msg = self.expression(true)?;
+                if self.matches_comma().is_some() {
+                    can_click = self.expression(true)?;
+                }
+            }
+        }
+        self.consume_newline()?;
+        Some(EraTInputStmt {
+            time_limit,
+            default_value,
+            show_prompt,
+            expiry_msg,
+            can_click,
+            src_info,
+        })
+    }
+    fn stmt_oneinput(&mut self) -> Option<EraOneInputStmt> {
+        let src_info = self.src_info;
+        let mut default_value = None;
+        if self.matches_newline().is_none() {
+            default_value = Some(self.expression(true)?);
+            self.consume_newline()?;
+        }
+        Some(EraOneInputStmt {
+            default_value,
+            src_info,
+        })
+    }
+    fn stmt_toneinput(&mut self) -> Option<EraTOneInputStmt> {
+        let src_info = self.src_info;
+        let time_limit = self.expression(true)?;
+        self.consume_comma()?;
+        let default_value = self.expression(true)?;
+        let mut show_prompt = EraExpr::new_int(1, src_info);
+        let mut expiry_msg = EraExpr::new_str(String::new(), src_info);
+        let mut can_click = EraExpr::new_int(0, src_info);
+        if self.matches_comma().is_some() {
+            show_prompt = self.expression(true)?;
+            if self.matches_comma().is_some() {
+                expiry_msg = self.expression(true)?;
+                if self.matches_comma().is_some() {
+                    can_click = self.expression(true)?;
+                }
+            }
+        }
+        self.consume_newline()?;
+        Some(EraTOneInputStmt {
+            time_limit,
+            default_value,
+            show_prompt,
+            expiry_msg,
+            can_click,
+            src_info,
+        })
+    }
+    fn stmt_reuselastline(&mut self) -> Option<EraReuseLastLineStmt> {
+        let src_info = self.src_info;
+        let content = EraExpr::Term(EraTermExpr::StrForm(self.raw_strform(false)?));
+        Some(EraReuseLastLineStmt { content, src_info })
+    }
+    fn stmt_clearline(&mut self) -> Option<EraClearLineStmt> {
+        let src_info = self.src_info;
+        let count = self.expression(true)?;
+        self.consume_newline()?;
+        Some(EraClearLineStmt { count, src_info })
+    }
+    fn stmt_customdrawline(&mut self, is_form: bool) -> Option<EraCustomDrawLineStmt> {
+        let src_info = self.src_info;
+        let content = if is_form {
+            EraExpr::Term(EraTermExpr::StrForm(self.raw_strform(false)?))
+        } else {
+            self.raw_str()?
+        };
+        Some(EraCustomDrawLineStmt { content, src_info })
+    }
+    fn stmt_twait(&mut self) -> Option<EraTWaitStmt> {
+        let src_info = self.src_info;
+        let duration = self.expression(true)?;
+        self.consume_comma()?;
+        let force_wait = self.expression(true)?;
+        self.consume_newline()?;
+        Some(EraTWaitStmt { duration, force_wait, src_info })
+    }
+    fn stmt_fontstyle(&mut self) -> Option<EraFontStyleStmt> {
+        let src_info = self.src_info;
+        let style = self.expression(true)?;
+        self.consume_newline()?;
+        Some(EraFontStyleStmt { style, src_info })
+    }
+    fn stmt_setfont(&mut self) -> Option<EraSetFontStmt> {
+        let src_info = self.src_info;
+        let font_name = self.expression(true)?;
+        self.consume_newline()?;
+        Some(EraSetFontStmt { font_name, src_info })
     }
     #[must_use]
     fn consume(

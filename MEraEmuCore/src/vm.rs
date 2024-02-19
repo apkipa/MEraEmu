@@ -360,6 +360,21 @@ impl EraVirtualMachine {
             callback,
         };
 
+        let Some(FlatValue::ArrInt(vresult)) = self
+            .global_vars
+            .get_var("RESULT")
+            .map(|x| x.clone().into_unpacked())
+        else {
+            bail_opt!(ctx, None, true, "variable RESULT not properly defined");
+        };
+        let Some(FlatValue::ArrStr(vresults)) = self
+            .global_vars
+            .get_var("RESULTS")
+            .map(|x| x.clone().into_unpacked())
+        else {
+            bail_opt!(ctx, None, true, "variable RESULTS not properly defined");
+        };
+
         let mut cur_frame = match self.frames.last_mut() {
             Some(x) => x,
             None => {
