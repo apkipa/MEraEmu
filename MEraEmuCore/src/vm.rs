@@ -481,13 +481,21 @@ impl EraVirtualMachine {
                         vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)? as _;
                     ip_offset_delta += 1;
                     let entry = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
+                    // NOTE: We ignore the return value is we are looking up the callee
+                    //       dynamically (i.e. by string instead of index)
+                    let ignore_return_value;
                     let func_info = match entry.val.into_unpacked() {
                         // TODO: Check index overflow
-                        FlatValue::Int(x) => self.funcs.get(x.val as usize),
-                        FlatValue::Str(x) => self
-                            .func_names
-                            .get(CaselessStr::new(&x.val))
-                            .map(|&x| &self.funcs[x]),
+                        FlatValue::Int(x) => {
+                            ignore_return_value = false;
+                            self.funcs.get(x.val as usize)
+                        }
+                        FlatValue::Str(x) => {
+                            ignore_return_value = true;
+                            self.func_names
+                                .get(CaselessStr::new(&x.val))
+                                .map(|&x| &self.funcs[x])
+                        }
                         _ => {
                             vm_report_err!(
                                 ctx,
@@ -551,7 +559,7 @@ impl EraVirtualMachine {
                         stack_start,
                         ip,
                         ret_ip,
-                        ignore_return_value: false,
+                        ignore_return_value,
                     });
                     let call_depth = self.frames.len();
                     cur_frame = self.frames.last_mut().unwrap();
@@ -570,6 +578,7 @@ impl EraVirtualMachine {
                         vm_read_chunk_u8!(ctx, cur_frame, cur_chunk, cur_frame.ip.offset + 1)? as _;
                     ip_offset_delta += 1;
                     let entry = vm_pop_stack!(ctx, cur_frame, &mut self.stack)?;
+                    // NOTE: We unconditionally ignore return values
                     let func_info = match entry.val.into_unpacked() {
                         // TODO: Check index overflow
                         FlatValue::Int(x) => self.funcs.get(x.val as usize),
@@ -602,6 +611,10 @@ impl EraVirtualMachine {
                         let args_pack =
                             vm_pop_stack!(ctx, cur_frame, &mut self.stack, args_cnt * 2)?
                                 .collect::<Vec<_>>();
+
+                        // Function exists
+                        self.stack.push(Value::new_int(1).into());
+
                         let stack_start = self.stack.len();
                         for (arg_pack, param) in
                             args_pack.chunks_exact(2).zip(func_info.args.iter())
@@ -680,9 +693,8 @@ impl EraVirtualMachine {
                             );
                             return None;
                         }
-
-                        self.stack.push(Value::new_int(1).into());
                     } else {
+                        // Function does not exist
                         self.stack.push(Value::new_int(0).into());
                     }
                 }

@@ -130,7 +130,7 @@ mod tests {
             ; Simple counter pure function
             @DO_COUNT(upper = 100)
                 #FUNCTION
-                #DIM upper
+                #DIM DYNAMIC upper
                 #DIM result, 1, 1 = 0
                 ;[SKIPSTART]
                 ;#DIM cnt = 100
@@ -142,6 +142,7 @@ mod tests {
                 ;results = oook
                 ;locals@DO_COUNT = oook
                 ;PRINTFORM [Start with cnt={cnt},result={result}]
+                PRINTFORM [IN {upper}]
                 WHILE cnt > 0
                     ;PRINTFORM []
                     ;result = result + cnt:0--

@@ -231,7 +231,9 @@ impl EraBytecodeChunk {
         self.append_u16(0xffff, src_info);
         EraBytecodeChunkBacktrackHolder {
             base_idx,
-            write_fn: &|this, idx, offset| this.overwrite_u16(offset.try_into().ok()?, idx),
+            write_fn: &|this, idx, offset| {
+                this.overwrite_u16(i16::try_from(offset).ok()? as _, idx)
+            },
         }
     }
     fn emit_jump_cond_hold(&mut self, src_info: SourcePosInfo) -> EraBytecodeChunkBacktrackHolder {
@@ -240,7 +242,9 @@ impl EraBytecodeChunk {
         self.append_u16(0xffff, src_info);
         EraBytecodeChunkBacktrackHolder {
             base_idx,
-            write_fn: &|this, idx, offset| this.overwrite_u16(offset.try_into().ok()?, idx),
+            write_fn: &|this, idx, offset| {
+                this.overwrite_u16(i16::try_from(offset).ok()? as _, idx)
+            },
         }
     }
     fn emit_jump(&mut self, offset: isize, src_info: SourcePosInfo) {
@@ -349,13 +353,13 @@ impl EraExpressionValueKind {
 }
 
 struct EraLoopStructCodeMetadata {
-    continue_pos: usize,
+    continue_queue: Vec<EraBytecodeChunkBacktrackHolder>,
     done_queue: Vec<EraBytecodeChunkBacktrackHolder>,
 }
 impl EraLoopStructCodeMetadata {
-    fn new(continue_pos: usize) -> Self {
+    fn new() -> Self {
         EraLoopStructCodeMetadata {
-            continue_pos,
+            continue_queue: Vec::new(),
             done_queue: Vec::new(),
         }
     }
@@ -406,6 +410,7 @@ pub struct EraCompilerImpl<'a, ErrReportFn> {
     stack_balance: usize,
     goto_labels: HashMap<CaselessString, EraGotoLabelInfo>,
     goto_backtracks: Vec<EraGotoJumpInfo>,
+    final_return_backtracks: Vec<EraBytecodeChunkBacktrackHolder>,
     contextual_indices: HashMap<Ascii<String>, u32>,
 }
 
@@ -437,6 +442,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             stack_balance: 0,
             goto_labels: HashMap::new(),
             goto_backtracks: Vec::new(),
+            final_return_backtracks: Vec::new(),
             contextual_indices,
         }
     }
@@ -509,6 +515,17 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         // Parse function signatures
         for (file_name, fun) in fun_decls.iter_mut() {
             std::mem::swap(&mut self.file_name, file_name);
+
+            // Rewrite event function name
+            if let Some(kind) = fun.event_kind {
+                use crate::parser::EraEventFunKind::*;
+                fun.name += match kind {
+                    Only => "@ONLY",
+                    Pri => "@PRI",
+                    Normal => "@NORMAL",
+                    Later => "@LATER",
+                };
+            }
 
             let func_name = CaselessStr::new(fun.name.deref()).into();
             let fun_idx = global_funcs.funcs.len();
@@ -994,6 +1011,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         }
 
         // Return
+        for bt in std::mem::take(&mut self.final_return_backtracks) {
+            bt.complete(chunk)?;
+        }
         match func_decl.kind {
             EraFunKind::Function => {
                 let val = self.new_value_int(0);
@@ -1101,6 +1121,10 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         };
 
         match stmt {
+            Cmd::DebugPrint(x) => {
+                // TODO: Cmd::DebugPrint
+                // Ignore debug print for now
+            }
             Cmd::Print(x) => {
                 let src_info = x.src_info;
                 let args_cnt = x.vals.len();
@@ -1129,8 +1153,11 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     }
                 }
             }
-            Cmd::Quit(x) => {
-                chunk.emit_bytecode(Quit, x.src_info);
+            Cmd::PrintData(x) => {
+                todo!();
+            }
+            Cmd::Wait(x) => {
+                chunk.emit_bytecode(Wait, x.src_info);
             }
             Cmd::If(x) => {
                 // TODO: Optimize when there is no else body
@@ -1154,193 +1181,8 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     return None;
                 }
             }
-            Cmd::While(x) => {
-                let start_index = chunk.cur_bytes_cnt();
-                self.loop_structs
-                    .push(EraLoopStructCodeMetadata::new(start_index));
-                self.compile_expression(funcs, func_info, x.cond, chunk)?;
-                chunk.emit_bytecode(LogicalNot, x.src_info);
-                let backtrack_done = chunk.emit_jump_cond_hold(x.src_info);
-                for stmt in x.body {
-                    self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
-                }
-                let done_index = chunk.cur_bytes_cnt();
-                // HACK: Steal source pos info from last statement
-                let last_src_info = chunk.source_info_at(chunk.cur_bytes_cnt() - 1).unwrap();
-                chunk.emit_jump(-((done_index - start_index) as isize), last_src_info);
-                if backtrack_done.complete(chunk).is_none() {
-                    bail_opt!(self, x.src_info, "jump too far to be encoded in bytecode");
-                }
-                for bt in self.loop_structs.pop().unwrap().done_queue {
-                    bt.complete(chunk)?;
-                }
-            }
-            Cmd::Return(x) => {
-                // NOTE: EraBasic only assigns values to RESULT:*
-                if let EraFunKind::Procedure = func_kind {
-                    for (val_idx, val) in x.vals.into_iter().enumerate() {
-                        let src_info = val.source_pos_info();
-                        let dst = EraVarExpr {
-                            name: "RESULT".to_owned(),
-                            idxs: vec![EraExpr::Term(EraTermExpr::Literal(EraLiteral::Integer(
-                                val_idx as _,
-                                src_info,
-                            )))],
-                            src_info: val.source_pos_info(),
-                        };
-                        _ = self.compile_expression_assign(
-                            funcs,
-                            func_info,
-                            dst,
-                            |this, chunk| {
-                                let v = this.compile_expression(funcs, func_info, val, chunk)?;
-                                if let TString = v {
-                                    chunk.emit_bytecode(ConvertToInteger, src_info);
-                                }
-                                Some(TInteger)
-                            },
-                            chunk,
-                        )?;
-                    }
-                    chunk.emit_bytecode(ReturnVoid, x.src_info);
-                } else {
-                    let src_info = x.src_info;
-                    let Ok([val]) = TryInto::<[_; 1]>::try_into(x.vals) else {
-                        bail_opt!(self, src_info, "invalid return type for current function");
-                    };
-                    let val_kind = self.compile_expression(funcs, func_info, val, chunk)?;
-                    match (func_kind, val_kind) {
-                        (EraFunKind::Function, TInteger) => {
-                            chunk.emit_bytecode(ReturnInteger, src_info);
-                        }
-                        (EraFunKind::FunctionS, TString) => {
-                            chunk.emit_bytecode(ReturnString, src_info);
-                        }
-                        _ => bail_opt!(self, src_info, "invalid return type for current function"),
-                    }
-                }
-            }
-            Cmd::Call(x) => match x.func {
-                EraExpr::Term(EraTermExpr::Literal(EraLiteral::String(func, src_info))) => {
-                    match self
-                        .compile_static_fun_call(funcs, func_info, &func, x.args, src_info, chunk)?
-                    {
-                        TInteger | TString => chunk.emit_bytecode(Pop, src_info),
-                        TVoid => (),
-                    }
-                }
-                _ => {
-                    // HACK: Assuming dynamic calls have no return values
-                    let src_info = x.func.source_pos_info();
-                    if !x.args.is_empty() {
-                        panic!("dynamic calls must not have arguments");
-                    }
-                    let kind = self.compile_expression(funcs, func_info, x.func, chunk)?;
-                    let TString = kind else {
-                        bail_opt!(self, src_info, "invalid type as function name");
-                    };
-                    chunk.emit_bytecode(FunCall, src_info);
-                    chunk.append_u8(0, src_info);
-                }
-            },
-            Cmd::Continue(x) => {
-                let Some(loop_struct) = self.loop_structs.last_mut() else {
-                    bail_opt!(self, x.src_info, "loop controlling statements are valid only in the context of a loop structure");
-                };
-                let pos_delta = (chunk.cur_bytes_cnt() - loop_struct.continue_pos) as isize;
-                chunk.emit_jump(-pos_delta, x.src_info);
-            }
-            Cmd::Break(x) => {
-                let Some(loop_struct) = self.loop_structs.last_mut() else {
-                    bail_opt!(self, x.src_info, "loop controlling statements are valid only in the context of a loop structure");
-                };
-                loop_struct
-                    .done_queue
-                    .push(chunk.emit_jump_hold(x.src_info));
-            }
-            Cmd::Throw(x) => {
-                self.compile_expression(funcs, func_info, x.val, chunk)?;
-                chunk.emit_bytecode(Throw, x.src_info);
-            }
-            Cmd::Repeat(x) => {
-                // for (loopCount = ?, COUNT = 0; COUNT < loopCount; COUNT++) {}
-                // Use stack to store temporary loopCount
-                self.stack_balance += 1;
-
-                match self.compile_expression(funcs, func_info, x.loop_cnt, chunk)? {
-                    TInteger => (),
-                    TString | TVoid => {
-                        bail_opt!(self, x.src_info, "invalid expression for REPEAT condition")
-                    }
-                }
-                let count_var = EraVarExpr {
-                    name: "COUNT".to_owned(),
-                    idxs: Vec::new(),
-                    src_info: x.src_info,
-                };
-                self.compile_expression_assign(
-                    funcs,
-                    func_info,
-                    count_var.clone(),
-                    |this, chunk| {
-                        chunk.emit_load_const(Value::new_int(0), x.src_info);
-                        Some(TInteger)
-                    },
-                    chunk,
-                )?;
-                chunk.emit_bytecode(Pop, x.src_info);
-                let bt_body = chunk.emit_jump_hold(x.src_info);
-                let start_pos = chunk.cur_bytes_cnt();
-                self.loop_structs
-                    .push(EraLoopStructCodeMetadata::new(start_pos));
-                self.compile_expression(
-                    funcs,
-                    func_info,
-                    EraExpr::PreUnary(
-                        EraTokenLite {
-                            kind: EraTokenKind::Increment,
-                            src_info: x.src_info,
-                        },
-                        Box::new(EraExpr::Term(EraTermExpr::Var(count_var.clone()))),
-                    ),
-                    chunk,
-                )?;
-                chunk.emit_bytecode(Pop, x.src_info);
-                bt_body.complete(chunk)?;
-                chunk.emit_bytecode(Duplicate, x.src_info);
-                self.compile_expression_array(funcs, func_info, count_var.clone(), true, chunk)?;
-                chunk.emit_bytecode(CompareLEq, x.src_info);
-                let bt_done = chunk.emit_jump_cond_hold(x.src_info);
-                for stmt in x.body {
-                    self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
-                }
-                {
-                    let offset = -((chunk.cur_bytes_cnt() - start_pos) as isize);
-                    chunk.emit_jump(offset, x.src_info);
-                }
-                for bt in self.loop_structs.pop().unwrap().done_queue {
-                    bt.complete(chunk)?;
-                }
-                // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
-                self.compile_expression(
-                    funcs,
-                    func_info,
-                    EraExpr::PreUnary(
-                        EraTokenLite {
-                            kind: EraTokenKind::Increment,
-                            src_info: x.src_info,
-                        },
-                        Box::new(EraExpr::Term(EraTermExpr::Var(count_var.clone()))),
-                    ),
-                    chunk,
-                )?;
-                bt_done.complete(chunk)?;
-                chunk.emit_bytecode(Pop, x.src_info);
-
-                self.stack_balance -= 1;
-            }
-            Cmd::Wait(x) => {
-                chunk.emit_bytecode(Wait, x.src_info);
+            Cmd::Quit(x) => {
+                chunk.emit_bytecode(Quit, x.src_info);
             }
             Cmd::SelectCase(x) => {
                 self.stack_balance += 1;
@@ -1445,6 +1287,249 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
 
                 self.stack_balance -= 1;
             }
+            Cmd::While(x) => {
+                let start_pos = chunk.cur_bytes_cnt();
+                self.loop_structs.push(EraLoopStructCodeMetadata::new());
+                self.compile_expression(funcs, func_info, x.cond, chunk)?;
+                chunk.emit_bytecode(LogicalNot, x.src_info);
+                let backtrack_done = chunk.emit_jump_cond_hold(x.src_info);
+                for stmt in x.body {
+                    self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
+                }
+                let done_index = chunk.cur_bytes_cnt();
+                // HACK: Steal source pos info from last statement
+                let last_src_info = chunk.source_info_at(chunk.cur_bytes_cnt() - 1).unwrap();
+                chunk.emit_jump(-((done_index - start_pos) as isize), last_src_info);
+                if backtrack_done.complete(chunk).is_none() {
+                    bail_opt!(self, x.src_info, "jump too far to be encoded in bytecode");
+                }
+                let loop_struct = self.loop_structs.pop().unwrap();
+                for bt in loop_struct.continue_queue {
+                    bt.complete_at(chunk, start_pos)?;
+                }
+                for bt in loop_struct.done_queue {
+                    bt.complete(chunk)?;
+                }
+            }
+            Cmd::Call(x) => match x.func {
+                // Try to optimize into a static call
+                EraExpr::Term(EraTermExpr::Literal(EraLiteral::String(func, si))) => match self
+                    .compile_static_fun_call(funcs, func_info, &func, x.args, si, chunk)?
+                {
+                    TInteger | TString => chunk.emit_bytecode(Pop, x.src_info),
+                    TVoid => (),
+                },
+                _ => {
+                    self.compile_dynamic_fun_call(funcs, func_info, x.func, x.args, chunk)?;
+                    chunk.emit_bytecode(Pop, x.src_info);
+                }
+            },
+            Cmd::TryCall(x) => {
+                // Enforce dynamic call
+                self.compile_dynamic_fun_call(funcs, func_info, x.func, x.args, chunk)?;
+                chunk.emit_bytecode(Pop, x.src_info);
+            }
+            Cmd::TryCCall(x) => {
+                // Enforce dynamic call
+                self.compile_dynamic_fun_call(funcs, func_info, x.func, x.args, chunk)?;
+                let bt_then = chunk.emit_jump_cond_hold(x.src_info);
+                for stmt in x.catch_body {
+                    self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
+                }
+                // HACK: Steal source pos info from last statement
+                let last_src_info = chunk.source_info_at(chunk.cur_bytes_cnt() - 1).unwrap();
+                let bt_done = chunk.emit_jump_hold(last_src_info);
+                if bt_then.complete(chunk).is_none() {
+                    bail_opt!(self, x.src_info, "jump too far to be encoded in bytecode");
+                }
+                for stmt in x.then_body {
+                    self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
+                }
+                if bt_done.complete(chunk).is_none() {
+                    bail_opt!(self, x.src_info, "jump too far to be encoded in bytecode");
+                }
+            }
+            Cmd::Jump(x) => {
+                let si = x.src_info;
+                self.compile_statement(
+                    funcs,
+                    func_info,
+                    func_kind,
+                    EraStmt::Command(Cmd::Call(x)),
+                    chunk,
+                )?;
+                self.final_return_backtracks.push(chunk.emit_jump_hold(si));
+            }
+            Cmd::TryJump(x) => {
+                let si = x.src_info;
+                self.compile_statement(
+                    funcs,
+                    func_info,
+                    func_kind,
+                    EraStmt::Command(Cmd::TryCall(x)),
+                    chunk,
+                )?;
+                self.final_return_backtracks.push(chunk.emit_jump_hold(si));
+            }
+            Cmd::TryCJump(x) => {
+                let si = x.src_info;
+                self.compile_statement(
+                    funcs,
+                    func_info,
+                    func_kind,
+                    EraStmt::Command(Cmd::TryCCall(x)),
+                    chunk,
+                )?;
+                self.final_return_backtracks.push(chunk.emit_jump_hold(si));
+            }
+            Cmd::Return(x) => {
+                // NOTE: EraBasic only assigns values to RESULT:*
+                if let EraFunKind::Procedure = func_kind {
+                    // TODO: Optimize RETURN
+                    for (val_idx, val) in x.vals.into_iter().enumerate() {
+                        let src_info = val.source_pos_info();
+                        let dst = EraVarExpr {
+                            name: "RESULT".to_owned(),
+                            idxs: vec![EraExpr::Term(EraTermExpr::Literal(EraLiteral::Integer(
+                                val_idx as _,
+                                src_info,
+                            )))],
+                            src_info: val.source_pos_info(),
+                        };
+                        _ = self.compile_expression_assign(
+                            funcs,
+                            func_info,
+                            dst,
+                            |this, chunk| {
+                                let v = this.compile_expression(funcs, func_info, val, chunk)?;
+                                if let TString = v {
+                                    chunk.emit_bytecode(ConvertToInteger, src_info);
+                                }
+                                Some(TInteger)
+                            },
+                            chunk,
+                        )?;
+                    }
+                    chunk.emit_bytecode(ReturnVoid, x.src_info);
+                } else {
+                    let src_info = x.src_info;
+                    let Ok([val]) = TryInto::<[_; 1]>::try_into(x.vals) else {
+                        bail_opt!(self, src_info, "invalid return type for current function");
+                    };
+                    let val_kind = self.compile_expression(funcs, func_info, val, chunk)?;
+                    match (func_kind, val_kind) {
+                        (EraFunKind::Function, TInteger) => {
+                            chunk.emit_bytecode(ReturnInteger, src_info);
+                        }
+                        (EraFunKind::FunctionS, TString) => {
+                            chunk.emit_bytecode(ReturnString, src_info);
+                        }
+                        _ => bail_opt!(self, src_info, "invalid return type for current function"),
+                    }
+                }
+            }
+            Cmd::Continue(x) => {
+                let Some(loop_struct) = self.loop_structs.last_mut() else {
+                    bail_opt!(self, x.src_info, "loop controlling statements are valid only in the context of a loop structure");
+                };
+                // let pos_delta = (chunk.cur_bytes_cnt() - loop_struct.continue_pos) as isize;
+                // chunk.emit_jump(-pos_delta, x.src_info);
+                loop_struct
+                    .continue_queue
+                    .push(chunk.emit_jump_hold(x.src_info));
+            }
+            Cmd::Break(x) => {
+                let Some(loop_struct) = self.loop_structs.last_mut() else {
+                    bail_opt!(self, x.src_info, "loop controlling statements are valid only in the context of a loop structure");
+                };
+                loop_struct
+                    .done_queue
+                    .push(chunk.emit_jump_hold(x.src_info));
+            }
+            Cmd::Throw(x) => {
+                self.compile_expression(funcs, func_info, x.val, chunk)?;
+                chunk.emit_bytecode(Throw, x.src_info);
+            }
+            Cmd::Repeat(x) => {
+                // for (loopCount = ?, COUNT = 0; COUNT < loopCount; COUNT++) {}
+                // Use stack to store temporary loopCount
+                self.stack_balance += 1;
+
+                match self.compile_expression(funcs, func_info, x.loop_cnt, chunk)? {
+                    TInteger => (),
+                    TString | TVoid => {
+                        bail_opt!(self, x.src_info, "invalid expression for REPEAT condition")
+                    }
+                }
+                let count_var = EraVarExpr {
+                    name: "COUNT".to_owned(),
+                    idxs: Vec::new(),
+                    src_info: x.src_info,
+                };
+                self.compile_expression_assign(
+                    funcs,
+                    func_info,
+                    count_var.clone(),
+                    |this, chunk| {
+                        chunk.emit_load_const(Value::new_int(0), x.src_info);
+                        Some(TInteger)
+                    },
+                    chunk,
+                )?;
+                chunk.emit_bytecode(Pop, x.src_info);
+                let bt_body = chunk.emit_jump_hold(x.src_info);
+                let start_pos = chunk.cur_bytes_cnt();
+                self.loop_structs.push(EraLoopStructCodeMetadata::new());
+                self.compile_expression(
+                    funcs,
+                    func_info,
+                    EraExpr::PreUnary(
+                        EraTokenLite {
+                            kind: EraTokenKind::Increment,
+                            src_info: x.src_info,
+                        },
+                        Box::new(EraExpr::Term(EraTermExpr::Var(count_var.clone()))),
+                    ),
+                    chunk,
+                )?;
+                chunk.emit_bytecode(Pop, x.src_info);
+                bt_body.complete(chunk)?;
+                chunk.emit_bytecode(Duplicate, x.src_info);
+                self.compile_expression_array(funcs, func_info, count_var.clone(), true, chunk)?;
+                chunk.emit_bytecode(CompareLEq, x.src_info);
+                let bt_done = chunk.emit_jump_cond_hold(x.src_info);
+                for stmt in x.body {
+                    self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
+                }
+                {
+                    let offset = -((chunk.cur_bytes_cnt() - start_pos) as isize);
+                    chunk.emit_jump(offset, x.src_info);
+                }
+                let loop_struct = self.loop_structs.pop().unwrap();
+                for bt in loop_struct.continue_queue {
+                    bt.complete_at(chunk, start_pos)?;
+                }
+                for bt in loop_struct.done_queue {
+                    bt.complete(chunk)?;
+                }
+                // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
+                self.compile_expression(
+                    funcs,
+                    func_info,
+                    EraExpr::PreUnary(
+                        EraTokenLite {
+                            kind: EraTokenKind::Increment,
+                            src_info: x.src_info,
+                        },
+                        Box::new(EraExpr::Term(EraTermExpr::Var(count_var.clone()))),
+                    ),
+                    chunk,
+                )?;
+                bt_done.complete(chunk)?;
+                chunk.emit_bytecode(Pop, x.src_info);
+
+                self.stack_balance -= 1;
+            }
             Cmd::Goto(x) => {
                 let backtrack = chunk.emit_jump_hold(x.src_info);
                 self.goto_backtracks.push(EraGotoJumpInfo {
@@ -1537,8 +1622,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 };
                 let bt_body = chunk.emit_jump_hold(x.src_info);
                 let start_pos = chunk.cur_bytes_cnt();
-                self.loop_structs
-                    .push(EraLoopStructCodeMetadata::new(start_pos));
+                self.loop_structs.push(EraLoopStructCodeMetadata::new());
                 emit_step_fn(chunk, x.src_info);
                 bt_body.complete(chunk)?;
                 emit_cond_fn(chunk, x.src_info);
@@ -1550,7 +1634,11 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     let offset = -((chunk.cur_bytes_cnt() - start_pos) as isize);
                     chunk.emit_jump(offset, x.src_info);
                 }
-                for bt in self.loop_structs.pop().unwrap().done_queue {
+                let loop_struct = self.loop_structs.pop().unwrap();
+                for bt in loop_struct.continue_queue {
+                    bt.complete_at(chunk, start_pos)?;
+                }
+                for bt in loop_struct.done_queue {
                     bt.complete(chunk)?;
                 }
                 // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
@@ -1563,22 +1651,34 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
 
                 self.stack_balance -= 4;
             }
+            Cmd::DoLoop(x) => {
+                let si = x.src_info;
+                let start_pos = chunk.cur_bytes_cnt();
+                self.loop_structs.push(EraLoopStructCodeMetadata::new());
+                for stmt in x.body {
+                    self.compile_statement(funcs, func_info, func_kind, stmt, chunk)?;
+                }
+                let continue_pos = chunk.cur_bytes_cnt();
+                self.compile_expression(funcs, func_info, x.cond, chunk)?;
+                chunk.emit_jump_cond_hold(si).complete_at(chunk, start_pos);
+                let loop_struct = self.loop_structs.pop().unwrap();
+                for bt in loop_struct.continue_queue {
+                    bt.complete_at(chunk, continue_pos)?;
+                }
+                for bt in loop_struct.done_queue {
+                    bt.complete(chunk)?;
+                }
+            }
             Cmd::Split(x) => {
-                let TString = self.compile_expression(funcs, func_info, x.input, chunk)? else {
-                    bail_opt!(self, x.src_info, "SPLIT expects string arguments");
-                };
-                let TString = self.compile_expression(funcs, func_info, x.separator, chunk)? else {
-                    bail_opt!(self, x.src_info, "SPLIT expects string arguments");
-                };
-                let TString =
-                    self.compile_expression_array(funcs, func_info, x.dest, false, chunk)?
-                else {
-                    bail_opt!(self, x.src_info, "SPLIT expects string arguments");
-                };
+                self.expression_str(funcs, func_info, x.input, chunk)?;
+                self.expression_str(funcs, func_info, x.separator, chunk)?;
+                self.array_str(funcs, func_info, x.dest, chunk)?;
+                self.array_int(funcs, func_info, x.dest_count, chunk)?;
                 chunk.emit_bytecode(SplitString, x.src_info);
             }
             Cmd::ResultCmdCall(x) => {
                 let mut should_assign = false;
+                // TODO: Refactor Cmd::ResultCmdCall
                 match self.try_compile_builtin_fun_call(
                     funcs,
                     func_info,
@@ -1609,10 +1709,6 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     }
                     None => bail_opt!(self, x.src_info, "invalid statement call"),
                 }
-            }
-            Cmd::DebugPrint(x) => {
-                // TODO: Cmd::DebugPrint
-                // Ignore debug print for now
             }
             _ => bail_opt!(
                 self,
@@ -2593,6 +2689,76 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
     #[must_use]
     fn decorate_as_func_local_name(name: &str, func_name: &str) -> String {
         format!("$LOCALVAR_{name}@{func_name}")
+    }
+    fn expression_int(
+        &mut self,
+        funcs: &EraFuncPool,
+        func_info: &EraFuncInfo,
+        expr: EraExpr,
+        chunk: &mut EraBytecodeChunk,
+    ) -> Option<()> {
+        use EraExpressionValueKind::*;
+        let si = expr.source_pos_info();
+        let TInteger = self.compile_expression(funcs, func_info, expr, chunk)? else {
+            bail_opt!(self, si, "expected an integer expression");
+        };
+        Some(())
+    }
+    fn expression_str(
+        &mut self,
+        funcs: &EraFuncPool,
+        func_info: &EraFuncInfo,
+        expr: EraExpr,
+        chunk: &mut EraBytecodeChunk,
+    ) -> Option<()> {
+        use EraExpressionValueKind::*;
+        let si = expr.source_pos_info();
+        let TString = self.compile_expression(funcs, func_info, expr, chunk)? else {
+            bail_opt!(self, si, "expected a string expression");
+        };
+        Some(())
+    }
+    fn array_int(
+        &mut self,
+        funcs: &EraFuncPool,
+        func_info: &EraFuncInfo,
+        var_expr: EraVarExpr,
+        chunk: &mut EraBytecodeChunk,
+    ) -> Option<()> {
+        use EraExpressionValueKind::*;
+        let si = var_expr.src_info;
+        let TInteger = self.compile_expression_array_with_idx(funcs, func_info, var_expr, chunk)?
+        else {
+            bail_opt!(self, si, "expected an integer variable");
+        };
+        Some(())
+    }
+    fn array_str(
+        &mut self,
+        funcs: &EraFuncPool,
+        func_info: &EraFuncInfo,
+        var_expr: EraVarExpr,
+        chunk: &mut EraBytecodeChunk,
+    ) -> Option<()> {
+        use EraExpressionValueKind::*;
+        let si = var_expr.src_info;
+        let TString = self.compile_expression_array_with_idx(funcs, func_info, var_expr, chunk)?
+        else {
+            bail_opt!(self, si, "expected a string variable");
+        };
+        Some(())
+    }
+    fn var_result(&mut self, src_info: SourcePosInfo, chunk: &mut EraBytecodeChunk) -> Option<()> {
+        let idx = self.vars.get_var_idx("RESULT").unwrap();
+        chunk.emit_load_const(self.new_value_int(idx as _), src_info);
+        chunk.emit_bytecode(EraBytecodePrimaryType::GetGlobal, src_info);
+        Some(())
+    }
+    fn var_results(&mut self, src_info: SourcePosInfo, chunk: &mut EraBytecodeChunk) -> Option<()> {
+        let idx = self.vars.get_var_idx("RESULTS").unwrap();
+        chunk.emit_load_const(self.new_value_int(idx as _), src_info);
+        chunk.emit_bytecode(EraBytecodePrimaryType::GetGlobal, src_info);
+        Some(())
     }
     fn report_err<V: Into<String>>(
         &mut self,
