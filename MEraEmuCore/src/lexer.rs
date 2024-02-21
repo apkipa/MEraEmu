@@ -50,6 +50,7 @@ pub enum EraTokenKind {
     BitAnd,
     BitOr,
     BitXor,
+    BitNot,
     BitShiftL,
     BitShiftR,
     LogicalNot,
@@ -109,6 +110,10 @@ pub enum EraTokenKind {
     KwFunction,
     KwFunctionS,
     KwDefine,
+    KwOnly,
+    KwPri,
+    KwLater,
+    KwSingle,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -153,6 +158,7 @@ impl std::fmt::Display for EraTokenKind {
                 BitAnd => "&",
                 BitOr => "|",
                 BitXor => "^",
+                BitNot => "~",
                 BitShiftL => "<<",
                 BitShiftR => ">>",
                 LogicalNot => "!",
@@ -211,6 +217,10 @@ impl std::fmt::Display for EraTokenKind {
                 KwFunction => "FUNCTION",
                 KwFunctionS => "FUNCTIONS",
                 KwDefine => "DEFINE",
+                KwOnly => "ONLY",
+                KwPri => "PRI",
+                KwLater => "LATER",
+                KwSingle => "SINGLE",
                 Invalid | _ => "<invalid>",
             }
         )
@@ -225,6 +235,7 @@ impl std::fmt::Display for EraTokenLite {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EraLexerMode {
     Normal,
+    InlineNormal,
     SharpDecl,  // Such as `#DIM x = 42`
     StrForm,    // Quoted string form expression
     RawStrForm, // Unquoted string form
@@ -344,7 +355,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
     /// Retrieves the next token without lexeme field set.
     fn next_token(&mut self, mode: EraLexerMode) -> EraToken<'static> {
         // Normal mode should have leading whitespaces removed
-        if let EraLexerMode::Normal | EraLexerMode::SharpDecl = mode {
+        if let EraLexerMode::Normal | EraLexerMode::SharpDecl | EraLexerMode::InlineNormal = mode {
             self.skip_whitespace();
         }
 
@@ -369,7 +380,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
             };
 
         let token = match mode {
-            EraLexerMode::Normal | EraLexerMode::SharpDecl => {
+            EraLexerMode::Normal | EraLexerMode::SharpDecl | EraLexerMode::InlineNormal => {
                 //use EraTokenKind as TKind;
                 use EraTokenKind::*;
 
@@ -405,6 +416,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                     b',' => make_token_fn(self, Comma),
                     b':' => make_token_fn(self, Colon),
                     b'$' => make_token_fn(self, Dollar),
+                    b'~' => make_token_fn(self, BitNot),
                     b'+' => {
                         make_link2_token_fn(self, &[(b'=', PlusAssign), (b'+', Increment)], Plus)
                     }
@@ -413,7 +425,13 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                     }
                     b'*' => make_link2_token_fn(self, &[(b'=', MultiplyAssign)], Multiply),
                     b'/' => make_link2_token_fn(self, &[(b'=', DivideAssign)], Divide),
-                    b'%' => make_link2_token_fn(self, &[(b'=', ModuloAssign)], Percentage),
+                    b'%' => {
+                        if let EraLexerMode::InlineNormal = mode {
+                            make_token_fn(self, Percentage)
+                        } else {
+                            make_link2_token_fn(self, &[(b'=', ModuloAssign)], Percentage)
+                        }
+                    }
                     b'?' => make_token_fn(self, QuestionMark),
                     b'{' => make_token_fn(self, LCurlyBracket),
                     b'}' => make_token_fn(self, RCurlyBracket),
@@ -484,6 +502,14 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                                 KwFunctionS
                             } else if lexeme.eq_ignore_ascii_case(b"DEFINE") {
                                 KwDefine
+                            } else if lexeme.eq_ignore_ascii_case(b"ONLY") {
+                                KwOnly
+                            } else if lexeme.eq_ignore_ascii_case(b"PRI") {
+                                KwPri
+                            } else if lexeme.eq_ignore_ascii_case(b"LATER") {
+                                KwLater
+                            } else if lexeme.eq_ignore_ascii_case(b"SINGLE") {
+                                KwSingle
                             } else {
                                 token.kind
                             };
@@ -503,6 +529,11 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                                 // Hex
                                 _ = self.advance_char();
                                 self.skip_char_while(|x| x.is_ascii_hexdigit());
+                            }
+                            Some(b'b' | b'B') => {
+                                // Bin
+                                _ = self.advance_char();
+                                self.skip_char_while(|x| matches!(x, b'0' | b'1'));
                             }
                             /*
                             Some(b'0'..=b'7') => {

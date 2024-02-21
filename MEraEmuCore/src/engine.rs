@@ -399,6 +399,10 @@ impl<'a> MEraEngine<'a> {
         // ………………………………………………
         // 角色文字列変数
         // ………………………………………………
+        iv.add_chara_str("NAME", vec![1]);
+        iv.add_chara_str("CALLNAME", vec![1]);
+        iv.add_chara_str("NICKNAME", vec![1]);
+        iv.add_chara_str("MASTERNAME", vec![1]);
         iv.add_chara_str("CSTR", vec![1]);
         // ………………………………………………
         // 特殊一時変数・一時文字列変数
@@ -407,8 +411,8 @@ impl<'a> MEraEngine<'a> {
         // LOCALS,100
         // ARG,200
         // ARGS,100
-        // GLOBAL,1000
-        // GLOBALS,100
+        iv.add_int("GLOBAL", vec![1]);
+        iv.add_str("GLOBALS", vec![1]);
         // ………………………………………………
         // 二次元配列型変数
         // ………………………………………………

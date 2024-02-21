@@ -21,6 +21,7 @@ pub use engine::{
 mod tests {
     use std::{cell::RefCell, sync::atomic::AtomicBool};
 
+    use colored::{Color, Colorize};
     use indoc::indoc;
 
     use super::*;
@@ -39,14 +40,17 @@ mod tests {
     }
     impl MEraEngineSysCallback for &mut MockEngineCallback<'_> {
         fn on_compile_error(&mut self, info: &EraScriptErrorInfo) {
+            let (noun, color) = if info.is_error {
+                ("error", Color::Red)
+            } else {
+                ("warning", Color::BrightYellow)
+            };
             *self.errors.borrow_mut() += &format!(
                 "{}({},{}): compile {}: {}\n",
-                info.filename,
-                info.src_info.line,
-                info.src_info.column,
-                if info.is_error { "error" } else { "warning" },
-                info.msg
-            );
+                info.filename, info.src_info.line, info.src_info.column, noun, info.msg
+            )
+            .color(color)
+            .to_string();
         }
         fn on_execute_error(&mut self, info: &EraScriptErrorInfo) {
             panic!(
@@ -366,6 +370,14 @@ mod tests {
             let erb = erb.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&erb);
             if engine.load_erb(&erb_path.to_string_lossy(), erb).is_ok() {
                 pass_cnt += 1;
+            } else {
+                // *errors.borrow_mut() +=
+                //     &format!("[File `{}` failed to compile]\n", erb_path.display());
+                panic!(
+                    "{}\n[File `{}` failed to compile]\n",
+                    errors.borrow(),
+                    erb_path.display()
+                );
             }
             total_cnt += 1;
         }
