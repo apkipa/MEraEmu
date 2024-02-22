@@ -245,7 +245,7 @@ mod tests {
         drop(engine);
         assert_eq!(
             &callback.output,
-            "Hello, 4 the world!falseDone[Ret][Ret][Ret]55~-5050~"
+            "Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135"
         );
 
         Ok(())

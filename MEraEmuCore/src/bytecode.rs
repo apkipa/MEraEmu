@@ -85,6 +85,10 @@ pub enum EraBytecodePrimaryType {
     GetRandom,
     GetRandomMax,
     SplitString,
+    MaximumInt,
+    MinimumInt,
+    ClampInt,
+    InRangeInt,
     // -----
     Print,
     PrintLine,

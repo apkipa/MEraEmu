@@ -1679,37 +1679,39 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             Cmd::ResultCmdCall(x) => {
                 let mut should_assign = false;
                 // TODO: Refactor Cmd::ResultCmdCall
-                match self.try_compile_builtin_fun_call(
-                    funcs,
-                    func_info,
-                    &x.name,
-                    x.args,
-                    x.src_info,
-                    |this, chunk, src_info, ret_kind| {
-                        let name = match ret_kind {
-                            TInteger => "RESULT",
-                            TString => "RESULTS",
-                            TVoid => return Some(()),
-                        };
-                        let var = EraVarExpr {
-                            name: name.to_owned(),
-                            idxs: Vec::new(),
-                            src_info,
-                        };
-                        this.compile_expression_array(funcs, func_info, var, false, chunk)?;
-                        should_assign = true;
-                        Some(())
-                    },
-                    chunk,
+                match self.compile_builtin_fun_call(
+                    funcs, func_info, &x.name, x.args, x.src_info, true, chunk,
                 ) {
                     Some(_) => {
                         if should_assign {
                             chunk.emit_bytecode(SetMDArrayVal, x.src_info);
+                            chunk.emit_bytecode(Pop, x.src_info);
                         }
                     }
                     None => bail_opt!(self, x.src_info, "invalid statement call"),
                 }
             }
+            // TODO...
+            Cmd::Swap(x) => {
+                let k1 = self.compile_expression_array_with_idx(funcs, func_info, x.v1, chunk)?;
+                let k2 = self.compile_expression_array_with_idx(funcs, func_info, x.v2, chunk)?;
+                if k1 != k2 || matches!(k1, TVoid) {
+                    bail_opt!(self, x.src_info, "invalid SWAP operands");
+                }
+                chunk.emit_duplicate_one_n(4, x.src_info);
+                chunk.emit_duplicate_one_n(4, x.src_info);
+                chunk.emit_bytecode(GetArrayVal, x.src_info);
+                chunk.emit_duplicate_n(5, x.src_info);
+                chunk.emit_bytecode(Pop, x.src_info);
+                chunk.emit_bytecode(GetArrayVal, x.src_info);
+                chunk.emit_bytecode(SetArrayVal, x.src_info);
+                chunk.emit_bytecode(Pop, x.src_info);
+                chunk.emit_bytecode(SetArrayVal, x.src_info);
+                chunk.emit_bytecode(Pop, x.src_info);
+                chunk.emit_bytecode(Pop, x.src_info);
+                chunk.emit_bytecode(Pop, x.src_info);
+            }
+            // TODO...
             _ => bail_opt!(
                 self,
                 stmt.source_pos_info(),
@@ -2437,13 +2439,13 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
 
         let Some(&target_idx) = funcs.func_names.get(CaselessStr::new(&target)) else {
             // Check for built-in functions as fallback
-            match self.try_compile_builtin_fun_call(
+            match self.compile_builtin_fun_call(
                 funcs,
                 func_info,
                 target,
                 args,
                 target_src_info,
-                |_, _, _, _| Some(()),
+                false,
                 chunk,
             ) {
                 Some(x) => return Some(x),
@@ -2614,77 +2616,170 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         Some(TInteger)
     }
     #[must_use]
-    fn try_compile_builtin_fun_call(
+    fn compile_builtin_fun_call(
         &mut self,
         funcs: &EraFuncPool,
         func_info: &EraFuncInfo,
         target: &str,
         args: Vec<Option<EraExpr>>,
         src_info: SourcePosInfo,
-        pre_run_fn: impl FnOnce(
-            &mut Self,
-            &mut EraBytecodeChunk,
-            SourcePosInfo,
-            EraExpressionValueKind,
-        ) -> Option<()>,
+        is_cmd: bool,
         chunk: &mut EraBytecodeChunk,
     ) -> Option<EraExpressionValueKind> {
         use EraBytecodePrimaryType::*;
         use EraExpressionValueKind::*;
         use ValueKind::*;
-        // TODO: try_compile_builtin_fun_call
-        struct BuiltInFuncOverload {
-            args: &'static [ValueKind],
-            bytecodes: &'static [EraBytecodePrimaryType],
+
+        struct Ctx<'c, 'this, 'a, 'target, T> {
+            this: &'this mut EraCompilerImpl<'a, T>,
+            chunk: &'c mut EraBytecodeChunk,
+            target: &'target str,
+            ret_kind: EraExpressionValueKind,
+            src_info: SourcePosInfo,
+            assign_to_result: bool,
         }
-        struct BuiltInFunc {
-            ret_val: EraExpressionValueKind,
-            overloads: &'static [BuiltInFuncOverload],
-        }
-        macro_rules! builtin_func {
-            ($ret_val:expr, [$(($args:expr, $bytecodes:expr)),+]) => {
-                BuiltInFunc { ret_val: $ret_val, overloads: &[$(BuiltInFuncOverload { args: $args, bytecodes: $bytecodes }),+] }
-            };
-        }
-        static FUNCS: phf::Map<&'static [u8], BuiltInFunc> = phf::phf_map! {
-            b"GCREATE" => builtin_func!{ TInteger, [(&[Int, Int, Int], &[Invalid])] },
-            b"GDISPOSE" => builtin_func!{ TInteger, [(&[Int], &[Invalid])] },
-            b"GDRAWSPRITE" => builtin_func!{ TInteger, [(&[Int, Str], &[Invalid])] },
-        };
-        match FUNCS.get(target.to_ascii_uppercase().as_bytes()) {
-            Some(x) => {
-                pre_run_fn(self, chunk, src_info, x.ret_val)?;
-                for overload in x.overloads {
-                    if overload.args.len() != args.len() {
-                        continue;
-                    }
-                    let chunk_snapshot = chunk.take_snapshot();
-                    let mut ok = true;
-                    for (arg, &param_kind) in args.iter().cloned().zip(overload.args.iter()) {
-                        let Some(arg) = arg else {
-                            todo!("omission of built-in method arguments");
-                        };
-                        let arg_kind = self.compile_expression(funcs, func_info, arg, chunk)?;
-                        match (arg_kind, param_kind) {
-                            (TInteger, Int) | (TString, Str) => (),
-                            _ => {
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                    if ok {
-                        for &bc in overload.bytecodes {
-                            chunk.emit_bytecode(bc, src_info);
-                        }
-                        return Some(x.ret_val);
-                    }
-                    chunk_snapshot.regret(chunk);
+        impl<T: FnMut(&EraCompileErrorInfo)> Ctx<'_, '_, '_, '_, T> {
+            fn result(&mut self) -> Option<()> {
+                if !self.assign_to_result {
+                    return Some(());
                 }
-                None
+                self.this.var_result(self.src_info, self.chunk)?;
+                self.chunk
+                    .emit_load_const(self.this.new_value_int(0), self.src_info);
+                self.ret_kind = TInteger;
+                Some(())
             }
-            None => None,
+            fn results(&mut self) -> Option<()> {
+                if !self.assign_to_result {
+                    return Some(());
+                }
+                self.this.var_results(self.src_info, self.chunk)?;
+                self.chunk
+                    .emit_load_const(self.this.new_value_int(0), self.src_info);
+                self.ret_kind = TString;
+                Some(())
+            }
+            fn unpack_args<const N: usize>(
+                &mut self,
+                args: Vec<Option<EraExpr>>,
+            ) -> Option<[Option<EraExpr>; N]> {
+                if args.len() != N {
+                    bail_opt!(
+                        self.this,
+                        self.src_info,
+                        format!(
+                            "function `{}` expects {} parameters, but {} were given",
+                            self.target,
+                            N,
+                            args.len()
+                        )
+                    );
+                }
+                let mut it = args.into_iter();
+                Some(std::array::from_fn(|_| it.next().unwrap()))
+            }
+            fn unpack_some_args<const N: usize>(
+                &mut self,
+                args: Vec<Option<EraExpr>>,
+            ) -> Option<[EraExpr; N]> {
+                let args = self.unpack_args::<N>(args)?;
+                for (idx, arg) in args.iter().enumerate() {
+                    if arg.is_none() {
+                        bail_opt!(
+                            self.this,
+                            self.src_info,
+                            format!("argument {} cannot be omitted", idx + 1)
+                        );
+                    }
+                }
+                Some(args.map(|x| x.unwrap()))
+            }
         }
+        impl<T> Drop for Ctx<'_, '_, '_, '_, T> {
+            fn drop(&mut self) {
+                match self.ret_kind {
+                    TInteger | TString => {
+                        self.chunk.emit_bytecode(SetArrayVal, self.src_info);
+                        self.chunk.emit_bytecode(Pop, self.src_info);
+                    }
+                    TVoid => (),
+                }
+            }
+        }
+        let mut ctx = Ctx {
+            this: self,
+            chunk,
+            ret_kind: TVoid,
+            target,
+            src_info,
+            assign_to_result: is_cmd,
+        };
+
+        match target.to_ascii_uppercase().as_bytes() {
+            b"GCREATE" => todo!(),
+            b"GDISPOSE" => todo!(),
+            b"GDRAWSPRITE" => todo!(),
+            b"GCLEAR" => todo!(),
+            b"SPRITECREATE" => todo!(),
+            b"SPRITEDISPOSE" => todo!(),
+            b"SPRITEANIMECREATE" => todo!(),
+            b"SPRITEANIMEADDFRAME" => todo!(),
+            b"GETBIT" => todo!(),
+            b"GETSTYLE" => todo!(),
+            b"CHKFONT" => todo!(),
+            b"GETFONT" => todo!(),
+            b"REPLACE" => todo!(),
+            b"SUBSTRING" => todo!(),
+            b"SUBSTRINGU" => todo!(),
+            b"STRFIND" => todo!(),
+            b"STRFINDU" => todo!(),
+            b"STRLENS" => todo!(),
+            b"STRLENSU" => todo!(),
+            b"STRCOUNT" => todo!(),
+            b"CUREENTREDRAW" => todo!(),
+            b"CURRENTALIGN" => todo!(),
+            b"CHKCHARADATA" => todo!(),
+            b"SAVETEXT" => todo!(),
+            b"MAX" => {
+                ctx.result()?;
+                let [a1, a2] = ctx.unpack_some_args(args)?;
+                ctx.this.expression_int(funcs, func_info, a1, ctx.chunk)?;
+                ctx.this.expression_int(funcs, func_info, a2, ctx.chunk)?;
+                ctx.chunk.emit_bytecode(MaximumInt, src_info);
+            }
+            b"MIN" => {
+                ctx.result()?;
+                let [a1, a2] = ctx.unpack_some_args(args)?;
+                ctx.this.expression_int(funcs, func_info, a1, ctx.chunk)?;
+                ctx.this.expression_int(funcs, func_info, a2, ctx.chunk)?;
+                ctx.chunk.emit_bytecode(MinimumInt, src_info);
+            }
+            b"LIMIT" => {
+                ctx.result()?;
+                let [a, amax, amin] = ctx.unpack_some_args(args)?;
+                ctx.this.expression_int(funcs, func_info, a, ctx.chunk)?;
+                ctx.this.expression_int(funcs, func_info, amax, ctx.chunk)?;
+                ctx.this.expression_int(funcs, func_info, amin, ctx.chunk)?;
+                ctx.chunk.emit_bytecode(ClampInt, src_info);
+            }
+            b"INRANGE" => {
+                ctx.result()?;
+                let [a, amax, amin] = ctx.unpack_some_args(args)?;
+                ctx.this.expression_int(funcs, func_info, a, ctx.chunk)?;
+                ctx.this.expression_int(funcs, func_info, amax, ctx.chunk)?;
+                ctx.this.expression_int(funcs, func_info, amin, ctx.chunk)?;
+                ctx.chunk.emit_bytecode(InRangeInt, src_info);
+            }
+            b"FINDCHARA" => todo!(),
+            b"FINDLASTCHARA" => todo!(),
+            _ => bail_opt!(
+                ctx.this,
+                src_info,
+                format!("function `{target}` is undefined or has no matching overloads")
+            ),
+        }
+
+        Some(ctx.ret_kind)
     }
     #[must_use]
     fn decorate_as_func_local_name(name: &str, func_name: &str) -> String {
