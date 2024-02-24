@@ -522,7 +522,7 @@ impl EraVirtualMachine {
         self.stack.push(Value::new_int(0).into()); // Stub value
         self.frames.clear();
         self.frames.push(EraFuncExecFrame {
-            stack_start: 0,
+            stack_start: self.stack.len(),
             ip,
             ret_ip: EraExecIp {
                 chunk: 0,

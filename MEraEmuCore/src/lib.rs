@@ -222,10 +222,15 @@ mod tests {
 
                 ;#DIM cnt = 10000000
                 #DIM cnt = 100
-                WHILE cnt > 0
-                    cnt = cnt - 1
-                WEND
-                cnt = 100
+                #DIM DYNAMIC sum1
+                ;WHILE cnt > 0
+                ;    cnt = cnt - 1
+                ;WEND
+                ;cnt = 100
+                FOR LOCAL, 100, 0, -1
+                    sum1 += LOCAL
+                NEXT
+                PRINTV '(, sum1, ')
 
                 ;world_str = \@ 0 ? aaa # bb{4+1}b \@
                 ;world_str '= @"~\@ 0 ? aaa # bb{4+1}b \@~"
@@ -299,7 +304,7 @@ mod tests {
         drop(engine);
         assert_eq!(
             &callback.output,
-            "Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135"
+            "(5050)Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135"
         );
 
         Ok(())

@@ -2626,9 +2626,9 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
         Some(EraExpr::new_str(cont, src_info))
     }
-    fn generic_rawstr(&mut self, break_at: &[EraTokenKind]) -> Option<(EraExpr, EraToken<'b>)> {
+    fn generic_rawstr(&mut self, mode: EraLexerMode, break_at: &[EraTokenKind]) -> Option<(EraExpr, EraToken<'b>)> {
         let mut cont = String::new();
-        let mut token = self.lexer.read(EraLexerMode::RawStr);
+        let mut token = self.lexer.read(mode);
         let src_info = token.src_info;
         loop {
             match token.kind {
@@ -2649,7 +2649,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     return None;
                 }
             }
-            token = self.lexer.read(EraLexerMode::RawStr);
+            token = self.lexer.read(mode);
         }
         Some((EraExpr::new_str(cont, src_info), token))
     }
@@ -2747,7 +2747,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     .is_some()
                 {
                     // HACK: Raw string inside PRINTV
-                    let (val, token) = self.generic_rawstr(&[EraTokenKind::Comma])?;
+                    let (val, token) = self.generic_rawstr(EraLexerMode::CommaRawStr, &[EraTokenKind::Comma])?;
                     vals.push(val);
                     match token.kind {
                         EraTokenKind::Comma => continue,

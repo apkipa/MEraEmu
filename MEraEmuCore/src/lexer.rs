@@ -243,6 +243,7 @@ pub enum EraLexerMode {
     // TODO: Reject comments inside StrForm properly by introducing a new EraLexerMode
     TernaryStrForm,
     CallForm,
+    CommaRawStr,
 }
 
 pub struct EraLexErrorInfo {
@@ -713,6 +714,21 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                     b'\n' => make_token_fn(self, EraTokenKind::LineBreak),
                     _ => {
                         self.skip_char_while(|x| x != b'\n');
+                        make_token_fn(self, EraTokenKind::PlainStringLiteral)
+                    }
+                }
+            }
+            EraLexerMode::CommaRawStr => {
+                let ch = match self.advance_char() {
+                    Some(ch) => ch,
+                    None => return self.make_eof_token(),
+                };
+
+                match ch {
+                    b'\n' => make_token_fn(self, EraTokenKind::LineBreak),
+                    b',' => make_token_fn(self, EraTokenKind::Comma),
+                    _ => {
+                        self.skip_char_while(|x| !matches!(x, b'\n' | b','));
                         make_token_fn(self, EraTokenKind::PlainStringLiteral)
                     }
                 }
