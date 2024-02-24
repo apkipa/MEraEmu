@@ -374,6 +374,66 @@ pub struct EraRuntimeErrorInfo {
     pub msg: String,
 }
 
+// Reference: https://learn.microsoft.com/en-us/dotnet/api/system.drawing.imaging.colormatrix
+pub struct EraColorMatrix {
+    pub m00: f32,
+    pub m01: f32,
+    pub m02: f32,
+    pub m03: f32,
+    pub m04: f32,
+    pub m10: f32,
+    pub m11: f32,
+    pub m12: f32,
+    pub m13: f32,
+    pub m14: f32,
+    pub m20: f32,
+    pub m21: f32,
+    pub m22: f32,
+    pub m23: f32,
+    pub m24: f32,
+    pub m30: f32,
+    pub m31: f32,
+    pub m32: f32,
+    pub m33: f32,
+    pub m34: f32,
+    pub m40: f32,
+    pub m41: f32,
+    pub m42: f32,
+    pub m43: f32,
+    pub m44: f32,
+}
+impl Default for EraColorMatrix {
+    fn default() -> Self {
+        EraColorMatrix {
+            m00: 1.0,
+            m01: 0.0,
+            m02: 0.0,
+            m03: 0.0,
+            m04: 0.0,
+            m10: 0.0,
+            m11: 1.0,
+            m12: 0.0,
+            m13: 0.0,
+            m14: 0.0,
+            m20: 0.0,
+            m21: 0.0,
+            m22: 1.0,
+            m23: 0.0,
+            m24: 0.0,
+            m30: 0.0,
+            m31: 0.0,
+            m32: 0.0,
+            m33: 1.0,
+            m34: 0.0,
+            m40: 0.0,
+            m41: 0.0,
+            m42: 0.0,
+            m43: 0.0,
+            m44: 1.0,
+        }
+    }
+}
+
 pub trait EraVirtualMachineCallback {
     fn on_execution_error(&mut self, error: EraRuntimeErrorInfo);
     fn on_get_rand(&mut self) -> u64;
@@ -398,10 +458,46 @@ pub trait EraVirtualMachineCallback {
     fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error>;
     fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error>;
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error>;
-    // Graphics
+    // Graphics subsystem
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64;
+    fn on_gcreatefromfile(&mut self, gid: i64, path: &str) -> i64;
     fn on_gdispose(&mut self, gid: i64) -> i64;
     fn on_gcreated(&mut self, gid: i64) -> i64;
+    fn on_gdrawsprite(
+        &mut self,
+        gid: i64,
+        sprite_name: &str,
+        dest_x: i64,
+        dest_y: i64,
+        dest_width: i64,
+        dest_height: i64,
+        color_matrix: Option<&EraColorMatrix>,
+    ) -> i64;
+    fn on_gclear(&mut self, gid: i64, color: i64) -> i64;
+    fn on_spritecreate(
+        &mut self,
+        name: &str,
+        gid: i64,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+    ) -> i64;
+    fn on_spritedispose(&mut self, name: &str) -> i64;
+    fn on_spritecreated(&mut self, name: &str) -> i64;
+    fn on_spriteanimecreate(&mut self, name: &str, width: i64, height: i64) -> i64;
+    fn on_spriteanimeaddframe(
+        &mut self,
+        name: &str,
+        gid: i64,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+        offset_x: i64,
+        offset_y: i64,
+        delay: i64,
+    ) -> i64;
 }
 
 impl EraVirtualMachine {
@@ -521,28 +617,20 @@ impl EraVirtualMachine {
         let mut ctx;
         make_ctx!(self, ctx);
 
-        // let Some(FlatValue::ArrInt(vresult)) = self
-        //     .global_vars
-        //     .get_var("RESULT")
-        //     .map(|x| x.clone().into_unpacked())
-        // else {
-        //     bail_opt!(ctx, None, true, "variable RESULT not properly defined");
-        // };
-        // let Some(FlatValue::ArrStr(vresults)) = self
-        //     .global_vars
-        //     .get_var("RESULTS")
-        //     .map(|x| x.clone().into_unpacked())
-        // else {
-        //     bail_opt!(ctx, None, true, "variable RESULTS not properly defined");
-        // };
-
-        // ctx.cur_chunk = match self.chunks.get(ctx.cur_frame.ip.chunk) {
-        //     Some(x) => x,
-        //     None => {
-        //         ctx.report_err(true, "ip exceeds bounds of chunk");
-        //         return None;
-        //     }
-        // };
+        let Some(FlatValue::ArrInt(vresult)) = self
+            .global_vars
+            .get_var("RESULT")
+            .map(|x| x.clone().into_unpacked())
+        else {
+            bail_opt!(ctx, None, true, "variable RESULT not properly defined");
+        };
+        let Some(FlatValue::ArrStr(vresults)) = self
+            .global_vars
+            .get_var("RESULTS")
+            .map(|x| x.clone().into_unpacked())
+        else {
+            bail_opt!(ctx, None, true, "variable RESULTS not properly defined");
+        };
 
         for _ in 0..max_inst_cnt {
             if stop_flag.load(Ordering::Relaxed) {
@@ -1642,6 +1730,65 @@ impl EraVirtualMachine {
                     });
                     let msg = msg.as_ref().map(|x| x.val.as_str()).unwrap_or("<invalid>");
                     bail_opt!(ctx, true, format!("THROW: {msg}"));
+                }
+                MaximumInt => {
+                    let [a1, a2] = ctx.pop_stack()?;
+                    let a1 = ctx.unpack_int(a1.into())?;
+                    let a2 = ctx.unpack_int(a2.into())?;
+                    ctx.stack.push(Value::new_int(a1.val.max(a2.val)).into());
+                }
+                MinimumInt => {
+                    let [a1, a2] = ctx.pop_stack()?;
+                    let a1 = ctx.unpack_int(a1.into())?;
+                    let a2 = ctx.unpack_int(a2.into())?;
+                    ctx.stack.push(Value::new_int(a1.val.min(a2.val)).into());
+                }
+                ClampInt => {
+                    let [a, amax, amin] = ctx.pop_stack()?;
+                    let a = ctx.unpack_int(a.into())?;
+                    let amax = ctx.unpack_int(amax.into())?;
+                    let amin = ctx.unpack_int(amin.into())?;
+                    if amin.val > amax.val {
+                        bail_opt!(ctx, true, "precondition min <= max was not satisfied");
+                    }
+                    ctx.stack
+                        .push(Value::new_int(a.val.clamp(amin.val, amax.val)).into());
+                }
+                InRangeInt => {
+                    let [a, amax, amin] = ctx.pop_stack()?;
+                    let a = ctx.unpack_int(a.into())?;
+                    let amax = ctx.unpack_int(amax.into())?;
+                    let amin = ctx.unpack_int(amin.into())?;
+                    if amin.val > amax.val {
+                        bail_opt!(ctx, true, "precondition min <= max was not satisfied");
+                    }
+                    let in_range = (amin.val..=amax.val).contains(&a.val);
+                    ctx.stack.push(Value::new_int(in_range.into()).into());
+                }
+                GetBit => {
+                    let [val, bit] = ctx.pop_stack()?;
+                    let val = ctx.unpack_int(val.into())?;
+                    let bit = ctx.unpack_int(bit.into())?;
+                    if !(0..64).contains(&bit.val) {
+                        bail_opt!(ctx, true, "precondition 0 <= bit < 64 was not satisfied");
+                    }
+                    let is_bit_set = (val.val & (1 << bit.val)) != 0;
+                    ctx.stack.push(Value::new_int(is_bit_set.into()).into());
+                }
+                GCreate => {
+                    let [gid, width, height] = ctx.pop_stack()?;
+                    let gid = ctx.unpack_int(gid.into())?;
+                    let width = ctx.unpack_int(width.into())?;
+                    let height = ctx.unpack_int(height.into())?;
+                    let ret = ctx.callback.on_gcreate(gid.val, width.val, height.val);
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                GCreateFromFile => {
+                    let [gid, file_path] = ctx.pop_stack()?;
+                    let gid = ctx.unpack_int(gid.into())?;
+                    let file_path = ctx.unpack_str(file_path.into())?;
+                    let ret = ctx.callback.on_gcreatefromfile(gid.val, &file_path.val);
+                    ctx.stack.push(Value::new_int(ret).into());
                 }
                 Invalid | _ => bail_opt!(
                     ctx,

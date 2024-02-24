@@ -89,6 +89,7 @@ pub enum EraBytecodePrimaryType {
     MinimumInt,
     ClampInt,
     InRangeInt,
+    GetBit,
     // -----
     Print,
     PrintLine,
@@ -99,6 +100,18 @@ pub enum EraBytecodePrimaryType {
     // PrintImg2,
     // PrintImg3,
     PrintImg4,
+    GCreate,
+    GCreateFromFile,
+    GDispose,
+    GCreated,
+    GDrawSprite,
+    GDrawSpriteWithColorMatrix,
+    GClear,
+    SpriteCreate,
+    SpriteDispose,
+    SpriteCreated,
+    SpriteAnimeCreate,
+    SpriteAnimeAddFrame,
     // -----
     ExtendedBytecode1 = 192, // Values >= ExtendedBytecode should do extended lookup
 }

@@ -8,6 +8,8 @@ mod routine;
 mod util;
 mod vm;
 
+pub use vm::EraColorMatrix;
+
 #[cxx::bridge]
 mod ffi {
     // TODO: ffi
@@ -116,10 +118,62 @@ mod tests {
         fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
             0
         }
+        fn on_gcreatefromfile(&mut self, gid: i64, path: &str) -> i64 {
+            0
+        }
         fn on_gdispose(&mut self, gid: i64) -> i64 {
             0
         }
         fn on_gcreated(&mut self, gid: i64) -> i64 {
+            0
+        }
+        fn on_gdrawsprite(
+            &mut self,
+            gid: i64,
+            sprite_name: &str,
+            dest_x: i64,
+            dest_y: i64,
+            dest_width: i64,
+            dest_height: i64,
+            color_matrix: Option<&crate::vm::EraColorMatrix>,
+        ) -> i64 {
+            0
+        }
+        fn on_gclear(&mut self, gid: i64, color: i64) -> i64 {
+            0
+        }
+        fn on_spritecreate(
+            &mut self,
+            name: &str,
+            gid: i64,
+            x: i64,
+            y: i64,
+            width: i64,
+            height: i64,
+        ) -> i64 {
+            0
+        }
+        fn on_spritedispose(&mut self, name: &str) -> i64 {
+            0
+        }
+        fn on_spritecreated(&mut self, name: &str) -> i64 {
+            0
+        }
+        fn on_spriteanimecreate(&mut self, name: &str, width: i64, height: i64) -> i64 {
+            0
+        }
+        fn on_spriteanimeaddframe(
+            &mut self,
+            name: &str,
+            gid: i64,
+            x: i64,
+            y: i64,
+            width: i64,
+            height: i64,
+            offset_x: i64,
+            offset_y: i64,
+            delay: i64,
+        ) -> i64 {
             0
         }
     }
@@ -240,7 +294,7 @@ mod tests {
             }
         }
         let stop_flag = AtomicBool::new(false);
-        engine.do_execution(&stop_flag, u64::MAX)?;
+        engine.do_execution(&stop_flag, 1024 * 1024)?;
         assert!(engine.get_is_halted());
         drop(engine);
         assert_eq!(

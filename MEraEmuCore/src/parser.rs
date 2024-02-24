@@ -2023,11 +2023,14 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"POWER" => Cmd::Power(self.r().stmt_power()?),
                         b"SAVEDATA" => Cmd::SaveData(self.r().stmt_savedata()?),
                         b"GCREATE"
+                        | b"GCREATEFROMFILE"
                         | b"GDISPOSE"
+                        | b"GCREATED"
                         | b"GDRAWSPRITE"
                         | b"GCLEAR"
                         | b"SPRITECREATE"
                         | b"SPRITEDISPOSE"
+                        | b"SPRITECREATED"
                         | b"SPRITEANIMECREATE"
                         | b"SPRITEANIMEADDFRAME"
                         | b"GETBIT"

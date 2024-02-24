@@ -114,10 +114,46 @@ pub trait MEraEngineSysCallback {
     fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error>;
     fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error>;
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error>;
-    // Graphics
+    // Graphics subsystem
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64;
+    fn on_gcreatefromfile(&mut self, gid: i64, path: &str) -> i64;
     fn on_gdispose(&mut self, gid: i64) -> i64;
     fn on_gcreated(&mut self, gid: i64) -> i64;
+    fn on_gdrawsprite(
+        &mut self,
+        gid: i64,
+        sprite_name: &str,
+        dest_x: i64,
+        dest_y: i64,
+        dest_width: i64,
+        dest_height: i64,
+        color_matrix: Option<&crate::vm::EraColorMatrix>,
+    ) -> i64;
+    fn on_gclear(&mut self, gid: i64, color: i64) -> i64;
+    fn on_spritecreate(
+        &mut self,
+        name: &str,
+        gid: i64,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+    ) -> i64;
+    fn on_spritedispose(&mut self, name: &str) -> i64;
+    fn on_spritecreated(&mut self, name: &str) -> i64;
+    fn on_spriteanimecreate(&mut self, name: &str, width: i64, height: i64) -> i64;
+    fn on_spriteanimeaddframe(
+        &mut self,
+        name: &str,
+        gid: i64,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+        offset_x: i64,
+        offset_y: i64,
+        delay: i64,
+    ) -> i64;
 }
 
 pub struct ExecSourceInfo {
@@ -180,6 +216,7 @@ pub enum EraCsvLoadKind {
     _Rename,
     GameBase,
     VariableSize,
+    ImageResources,
 }
 
 struct EmptyCallback;
@@ -221,8 +258,11 @@ impl MEraEngineSysCallback for EmptyCallback {
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error> {
         Ok(())
     }
-    // Graphics
+    // Graphics subsystem
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
+        0
+    }
+    fn on_gcreatefromfile(&mut self, gid: i64, path: &str) -> i64 {
         0
     }
     fn on_gdispose(&mut self, gid: i64) -> i64 {
@@ -231,15 +271,61 @@ impl MEraEngineSysCallback for EmptyCallback {
     fn on_gcreated(&mut self, gid: i64) -> i64 {
         0
     }
+    fn on_gdrawsprite(
+        &mut self,
+        gid: i64,
+        sprite_name: &str,
+        dest_x: i64,
+        dest_y: i64,
+        dest_width: i64,
+        dest_height: i64,
+        color_matrix: Option<&crate::vm::EraColorMatrix>,
+    ) -> i64 {
+        0
+    }
+    fn on_gclear(&mut self, gid: i64, color: i64) -> i64 {
+        0
+    }
+    fn on_spritecreate(
+        &mut self,
+        name: &str,
+        gid: i64,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+    ) -> i64 {
+        0
+    }
+    fn on_spritedispose(&mut self, name: &str) -> i64 {
+        0
+    }
+    fn on_spritecreated(&mut self, name: &str) -> i64 {
+        0
+    }
+    fn on_spriteanimecreate(&mut self, name: &str, width: i64, height: i64) -> i64 {
+        0
+    }
+    fn on_spriteanimeaddframe(
+        &mut self,
+        name: &str,
+        gid: i64,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+        offset_x: i64,
+        offset_y: i64,
+        delay: i64,
+    ) -> i64 {
+        0
+    }
 }
 
 impl<'a> MEraEngine<'a> {
     pub fn new() -> Self {
         type T1 = HashMap<Ascii<String>, InitialVarDesc>;
         let mut iv: T1 = HashMap::new();
-        // let mut add_var = |name: &str, is_string, dims| {
-        //     initial_vars.insert(name.into(), InitialVarDesc { is_string, dims });
-        // };
         trait Adhoc {
             fn add_item(
                 &mut self,
@@ -629,6 +715,14 @@ impl<'a> MEraEngine<'a> {
             EraCsvLoadKind::SaveStr => load_2_fn("SAVESTRNAME", false)?,
             EraCsvLoadKind::Global => load_2_fn("GLOBALNAME", false)?,
             EraCsvLoadKind::Globals => load_2_fn("GLOBALSNAME", false)?,
+            EraCsvLoadKind::ImageResources => {
+                let dir_prefix = filename
+                    .rsplit_once(&['\\', '/'])
+                    .map(|x| x.0)
+                    .unwrap_or("");
+                // TODO: Use self.callback to pre-allocate graphics & sprites
+                todo!()
+            }
             _ => {
                 return Err(MEraEngineError::new(
                     "csv loading not yet implemented".to_owned(),
@@ -660,7 +754,7 @@ impl<'a> MEraEngine<'a> {
                     .add_var_ex(&name, val, var_desc.is_const, var_desc.is_charadata)
                     .is_none()
                 {
-                    panic!("variable `{name}` redefined");
+                    panic!("variable `{name}` was redefined");
                 }
             }
         }
@@ -791,7 +885,6 @@ impl<'a> MEraEngine<'a> {
         };
         let mut vm = crate::vm::EraVirtualMachine::new(compilation);
         vm.reset_exec_and_ip(entry_ip);
-        //for var in registered_vars {
         for var in std::mem::take(&mut self.watching_vars) {
             vm.register_var_callback(var.as_str()).ok_or_else(|| {
                 MEraEngineError::new("cannot register variable callback".to_owned())
@@ -886,11 +979,74 @@ impl<'a> MEraEngine<'a> {
             fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
                 self.callback.on_gcreate(gid, width, height)
             }
+            fn on_gcreatefromfile(&mut self, gid: i64, path: &str) -> i64 {
+                self.callback.on_gcreatefromfile(gid, path)
+            }
             fn on_gdispose(&mut self, gid: i64) -> i64 {
                 self.callback.on_gdispose(gid)
             }
             fn on_gcreated(&mut self, gid: i64) -> i64 {
                 self.callback.on_gcreated(gid)
+            }
+            fn on_gdrawsprite(
+                &mut self,
+                gid: i64,
+                sprite_name: &str,
+                dest_x: i64,
+                dest_y: i64,
+                dest_width: i64,
+                dest_height: i64,
+                color_matrix: Option<&crate::vm::EraColorMatrix>,
+            ) -> i64 {
+                self.callback.on_gdrawsprite(
+                    gid,
+                    sprite_name,
+                    dest_x,
+                    dest_y,
+                    dest_width,
+                    dest_height,
+                    color_matrix,
+                )
+            }
+            fn on_gclear(&mut self, gid: i64, color: i64) -> i64 {
+                self.callback.on_gclear(gid, color)
+            }
+            fn on_spritecreate(
+                &mut self,
+                name: &str,
+                gid: i64,
+                x: i64,
+                y: i64,
+                width: i64,
+                height: i64,
+            ) -> i64 {
+                self.callback
+                    .on_spritecreate(name, gid, x, y, width, height)
+            }
+            fn on_spritedispose(&mut self, name: &str) -> i64 {
+                self.callback.on_spritedispose(name)
+            }
+            fn on_spritecreated(&mut self, name: &str) -> i64 {
+                self.callback.on_spritecreated(name)
+            }
+            fn on_spriteanimecreate(&mut self, name: &str, width: i64, height: i64) -> i64 {
+                self.callback.on_spriteanimecreate(name, width, height)
+            }
+            fn on_spriteanimeaddframe(
+                &mut self,
+                name: &str,
+                gid: i64,
+                x: i64,
+                y: i64,
+                width: i64,
+                height: i64,
+                offset_x: i64,
+                offset_y: i64,
+                delay: i64,
+            ) -> i64 {
+                self.callback.on_spriteanimeaddframe(
+                    name, gid, x, y, width, height, offset_x, offset_y, delay,
+                )
             }
         }
 
