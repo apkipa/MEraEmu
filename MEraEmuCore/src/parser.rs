@@ -201,6 +201,16 @@ impl EraExpr {
             }),
         }
     }
+    pub fn unwrap_str_constant(lit: EraLiteral) -> Result<String, EraParseErrorInfo> {
+        match lit {
+            EraLiteral::String(x, _) => Ok(x),
+            EraLiteral::Integer(_, src_info) => Err(EraParseErrorInfo {
+                src_info,
+                is_error: true,
+                msg: "expected string here".into(),
+            }),
+        }
+    }
     // TODO: Finish EraExpr::try_evaluate_constant
     pub fn try_evaluate_constant(self, vars: &EraVarPool) -> Result<EraLiteral, EraParseErrorInfo> {
         let src_info = self.source_pos_info();
@@ -343,6 +353,35 @@ impl EraExpr {
                         result
                             .push(char::from_u32(arg as _).unwrap_or(char::REPLACEMENT_CHARACTER));
                         EraLiteral::String(result, fun_si)
+                    }
+                    "VARSIZE" => {
+                        if args.len() != 1 {
+                            // TODO: constexpr VARSIZE
+                            return Err(make_err(
+                                fun_si,
+                                true,
+                                "invalid function call during constant expression evaluation",
+                            ));
+                        }
+                        let arg = args.into_iter().next().unwrap();
+                        let arg = if let Some(arg) = arg {
+                            Self::unwrap_str_constant(arg.try_evaluate_constant(vars)?)?
+                        } else {
+                            String::new()
+                        };
+                        let Some(value) = vars.get_var(&arg) else {
+                            return Err(make_err(
+                                fun_si,
+                                true,
+                                format!("variable `{arg}` does not exist"),
+                            ));
+                        };
+                        let varsize = match value.clone().into_unpacked() {
+                            FlatValue::ArrInt(x) => *x.borrow().dims.first().unwrap(),
+                            FlatValue::ArrStr(x) => *x.borrow().dims.first().unwrap(),
+                            _ => unreachable!(),
+                        };
+                        EraLiteral::Integer(varsize as _, fun_si)
                     }
                     _ => {
                         return Err(make_err(
@@ -1148,6 +1187,7 @@ pub enum EraCommandStmt {
     TOneInputS(EraTOneInputStmt),
     ReuseLastLine(EraReuseLastLineStmt),
     ClearLine(EraClearLineStmt),
+    DrawLine(EraCmdEmptyStmt),
     CustomDrawLine(EraCustomDrawLineStmt),
     TWait(EraTWaitStmt),
     FontStyle(EraFontStyleStmt),
@@ -1182,6 +1222,7 @@ pub enum EraCommandStmt {
     HtmlTagSplit(EraHtmlTagSplitStmt),
     Power(EraPowerStmt),
     SaveData(EraSaveDataStmt),
+    Restart(EraCmdEmptyStmt),
 }
 impl EraCommandStmt {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -1242,6 +1283,7 @@ impl EraCommandStmt {
             TOneInputS(x) => x.src_info,
             ReuseLastLine(x) => x.src_info,
             ClearLine(x) => x.src_info,
+            DrawLine(x) => x.src_info,
             CustomDrawLine(x) => x.src_info,
             TWait(x) => x.src_info,
             FontStyle(x) => x.src_info,
@@ -1268,8 +1310,6 @@ impl EraCommandStmt {
             PickUpChara(x) => x.src_info,
             DelChara(x) => x.src_info,
             SwapChara(x) => x.src_info,
-            SwapChara(x) => x.src_info,
-            AddCopyChara(x) => x.src_info,
             AddCopyChara(x) => x.src_info,
             ResetStain(x) => x.src_info,
             SaveChara(x) => x.src_info,
@@ -1278,6 +1318,7 @@ impl EraCommandStmt {
             HtmlTagSplit(x) => x.src_info,
             Power(x) => x.src_info,
             SaveData(x) => x.src_info,
+            Restart(x) => x.src_info,
         }
     }
 }
@@ -1381,6 +1422,10 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         if decl.dims.is_empty() {
             let dim = (decl.inits.len() as u32).max(1);
             decl.dims.push(dim);
+        }
+        // HACK: Handle CHARADATA variable dimensions
+        if decl.is_charadata {
+            decl.dims.insert(0, crate::engine::MAX_CHARA_COUNT);
         }
         let inits = decl
             .inits
@@ -1978,6 +2023,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"TONEINPUTS" => Cmd::TOneInputS(self.r().stmt_toneinput()?),
                         b"REUSELASTLINE" => Cmd::ReuseLastLine(self.r().stmt_reuselastline()?),
                         b"CLEARLINE" => Cmd::ClearLine(self.r().stmt_clearline()?),
+                        b"DRAWLINE" => Cmd::DrawLine(self.empty()?),
                         b"CUSTOMDRAWLINE" => {
                             Cmd::CustomDrawLine(self.r().stmt_customdrawline(false)?)
                         }
@@ -2022,6 +2068,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"HTML_TAGSPLIT" => Cmd::HtmlTagSplit(self.r().stmt_html_tagsplit()?),
                         b"POWER" => Cmd::Power(self.r().stmt_power()?),
                         b"SAVEDATA" => Cmd::SaveData(self.r().stmt_savedata()?),
+                        b"RESTART" => Cmd::Restart(self.empty()?),
                         b"GCREATE"
                         | b"GCREATEFROMFILE"
                         | b"GDISPOSE"
@@ -2047,14 +2094,44 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"STRCOUNT"
                         | b"CUREENTREDRAW"
                         | b"CURRENTALIGN"
-                        | b"CHKCHARADATA"
-                        | b"SAVETEXT"
                         | b"MAX"
                         | b"MIN"
                         | b"LIMIT"
                         | b"INRANGE"
+                        | b"CHKCHARADATA"
+                        | b"SAVETEXT"
                         | b"FINDCHARA"
-                        | b"FINDLASTCHARA" => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
+                        | b"FINDLASTCHARA"
+                        | b"GETCOLOR"
+                        | b"GETBGCOLOR"
+                        | b"GETDEFCOLOR"
+                        | b"GETDEFBGCOLOR"
+                        | b"GETFOCUSCOLOR"
+                        | b"GETNUM"
+                        | b"GROUPMATCH"
+                        | b"NOSAMES"
+                        | b"ALLSAMES"
+                        | b"GETMILLISECOND"
+                        | b"GETSECOND"
+                        | b"CSVNAME"
+                        | b"CSVCALLNAME"
+                        | b"CSVNICKNAME"
+                        | b"CSVMASTERNAME"
+                        | b"CSVBASE"
+                        | b"CSVCSTR"
+                        | b"CSVABL"
+                        | b"CSVTALENT"
+                        | b"CSVMARK"
+                        | b"CSVEXP"
+                        | b"CSVRELATION"
+                        | b"CSVJUEL"
+                        | b"CSVEQUIP"
+                        | b"CSVCFLAG"
+                        | b"CBRT"
+                        | b"LOG"
+                        | b"LOG10"
+                        | b"EXPONENT"
+                         => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
                         _ => return Some(self.stmt_expression()?),
                     }
                 }
@@ -2626,7 +2703,11 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
         Some(EraExpr::new_str(cont, src_info))
     }
-    fn generic_rawstr(&mut self, mode: EraLexerMode, break_at: &[EraTokenKind]) -> Option<(EraExpr, EraToken<'b>)> {
+    fn generic_rawstr(
+        &mut self,
+        mode: EraLexerMode,
+        break_at: &[EraTokenKind],
+    ) -> Option<(EraExpr, EraToken<'b>)> {
         let mut cont = String::new();
         let mut token = self.lexer.read(mode);
         let src_info = token.src_info;
@@ -2747,7 +2828,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     .is_some()
                 {
                     // HACK: Raw string inside PRINTV
-                    let (val, token) = self.generic_rawstr(EraLexerMode::CommaRawStr, &[EraTokenKind::Comma])?;
+                    let (val, token) =
+                        self.generic_rawstr(EraLexerMode::CommaRawStr, &[EraTokenKind::Comma])?;
                     vals.push(val);
                     match token.kind {
                         EraTokenKind::Comma => continue,

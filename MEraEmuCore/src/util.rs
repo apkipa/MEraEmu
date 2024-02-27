@@ -4,6 +4,7 @@ mod hstring;
 use std::{borrow::Borrow, fmt::Display, hash::Hash, ops::Deref, rc::Rc};
 
 /// An ASCII-caseless string slice type.
+#[derive(Debug)]
 #[repr(transparent)]
 pub struct CaselessStr(str);
 impl PartialEq for CaselessStr {
@@ -46,7 +47,7 @@ impl CaselessStr {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 #[repr(transparent)]
 pub struct CaselessString(String);
 impl PartialEq for CaselessString {

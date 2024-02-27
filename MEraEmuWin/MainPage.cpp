@@ -25,7 +25,7 @@ namespace winrt::MEraEmuWin::implementation {
     }
 
     void MainPage::ClickHandler(IInspectable const&, RoutedEventArgs const&) {
-        myButton().Content(box_value(L"Clicked"));
+        myButton().Content(box_value(winrt::format(L"{}!", L"Clicked")));
     }
 
     void MainPage::SwitchTitleBarButtonClick(IInspectable const&, RoutedEventArgs const&) {

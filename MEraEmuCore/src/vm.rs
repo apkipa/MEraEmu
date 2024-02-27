@@ -232,6 +232,11 @@ macro_rules! vm_pop_stack {
         }
     };
 }
+// macro_rules! arr_visit_mut {
+//     ($ctx:expr, ) => {
+//         // ...
+//     };
+// }
 
 #[derive(Default)]
 pub struct EraVarPool {
@@ -365,6 +370,7 @@ pub struct EraVirtualMachine {
     uniform_gen: SimpleUniformGenerator,
     // Variable address -> metadata index
     trap_vars: HashMap<*const (), usize>,
+    charas_count: usize,
 }
 
 pub struct EraRuntimeErrorInfo {
@@ -444,20 +450,60 @@ pub trait EraVirtualMachineCallback {
     fn on_wait(&mut self, is_force: bool);
     fn on_input_int(
         &mut self,
-        default_value: i64,
+        default_value: Option<i64>,
         can_click: bool,
         allow_skip: bool,
     ) -> Option<i64>;
     fn on_input_str(
         &mut self,
-        default_value: &str,
+        default_value: Option<&str>,
         can_click: bool,
         allow_skip: bool,
+    ) -> Option<String>;
+    fn on_tinput_int(
+        &mut self,
+        time_limit: i64,
+        default_value: i64,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
+    ) -> Option<i64>;
+    fn on_tinput_str(
+        &mut self,
+        time_limit: i64,
+        default_value: &str,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
+    ) -> Option<String>;
+    fn on_oneinput_int(&mut self, default_value: Option<i64>) -> Option<i64>;
+    fn on_oneinput_str(&mut self, default_value: Option<&str>) -> Option<String>;
+    fn on_toneinput_int(
+        &mut self,
+        time_limit: i64,
+        default_value: i64,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
+    ) -> Option<i64>;
+    fn on_toneinput_str(
+        &mut self,
+        time_limit: i64,
+        default_value: &str,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
     ) -> Option<String>;
     fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error>;
     fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error>;
     fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error>;
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error>;
+    fn on_print_button(
+        &mut self,
+        content: &str,
+        value: &str,
+        flags: crate::bytecode::PrintExtendedFlags,
+    );
     // Graphics subsystem
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64;
     fn on_gcreatefromfile(&mut self, gid: i64, path: &str) -> i64;
@@ -498,6 +544,10 @@ pub trait EraVirtualMachineCallback {
         offset_y: i64,
         delay: i64,
     ) -> i64;
+    // Others
+    fn on_check_font(&mut self, font_name: &str) -> i64;
+    // NOTE: Returns UTC timestamp (in milliseconds).
+    fn on_get_host_time(&mut self) -> u64;
 }
 
 impl EraVirtualMachine {
@@ -512,11 +562,13 @@ impl EraVirtualMachine {
             is_halted: false,
             uniform_gen: SimpleUniformGenerator::new(),
             trap_vars: HashMap::new(),
+            charas_count: 0,
         };
         this
     }
     pub fn reset_exec_and_ip(&mut self, ip: EraExecIp) {
         // TODO: Verify input
+        // NOTE: self.charas_count is not affected (?)
         self.is_halted = false;
         self.stack.clear();
         self.stack.push(Value::new_int(0).into()); // Stub value
@@ -1107,6 +1159,11 @@ impl EraVirtualMachine {
                             _ => bail_opt!(ctx, true, "expected integer values as operands"),
                         });
                     ctx.stack.push(result.into());
+                }
+                BitNot => {
+                    let [x] = ctx.pop_stack()?;
+                    let x = ctx.unpack_int(x.into())?;
+                    ctx.stack.push(Value::new_int(!x.val).into());
                 }
                 CompareL | CompareEq | CompareLEq => {
                     let [lhs, rhs] = ctx.pop_stack()?;
@@ -1774,6 +1831,17 @@ impl EraVirtualMachine {
                     }
                     let is_bit_set = (val.val & (1 << bit.val)) != 0;
                     ctx.stack.push(Value::new_int(is_bit_set.into()).into());
+                }
+                TimesFloat => {
+                    let [target, target_idx, factor] = ctx.pop_stack()?;
+                    let target = ctx.unpack_arrint(target.into())?;
+                    let target_idx = ctx.unpack_int(target_idx.into())?.val;
+                    let factor = f64::from_bits(ctx.unpack_int(factor.into())?.val as _);
+                    let mut target = target.borrow_mut();
+                    let Some(target) = target.flat_get_mut(target_idx as _) else {
+                        bail_opt!(ctx, true, "invalid indices into array");
+                    };
+                    target.val = (target.val as f64 * factor) as _;
                 }
                 GCreate => {
                     let [gid, width, height] = ctx.pop_stack()?;

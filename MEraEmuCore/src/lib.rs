@@ -28,6 +28,19 @@ mod tests {
 
     use super::*;
 
+    trait EngineExtension {
+        fn reg_int(&mut self, name: &str) -> Result<(), MEraEngineError>;
+        fn reg_str(&mut self, name: &str) -> Result<(), MEraEngineError>;
+    }
+    impl EngineExtension for MEraEngine<'_> {
+        fn reg_int(&mut self, name: &str) -> Result<(), MEraEngineError> {
+            self.register_global_var(name, false, 1, false)
+        }
+        fn reg_str(&mut self, name: &str) -> Result<(), MEraEngineError> {
+            self.register_global_var(name, true, 1, false)
+        }
+    }
+
     struct MockEngineCallback<'a> {
         errors: &'a RefCell<String>,
         output: String,
@@ -77,19 +90,65 @@ mod tests {
         fn on_wait(&mut self, is_force: bool) {}
         fn on_input_int(
             &mut self,
-            default_value: i64,
+            default_value: Option<i64>,
             can_click: bool,
             allow_skip: bool,
         ) -> Option<i64> {
-            Some(0)
+            None
         }
         fn on_input_str(
             &mut self,
-            default_value: &str,
+            default_value: Option<&str>,
             can_click: bool,
             allow_skip: bool,
         ) -> Option<String> {
-            Some(String::new())
+            None
+        }
+        fn on_tinput_int(
+            &mut self,
+            time_limit: i64,
+            default_value: i64,
+            show_prompt: bool,
+            expiry_msg: &str,
+            can_click: bool,
+        ) -> Option<i64> {
+            None
+        }
+        fn on_tinput_str(
+            &mut self,
+            time_limit: i64,
+            default_value: &str,
+            show_prompt: bool,
+            expiry_msg: &str,
+            can_click: bool,
+        ) -> Option<String> {
+            None
+        }
+        fn on_oneinput_int(&mut self, default_value: Option<i64>) -> Option<i64> {
+            None
+        }
+        fn on_oneinput_str(&mut self, default_value: Option<&str>) -> Option<String> {
+            None
+        }
+        fn on_toneinput_int(
+            &mut self,
+            time_limit: i64,
+            default_value: i64,
+            show_prompt: bool,
+            expiry_msg: &str,
+            can_click: bool,
+        ) -> Option<i64> {
+            None
+        }
+        fn on_toneinput_str(
+            &mut self,
+            time_limit: i64,
+            default_value: &str,
+            show_prompt: bool,
+            expiry_msg: &str,
+            can_click: bool,
+        ) -> Option<String> {
+            None
         }
         fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
             Ok(0)
@@ -113,6 +172,14 @@ mod tests {
         ) -> Result<(), anyhow::Error> {
             println!("Setting variable `{name}` to `{val}`...");
             Ok(())
+        }
+        fn on_print_button(
+            &mut self,
+            content: &str,
+            value: &str,
+            flags: crate::bytecode::PrintExtendedFlags,
+        ) {
+            self.output += content;
         }
         // Graphics
         fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
@@ -174,6 +241,13 @@ mod tests {
             offset_y: i64,
             delay: i64,
         ) -> i64 {
+            0
+        }
+        // Others
+        fn on_check_font(&mut self, font_name: &str) -> i64 {
+            0
+        }
+        fn on_get_host_time(&mut self) -> u64 {
             0
         }
     }
@@ -313,12 +387,23 @@ mod tests {
     fn assembled_game() -> anyhow::Result<()> {
         // TODO: Redact this
         let game_base_dir = r#"D:\MyData\Games\Others\1\eraTW\TW4.881画蛇添足版（04.07更新）\"#;
+        // let game_base_dir = r#"D:\MyData\Games\Others\1\eratohoK\"#;
 
         let errors = RefCell::new(String::new());
         let mut callback = MockEngineCallback::new(&errors);
         let mut engine = MEraEngine::new();
         engine.install_sys_callback(Box::new(&mut callback));
         engine.register_global_var("WINDOW_TITLE", true, 1, true)?;
+        engine.reg_int("@COLOR")?;
+        engine.reg_int("@DEFCOLOR")?;
+        engine.reg_int("@BGCOLOR")?;
+        engine.reg_int("@DEFBGCOLOR")?;
+        engine.reg_int("@FOCUSCOLOR")?;
+        engine.reg_int("@STYLE")?;
+        engine.reg_str("@FONT")?;
+        engine.reg_int("@REDRAW")?;
+        engine.reg_int("@ALIGN")?;
+        engine.reg_int("SCREENWIDTH")?;
         let mut total_cnt = 0usize;
         let mut pass_cnt = 0usize;
         // Load CSV files

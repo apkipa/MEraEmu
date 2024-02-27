@@ -73,6 +73,7 @@ pub enum EraBytecodePrimaryType {
     BitAnd,
     BitOr,
     BitXor,
+    BitNot,
     BitShiftL,
     BitShiftR,
     CompareL,
@@ -82,7 +83,7 @@ pub enum EraBytecodePrimaryType {
     LogicalAnd,
     LogicalOr,
     LogicalNot,
-    GetRandom,
+    GetRandomRange,
     GetRandomMax,
     SplitString,
     MaximumInt,
@@ -90,11 +91,37 @@ pub enum EraBytecodePrimaryType {
     ClampInt,
     InRangeInt,
     GetBit,
+    SetBit,
+    ClearBit,
+    InvertBit,
+    TimesFloat,
+    ReplaceString,
+    RepeatString,
+    SubString,
+    SubStringU,
+    StrFind,
+    StrFindU,
+    StrLen,
+    StrLenU,
+    CountSubString,
+    GroupMatch,
+    ArrayRemove,
+    ArraySortAsc,
+    ArraySortDesc,
+    ArrayMSort,
+    ArrayCopy,
+    ArrayShift,
+    PowerInt,
+    CbrtInt,
+    LogInt,
+    Log10Int,
+    ExponentInt,
     // -----
     Print,
     PrintLine,
     PrintExtended, // Requires an imm8 PrintExtendedFlags
     HtmlPrint,
+    PrintButton,
     Wait,
     PrintImg,
     // PrintImg2,
@@ -112,6 +139,21 @@ pub enum EraBytecodePrimaryType {
     SpriteCreated,
     SpriteAnimeCreate,
     SpriteAnimeAddFrame,
+    CheckFont,
+    SaveText,
+    FindChara,
+    FindLastChara,
+    VarSet,
+    CVarSet,
+    GetCharaNum,
+    GetHostTimeRaw,
+    GetHostTime,
+    GetHostTimeS,
+    Input, // Extended: EraInputSubBytecodeType
+    ReuseLastLine,
+    ClearLine,
+    //CsvGetProp,
+    CsvGetProp2,
     // -----
     ExtendedBytecode1 = 192, // Values >= ExtendedBytecode should do extended lookup
 }
@@ -119,6 +161,46 @@ impl EraBytecodePrimaryType {
     pub fn from_i(value: u8) -> Self {
         num_traits::FromPrimitive::from_u8(value).unwrap_or(Self::Invalid)
     }
+    pub fn try_from_i(value: u8) -> Option<Self> {
+        num_traits::FromPrimitive::from_u8(value)
+    }
+    pub fn to_i(self) -> u8 {
+        num_traits::ToPrimitive::to_u8(&self).unwrap()
+    }
+}
+#[modular_bitfield::bitfield]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub struct EraInputSubBytecodeType {
+    pub is_string: bool,
+    pub is_one: bool,
+    pub is_timed: bool,
+    pub has_default_value: bool,
+    #[skip]
+    __: modular_bitfield::specifiers::B4,
+}
+#[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
+pub enum EraCsvGetProp2SubBytecodeType {
+    CsvName,
+    CsvCallName,
+    CsvNickName,
+    CsvMasterName,
+    CsvBase,
+    CsvCStr,
+    CsvAbl,
+    CsvTalent,
+    CsvMark,
+    CsvExp,
+    CsvRelation,
+    CsvJuel,
+    CsvEquip,
+    CsvCFlag,
+}
+impl EraCsvGetProp2SubBytecodeType {
+    // pub fn from_i(value: u8) -> Self {
+    //     num_traits::FromPrimitive::from_u8(value).unwrap_or(Self::Invalid)
+    // }
     pub fn try_from_i(value: u8) -> Option<Self> {
         num_traits::FromPrimitive::from_u8(value)
     }

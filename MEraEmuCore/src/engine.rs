@@ -41,7 +41,7 @@ pub struct MEraEngine<'a> {
     contextual_indices: HashMap<Ascii<String>, u32>,
 }
 
-const MAX_CHARA_COUNT: u32 = 1024;
+pub const MAX_CHARA_COUNT: u32 = 1024;
 
 #[derive(thiserror::Error, Debug)]
 #[error("{msg}")]
@@ -99,16 +99,56 @@ pub trait MEraEngineSysCallback {
     fn on_wait(&mut self, is_force: bool);
     fn on_input_int(
         &mut self,
-        default_value: i64,
+        default_value: Option<i64>,
         can_click: bool,
         allow_skip: bool,
     ) -> Option<i64>;
     fn on_input_str(
         &mut self,
-        default_value: &str,
+        default_value: Option<&str>,
         can_click: bool,
         allow_skip: bool,
     ) -> Option<String>;
+    fn on_tinput_int(
+        &mut self,
+        time_limit: i64,
+        default_value: i64,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
+    ) -> Option<i64>;
+    fn on_tinput_str(
+        &mut self,
+        time_limit: i64,
+        default_value: &str,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
+    ) -> Option<String>;
+    fn on_oneinput_int(&mut self, default_value: Option<i64>) -> Option<i64>;
+    fn on_oneinput_str(&mut self, default_value: Option<&str>) -> Option<String>;
+    fn on_toneinput_int(
+        &mut self,
+        time_limit: i64,
+        default_value: i64,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
+    ) -> Option<i64>;
+    fn on_toneinput_str(
+        &mut self,
+        time_limit: i64,
+        default_value: &str,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
+    ) -> Option<String>;
+    fn on_print_button(
+        &mut self,
+        content: &str,
+        value: &str,
+        flags: crate::bytecode::PrintExtendedFlags,
+    );
     /// Callbacks for variable getters & setters. May return a string to report as execution errors.
     fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error>;
     fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error>;
@@ -154,6 +194,8 @@ pub trait MEraEngineSysCallback {
         offset_y: i64,
         delay: i64,
     ) -> i64;
+    fn on_check_font(&mut self, font_name: &str) -> i64;
+    fn on_get_host_time(&mut self) -> u64;
 }
 
 pub struct ExecSourceInfo {
@@ -232,7 +274,7 @@ impl MEraEngineSysCallback for EmptyCallback {
     fn on_wait(&mut self, is_force: bool) {}
     fn on_input_int(
         &mut self,
-        default_value: i64,
+        default_value: Option<i64>,
         can_click: bool,
         allow_skip: bool,
     ) -> Option<i64> {
@@ -240,9 +282,55 @@ impl MEraEngineSysCallback for EmptyCallback {
     }
     fn on_input_str(
         &mut self,
-        default_value: &str,
+        default_value: Option<&str>,
         can_click: bool,
         allow_skip: bool,
+    ) -> Option<String> {
+        None
+    }
+    fn on_tinput_int(
+        &mut self,
+        time_limit: i64,
+        default_value: i64,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
+    ) -> Option<i64> {
+        None
+    }
+    fn on_tinput_str(
+        &mut self,
+        time_limit: i64,
+        default_value: &str,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
+    ) -> Option<String> {
+        None
+    }
+    fn on_oneinput_int(&mut self, default_value: Option<i64>) -> Option<i64> {
+        None
+    }
+    fn on_oneinput_str(&mut self, default_value: Option<&str>) -> Option<String> {
+        None
+    }
+    fn on_toneinput_int(
+        &mut self,
+        time_limit: i64,
+        default_value: i64,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
+    ) -> Option<i64> {
+        None
+    }
+    fn on_toneinput_str(
+        &mut self,
+        time_limit: i64,
+        default_value: &str,
+        show_prompt: bool,
+        expiry_msg: &str,
+        can_click: bool,
     ) -> Option<String> {
         None
     }
@@ -257,6 +345,13 @@ impl MEraEngineSysCallback for EmptyCallback {
     }
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error> {
         Ok(())
+    }
+    fn on_print_button(
+        &mut self,
+        content: &str,
+        value: &str,
+        flags: crate::bytecode::PrintExtendedFlags,
+    ) {
     }
     // Graphics subsystem
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
@@ -318,6 +413,13 @@ impl MEraEngineSysCallback for EmptyCallback {
         offset_y: i64,
         delay: i64,
     ) -> i64 {
+        0
+    }
+    // Others
+    fn on_check_font(&mut self, font_name: &str) -> i64 {
+        0
+    }
+    fn on_get_host_time(&mut self) -> u64 {
         0
     }
 }
@@ -508,6 +610,9 @@ impl<'a> MEraEngine<'a> {
         // DC,100,100
         // DD,100,100
         // DE,100,100
+        // MISC variables
+        iv.add_chara_int("NO", vec![1]);
+        iv.add_chara_int("ISASSI", vec![1]);
 
         MEraEngine {
             file_inputs: Vec::new(),
@@ -937,7 +1042,7 @@ impl<'a> MEraEngine<'a> {
             }
             fn on_input_int(
                 &mut self,
-                default_value: i64,
+                default_value: Option<i64>,
                 can_click: bool,
                 allow_skip: bool,
             ) -> Option<i64> {
@@ -946,12 +1051,82 @@ impl<'a> MEraEngine<'a> {
             }
             fn on_input_str(
                 &mut self,
-                default_value: &str,
+                default_value: Option<&str>,
                 can_click: bool,
                 allow_skip: bool,
             ) -> Option<String> {
                 self.callback
                     .on_input_str(default_value, can_click, allow_skip)
+            }
+            fn on_tinput_int(
+                &mut self,
+                time_limit: i64,
+                default_value: i64,
+                show_prompt: bool,
+                expiry_msg: &str,
+                can_click: bool,
+            ) -> Option<i64> {
+                self.callback.on_tinput_int(
+                    time_limit,
+                    default_value,
+                    show_prompt,
+                    expiry_msg,
+                    can_click,
+                )
+            }
+            fn on_tinput_str(
+                &mut self,
+                time_limit: i64,
+                default_value: &str,
+                show_prompt: bool,
+                expiry_msg: &str,
+                can_click: bool,
+            ) -> Option<String> {
+                self.callback.on_tinput_str(
+                    time_limit,
+                    default_value,
+                    show_prompt,
+                    expiry_msg,
+                    can_click,
+                )
+            }
+            fn on_oneinput_int(&mut self, default_value: Option<i64>) -> Option<i64> {
+                self.callback.on_oneinput_int(default_value)
+            }
+            fn on_oneinput_str(&mut self, default_value: Option<&str>) -> Option<String> {
+                self.callback.on_oneinput_str(default_value)
+            }
+            fn on_toneinput_int(
+                &mut self,
+                time_limit: i64,
+                default_value: i64,
+                show_prompt: bool,
+                expiry_msg: &str,
+                can_click: bool,
+            ) -> Option<i64> {
+                self.callback.on_toneinput_int(
+                    time_limit,
+                    default_value,
+                    show_prompt,
+                    expiry_msg,
+                    can_click,
+                )
+            }
+            fn on_toneinput_str(
+                &mut self,
+                time_limit: i64,
+                default_value: &str,
+                show_prompt: bool,
+                expiry_msg: &str,
+                can_click: bool,
+            ) -> Option<String> {
+                self.callback.on_toneinput_str(
+                    time_limit,
+                    default_value,
+                    show_prompt,
+                    expiry_msg,
+                    can_click,
+                )
             }
             fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
                 self.callback.on_var_get_int(name, idx)
@@ -974,6 +1149,14 @@ impl<'a> MEraEngine<'a> {
                 val: &str,
             ) -> Result<(), anyhow::Error> {
                 self.callback.on_var_set_str(name, idx, val)
+            }
+            fn on_print_button(
+                &mut self,
+                content: &str,
+                value: &str,
+                flags: crate::bytecode::PrintExtendedFlags,
+            ) {
+                self.callback.on_print_button(content, value, flags)
             }
             // Graphics
             fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
@@ -1047,6 +1230,13 @@ impl<'a> MEraEngine<'a> {
                 self.callback.on_spriteanimeaddframe(
                     name, gid, x, y, width, height, offset_x, offset_y, delay,
                 )
+            }
+            // Others
+            fn on_check_font(&mut self, font_name: &str) -> i64 {
+                self.callback.on_check_font(font_name)
+            }
+            fn on_get_host_time(&mut self) -> u64 {
+                self.callback.on_get_host_time()
             }
         }
 
