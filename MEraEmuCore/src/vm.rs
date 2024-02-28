@@ -448,6 +448,7 @@ pub trait EraVirtualMachineCallback {
     fn on_debugprint(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
     fn on_html_print(&mut self, content: &str);
     fn on_wait(&mut self, is_force: bool);
+    fn on_twait(&mut self, duration: i64, is_force: bool);
     fn on_input_int(
         &mut self,
         default_value: Option<i64>,

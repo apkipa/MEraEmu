@@ -88,6 +88,7 @@ mod tests {
             self.output += content;
         }
         fn on_wait(&mut self, is_force: bool) {}
+        fn on_twait(&mut self, duration: i64, is_force: bool) {}
         fn on_input_int(
             &mut self,
             default_value: Option<i64>,

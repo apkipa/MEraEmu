@@ -97,6 +97,7 @@ pub trait MEraEngineSysCallback {
     /// Callback for HTML_PRINT statements.
     fn on_html_print(&mut self, content: &str);
     fn on_wait(&mut self, is_force: bool);
+    fn on_twait(&mut self, duration: i64, is_force: bool);
     fn on_input_int(
         &mut self,
         default_value: Option<i64>,
@@ -272,6 +273,7 @@ impl MEraEngineSysCallback for EmptyCallback {
     //fn on_debugprint(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {}
     fn on_html_print(&mut self, content: &str) {}
     fn on_wait(&mut self, is_force: bool) {}
+    fn on_twait(&mut self, duration: i64, is_force: bool) {}
     fn on_input_int(
         &mut self,
         default_value: Option<i64>,
@@ -1039,6 +1041,9 @@ impl<'a> MEraEngine<'a> {
             }
             fn on_wait(&mut self, is_force: bool) {
                 self.callback.on_wait(is_force)
+            }
+            fn on_twait(&mut self, duration: i64, is_force: bool) {
+                self.callback.on_twait(duration, is_force)
             }
             fn on_input_int(
                 &mut self,

@@ -591,6 +591,7 @@ pub struct EraIfStmt {
 
 #[derive(Debug, Clone)]
 pub struct EraWaitStmt {
+    pub is_force: bool,
     pub src_info: SourcePosInfo,
 }
 
@@ -1223,6 +1224,7 @@ pub enum EraCommandStmt {
     Power(EraPowerStmt),
     SaveData(EraSaveDataStmt),
     Restart(EraCmdEmptyStmt),
+    GetTime(EraCmdEmptyStmt),
 }
 impl EraCommandStmt {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -1319,6 +1321,7 @@ impl EraCommandStmt {
             Power(x) => x.src_info,
             SaveData(x) => x.src_info,
             Restart(x) => x.src_info,
+            GetTime(x) => x.src_info,
         }
     }
 }
@@ -1959,7 +1962,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"SELECTCASE" => Cmd::SelectCase(self.r().stmt_selectcase()?),
                         b"SIF" => Cmd::If(self.r().stmt_sif()?),
                         b"QUIT" => Cmd::Quit(self.r().stmt_quit()?),
-                        b"WAIT" => Cmd::Wait(self.r().stmt_wait()?),
+                        b"WAIT" => Cmd::Wait(self.r().stmt_wait(false)?),
+                        b"FORCEWAIT" => Cmd::Wait(self.r().stmt_wait(true)?),
                         b"WHILE" => Cmd::While(self.r().stmt_while()?),
                         b"RETURN" | b"RETURNF" => Cmd::Return(self.r().stmt_return()?),
                         b"CALL" | b"CALLF" => Cmd::Call(self.r().stmt_call()?),
@@ -2069,6 +2073,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"POWER" => Cmd::Power(self.r().stmt_power()?),
                         b"SAVEDATA" => Cmd::SaveData(self.r().stmt_savedata()?),
                         b"RESTART" => Cmd::Restart(self.empty()?),
+                        b"GETTIME" => Cmd::GetTime(self.empty()?),
                         b"GCREATE"
                         | b"GCREATEFROMFILE"
                         | b"GDISPOSE"
@@ -2100,6 +2105,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"INRANGE"
                         | b"CHKCHARADATA"
                         | b"SAVETEXT"
+                        | b"FINDELEMENT"
+                        | b"FINDLASTELEMENT"
                         | b"FINDCHARA"
                         | b"FINDLASTCHARA"
                         | b"GETCOLOR"
@@ -2108,6 +2115,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"GETDEFBGCOLOR"
                         | b"GETFOCUSCOLOR"
                         | b"GETNUM"
+                        | b"MATCH"
                         | b"GROUPMATCH"
                         | b"NOSAMES"
                         | b"ALLSAMES"
@@ -2131,7 +2139,11 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"LOG"
                         | b"LOG10"
                         | b"EXPONENT"
-                         => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
+                        | b"ABS"
+                        | b"SIGN"
+                        | b"TOSTR"
+                        | b"TOINT"
+                        | b"ISNUMERIC" => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
                         _ => return Some(self.stmt_expression()?),
                     }
                 }
@@ -2971,9 +2983,10 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             src_info: self.src_info,
         })
     }
-    fn stmt_wait(&mut self) -> Option<EraWaitStmt> {
+    fn stmt_wait(&mut self, is_force: bool) -> Option<EraWaitStmt> {
         self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
         Some(EraWaitStmt {
+            is_force,
             src_info: self.src_info,
         })
     }
