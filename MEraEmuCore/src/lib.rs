@@ -405,6 +405,7 @@ mod tests {
         engine.reg_int("@REDRAW")?;
         engine.reg_int("@ALIGN")?;
         engine.reg_int("SCREENWIDTH")?;
+        engine.reg_int("LINECOUNT")?;
         let mut total_cnt = 0usize;
         let mut pass_cnt = 0usize;
         // Load CSV files

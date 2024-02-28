@@ -118,6 +118,7 @@ pub enum EraBytecodePrimaryType {
     Log10Int,
     ExponentInt,
     AbsInt,
+    FormatIntToStr,
     // -----
     Print,
     PrintLine,

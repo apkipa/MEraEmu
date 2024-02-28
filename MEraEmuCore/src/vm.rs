@@ -1844,6 +1844,17 @@ impl EraVirtualMachine {
                     };
                     target.val = (target.val as f64 * factor) as _;
                 }
+                FormatIntToStr => {
+                    use crate::util::number::formatting::csharp_format_i64;
+                    let [value, format] = ctx.pop_stack()?;
+                    let value = ctx.unpack_int(value.into())?;
+                    let format = ctx.unpack_str(format.into())?;
+                    let result = match csharp_format_i64(value.val, &format.val) {
+                        Ok(x) => x,
+                        Err(e) => bail_opt!(ctx, true, format!("failed to format integer: {e}")),
+                    };
+                    ctx.stack.push(Value::new_str(result).into());
+                }
                 GCreate => {
                     let [gid, width, height] = ctx.pop_stack()?;
                     let gid = ctx.unpack_int(gid.into())?;

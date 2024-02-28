@@ -1,5 +1,6 @@
 mod ascii;
 mod hstring;
+pub mod number;
 
 use std::{borrow::Borrow, fmt::Display, hash::Hash, ops::Deref, rc::Rc};
 

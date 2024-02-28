@@ -2840,9 +2840,28 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             b"TOSTR" => {
                 // TODO: Support https://learn.microsoft.com/ja-jp/dotnet/api/system.int64.tostring
                 ctx.results()?;
-                let [value] = ctx.unpack_some_args(args)?;
-                ctx.this.expr_int(value)?;
-                ctx.this.chunk.emit_bytecode(ConvertToString, src_info);
+                match args.len() {
+                    1 => {
+                        let [value] = ctx.unpack_some_args(args)?;
+                        ctx.this.expr_int(value)?;
+                        ctx.this.chunk.emit_bytecode(ConvertToString, src_info);
+                    }
+                    2 => {
+                        let [value, format] = ctx.unpack_some_args(args)?;
+                        ctx.this.expr_int(value)?;
+                        ctx.this.expr_str(format)?;
+                        ctx.this.chunk.emit_bytecode(FormatIntToStr, src_info);
+                    }
+                    _ => bail_opt!(
+                        ctx.this,
+                        ctx.src_info,
+                        format!(
+                            "no overload of `{}` accepts {} arguments",
+                            ctx.target,
+                            args.len()
+                        )
+                    ),
+                }
             }
             b"TOINT" => {
                 ctx.result()?;
@@ -3032,7 +3051,8 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.chunk.emit_bytecode(Pop, x.src_info);
             }
             Cmd::Wait(x) => {
-                self.chunk.emit_load_const(self.p.new_value_int(x.is_force.into()), x.src_info);
+                self.chunk
+                    .emit_load_const(self.p.new_value_int(x.is_force.into()), x.src_info);
                 self.chunk.emit_bytecode(Wait, x.src_info);
             }
             Cmd::If(x) => {
@@ -3891,7 +3911,8 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             Cmd::FontBold(x) => {
                 self.arr_set("@STYLE", vec![], x.src_info, |this| {
                     this.arr_get_int("@STYLE", vec![], x.src_info)?;
-                    this.chunk.emit_load_const(this.p.new_value_int(1), x.src_info);
+                    this.chunk
+                        .emit_load_const(this.p.new_value_int(1), x.src_info);
                     this.chunk.emit_bytecode(BitOr, x.src_info);
                     Some(TInteger)
                 })?;
@@ -3899,14 +3920,16 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             Cmd::FontItalic(x) => {
                 self.arr_set("@STYLE", vec![], x.src_info, |this| {
                     this.arr_get_int("@STYLE", vec![], x.src_info)?;
-                    this.chunk.emit_load_const(this.p.new_value_int(1), x.src_info);
+                    this.chunk
+                        .emit_load_const(this.p.new_value_int(1), x.src_info);
                     this.chunk.emit_bytecode(BitOr, x.src_info);
                     Some(TInteger)
                 })?;
             }
             Cmd::FontRegular(x) => {
                 self.arr_set("@STYLE", vec![], x.src_info, |this| {
-                    this.chunk.emit_load_const(this.p.new_value_int(0), x.src_info);
+                    this.chunk
+                        .emit_load_const(this.p.new_value_int(0), x.src_info);
                     Some(TInteger)
                 })?;
             }
@@ -3918,13 +3941,25 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             }
             // TODO...
             Cmd::Randomize(x) => {
-                self.report_err(x.src_info, true, "RANDOMIZE is not supported and will be ignored");
+                self.report_err(
+                    x.src_info,
+                    true,
+                    "RANDOMIZE is not supported and will be ignored",
+                );
             }
             Cmd::DumpRand(x) => {
-                self.report_err(x.src_info, true, "DUMPRAND is not supported and will be ignored");
+                self.report_err(
+                    x.src_info,
+                    true,
+                    "DUMPRAND is not supported and will be ignored",
+                );
             }
             Cmd::InitRand(x) => {
-                self.report_err(x.src_info, true, "INITRAND is not supported and will be ignored");
+                self.report_err(
+                    x.src_info,
+                    true,
+                    "INITRAND is not supported and will be ignored",
+                );
             }
             // TODO...
             Cmd::Restart(x) => {
