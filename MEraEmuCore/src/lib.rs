@@ -44,20 +44,26 @@ mod tests {
     struct MockEngineCallback<'a> {
         errors: &'a RefCell<String>,
         output: String,
+        err_cnt: usize,
+        warn_cnt: usize,
     }
     impl<'a> MockEngineCallback<'a> {
         fn new(errors: &'a RefCell<String>) -> Self {
             Self {
                 errors,
                 output: String::new(),
+                err_cnt: 0,
+                warn_cnt: 0,
             }
         }
     }
     impl MEraEngineSysCallback for &mut MockEngineCallback<'_> {
         fn on_compile_error(&mut self, info: &EraScriptErrorInfo) {
             let (noun, color) = if info.is_error {
+                self.err_cnt += 1;
                 ("error", Color::Red)
             } else {
+                self.warn_cnt += 1;
                 ("warning", Color::BrightYellow)
             };
             *self.errors.borrow_mut() += &format!(
@@ -404,6 +410,8 @@ mod tests {
         engine.reg_str("@FONT")?;
         engine.reg_int("@REDRAW")?;
         engine.reg_int("@ALIGN")?;
+        engine.reg_int("@TOOLTIP_DELAY")?;
+        engine.reg_int("@TOOLTIP_DURATION")?;
         engine.reg_int("SCREENWIDTH")?;
         engine.reg_int("LINECOUNT")?;
         let mut total_cnt = 0usize;
@@ -535,8 +543,8 @@ mod tests {
             if errors.contains("error:") {
                 drop(engine);
                 panic!(
-                    "compile output:\n{errors}\nexec output:\n{}\nCompiled {}/{} files",
-                    callback.output, pass_cnt, total_cnt
+                    "compile output:\n{errors}\nexec output:\n{}\nCompiled {}/{} files.\n{} warning(s), {} error(s) generated.",
+                    callback.output, pass_cnt, total_cnt, callback.warn_cnt, callback.err_cnt
                 );
             }
             if !errors.is_empty() {

@@ -1,7 +1,7 @@
 use crate::{
     bytecode::{
-        EraBytecodePrimaryType, FlatValue, PadStringFlags, PrintExtendedFlags, SourcePosInfo,
-        StrValue, Value, ValueKind,
+        ArrIntValue, EraBytecodePrimaryType, FlatValue, PadStringFlags, PrintExtendedFlags,
+        SourcePosInfo, StrValue, Value, ValueKind,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
     util::*,
@@ -19,6 +19,7 @@ struct EraErrReportContext<'a> {
     stack: &'a mut Vec<EraTrappableValue>,
     cur_frame: &'a mut EraFuncExecFrame,
     cur_chunk: &'a EraBytecodeChunk,
+    global_vars: &'a mut EraVarPool,
 }
 impl EraErrReportContext<'_> {
     fn report_err<V: Into<String>>(&mut self, is_error: bool, msg: V) {
@@ -127,6 +128,30 @@ impl EraErrReportContext<'_> {
                 None
             }
         }
+    }
+    #[must_use]
+    fn get_var_arrint(&mut self, name: &str) -> Option<Rc<RefCell<crate::bytecode::ArrIntValue>>> {
+        let Some(FlatValue::ArrInt(var)) = self
+            .global_vars
+            .get_var(name)
+            .map(|x| x.clone().into_unpacked())
+        else {
+            self.report_err(true, format!("variable `{name}` not properly defined"));
+            return None;
+        };
+        Some(var)
+    }
+    #[must_use]
+    fn get_var_arrstr(&mut self, name: &str) -> Option<Rc<RefCell<crate::bytecode::ArrStrValue>>> {
+        let Some(FlatValue::ArrStr(var)) = self
+            .global_vars
+            .get_var(name)
+            .map(|x| x.clone().into_unpacked())
+        else {
+            self.report_err(true, format!("variable `{name}` not properly defined"));
+            return None;
+        };
+        Some(var)
     }
 }
 
@@ -549,6 +574,9 @@ pub trait EraVirtualMachineCallback {
     fn on_check_font(&mut self, font_name: &str) -> i64;
     // NOTE: Returns UTC timestamp (in milliseconds).
     fn on_get_host_time(&mut self) -> u64;
+    // Private
+    /// Translates strings to indices.
+    fn on_csv_get_num(&mut self, name: &str) -> Option<u32>;
 }
 
 impl EraVirtualMachine {
@@ -649,6 +677,7 @@ impl EraVirtualMachine {
                                 break Err("no chunks loaded");
                             }
                         },
+                        global_vars: &mut $self.global_vars,
                     });
                 } {
                     Ok(ctx) => ctx,
@@ -670,20 +699,22 @@ impl EraVirtualMachine {
         let mut ctx;
         make_ctx!(self, ctx);
 
-        let Some(FlatValue::ArrInt(vresult)) = self
-            .global_vars
-            .get_var("RESULT")
-            .map(|x| x.clone().into_unpacked())
-        else {
-            bail_opt!(ctx, None, true, "variable RESULT not properly defined");
-        };
-        let Some(FlatValue::ArrStr(vresults)) = self
-            .global_vars
-            .get_var("RESULTS")
-            .map(|x| x.clone().into_unpacked())
-        else {
-            bail_opt!(ctx, None, true, "variable RESULTS not properly defined");
-        };
+        // let Some(FlatValue::ArrInt(vresult)) = ctx
+        //     .global_vars
+        //     .get_var("RESULT")
+        //     .map(|x| x.clone().into_unpacked())
+        // else {
+        //     bail_opt!(ctx, None, true, "variable `RESULT` not properly defined");
+        // };
+        // let Some(FlatValue::ArrStr(vresults)) = ctx
+        //     .global_vars
+        //     .get_var("RESULTS")
+        //     .map(|x| x.clone().into_unpacked())
+        // else {
+        //     bail_opt!(ctx, None, true, "variable `RESULTS` not properly defined");
+        // };
+        let vresult = ctx.get_var_arrint("RESULT")?;
+        let vresults = ctx.get_var_arrstr("RESULTS")?;
 
         for _ in 0..max_inst_cnt {
             if stop_flag.load(Ordering::Relaxed) {
@@ -1262,8 +1293,8 @@ impl EraVirtualMachine {
                     let [value] = ctx.pop_stack()?;
                     let value = match value.val.into_unpacked() {
                         // TODO: Check if index is in function frame
-                        FlatValue::Int(x) => self.global_vars.get_var_by_idx(x.val as _),
-                        FlatValue::Str(x) => self.global_vars.get_var(&x.val),
+                        FlatValue::Int(x) => ctx.global_vars.get_var_by_idx(x.val as _),
+                        FlatValue::Str(x) => ctx.global_vars.get_var(&x.val),
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
                     };
                     let value = match value {
@@ -1279,8 +1310,8 @@ impl EraVirtualMachine {
                     let [index, src_value] = ctx.pop_stack()?;
                     let value = match index.val.into_unpacked() {
                         // TODO: Check if index is in function frame
-                        FlatValue::Int(x) => self.global_vars.get_var_by_idx_mut(x.val as _),
-                        FlatValue::Str(x) => self.global_vars.get_var_mut(&x.val),
+                        FlatValue::Int(x) => ctx.global_vars.get_var_by_idx_mut(x.val as _),
+                        FlatValue::Str(x) => ctx.global_vars.get_var_mut(&x.val),
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
                     };
                     let value = match value {
@@ -1356,7 +1387,7 @@ impl EraVirtualMachine {
                                     1,
                                     "multi-dimensional arrays must not be trapped"
                                 );
-                                let trap_var_info = self
+                                let trap_var_info = ctx
                                     .global_vars
                                     .get_var_info(*self.trap_vars.get(&x_ptr).unwrap())
                                     .unwrap();
@@ -1391,7 +1422,7 @@ impl EraVirtualMachine {
                                     1,
                                     "multi-dimensional arrays must not be trapped"
                                 );
-                                let trap_var_info = self
+                                let trap_var_info = ctx
                                     .global_vars
                                     .get_var_info(*self.trap_vars.get(&x_ptr).unwrap())
                                     .unwrap();
@@ -1465,7 +1496,7 @@ impl EraVirtualMachine {
                                     1,
                                     "multi-dimensional arrays must not be trapped"
                                 );
-                                let trap_var_info = self
+                                let trap_var_info = ctx
                                     .global_vars
                                     .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
                                     .unwrap();
@@ -1494,7 +1525,7 @@ impl EraVirtualMachine {
                                     1,
                                     "multi-dimensional arrays must not be trapped"
                                 );
-                                let trap_var_info = self
+                                let trap_var_info = ctx
                                     .global_vars
                                     .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
                                     .unwrap();
@@ -1545,7 +1576,7 @@ impl EraVirtualMachine {
                                     1,
                                     "multi-dimensional arrays must not be trapped"
                                 );
-                                let trap_var_info = self
+                                let trap_var_info = ctx
                                     .global_vars
                                     .get_var_info(*self.trap_vars.get(&x_ptr).unwrap())
                                     .unwrap();
@@ -1579,7 +1610,7 @@ impl EraVirtualMachine {
                                     1,
                                     "multi-dimensional arrays must not be trapped"
                                 );
-                                let trap_var_info = self
+                                let trap_var_info = ctx
                                     .global_vars
                                     .get_var_info(*self.trap_vars.get(&x_ptr).unwrap())
                                     .unwrap();
@@ -1635,7 +1666,7 @@ impl EraVirtualMachine {
                                     1,
                                     "multi-dimensional arrays must not be trapped"
                                 );
-                                let trap_var_info = self
+                                let trap_var_info = ctx
                                     .global_vars
                                     .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
                                     .unwrap();
@@ -1666,7 +1697,7 @@ impl EraVirtualMachine {
                                     1,
                                     "multi-dimensional arrays must not be trapped"
                                 );
-                                let trap_var_info = self
+                                let trap_var_info = ctx
                                     .global_vars
                                     .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
                                     .unwrap();
@@ -1846,12 +1877,27 @@ impl EraVirtualMachine {
                 }
                 FormatIntToStr => {
                     use crate::util::number::formatting::csharp_format_i64;
+
                     let [value, format] = ctx.pop_stack()?;
                     let value = ctx.unpack_int(value.into())?;
                     let format = ctx.unpack_str(format.into())?;
                     let result = match csharp_format_i64(value.val, &format.val) {
                         Ok(x) => x,
                         Err(e) => bail_opt!(ctx, true, format!("failed to format integer: {e}")),
+                    };
+                    ctx.stack.push(Value::new_str(result).into());
+                }
+                StringToUpper | StringToLower | StringToHalf | StringToFull => {
+                    use full2half::CharacterWidth;
+
+                    let [value] = ctx.pop_stack()?;
+                    let value = ctx.unpack_str(value.into())?;
+                    let result = match primary_bytecode {
+                        StringToUpper => value.val.to_ascii_uppercase(),
+                        StringToLower => value.val.to_ascii_lowercase(),
+                        StringToHalf => value.val.to_half_width(),
+                        StringToFull => value.val.to_full_width(),
+                        _ => unreachable!(),
                     };
                     ctx.stack.push(Value::new_str(result).into());
                 }
@@ -1869,6 +1915,42 @@ impl EraVirtualMachine {
                     let file_path = ctx.unpack_str(file_path.into())?;
                     let ret = ctx.callback.on_gcreatefromfile(gid.val, &file_path.val);
                     ctx.stack.push(Value::new_int(ret).into());
+                }
+                CsvGetProp2 => {
+                    todo!("CsvGetProp2")
+                }
+                CsvGetNum => {
+                    let [name] = ctx.pop_stack()?;
+                    let name = ctx.unpack_str(name.into())?;
+                    let result = ctx
+                        .callback
+                        .on_csv_get_num(&name.val)
+                        .map(|x| x as _)
+                        .unwrap_or(-1);
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                GetPalamLv | GetExpLv => {
+                    let [value, max_lv] = ctx.pop_stack()?;
+                    let value = ctx.unpack_int(value.into())?;
+                    let max_lv = ctx.unpack_int(max_lv.into())?;
+                    let target_arr = match primary_bytecode {
+                        GetPalamLv => "PALAMLV",
+                        GetExpLv => "EXPLV",
+                        _ => unreachable!(),
+                    };
+                    let target_arr = ctx.get_var_arrint(target_arr)?;
+                    let target_arr = target_arr.borrow();
+                    let mut result = 0;
+                    while result < max_lv.val {
+                        let Some(limit) = target_arr.vals.get((result + 1) as usize) else {
+                            break;
+                        };
+                        if value.val < limit.val {
+                            break;
+                        }
+                        result += 1;
+                    }
+                    ctx.stack.push(Value::new_int(result).into());
                 }
                 Invalid | _ => bail_opt!(
                     ctx,

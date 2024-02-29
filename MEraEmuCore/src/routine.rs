@@ -20,11 +20,11 @@ pub fn is_chara_nodim(name: &str) -> bool {
 pub fn is_csv_var(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
     match name.as_str() {
-        "ABL" | "EXP" | "TALENT" | "PALAM" | "TRAIN" | "MARK" | "ITEM" | "BASE" | "MAXBASE"
-        | "SOURCE" | "EX" | "STR" | "EQUIP" | "TEQUIP" | "FLAG" | "TFLAG" | "CFLAG" | "TCVAR"
-        | "CSTR" | "STAIN" | "CDFLAG" | "STRNAME" | "TSTR" | "SAVESTR" | "GLOBAL" | "GLOBALS" => {
-            true
-        }
+        "ABL" | "EXP" | "TALENT" | "PALAM" | "JUEL" | "GOTJUEL" | "UP" | "DOWN" | "CUP"
+        | "CDOWN" | "TRAIN" | "MARK" | "ITEM" | "ITEMPRICE" | "ITEMSALES" | "BASE" | "MAXBASE"
+        | "DOWNBASE" | "LOSEBASE" | "SOURCE" | "EX" | "NOWEX" | "STR" | "EQUIP" | "TEQUIP"
+        | "FLAG" | "TFLAG" | "CFLAG" | "TCVAR" | "CSTR" | "STAIN" | "CDFLAG" | "STRNAME"
+        | "TSTR" | "SAVESTR" | "GLOBAL" | "GLOBALS" => true,
         _ => false,
     }
 }

@@ -70,6 +70,24 @@ macro_rules! bail_opt {
         return None;
     }};
 }
+macro_rules! err_opt {
+    ($self:expr, $src_info:expr, $is_error:expr, $msg:expr) => {{
+        $self.report_err($src_info, $is_error, $msg);
+    }};
+    ($self:expr, $src_info:expr, $msg:expr) => {{
+        $self.report_err($src_info, true, $msg);
+    }};
+    ($self:expr, [$(($src_info:expr, $is_error:expr, $msg:expr)),+]) => {{
+        $($self.report_err($src_info, $is_error, $msg);)+
+    }};
+    ($self:expr, [$(($src_info:expr, $msg:expr)),+]) => {{
+        $($self.report_err($src_info, true, $msg);)+
+    }};
+    ($self:expr, [($src_info0:expr, $msg0:expr), $(($file_name:expr, $src_info:expr, $msg:expr)),+]) => {{
+        $self.report_err($src_info0, true, $msg0);
+        $($self.report_far_err($file_name, $src_info, true, $msg);)+
+    }};
+}
 
 #[derive(Default)]
 pub struct EraConstantPool {
@@ -1341,7 +1359,10 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 | EraTokenKind::MinusAssign
                 | EraTokenKind::MultiplyAssign
                 | EraTokenKind::DivideAssign
-                | EraTokenKind::ModuloAssign = op.kind
+                | EraTokenKind::ModuloAssign
+                | EraTokenKind::BitAndAssign
+                | EraTokenKind::BitOrAssign
+                | EraTokenKind::BitXorAssign = op.kind
                 {
                     match *lhs {
                         EraExpr::Term(EraTermExpr::Var(lhs)) => {
@@ -1402,6 +1423,42 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                                 EraTokenKind::ModuloAssign => match (lhs_k, rhs_k) {
                                     (TInteger, TInteger) => {
                                         self.chunk.emit_bytecode(Modulo, op.src_info);
+                                        lhs_k
+                                    }
+                                    _ => bail_opt!(
+                                        self,
+                                        op.src_info,
+                                        true,
+                                        "operands must be integers"
+                                    ),
+                                },
+                                EraTokenKind::BitAndAssign => match (lhs_k, rhs_k) {
+                                    (TInteger, TInteger) => {
+                                        self.chunk.emit_bytecode(BitAnd, op.src_info);
+                                        lhs_k
+                                    }
+                                    _ => bail_opt!(
+                                        self,
+                                        op.src_info,
+                                        true,
+                                        "operands must be integers"
+                                    ),
+                                },
+                                EraTokenKind::BitOrAssign => match (lhs_k, rhs_k) {
+                                    (TInteger, TInteger) => {
+                                        self.chunk.emit_bytecode(BitOr, op.src_info);
+                                        lhs_k
+                                    }
+                                    _ => bail_opt!(
+                                        self,
+                                        op.src_info,
+                                        true,
+                                        "operands must be integers"
+                                    ),
+                                },
+                                EraTokenKind::BitXorAssign => match (lhs_k, rhs_k) {
+                                    (TInteger, TInteger) => {
+                                        self.chunk.emit_bytecode(BitXor, op.src_info);
                                         lhs_k
                                     }
                                     _ => bail_opt!(
@@ -1556,6 +1613,27 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         EraTokenKind::BitShiftR => match (lhs, rhs) {
                             (TInteger, TInteger) => {
                                 self.chunk.emit_bytecode(BitShiftR, op.src_info);
+                                lhs
+                            }
+                            _ => bail_opt!(self, op.src_info, true, "operands must be integers"),
+                        },
+                        EraTokenKind::BitAnd => match (lhs, rhs) {
+                            (TInteger, TInteger) => {
+                                self.chunk.emit_bytecode(BitAnd, op.src_info);
+                                lhs
+                            }
+                            _ => bail_opt!(self, op.src_info, true, "operands must be integers"),
+                        },
+                        EraTokenKind::BitOr => match (lhs, rhs) {
+                            (TInteger, TInteger) => {
+                                self.chunk.emit_bytecode(BitOr, op.src_info);
+                                lhs
+                            }
+                            _ => bail_opt!(self, op.src_info, true, "operands must be integers"),
+                        },
+                        EraTokenKind::BitXor => match (lhs, rhs) {
+                            (TInteger, TInteger) => {
+                                self.chunk.emit_bytecode(BitXor, op.src_info);
                                 lhs
                             }
                             _ => bail_opt!(self, op.src_info, true, "operands must be integers"),
@@ -1849,6 +1927,20 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     match (arg_kind, param_kind) {
                         (EraExpressionValueKind::TInteger, ValueKind::Int)
                         | (EraExpressionValueKind::TString, ValueKind::Str) => (),
+                        (EraExpressionValueKind::TInteger, ValueKind::Str) => {
+                            err_opt!(
+                                self,
+                                [
+                                    (arg_si, "incompatible argument type; implicit conversion from integer to string is disallowed"),
+                                    (
+                                        &target.file_name,
+                                        target.src_info,
+                                        "note: see signature of callee here"
+                                    )
+                                ]
+                            );
+                            self.chunk.emit_bytecode(ConvertToString, arg_si);
+                        }
                         _ => bail_opt!(
                             self,
                             [
@@ -1856,7 +1948,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                                 (
                                     &target.file_name,
                                     target.src_info,
-                                    "see signature of callee here"
+                                    "note: see signature of callee here"
                                 )
                             ]
                         ),
@@ -2335,7 +2427,14 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 ctx.this.expr_str(needle)?;
                 ctx.this.chunk.emit_bytecode(CountSubString, src_info);
             }
-            b"CUREENTREDRAW" => {
+            b"CHARATU" => {
+                ctx.results()?;
+                let [haystack, pos] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_str(haystack)?;
+                ctx.this.expr_int(pos)?;
+                ctx.this.chunk.emit_bytecode(StrCharAtU, src_info);
+            }
+            b"CURRENTREDRAW" => {
                 ctx.result()?;
                 let [] = ctx.unpack_some_args(args)?;
                 ctx.this.arr_get_int("@REDRAW", vec![], src_info)?;
@@ -2457,6 +2556,15 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         end_idx = EraExpr::new_int(-1, src_info);
                         complete_match = EraExpr::new_int(0, src_info);
                     }
+                    4 => {
+                        let [avar, avalue, astart_idx, aend_idx] = ctx.unpack_args(args)?;
+                        let avar = ctx.unpack_some_arg(avar, 0)?;
+                        var = ctx.this.unpack_var_expr_from_expr(avar)?;
+                        value = ctx.unpack_some_arg(avalue, 1)?;
+                        start_idx = astart_idx.unwrap_or_else(|| EraExpr::new_int(0, src_info));
+                        end_idx = aend_idx.unwrap_or_else(|| EraExpr::new_int(-1, src_info));
+                        complete_match = EraExpr::new_int(0, src_info);
+                    }
                     5 => {
                         let [avar, avalue, astart_idx, aend_idx, acomplete_match] =
                             ctx.unpack_args(args)?;
@@ -2506,6 +2614,12 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         [a_chara_var, value] = ctx.unpack_some_args(args)?;
                         chara_var = ctx.this.unpack_var_expr_from_expr(a_chara_var)?;
                         start_id = EraExpr::new_int(0, src_info);
+                        end_id = EraExpr::new_int(-1, src_info);
+                    }
+                    3 => {
+                        let a_chara_var;
+                        [a_chara_var, value, start_id] = ctx.unpack_some_args(args)?;
+                        chara_var = ctx.this.unpack_var_expr_from_expr(a_chara_var)?;
                         end_id = EraExpr::new_int(-1, src_info);
                     }
                     4 => {
@@ -2565,8 +2679,13 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let [] = ctx.unpack_some_args(args)?;
                 ctx.this.arr_get_int("@FOCUSCOLOR", vec![], src_info)?;
             }
-            b"MATCH" => {
+            b"MATCH" | b"CMATCH" => {
                 ctx.result()?;
+                let bytecode = if upper_target == "CMATCH" {
+                    CArrayCountMatches
+                } else {
+                    ArrayCountMatches
+                };
                 let (array, value, start_idx, end_idx);
                 match args.len() {
                     2 => {
@@ -2574,6 +2693,12 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         [aarray, value] = ctx.unpack_some_args(args)?;
                         array = ctx.this.unpack_var_expr_from_expr(aarray)?;
                         start_idx = EraExpr::new_int(0, src_info);
+                        end_idx = EraExpr::new_int(-1, src_info);
+                    }
+                    3 => {
+                        let aarray;
+                        [aarray, value, start_idx] = ctx.unpack_some_args(args)?;
+                        array = ctx.this.unpack_var_expr_from_expr(aarray)?;
                         end_idx = EraExpr::new_int(-1, src_info);
                     }
                     4 => {
@@ -2604,30 +2729,78 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 }
                 ctx.this.expr_int(start_idx)?;
                 ctx.this.expr_int(end_idx)?;
-                ctx.this.chunk.emit_bytecode(ArrayCountMatches, src_info);
+                ctx.this.chunk.emit_bytecode(bytecode, src_info);
+            }
+            b"SUMARRAY" | b"SUMCARRAY" | b"MAXARRAY" | b"MAXCARRAY" | b"MINARRAY"
+            | b"MINCARRAY" => {
+                ctx.result()?;
+                let bytecode = match upper_target.as_bytes() {
+                    b"SUMARRAY" => SumArray,
+                    b"SUMCARRAY" => SumCArray,
+                    b"MAXARRAY" => MaxArray,
+                    b"MAXCARRAY" => MaxCArray,
+                    b"MINARRAY" => MinArray,
+                    b"MINCARRAY" => MinCArray,
+                    _ => unreachable!(),
+                };
+                let (array, start_idx, end_idx);
+                match args.len() {
+                    1 => {
+                        let aarray;
+                        [aarray] = ctx.unpack_some_args(args)?;
+                        array = ctx.this.unpack_var_expr_from_expr(aarray)?;
+                        start_idx = EraExpr::new_int(0, src_info);
+                        end_idx = EraExpr::new_int(-1, src_info);
+                    }
+                    3 => {
+                        let aarray;
+                        [aarray, start_idx, end_idx] = ctx.unpack_some_args(args)?;
+                        array = ctx.this.unpack_var_expr_from_expr(aarray)?;
+                    }
+                    _ => bail_opt!(
+                        ctx.this,
+                        ctx.src_info,
+                        format!(
+                            "no overload of `{}` accepts {} arguments",
+                            ctx.target,
+                            args.len()
+                        )
+                    ),
+                }
+                let arr_kind =
+                    ctx.this
+                        .arr_idx_no_chara_fix(&array.name, array.idxs, array.src_info)?;
+                // TODO: Ensure TInteger
+                ctx.this.expr_int(start_idx)?;
+                ctx.this.expr_int(end_idx)?;
+                ctx.this.chunk.emit_bytecode(bytecode, src_info);
             }
             b"GETNUM" => {
                 ctx.result()?;
                 // HACK: Process constant expression only for now
+                // let [target, index] = ctx.unpack_some_args(args)?;
+                // let target = ctx.this.unpack_var_expr_from_expr(target)?;
+                // if routine::is_csv_var(&target.name) {
+                //     let index = ctx.this.p.evaluate_constant(index)?;
+                //     let index = ctx.this.p.unwrap_str_constant(index)?;
+                //     if let Some(&idx) = ctx.this.p.contextual_indices.get(&Ascii::new(index)) {
+                //         ctx.this
+                //             .chunk
+                //             .emit_load_const(ctx.this.p.new_value_int(idx.into()), src_info);
+                //     } else {
+                //         ctx.this
+                //             .chunk
+                //             .emit_load_const(ctx.this.p.new_value_int(-1), src_info);
+                //     }
+                // } else {
+                //     ctx.this
+                //         .chunk
+                //         .emit_load_const(ctx.this.p.new_value_int(-1), src_info);
+                // }
                 let [target, index] = ctx.unpack_some_args(args)?;
                 let target = ctx.this.unpack_var_expr_from_expr(target)?;
-                if routine::is_csv_var(&target.name) {
-                    let index = ctx.this.p.evaluate_constant(index)?;
-                    let index = ctx.this.p.unwrap_str_constant(index)?;
-                    if let Some(&idx) = ctx.this.p.contextual_indices.get(&Ascii::new(index)) {
-                        ctx.this
-                            .chunk
-                            .emit_load_const(ctx.this.p.new_value_int(idx.into()), src_info);
-                    } else {
-                        ctx.this
-                            .chunk
-                            .emit_load_const(ctx.this.p.new_value_int(-1), src_info);
-                    }
-                } else {
-                    ctx.this
-                        .chunk
-                        .emit_load_const(ctx.this.p.new_value_int(-1), src_info);
-                }
+                ctx.this.expr_str(index)?;
+                ctx.this.chunk.emit_bytecode(CsvGetNum, src_info);
             }
             b"GROUPMATCH" | b"NOSAMES" | b"ALLSAMES" => {
                 ctx.result()?;
@@ -2792,29 +2965,19 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     ),
                 }
             }
-            b"CBRT" => {
+            b"SQRT" | b"CBRT" | b"LOG" | b"LOG10" | b"EXPONENT" => {
                 ctx.result()?;
+                let bytecode = match upper_target.as_bytes() {
+                    b"SQRT" => SqrtInt,
+                    b"CBRT" => CbrtInt,
+                    b"LOG" => LogInt,
+                    b"LOG10" => Log10Int,
+                    b"EXPONENT" => ExponentInt,
+                    _ => unreachable!(),
+                };
                 let [value] = ctx.unpack_some_args(args)?;
                 ctx.this.expr_int(value)?;
-                ctx.this.chunk.emit_bytecode(CbrtInt, src_info);
-            }
-            b"LOG" => {
-                ctx.result()?;
-                let [value] = ctx.unpack_some_args(args)?;
-                ctx.this.expr_int(value)?;
-                ctx.this.chunk.emit_bytecode(LogInt, src_info);
-            }
-            b"LOG10" => {
-                ctx.result()?;
-                let [value] = ctx.unpack_some_args(args)?;
-                ctx.this.expr_int(value)?;
-                ctx.this.chunk.emit_bytecode(Log10Int, src_info);
-            }
-            b"EXPONENT" => {
-                ctx.result()?;
-                let [value] = ctx.unpack_some_args(args)?;
-                ctx.this.expr_int(value)?;
-                ctx.this.chunk.emit_bytecode(ExponentInt, src_info);
+                ctx.this.chunk.emit_bytecode(bytecode, src_info);
             }
             b"ABS" => {
                 ctx.result()?;
@@ -2837,9 +3000,15 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 ctx.this.chunk.emit_bytecode(Divide, src_info);
                 bt_done.complete(ctx.this.chunk).unwrap();
             }
-            b"TOSTR" => {
+            b"TOSTR" | b"MONEYSTR" => {
+                let is_money = upper_target == "MONEYSTR";
                 // TODO: Support https://learn.microsoft.com/ja-jp/dotnet/api/system.int64.tostring
                 ctx.results()?;
+                if is_money {
+                    ctx.this
+                        .chunk
+                        .emit_load_const(ctx.this.p.new_value_str("$".to_owned()), src_info);
+                }
                 match args.len() {
                     1 => {
                         let [value] = ctx.unpack_some_args(args)?;
@@ -2862,6 +3031,9 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         )
                     ),
                 }
+                if is_money {
+                    ctx.this.chunk.emit_bytecode(Add, src_info)
+                }
             }
             b"TOINT" => {
                 ctx.result()?;
@@ -2869,9 +3041,112 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 ctx.this.expr_str(value)?;
                 ctx.this.chunk.emit_bytecode(ConvertToInteger, src_info);
             }
-            // b"ISNUMERIC" => {
-            //     // TODO...
-            // }
+            b"ISNUMERIC" => {
+                ctx.result()?;
+                let [value] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_str(value)?;
+                ctx.this.chunk.emit_bytecode(StringIsValidInteger, src_info);
+            }
+            b"VARSIZE" => {
+                // HACK: Support non-constexpr variable names
+                ctx.result()?;
+                let [var, dimension];
+                match args.len() {
+                    1 => {
+                        [var] = ctx.unpack_some_args(args)?;
+                        dimension = EraExpr::new_int(-1, src_info);
+                    }
+                    2 => {
+                        [var, dimension] = ctx.unpack_some_args(args)?;
+                    }
+                    _ => bail_opt!(
+                        ctx.this,
+                        ctx.src_info,
+                        format!(
+                            "no overload of `{}` accepts {} arguments",
+                            ctx.target,
+                            args.len()
+                        )
+                    ),
+                }
+                let var = ctx.this.p.evaluate_constant(var)?;
+                let var = ctx.this.p.unwrap_str_constant(var)?;
+                let dimension = ctx.this.p.evaluate_constant(dimension)?;
+                let dimension = ctx.this.p.unwrap_int_constant(dimension)?;
+                let info = ctx.this.var_arr_with_dims(&var, src_info)?;
+                ctx.this.chunk.emit_bytecode(Pop, src_info);
+                let EraVarArrCompileInfoWithDims::Normal(kind, mut dims, is_charadata) = info
+                else {
+                    bail_opt!(
+                        ctx.this,
+                        src_info,
+                        "`VARSIZE` cannot be used on pseudo variables"
+                    );
+                };
+                // HACK: VARSIZE ignores chara_no dimension
+                if is_charadata {
+                    dims.remove(0);
+                }
+                let dimension = if dimension < 0 {
+                    dims.last().copied()
+                } else {
+                    dims.get(dimension as usize).copied()
+                };
+                let Some(result) = dimension else {
+                    bail_opt!(ctx.this, src_info, "invalid VARSIZE dimension");
+                };
+                ctx.this
+                    .chunk
+                    .emit_load_const(ctx.this.p.new_value_int(result.into()), src_info);
+            }
+            b"TOUPPER" | b"TOLOWER" | b"TOHALF" | b"TOFULL" => {
+                ctx.results()?;
+                let bytecode = match upper_target.as_bytes() {
+                    b"TOUPPER" => StringToUpper,
+                    b"TOLOWER" => StringToLower,
+                    b"TOHALF" => StringToHalf,
+                    b"TOFULL" => StringToFull,
+                    _ => unreachable!(),
+                };
+                let [value] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_str(value)?;
+                ctx.this.chunk.emit_bytecode(bytecode, src_info);
+            }
+            b"EXISTCSV" => {
+                ctx.result()?;
+                let [chara_no] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_int(chara_no)?;
+                ctx.this.chunk.emit_bytecode(CharaCsvExists, src_info);
+            }
+            b"GETPALAMLV" | b"GETEXPLV" => {
+                ctx.result()?;
+                let bytecode = match upper_target.as_bytes() {
+                    b"GETPALAMLV" => GetPalamLv,
+                    b"GETEXPLV" => GetExpLv,
+                    _ => unreachable!(),
+                };
+                let [value, max_lv] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_int(value)?;
+                ctx.this.expr_int(max_lv)?;
+                ctx.this.chunk.emit_bytecode(bytecode, src_info);
+            }
+            b"GETCHARA" => {
+                ctx.result()?;
+                let [chara_no] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_int(chara_no)?;
+                ctx.this.chunk.emit_bytecode(GetCharaRegNum, src_info);
+            }
+            b"ESCAPE" => {
+                ctx.results()?;
+                let [haystack] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_str(haystack)?;
+                ctx.this.chunk.emit_bytecode(EscapeRegexStr, src_info);
+            }
+            b"LINEISEMPTY" => {
+                ctx.result()?;
+                let [] = ctx.unpack_some_args(args)?;
+                ctx.this.chunk.emit_bytecode(PrintLineIsEmpty, src_info);
+            }
             _ => bail_opt!(
                 ctx.this,
                 src_info,
@@ -2978,18 +3253,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 // TODO: BuildString check overflow
                 self.chunk.append_u8(args_cnt as _, src_info);
 
-                match u8::from(x.flags) {
-                    x if x == PrintExtendedFlags::new().into() => {
-                        self.chunk.emit_bytecode(Print, src_info);
-                    }
-                    x if x == PrintExtendedFlags::new().with_is_line(true).into() => {
-                        self.chunk.emit_bytecode(PrintLine, src_info);
-                    }
-                    x => {
-                        self.chunk.emit_bytecode(PrintExtended, src_info);
-                        self.chunk.append_u8(x, src_info);
-                    }
-                }
+                self.cmd_print_core(x.flags, src_info)?;
             }
             Cmd::PrintData(x) => {
                 if x.data.is_empty() {
@@ -3011,44 +3275,10 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         .emit_load_const(self.p.new_value_int(x.data.len() as _), x.src_info);
                     self.chunk.emit_bytecode(GetRandomMax, x.src_info);
                 }
-                let mut bt_data = Vec::new();
-                // Jump fields
-                for i in 0..x.data.len() {
-                    self.chunk.emit_bytecode(Duplicate, x.src_info);
-                    self.chunk
-                        .emit_load_const(self.p.new_value_int(i as _), x.src_info);
-                    self.chunk.emit_bytecode(CompareEq, x.src_info);
-                    bt_data.push(self.chunk.emit_jump_cond_hold(x.src_info));
-                }
-                // Data fields
-                let mut bt_done = Vec::new();
-                for (data_vec, bt) in x.data.into_iter().zip(bt_data.into_iter()) {
-                    bt.complete(self.chunk).unwrap();
-                    let mut strings_cnt = 1;
-                    let mut data_it = data_vec.into_iter();
-                    let first_data = if let Some(data) = data_it.next() {
-                        data
-                    } else {
-                        EraExpr::new_str(String::new(), x.src_info)
-                    };
-                    self.expr_str(first_data)?;
-                    let newline_value = self.p.new_value_str("\n".to_owned());
-                    for rest_data in data_it {
-                        self.chunk
-                            .emit_load_const(newline_value.clone(), x.src_info);
-                        self.expr_str(rest_data)?;
-                        strings_cnt += 2;
-                    }
-                    self.chunk.emit_bytecode(BuildString, x.src_info);
-                    self.chunk.append_u8(strings_cnt, x.src_info);
-                    bt_done.push(self.chunk.emit_jump_hold(x.src_info));
-                }
-                for bt in bt_done {
-                    bt.complete(self.chunk).unwrap();
-                }
-                self.chunk.emit_bytecode(PrintExtended, x.src_info);
-                self.chunk.append_u8(x.flags.into(), x.src_info);
-                self.chunk.emit_bytecode(Pop, x.src_info);
+
+                self.cmd_printdata_core(x.data, x.src_info)?;
+
+                self.cmd_print_core(x.flags, x.src_info)?;
             }
             Cmd::Wait(x) => {
                 self.chunk
@@ -3155,6 +3385,9 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                                     EraTokenKind::CmpGEq => {
                                         self.chunk.emit_bytecode(CompareL, op_si);
                                         self.chunk.emit_bytecode(LogicalNot, op_si);
+                                    }
+                                    EraTokenKind::BitAnd => {
+                                        self.chunk.emit_bytecode(BitAnd, op_si);
                                     }
                                     _ => {
                                         bail_opt!(self, op_si, "unsupported operator as case")
@@ -3294,6 +3527,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                             }
                             Some(k)
                         })?;
+                        self.chunk.emit_bytecode(Pop, x.src_info);
                     }
                     self.chunk.emit_bytecode(ReturnVoid, x.src_info);
                 } else {
@@ -3632,6 +3866,13 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 })?;
                 self.chunk.emit_bytecode(Pop, x.src_info);
             }
+            Cmd::ResetBgColor(x) => {
+                self.arr_set("@COLOR", vec![], x.src_info, |this| {
+                    this.arr_get_int("@DEFBGCOLOR", vec![], x.src_info)?;
+                    Some(TInteger)
+                })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
+            }
             Cmd::VarSet(x) => {
                 let (target_k, target_dims_cnt) =
                     self.var_arr_no_pseudo(&x.target.name, x.target.src_info)?;
@@ -3673,14 +3914,19 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             Cmd::VarSize(x) => {
                 // TODO: Optimize command VARSIZE performance
                 let info = self.var_arr_with_dims(&x.var.name, x.var.src_info)?;
-                let EraVarArrCompileInfoWithDims::Normal(kind, dims, is_charadata) = info else {
+                self.chunk.emit_bytecode(Pop, x.src_info);
+                let EraVarArrCompileInfoWithDims::Normal(kind, mut dims, is_charadata) = info
+                else {
                     bail_opt!(
                         self,
                         x.src_info,
                         "`VARSIZE` cannot be used on pseudo variables"
                     );
                 };
-                self.chunk.emit_bytecode(Pop, x.src_info);
+                // HACK: VARSIZE ignores chara_no dimension
+                if is_charadata {
+                    dims.remove(0);
+                }
                 for (idx, dim) in dims.into_iter().enumerate() {
                     let idx = EraExpr::new_int(idx as _, x.src_info);
                     self.arr_set("RESULT", vec![idx], x.src_info, |this| {
@@ -3688,6 +3934,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                             .emit_load_const(this.p.new_value_int(dim as _), x.var.src_info);
                         Some(TInteger)
                     })?;
+                    self.chunk.emit_bytecode(Pop, x.src_info);
                 }
             }
             Cmd::Swap(x) => {
@@ -3769,8 +4016,15 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.chunk.emit_bytecode(ArrayCopy, x.src_info);
             }
             Cmd::ArrayShift(x) => {
-                bail_opt!(self, x.src_info, "UNIMPLEMENTED");
-                todo!()
+                let (target_k, target_dims_cnt) =
+                    self.var_arr_no_pseudo(&x.target.name, x.target.src_info)?;
+                self.expr_int(x.shift_count)?;
+                if target_k != self.expression(x.value)? {
+                    bail_opt!(self, x.src_info, "array element type mismatches value type");
+                }
+                self.expr_int(x.start_index)?;
+                self.expr_int(x.target_count)?;
+                self.chunk.emit_bytecode(ArrayShift, x.src_info);
             }
             Cmd::Input(_) | Cmd::InputS(_) => {
                 let (x, is_string) = match stmt {
@@ -3907,6 +4161,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     this.expr_int(x.style)?;
                     Some(TInteger)
                 })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
             }
             Cmd::FontBold(x) => {
                 self.arr_set("@STYLE", vec![], x.src_info, |this| {
@@ -3916,6 +4171,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     this.chunk.emit_bytecode(BitOr, x.src_info);
                     Some(TInteger)
                 })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
             }
             Cmd::FontItalic(x) => {
                 self.arr_set("@STYLE", vec![], x.src_info, |this| {
@@ -3925,6 +4181,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     this.chunk.emit_bytecode(BitOr, x.src_info);
                     Some(TInteger)
                 })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
             }
             Cmd::FontRegular(x) => {
                 self.arr_set("@STYLE", vec![], x.src_info, |this| {
@@ -3932,14 +4189,77 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         .emit_load_const(this.p.new_value_int(0), x.src_info);
                     Some(TInteger)
                 })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
             }
             Cmd::SetFont(x) => {
                 self.arr_set("@FONT", vec![], x.src_info, |this| {
                     this.expr_str(x.font_name)?;
                     Some(TString)
                 })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
+            }
+            Cmd::StrData(x) => {
+                if x.data.is_empty() {
+                    bail_opt!(self, x.src_info, "cannot use STRDATA with empty data list");
+                }
+                self.arr_set(&x.target.name, x.target.idxs, x.target.src_info, |this| {
+                    this.chunk
+                        .emit_load_const(this.p.new_value_int(x.data.len() as _), x.src_info);
+                    this.chunk.emit_bytecode(GetRandomMax, x.src_info);
+                    this.cmd_printdata_core(x.data, x.src_info)?;
+                    Some(TString)
+                })?;
+                self.chunk.emit_pop(x.src_info);
             }
             // TODO...
+            Cmd::Begin(x) => {
+                self.chunk.emit_bytecode(BeginSystemProcedure, x.src_info);
+                self.chunk.append_u8(x.proc as _, x.src_info);
+            }
+            // TODO...
+            Cmd::Redraw(x) => {
+                self.arr_set("@REDRAW", vec![], x.src_info, |this| {
+                    this.expr_int(x.arg)?;
+                    Some(TInteger)
+                })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
+            }
+            Cmd::StrLen(x) => {
+                self.arr_set("RESULT", vec![], x.src_info, |this| {
+                    this.expr_str(x.cont)?;
+                    this.chunk.emit_bytecode(StrLen, x.src_info);
+                    Some(TInteger)
+                })?;
+            }
+            Cmd::StrLenU(x) => {
+                self.arr_set("RESULT", vec![], x.src_info, |this| {
+                    this.expr_str(x.cont)?;
+                    this.chunk.emit_bytecode(StrLenU, x.src_info);
+                    Some(TInteger)
+                })?;
+            }
+            Cmd::Alignment(x) => {
+                self.arr_set("@ALIGN", vec![], x.src_info, |this| {
+                    this.chunk
+                        .emit_load_const(this.p.new_value_int(x.alignment as _), x.src_info);
+                    Some(TInteger)
+                })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
+            }
+            Cmd::ToolTipSetDelay(x) => {
+                self.arr_set("@TOOLTIP_DELAY", vec![], x.src_info, |this| {
+                    this.expr_int(x.duration)?;
+                    Some(TInteger)
+                })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
+            }
+            Cmd::ToolTipSetDuration(x) => {
+                self.arr_set("@TOOLTIP_DURATION", vec![], x.src_info, |this| {
+                    this.expr_int(x.duration)?;
+                    Some(TInteger)
+                })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
+            }
             Cmd::Randomize(x) => {
                 self.report_err(
                     x.src_info,
@@ -3961,7 +4281,57 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     "INITRAND is not supported and will be ignored",
                 );
             }
+            Cmd::Bar(x) => {
+                self.expr_int(x.value)?;
+                self.expr_int(x.max_value)?;
+                self.expr_int(x.length)?;
+                self.chunk.emit_bytecode(BuildBarString, x.src_info);
+                self.cmd_print_core(
+                    PrintExtendedFlags::new().with_is_line(x.new_line),
+                    x.src_info,
+                )?;
+            }
+            Cmd::AddChara(x) => {
+                for chara in x.charas {
+                    self.expr_int(chara)?;
+                    self.chunk.emit_bytecode(AddChara, x.src_info);
+                }
+            }
+            Cmd::PickUpChara(x) => {
+                let charas_cnt = x.charas.len();
+                for chara in x.charas {
+                    self.expr_int(chara)?;
+                }
+                self.chunk.emit_bytecode(PickUpChara, x.src_info);
+                self.chunk.append_u8(charas_cnt as _, x.src_info);
+            }
+            Cmd::DelChara(x) => {
+                let charas_cnt = x.charas.len();
+                for chara in x.charas {
+                    self.expr_int(chara)?;
+                }
+                self.chunk.emit_bytecode(DeleteChara, x.src_info);
+                self.chunk.append_u8(charas_cnt as _, x.src_info);
+            }
+            Cmd::SwapChara(x) => {
+                self.expr_int(x.chara1)?;
+                self.expr_int(x.chara2)?;
+                self.chunk.emit_bytecode(SwapChara, x.src_info);
+            }
+            Cmd::AddCopyChara(x) => {
+                self.expr_int(x.chara)?;
+                self.chunk.emit_bytecode(AddCopyChara, x.src_info);
+            }
+            Cmd::ResetStain(x) => {
+                self.expr_int(x.chara)?;
+                self.chunk.emit_bytecode(ResetCharaStain, x.src_info);
+            }
             // TODO...
+            Cmd::SaveData(x) => {
+                self.expr_int(x.save_id)?;
+                self.expr_str(x.save_info)?;
+                self.chunk.emit_bytecode(SaveData, x.src_info);
+            }
             Cmd::Restart(x) => {
                 // HACK: RESTART is unconditional GOTO start of function body
                 self.chunk
@@ -3974,12 +4344,42 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     this.chunk.emit_bytecode(GetHostTime, src_info);
                     Some(TInteger)
                 })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
                 self.arr_set("RESULTS", vec![], src_info, |this| {
                     this.chunk.emit_bytecode(GetHostTimeS, src_info);
                     Some(TString)
                 })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
             }
             // TODO...
+            Cmd::LoadGlobal(x) => {
+                self.arr_set("RESULT", vec![], x.src_info, |this| {
+                    this.chunk.emit_bytecode(LoadGlobal, x.src_info);
+                    Some(TInteger)
+                })?;
+                self.chunk.emit_pop(x.src_info);
+            }
+            Cmd::SaveGlobal(x) => {
+                // NOTE: Incompatible with Emuera: returns a value to indicate success or failure
+                self.arr_set("RESULT", vec![], x.src_info, |this| {
+                    this.chunk.emit_bytecode(SaveGlobal, x.src_info);
+                    Some(TInteger)
+                })?;
+                self.chunk.emit_pop(x.src_info);
+            }
+            Cmd::LoadGame(x) => {
+                self.chunk.emit_bytecode(LoadGame, x.src_info);
+            }
+            Cmd::SaveGame(x) => {
+                self.chunk.emit_bytecode(SaveGame, x.src_info);
+            }
+            Cmd::DebugClear(x) => {
+                // TODO: Implement Cmd::DebugClear
+                //self.chunk.emit_bytecode(SaveGame, x.src_info);
+            }
+            Cmd::ResetData(x) => {
+                self.chunk.emit_bytecode(ResetData, x.src_info);
+            }
             Cmd::ResultCmdCall(x) => {
                 self.builtin_fun_call(&x.name, x.args, x.src_info, true)?;
             }
@@ -3990,6 +4390,70 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             ),
         }
 
+        Some(())
+    }
+    // Precondition: string on stack
+    // Postcondition: empty stack
+    fn cmd_print_core(&mut self, flags: PrintExtendedFlags, src_info: SourcePosInfo) -> Option<()> {
+        use EraBytecodePrimaryType::*;
+        match u8::from(flags) {
+            x if x == PrintExtendedFlags::new().into() => {
+                self.chunk.emit_bytecode(Print, src_info);
+            }
+            x if x == PrintExtendedFlags::new().with_is_line(true).into() => {
+                self.chunk.emit_bytecode(PrintLine, src_info);
+            }
+            x => {
+                self.chunk.emit_bytecode(PrintExtended, src_info);
+                self.chunk.append_u8(x, src_info);
+            }
+        }
+        Some(())
+    }
+    // Precondition: selection on stack
+    // Postcondition: composed string on stack
+    fn cmd_printdata_core(
+        &mut self,
+        data: Vec<Vec<EraExpr>>,
+        src_info: SourcePosInfo,
+    ) -> Option<()> {
+        use EraBytecodePrimaryType::*;
+        let mut bt_data = Vec::new();
+        // Jump fields
+        for i in 0..data.len() {
+            self.chunk.emit_bytecode(Duplicate, src_info);
+            self.chunk
+                .emit_load_const(self.p.new_value_int(i as _), src_info);
+            self.chunk.emit_bytecode(CompareEq, src_info);
+            bt_data.push(self.chunk.emit_jump_cond_hold(src_info));
+        }
+        // Data fields
+        let mut bt_done = Vec::new();
+        for (data_vec, bt) in data.into_iter().zip(bt_data.into_iter()) {
+            bt.complete(self.chunk).unwrap();
+            // HACK: Pop early
+            self.chunk.emit_bytecode(Pop, src_info);
+            let mut strings_cnt = 1;
+            let mut data_it = data_vec.into_iter();
+            let first_data = if let Some(data) = data_it.next() {
+                data
+            } else {
+                EraExpr::new_str(String::new(), src_info)
+            };
+            self.expr_str(first_data)?;
+            let newline_value = self.p.new_value_str("\n".to_owned());
+            for rest_data in data_it {
+                self.chunk.emit_load_const(newline_value.clone(), src_info);
+                self.expr_str(rest_data)?;
+                strings_cnt += 2;
+            }
+            self.chunk.emit_bytecode(BuildString, src_info);
+            self.chunk.append_u8(strings_cnt, src_info);
+            bt_done.push(self.chunk.emit_jump_hold(src_info));
+        }
+        for bt in bt_done {
+            bt.complete(self.chunk).unwrap();
+        }
         Some(())
     }
     #[must_use]
@@ -4248,19 +4712,40 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     bail_opt!(self, src_info, "too many indices into array");
                 }
                 if var_dims.len() > 1 && idx_len < var_dims.len() {
-                    if is_charadata && fix_chara_idxs {
-                        // Push implicit TARGET as first index, then try again
-                        let target_var = EraVarExpr {
-                            name: "TARGET".to_owned(),
-                            idxs: vec![],
-                            src_info,
-                        };
-                        idxs.insert(0, EraExpr::Term(EraTermExpr::Var(target_var)));
+                    if is_charadata {
+                        if fix_chara_idxs {
+                            // Push implicit TARGET as first index, then try again
+                            let target_var = EraVarExpr {
+                                name: "TARGET".to_owned(),
+                                idxs: vec![],
+                                src_info,
+                            };
+                            idxs.insert(0, EraExpr::Term(EraTermExpr::Var(target_var)));
+                        } else {
+                            idxs.insert(0, EraExpr::new_int(0, src_info));
+                        }
                         idx_len = idxs.len();
                         if idx_len != var_dims.len() {
-                            bail_opt!(self, src_info, "too few indices into CHARADATA variable");
+                            //bail_opt!(self, src_info, "too few indices into CHARADATA variable");
+                            self.report_err(
+                                src_info,
+                                true,
+                                "too few indices into CHARADATA variable",
+                            );
+                            while idx_len != var_dims.len() {
+                                // HACK: Push implicit 0 as last index to workaround bugs in game code
+                                idxs.push(EraExpr::new_int(0, src_info));
+                                idx_len = idxs.len();
+                            }
+                        } else {
+                            if fix_chara_idxs {
+                                self.report_err(
+                                    src_info,
+                                    false,
+                                    "non-compliant use of CHARADATA variable",
+                                );
+                            }
                         }
-                        self.report_err(src_info, false, "non-compliant use of CHARADATA variable");
                     } else {
                         self.report_err(src_info, false, "non-compliant use of array variable");
                     }
@@ -4280,6 +4765,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         r
                     })
                     .collect::<Vec<_>>();
+                let is_csv_var = routine::is_csv_var(&var_name);
                 for (idx, stride) in idxs.into_iter().zip(strides.into_iter().rev()) {
                     let src_info = idx.source_pos_info();
 
@@ -4287,7 +4773,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         // HACK: Contextual indices replacing
                         EraExpr::Term(EraTermExpr::Var(x))
                             if x.idxs.is_empty()
-                                && routine::is_csv_var(&var_name)
+                                && is_csv_var
                                 && self
                                     .p
                                     .contextual_indices
@@ -4307,6 +4793,15 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     };
                     match idx_kind {
                         TInteger => (),
+                        TString if is_csv_var => {
+                            // HACK: Dynamic CSV string to index translation
+                            self.report_err(
+                                src_info,
+                                false,
+                                "using strings as indices is discouraged",
+                            );
+                            self.chunk.emit_bytecode(CsvGetNum, src_info);
+                        }
                         _ => bail_opt!(self, src_info, true, "array indices must be integers"),
                     }
 

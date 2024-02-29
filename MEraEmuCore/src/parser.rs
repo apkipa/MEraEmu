@@ -847,7 +847,7 @@ pub struct EraArrayShiftStmt {
     pub shift_count: EraExpr,
     pub value: EraExpr,
     pub start_index: EraExpr,
-    // pub target_count: EraExpr,
+    pub target_count: EraExpr,
     pub src_info: SourcePosInfo,
 }
 
@@ -941,8 +941,8 @@ pub struct EraSkipDispStmt {
     pub src_info: SourcePosInfo,
 }
 
-#[derive(Debug, Clone)]
 #[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone)]
 pub enum EraBeginSystemProcedureKind {
     First,
     Title,
@@ -977,8 +977,8 @@ pub struct EraStrLenStmt {
     pub src_info: SourcePosInfo,
 }
 
-#[derive(Debug, Clone)]
 #[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
 pub enum EraAlignmentKind {
     Left,
     Center,
@@ -1167,6 +1167,7 @@ pub enum EraCommandStmt {
     SetColor(EraSetColorStmt),
     ResetColor(EraResetColorStmt),
     SetBgColor(EraSetColorStmt),
+    ResetBgColor(EraResetColorStmt),
     VarSet(EraVarSetStmt),
     CVarSet(EraCVarSetStmt),
     VarSize(EraVarSizeStmt),
@@ -1225,6 +1226,12 @@ pub enum EraCommandStmt {
     SaveData(EraSaveDataStmt),
     Restart(EraCmdEmptyStmt),
     GetTime(EraCmdEmptyStmt),
+    LoadGlobal(EraCmdEmptyStmt),
+    SaveGlobal(EraCmdEmptyStmt),
+    LoadGame(EraCmdEmptyStmt),
+    SaveGame(EraCmdEmptyStmt),
+    DebugClear(EraCmdEmptyStmt),
+    ResetData(EraCmdEmptyStmt),
 }
 impl EraCommandStmt {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -1264,6 +1271,7 @@ impl EraCommandStmt {
             SetColor(x) => x.src_info,
             ResetColor(x) => x.src_info,
             SetBgColor(x) => x.src_info,
+            ResetBgColor(x) => x.src_info,
             VarSet(x) => x.src_info,
             CVarSet(x) => x.src_info,
             VarSize(x) => x.src_info,
@@ -1322,6 +1330,12 @@ impl EraCommandStmt {
             SaveData(x) => x.src_info,
             Restart(x) => x.src_info,
             GetTime(x) => x.src_info,
+            LoadGlobal(x) => x.src_info,
+            SaveGlobal(x) => x.src_info,
+            LoadGame(x) => x.src_info,
+            SaveGame(x) => x.src_info,
+            DebugClear(x) => x.src_info,
+            ResetData(x) => x.src_info,
         }
     }
 }
@@ -1998,6 +2012,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"SETCOLOR" => Cmd::SetColor(self.r().stmt_setcolor()?),
                         b"RESETCOLOR" => Cmd::ResetColor(self.r().stmt_resetcolor()?),
                         b"SETBGCOLOR" => Cmd::SetBgColor(self.r().stmt_setcolor()?),
+                        b"RESETBGCOLOR" => Cmd::ResetBgColor(self.r().stmt_resetcolor()?),
                         b"VARSET" => Cmd::VarSet(self.r().stmt_varset()?),
                         b"CVARSET" => Cmd::CVarSet(self.r().stmt_cvarset()?),
                         b"VARSIZE" => Cmd::VarSize(self.r().stmt_varsize()?),
@@ -2074,6 +2089,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"SAVEDATA" => Cmd::SaveData(self.r().stmt_savedata()?),
                         b"RESTART" => Cmd::Restart(self.empty()?),
                         b"GETTIME" => Cmd::GetTime(self.empty()?),
+                        b"LOADGLOBAL" => Cmd::LoadGlobal(self.empty()?),
+                        b"SAVEGLOBAL" => Cmd::SaveGlobal(self.empty()?),
+                        b"LOADGAME" => Cmd::LoadGame(self.empty()?),
+                        b"SAVEGAME" => Cmd::SaveGame(self.empty()?),
+                        b"DEBUGCLEAR" => Cmd::DebugClear(self.empty()?),
+                        b"RESETDATA" => Cmd::ResetData(self.empty()?),
                         b"GCREATE"
                         | b"GCREATEFROMFILE"
                         | b"GDISPOSE"
@@ -2097,6 +2118,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"STRLENS"
                         | b"STRLENSU"
                         | b"STRCOUNT"
+                        | b"CHARATU"
                         | b"CUREENTREDRAW"
                         | b"CURRENTALIGN"
                         | b"MAX"
@@ -2115,7 +2137,6 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"GETDEFBGCOLOR"
                         | b"GETFOCUSCOLOR"
                         | b"GETNUM"
-                        | b"MATCH"
                         | b"GROUPMATCH"
                         | b"NOSAMES"
                         | b"ALLSAMES"
@@ -2135,6 +2156,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"CSVJUEL"
                         | b"CSVEQUIP"
                         | b"CSVCFLAG"
+                        | b"SQRT"
                         | b"CBRT"
                         | b"LOG"
                         | b"LOG10"
@@ -2143,7 +2165,26 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"SIGN"
                         | b"TOSTR"
                         | b"TOINT"
-                        | b"ISNUMERIC" => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
+                        | b"ISNUMERIC"
+                        | b"SUMARRAY"
+                        | b"SUMCARRAY"
+                        | b"MATCH"
+                        | b"CMATCH"
+                        | b"MAXARRAY"
+                        | b"MAXCARRAY"
+                        | b"MINARRAY"
+                        | b"MINCARRAY"
+                        | b"TOUPPER"
+                        | b"TOLOWER"
+                        | b"TOHALF"
+                        | b"TOFULL"
+                        | b"EXISTCSV"
+                        | b"MONEYSTR"
+                        | b"GETPALAMLV"
+                        | b"GETEXPLV"
+                        | b"GETCHARA"
+                        | b"ESCAPE"
+                        | b"LINEISEMPTY" => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
                         _ => return Some(self.stmt_expression()?),
                     }
                 }
@@ -3774,12 +3815,18 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         } else {
             EraExpr::new_int(0, src_info)
         };
+        let target_count = if self.matches_comma().is_some() {
+            self.expression(true)?
+        } else {
+            EraExpr::new_int(-1, src_info)
+        };
         self.consume_newline()?;
         Some(EraArrayShiftStmt {
             target,
             shift_count,
             value,
             start_index,
+            target_count,
             src_info,
         })
     }

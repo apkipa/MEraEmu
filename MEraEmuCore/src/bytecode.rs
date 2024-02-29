@@ -104,7 +104,9 @@ pub enum EraBytecodePrimaryType {
     StrLen,
     StrLenU,
     CountSubString,
+    StrCharAtU,
     ArrayCountMatches,
+    CArrayCountMatches,
     GroupMatch,
     ArrayRemove,
     ArraySortAsc,
@@ -113,12 +115,26 @@ pub enum EraBytecodePrimaryType {
     ArrayCopy,
     ArrayShift,
     PowerInt,
+    SqrtInt,
     CbrtInt,
     LogInt,
     Log10Int,
     ExponentInt,
     AbsInt,
     FormatIntToStr,
+    SumArray,
+    SumCArray,
+    MaxArray,
+    MaxCArray,
+    MinArray,
+    MinCArray,
+    StringIsValidInteger,
+    StringToUpper,
+    StringToLower,
+    StringToHalf,
+    StringToFull,
+    BuildBarString,
+    EscapeRegexStr,
     // -----
     Print,
     PrintLine,
@@ -160,6 +176,26 @@ pub enum EraBytecodePrimaryType {
     ClearLine,
     //CsvGetProp,
     CsvGetProp2,
+    CsvGetNum,
+    CharaCsvExists,
+    GetPalamLv,
+    GetExpLv,
+    AddChara,
+    AddVoidChara,
+    PickUpChara,
+    DeleteChara,
+    SwapChara,
+    AddCopyChara,
+    SaveData,
+    GetCharaRegNum,
+    LoadGlobal,
+    SaveGlobal,
+    LoadGame,
+    SaveGame,
+    BeginSystemProcedure,
+    PrintLineIsEmpty,
+    ResetData,
+    ResetCharaStain,
     // -----
     ExtendedBytecode1 = 192, // Values >= ExtendedBytecode should do extended lookup
 }
@@ -494,6 +530,12 @@ impl Value {
             vals,
             dims,
         }))))
+    }
+    pub fn new_int_0darr(val: i64) -> Self {
+        Self::new_int_arr(vec![1], vec![IntValue { val }])
+    }
+    pub fn new_str_0darr(val: String) -> Self {
+        Self::new_str_arr(vec![1], vec![Rc::new(StrValue { val })])
     }
     pub fn into_unpacked(self) -> FlatValue {
         use ptr_union::Enum4::*;
