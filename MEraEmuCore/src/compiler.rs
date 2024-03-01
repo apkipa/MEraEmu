@@ -93,6 +93,30 @@ macro_rules! err_opt {
 pub struct EraConstantPool {
     pub vals: Vec<Value>,
 }
+#[derive(Default)]
+struct EraConstantPoolBuilder {
+    intern_map: HashMap<either::Either<i64, *mut ()>, usize>,
+    vals: Vec<Value>,
+}
+impl EraConstantPoolBuilder {
+    fn build(self) -> EraConstantPool {
+        EraConstantPool { vals: self.vals }
+    }
+    fn add_val(&mut self, val: Value) -> usize {
+        // TODO: Should we intern simple strings?
+        let key = match val.clone().into_unpacked() {
+            FlatValue::Int(x) => either::Either::Left(x.val),
+            FlatValue::Str(x) => either::Either::Right(Rc::as_ptr(&x) as _),
+            FlatValue::ArrInt(x) => either::Either::Right(Rc::as_ptr(&x) as _),
+            FlatValue::ArrStr(x) => either::Either::Right(Rc::as_ptr(&x) as _),
+        };
+        *self.intern_map.entry(key).or_insert_with(|| {
+            let index = self.vals.len();
+            self.vals.push(val);
+            index
+        })
+    }
+}
 
 pub struct EraFuncBytecodeInfo {
     pub name: Rc<CaselessStr>,
@@ -149,14 +173,63 @@ pub struct EraBytecodeChunk {
     pub name: Rc<str>,
     pub constants: EraConstantPool,
 }
+struct EraBytecodeChunkBuilder {
+    // TODO: Optimize debugging information presentation
+    bytecode: Vec<u8>,
+    // src_infos[bytecode_offset] => src_info
+    src_infos: Vec<SlimSourcePosInfo>,
+    name: Rc<str>,
+    constants: EraConstantPoolBuilder,
+}
 struct EraBytecodeChunkBacktrackHolder {
     base_idx: usize,
-    write_fn: &'static dyn Fn(&mut EraBytecodeChunk, usize, isize) -> Option<()>,
+    write_fn: &'static dyn Fn(&mut EraBytecodeChunkBuilder, usize, isize) -> Option<()>,
 }
 struct EraBytecodeChunkSnapshot {
     len: usize,
 }
 impl EraBytecodeChunk {
+    pub fn read_u8(&self, idx: usize) -> Option<u8> {
+        self.bytecode.get(idx).copied()
+    }
+    pub fn read_u16(&self, idx: usize) -> Option<u16> {
+        let idx2 = idx + std::mem::size_of::<u16>();
+        self.bytecode
+            .get(idx..idx2)
+            .map(|x| u16::from_ne_bytes(x.try_into().unwrap()))
+    }
+    pub fn read_u32(&self, idx: usize) -> Option<u32> {
+        let idx2 = idx + std::mem::size_of::<u32>();
+        self.bytecode
+            .get(idx..idx2)
+            .map(|x| u32::from_ne_bytes(x.try_into().unwrap()))
+    }
+    pub fn cur_bytes_cnt(&self) -> usize {
+        self.bytecode.len()
+    }
+    pub fn get_constants_cnt(&self) -> usize {
+        self.constants.vals.len()
+    }
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+    pub fn source_info_at(&self, idx: usize) -> Option<SourcePosInfo> {
+        self.src_infos.get(idx).map(|x| SourcePosInfo::from(*x))
+    }
+    // WARN: Do NOT modify the returned value
+    pub fn get_constant(&self, idx: usize) -> Option<&Value> {
+        self.constants.vals.get(idx)
+    }
+}
+impl EraBytecodeChunkBuilder {
+    fn build(self) -> EraBytecodeChunk {
+        EraBytecodeChunk {
+            bytecode: self.bytecode,
+            src_infos: self.src_infos,
+            name: self.name,
+            constants: self.constants.build(),
+        }
+    }
     fn append_u8(&mut self, value: u8, src_info: SourcePosInfo) {
         self.bytecode.push(value);
         self.src_infos.push(src_info.into());
@@ -190,6 +263,22 @@ impl EraBytecodeChunk {
             .get(idx..idx2)
             .map(|x| u32::from_ne_bytes(x.try_into().unwrap()))
     }
+    pub fn cur_bytes_cnt(&self) -> usize {
+        self.bytecode.len()
+    }
+    pub fn get_constants_cnt(&self) -> usize {
+        self.constants.vals.len()
+    }
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+    pub fn source_info_at(&self, idx: usize) -> Option<SourcePosInfo> {
+        self.src_infos.get(idx).map(|x| SourcePosInfo::from(*x))
+    }
+    // WARN: Do NOT modify the returned value
+    pub fn get_constant(&self, idx: usize) -> Option<&Value> {
+        self.constants.vals.get(idx)
+    }
     // Useful for backtracking
     pub fn overwrite_u8(&mut self, value: u8, idx: usize) -> Option<()> {
         *self.bytecode.get_mut(idx)? = value;
@@ -211,26 +300,8 @@ impl EraBytecodeChunk {
             .copy_from_slice(&value.to_ne_bytes());
         Some(())
     }
-    pub fn cur_bytes_cnt(&self) -> usize {
-        self.bytecode.len()
-    }
-    pub fn get_constants_cnt(&self) -> usize {
-        self.constants.vals.len()
-    }
-    pub fn get_name(&self) -> &str {
-        &self.name
-    }
-    pub fn source_info_at(&self, idx: usize) -> Option<SourcePosInfo> {
-        self.src_infos.get(idx).map(|x| SourcePosInfo::from(*x))
-    }
     fn add_constant(&mut self, value: Value) -> usize {
-        let idx = self.constants.vals.len();
-        self.constants.vals.push(value);
-        idx
-    }
-    // WARN: Do NOT modify the returned value
-    pub fn get_constant(&self, idx: usize) -> Option<&Value> {
-        self.constants.vals.get(idx)
+        self.constants.add_val(value)
     }
     // NOTE: emit_* functions are helpers for writing bytecodes
     fn emit_bytecode(&mut self, value: EraBytecodePrimaryType, src_info: SourcePosInfo) {
@@ -334,14 +405,14 @@ impl EraBytecodeChunk {
     }
 }
 impl EraBytecodeChunkBacktrackHolder {
-    fn source_pos_info(&self, chunk: &EraBytecodeChunk) -> Option<SourcePosInfo> {
+    fn source_pos_info(&self, chunk: &EraBytecodeChunkBuilder) -> Option<SourcePosInfo> {
         chunk.source_info_at(self.base_idx)
     }
-    fn complete(self, chunk: &mut EraBytecodeChunk) -> Option<()> {
+    fn complete(self, chunk: &mut EraBytecodeChunkBuilder) -> Option<()> {
         let pos = chunk.cur_bytes_cnt();
         self.complete_at(chunk, pos)
     }
-    fn complete_at(self, chunk: &mut EraBytecodeChunk, pos: usize) -> Option<()> {
+    fn complete_at(self, chunk: &mut EraBytecodeChunkBuilder, pos: usize) -> Option<()> {
         let offset = isize::try_from(pos)
             .ok()?
             .checked_sub_unsigned(self.base_idx)?;
@@ -350,7 +421,7 @@ impl EraBytecodeChunkBacktrackHolder {
     }
 }
 impl EraBytecodeChunkSnapshot {
-    fn regret(self, chunk: &mut EraBytecodeChunk) {
+    fn regret(self, chunk: &mut EraBytecodeChunkBuilder) {
         chunk.bytecode.truncate(self.len);
         chunk.src_infos.truncate(self.len);
     }
@@ -455,7 +526,7 @@ pub struct EraCompilerImpl<'a, ErrReportFn> {
     err_report_fn: &'a mut ErrReportFn,
     file_name: Rc<str>,
     vars: EraVarPool,
-    intern_vals: HashMap<either::Either<Rc<IntValue>, Rc<StrValue>>, ()>,
+    // intern_vals: HashMap<either::Either<IntValue, Rc<StrValue>>, ()>,
     contextual_indices: HashMap<Ascii<String>, u32>,
 }
 
@@ -463,7 +534,7 @@ pub struct EraCompilerImplFunctionSite<'p, 'a, ErrReportFn> {
     p: &'p mut EraCompilerImpl<'a, ErrReportFn>,
     funcs: &'p EraFuncPool,
     func_info: &'p EraFuncInfo,
-    chunk: &'p mut EraBytecodeChunk,
+    chunk: &'p mut EraBytecodeChunkBuilder,
     loop_structs: Vec<EraLoopStructCodeMetadata>,
     stack_balance: usize,
     goto_labels: HashMap<CaselessString, EraGotoLabelInfo>,
@@ -523,7 +594,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             err_report_fn: &mut parser.err_report_fn,
             file_name: "".into(),
             vars: Default::default(),
-            intern_vals: HashMap::new(),
+            // intern_vals: HashMap::new(),
             contextual_indices,
         }
     }
@@ -975,7 +1046,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 .entry(self.file_name.clone())
                 .or_insert_with(|| {
                     let idx = chunks.len();
-                    chunks.push(EraBytecodeChunk {
+                    chunks.push(EraBytecodeChunkBuilder {
                         bytecode: Vec::new(),
                         src_infos: Vec::new(),
                         name: self.file_name.deref().into(),
@@ -1005,7 +1076,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         Some(EraBytecodeCompilation {
             func_names: global_funcs.func_names,
             funcs,
-            chunks,
+            chunks: chunks.into_iter().map(|x| x.build()).collect(),
             global_vars,
         })
     }
@@ -1015,7 +1086,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         funcs: &EraFuncPool,
         func_info: &EraFuncInfo,
         func_decl: EraFunDecl,
-        chunk: &mut EraBytecodeChunk,
+        chunk: &mut EraBytecodeChunkBuilder,
     ) -> Option<EraFuncBytecodeInfo> {
         EraCompilerImplFunctionSite::new(self, funcs, func_info, chunk).function(func_decl)
     }
@@ -1129,31 +1200,33 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         });
     }
     fn new_value_int(&mut self, value: i64) -> Value {
-        use std::collections::hash_map::Entry::*;
-        let value = IntValue { val: value };
-        match self.intern_vals.entry(either::Either::Left(Rc::new(value))) {
-            Occupied(x) => Value::new_int_rc(x.key().clone().unwrap_left()),
-            Vacant(x) => {
-                let r = Value::new_int_rc(x.key().clone().unwrap_left());
-                x.insert(());
-                r
-            }
-        }
+        // use std::collections::hash_map::Entry::*;
+        // let value = IntValue { val: value };
+        // match self.intern_vals.entry(either::Either::Left(value)) {
+        //     Occupied(x) => Value::new_int(x.key().as_ref().unwrap_left().val),
+        //     Vacant(x) => {
+        //         let r = Value::new_int(x.key().as_ref().unwrap_left().val);
+        //         x.insert(());
+        //         r
+        //     }
+        // }
+        Value::new_int(value)
     }
     fn new_value_str(&mut self, value: String) -> Value {
-        use std::collections::hash_map::Entry::*;
-        let value = StrValue { val: value };
-        match self
-            .intern_vals
-            .entry(either::Either::Right(Rc::new(value)))
-        {
-            Occupied(x) => Value::new_str_rc(x.key().clone().unwrap_right()),
-            Vacant(x) => {
-                let r = Value::new_str_rc(x.key().clone().unwrap_right());
-                x.insert(());
-                r
-            }
-        }
+        // use std::collections::hash_map::Entry::*;
+        // let value = StrValue { val: value };
+        // match self
+        //     .intern_vals
+        //     .entry(either::Either::Right(Rc::new(value)))
+        // {
+        //     Occupied(x) => Value::new_str_rc(x.key().clone().unwrap_right()),
+        //     Vacant(x) => {
+        //         let r = Value::new_str_rc(x.key().clone().unwrap_right());
+        //         x.insert(());
+        //         r
+        //     }
+        // }
+        Value::new_str(value)
     }
 }
 
@@ -1162,7 +1235,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         parent: &'p mut EraCompilerImpl<'a, T>,
         funcs: &'p EraFuncPool,
         func_info: &'p EraFuncInfo,
-        chunk: &'p mut EraBytecodeChunk,
+        chunk: &'p mut EraBytecodeChunkBuilder,
     ) -> Self {
         EraCompilerImplFunctionSite {
             p: parent,

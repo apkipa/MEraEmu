@@ -1740,7 +1740,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     EraTokenKind::Comma | EraTokenKind::LineBreak => {
                         dims.push(0);
                         continue;
-                    },
+                    }
                     _ => (),
                 }
             }
