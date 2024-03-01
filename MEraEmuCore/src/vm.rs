@@ -570,10 +570,14 @@ pub trait EraVirtualMachineCallback {
         offset_y: i64,
         delay: i64,
     ) -> i64;
+    fn on_spritewidth(&mut self, name: &str) -> i64;
+    fn on_spriteheight(&mut self, name: &str) -> i64;
     // Others
     fn on_check_font(&mut self, font_name: &str) -> i64;
     // NOTE: Returns UTC timestamp (in milliseconds).
     fn on_get_host_time(&mut self) -> u64;
+    fn on_get_config_int(&mut self, name: &str) -> anyhow::Result<i64>;
+    fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String>;
     // Private
     /// Translates strings to indices.
     fn on_csv_get_num(&mut self, name: &str) -> Option<u32>;
@@ -1769,16 +1773,17 @@ impl EraVirtualMachine {
                         .gen_range(0..upper, || ctx.callback.on_get_rand());
                     ctx.stack.push(Value::new_int(result as _).into());
                 }
-                Jump | JumpW => {
+                Jump | JumpW | JumpWW => {
                     let imm_ip = ctx.cur_frame.ip.offset + 1;
                     let offset: isize = match primary_bytecode {
                         Jump => ctx.chunk_read_u8(imm_ip)? as i8 as _,
                         JumpW => ctx.chunk_read_u16(imm_ip)? as i16 as _,
+                        JumpWW => ctx.chunk_read_u32(imm_ip)? as i32 as _,
                         _ => unreachable!(),
                     };
                     ip_offset_delta = offset;
                 }
-                JumpCond | JumpCondW => {
+                JumpCond | JumpCondW | JumpCondWW => {
                     let imm_ip = ctx.cur_frame.ip.offset + 1;
                     let offset_delta;
                     let offset: isize = match primary_bytecode {
@@ -1789,6 +1794,10 @@ impl EraVirtualMachine {
                         JumpCondW => {
                             offset_delta = 2;
                             ctx.chunk_read_u16(imm_ip)? as i16 as _
+                        }
+                        JumpCondWW => {
+                            offset_delta = 4;
+                            ctx.chunk_read_u32(imm_ip)? as i32 as _
                         }
                         _ => unreachable!(),
                     };

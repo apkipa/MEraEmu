@@ -1734,10 +1734,13 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         };
         // Array dimensions
         while self.matches_comma().is_some() {
-            // HACK: Special syntax for REF variables
+            // HACK: Omitted dimension is 0
             if is_ref {
                 match self.peek_token(EraLexerMode::Normal).kind {
-                    EraTokenKind::Comma | EraTokenKind::LineBreak => continue,
+                    EraTokenKind::Comma | EraTokenKind::LineBreak => {
+                        dims.push(0);
+                        continue;
+                    },
                     _ => (),
                 }
             }
@@ -1865,8 +1868,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     let info = EraParserSlimVarTypeInfo {
                         is_string: x.is_string,
                     };
-                    let name = CaselessString::new(x.name.clone());
-                    if self.local_vars.insert(name, info).is_some() {
+                    let var_name = CaselessString::new(x.name.clone());
+                    if self.local_vars.insert(var_name, info).is_some() {
                         self.report_err(
                             x.src_info,
                             true,
@@ -2106,6 +2109,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"SPRITECREATED"
                         | b"SPRITEANIMECREATE"
                         | b"SPRITEANIMEADDFRAME"
+                        | b"SPRITEWIDTH"
+                        | b"SPRITEHEIGHT"
                         | b"GETBIT"
                         | b"GETSTYLE"
                         | b"CHKFONT"
@@ -2119,7 +2124,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"STRLENSU"
                         | b"STRCOUNT"
                         | b"CHARATU"
-                        | b"CUREENTREDRAW"
+                        | b"CURRENTREDRAW"
                         | b"CURRENTALIGN"
                         | b"MAX"
                         | b"MIN"
@@ -2127,6 +2132,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"INRANGE"
                         | b"CHKCHARADATA"
                         | b"SAVETEXT"
+                        | b"LOADTEXT"
                         | b"FINDELEMENT"
                         | b"FINDLASTELEMENT"
                         | b"FINDCHARA"
@@ -2184,7 +2190,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"GETEXPLV"
                         | b"GETCHARA"
                         | b"ESCAPE"
-                        | b"LINEISEMPTY" => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
+                        | b"LINEISEMPTY"
+                        | b"GETCONFIG"
+                        | b"GETCONFIGS"
+                        | b"ISSKIP"
+                        | b"MOUSESKIP"
+                        | b"MESSKIP" => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
                         _ => return Some(self.stmt_expression()?),
                     }
                 }

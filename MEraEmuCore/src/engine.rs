@@ -196,8 +196,13 @@ pub trait MEraEngineSysCallback {
         offset_y: i64,
         delay: i64,
     ) -> i64;
+    fn on_spritewidth(&mut self, name: &str) -> i64;
+    fn on_spriteheight(&mut self, name: &str) -> i64;
+    // Others
     fn on_check_font(&mut self, font_name: &str) -> i64;
     fn on_get_host_time(&mut self) -> u64;
+    fn on_get_config_int(&mut self, name: &str) -> anyhow::Result<i64>;
+    fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String>;
 }
 
 pub struct ExecSourceInfo {
@@ -418,12 +423,24 @@ impl MEraEngineSysCallback for EmptyCallback {
     ) -> i64 {
         0
     }
+    fn on_spritewidth(&mut self, name: &str) -> i64 {
+        0
+    }
+    fn on_spriteheight(&mut self, name: &str) -> i64 {
+        0
+    }
     // Others
     fn on_check_font(&mut self, font_name: &str) -> i64 {
         0
     }
     fn on_get_host_time(&mut self) -> u64 {
         0
+    }
+    fn on_get_config_int(&mut self, name: &str) -> anyhow::Result<i64> {
+        anyhow::bail!("no such config entry");
+    }
+    fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String> {
+        anyhow::bail!("no such config entry");
     }
 }
 
@@ -1432,12 +1449,24 @@ impl<'a> MEraEngine<'a> {
                     name, gid, x, y, width, height, offset_x, offset_y, delay,
                 )
             }
+            fn on_spritewidth(&mut self, name: &str) -> i64 {
+                self.callback.on_spritewidth(name)
+            }
+            fn on_spriteheight(&mut self, name: &str) -> i64 {
+                self.callback.on_spriteheight(name)
+            }
             // Others
             fn on_check_font(&mut self, font_name: &str) -> i64 {
                 self.callback.on_check_font(font_name)
             }
             fn on_get_host_time(&mut self) -> u64 {
                 self.callback.on_get_host_time()
+            }
+            fn on_get_config_int(&mut self, name: &str) -> anyhow::Result<i64> {
+                self.callback.on_get_config_int(name)
+            }
+            fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String> {
+                self.callback.on_get_config_str(name)
             }
             // Private
             fn on_csv_get_num(&mut self, name: &str) -> Option<u32> {

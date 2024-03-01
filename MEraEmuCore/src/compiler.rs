@@ -256,23 +256,23 @@ impl EraBytecodeChunk {
     // TODO: Determine suitable imm sizes by spliting code into relocatable basic blocks
     fn emit_jump_hold(&mut self, src_info: SourcePosInfo) -> EraBytecodeChunkBacktrackHolder {
         let base_idx = self.cur_bytes_cnt();
-        self.emit_bytecode(EraBytecodePrimaryType::JumpW, src_info);
-        self.append_u16(0xffff, src_info);
+        self.emit_bytecode(EraBytecodePrimaryType::JumpWW, src_info);
+        self.append_u32(0xffffffff, src_info);
         EraBytecodeChunkBacktrackHolder {
             base_idx,
             write_fn: &|this, idx, offset| {
-                this.overwrite_u16(i16::try_from(offset).ok()? as _, idx)
+                this.overwrite_u32(i32::try_from(offset).ok()? as _, idx)
             },
         }
     }
     fn emit_jump_cond_hold(&mut self, src_info: SourcePosInfo) -> EraBytecodeChunkBacktrackHolder {
         let base_idx = self.cur_bytes_cnt();
-        self.emit_bytecode(EraBytecodePrimaryType::JumpCondW, src_info);
-        self.append_u16(0xffff, src_info);
+        self.emit_bytecode(EraBytecodePrimaryType::JumpCondWW, src_info);
+        self.append_u32(0xffffffff, src_info);
         EraBytecodeChunkBacktrackHolder {
             base_idx,
             write_fn: &|this, idx, offset| {
-                this.overwrite_u16(i16::try_from(offset).ok()? as _, idx)
+                this.overwrite_u32(i32::try_from(offset).ok()? as _, idx)
             },
         }
     }
@@ -283,6 +283,9 @@ impl EraBytecodeChunk {
         } else if let Ok(offset) = i16::try_from(offset) {
             self.emit_bytecode(EraBytecodePrimaryType::JumpW, src_info);
             self.append_u16(offset as _, src_info);
+        } else if let Ok(offset) = i32::try_from(offset) {
+            self.emit_bytecode(EraBytecodePrimaryType::JumpW, src_info);
+            self.append_u32(offset as _, src_info);
         } else {
             panic!("jump too far to be encoded in bytecode");
         }
@@ -294,6 +297,9 @@ impl EraBytecodeChunk {
         } else if let Ok(offset) = i16::try_from(offset) {
             self.emit_bytecode(EraBytecodePrimaryType::JumpCondW, src_info);
             self.append_u16(offset as _, src_info);
+        } else if let Ok(offset) = i32::try_from(offset) {
+            self.emit_bytecode(EraBytecodePrimaryType::JumpCondW, src_info);
+            self.append_u32(offset as _, src_info);
         } else {
             panic!("jump too far to be encoded in bytecode");
         }
@@ -314,7 +320,9 @@ impl EraBytecodeChunk {
         self.emit_bytecode(EraBytecodePrimaryType::Pop, src_info)
     }
     fn emit_pop_n(&mut self, cnt: usize, src_info: SourcePosInfo) {
-        assert!(cnt > 0);
+        if cnt == 0 {
+            return;
+        }
         for _ in 0..cnt {
             self.emit_pop(src_info);
         }
@@ -462,6 +470,7 @@ pub struct EraCompilerImplFunctionSite<'p, 'a, ErrReportFn> {
     goto_backtracks: Vec<EraGotoJumpInfo>,
     final_return_backtracks: Vec<EraBytecodeChunkBacktrackHolder>,
     body_start_pos: usize,
+    fatal_stop: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -586,7 +595,8 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
 
         // Parse function signatures
         for (file_name, fun) in fun_decls.iter_mut() {
-            std::mem::swap(&mut self.file_name, file_name);
+            // std::mem::swap(&mut self.file_name, file_name);
+            self.file_name = file_name.clone();
 
             // Rewrite event function name
             if let Some(kind) = fun.event_kind {
@@ -609,22 +619,22 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     let old_func = &global_funcs.funcs[old_func];
                     // HACK: Ignore error and skip this function
                     // TODO: Refactor error reporting mechanism
-                    _ = (|| -> Option<()> {
-                        bail_opt!(
-                            self,
-                            [
-                                (
-                                    fun.src_info,
-                                    format!("redefinition of function `{func_name}`")
-                                ),
-                                (
-                                    &old_func.file_name,
-                                    old_func.src_info,
-                                    "note: see previous definition of function"
-                                )
-                            ]
-                        );
-                    })();
+                    err_opt!(
+                        self,
+                        [
+                            (
+                                fun.src_info,
+                                format!("redefinition of function `{func_name}`")
+                            ),
+                            (
+                                &old_func.file_name,
+                                old_func.src_info,
+                                "note: see previous definition of function"
+                            )
+                        ]
+                    );
+                    // Mark function as invalid by resetting function name
+                    fun.name.clear();
                     continue;
                 }
                 std::collections::hash_map::Entry::Vacant(e) => {
@@ -657,11 +667,14 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         src_info = x.src_info;
                         let has_init;
                         let init_val = if x.is_ref {
-                            if !x.dims.is_empty() && x.dims[0] != 0 {
+                            if x.dims.is_empty() {
+                                x.dims.push(0);
+                            }
+                            if x.dims.iter().any(|x| *x != 0) {
                                 self.report_err(
                                     src_info,
                                     true,
-                                    "ref-qualified function parameter must not have dimensions",
+                                    "ref-qualified function parameter must not have non-zero dimensions",
                                 );
                                 return None;
                             }
@@ -675,9 +688,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             }
                             has_init = false;
                             if x.is_string {
-                                Value::new_str_arr(vec![0], Vec::new())
+                                Value::new_str_arr(x.dims, Vec::new())
                             } else {
-                                Value::new_int_arr(vec![0], Vec::new())
+                                Value::new_int_arr(x.dims, Vec::new())
                             }
                         } else {
                             has_init = !x.inits.is_empty();
@@ -942,7 +955,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 src_info: fun.src_info,
             });
 
-            std::mem::swap(&mut self.file_name, file_name);
+            // std::mem::swap(&mut self.file_name, file_name);
         }
 
         let mut funcs = Vec::new();
@@ -952,6 +965,11 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         // Compile function bodies
         for (file_name, func_decl) in fun_decls {
             self.file_name = file_name;
+
+            // If function is marked as invalid (duplicate), skip compilation
+            if func_decl.name.is_empty() {
+                continue;
+            }
 
             let chunk_idx = *chunks_idxs
                 .entry(self.file_name.clone())
@@ -973,6 +991,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 func_decl,
                 chunk,
             )?;
+
+            assert_eq!(global_funcs.funcs[func_idx].name, func_info.name);
+
             // TODO: Check overflow
             func_info.chunk_idx = chunk_idx as _;
             funcs.push(func_info);
@@ -1154,6 +1175,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             goto_backtracks: Vec::new(),
             final_return_backtracks: Vec::new(),
             body_start_pos: 0,
+            fatal_stop: false,
         }
     }
     fn function(&mut self, func_decl: EraFunDecl) -> Option<EraFuncBytecodeInfo> {
@@ -1243,7 +1265,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
 
         // Return
         for bt in std::mem::take(&mut self.final_return_backtracks) {
-            bt.complete(self.chunk)?;
+            bt.complete(self.chunk).unwrap();
         }
         match func_decl.kind {
             EraFunKind::Function => {
@@ -1266,7 +1288,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         let goto_labels = std::mem::take(&mut self.goto_labels);
         let goto_backtracks = std::mem::take(&mut self.goto_backtracks);
         for backtrack in goto_backtracks {
-            let src_si = backtrack.backtrack.source_pos_info(self.chunk)?;
+            let src_si = backtrack.backtrack.source_pos_info(self.chunk).unwrap();
             let dst_si;
             let Some(target) = goto_labels.get(&backtrack.target) else {
                 bail_opt!(
@@ -1287,7 +1309,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 );
             };
             dst_si = target.src_info;
-            if backtrack.stack_balance != target.stack_balance {
+            if backtrack.stack_balance < target.stack_balance {
                 bail_opt!(
                     self,
                     [
@@ -1298,8 +1320,21 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         (dst_si, "note: see the destination of this jump")
                     ]
                 );
+            } else if backtrack.stack_balance > target.stack_balance {
+                // HACK: Jump to a dedicated subchunk to balance stack
+                backtrack.backtrack.complete(self.chunk).unwrap();
+                self.chunk
+                    .emit_pop_n(backtrack.stack_balance - target.stack_balance, src_si);
+                self.chunk
+                    .emit_jump_hold(src_si)
+                    .complete_at(self.chunk, target.pos)
+                    .unwrap();
+            } else {
+                backtrack
+                    .backtrack
+                    .complete_at(self.chunk, target.pos)
+                    .unwrap();
             }
-            backtrack.backtrack.complete_at(self.chunk, target.pos)?;
         }
 
         Some(bytecode_info)
@@ -1803,9 +1838,9 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let bt_then = self.chunk.emit_jump_cond_hold(op1.src_info);
                 let rhs_k = self.expression(*rhs)?;
                 let bt_done = self.chunk.emit_jump_hold(op2.src_info);
-                bt_then.complete(self.chunk)?;
+                bt_then.complete(self.chunk).unwrap();
                 let mhs_k = self.expression(*mhs)?;
-                bt_done.complete(self.chunk)?;
+                bt_done.complete(self.chunk).unwrap();
                 match (mhs_k, rhs_k) {
                     (TInteger, TInteger) => TInteger,
                     (TString, TString) => TString,
@@ -1844,6 +1879,9 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
     ) -> Option<EraExpressionValueKind> {
         use EraBytecodePrimaryType::*;
 
+        // TODO: Use a better way to convey SourcePosInfo
+        let mut emitted_bc = false;
+
         let Some(&target_idx) = self.funcs.func_names.get(CaselessStr::new(&target)) else {
             // Check for built-in functions as fallback
             return Some(self.builtin_fun_call(target, args, target_src_info, false)?);
@@ -1867,10 +1905,13 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             let Some(arg) = arg else {
                 // Omitted argument
                 // HACK: Steal source info from last line
-                let src_info = self
-                    .chunk
-                    .source_info_at(self.chunk.cur_bytes_cnt() - 1)
-                    .unwrap();
+                let src_info = if emitted_bc {
+                    self.chunk
+                        .source_info_at(self.chunk.cur_bytes_cnt() - 1)
+                        .unwrap()
+                } else {
+                    target_src_info
+                };
                 if param.default_val.kind().is_arr() {
                     bail_opt!(
                         self,
@@ -1886,6 +1927,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 }
                 self.chunk
                     .emit_load_const(param.default_val.clone(), src_info);
+                emitted_bc = true;
                 continue;
             };
             let arg_si = arg.source_pos_info();
@@ -1906,6 +1948,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         );
                     };
                     let arg_kind = self.var_arr_no_pseudo(&var_expr.name, var_expr.src_info)?.0;
+                    emitted_bc = true;
                     match (arg_kind, param_kind) {
                         (EraExpressionValueKind::TInteger, ValueKind::ArrInt)
                         | (EraExpressionValueKind::TString, ValueKind::ArrStr) => (),
@@ -1924,6 +1967,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 }
                 ValueKind::Int | ValueKind::Str => {
                     let arg_kind = self.expression(arg)?;
+                    emitted_bc = true;
                     match (arg_kind, param_kind) {
                         (EraExpressionValueKind::TInteger, ValueKind::Int)
                         | (EraExpressionValueKind::TString, ValueKind::Str) => (),
@@ -1958,15 +2002,18 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         }
         for param in target.params.iter().skip(args_len) {
             // HACK: Steal source info from last line
-            let src_info = self
-                .chunk
-                .source_info_at(self.chunk.cur_bytes_cnt() - 1)
-                .unwrap();
+            let src_info = if emitted_bc {
+                self.chunk
+                    .source_info_at(self.chunk.cur_bytes_cnt() - 1)
+                    .unwrap()
+            } else {
+                target_src_info
+            };
             if param.default_val.kind().is_arr() {
                 bail_opt!(
                     self,
                     [
-                        (src_info, "reference parameter cannot be omitted"),
+                        (src_info, "REF parameter cannot be omitted"),
                         (
                             &target.file_name,
                             target.src_info,
@@ -1977,6 +2024,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             }
             self.chunk
                 .emit_load_const(param.default_val.clone(), src_info);
+            emitted_bc = true;
         }
         self.chunk
             .emit_load_const(self.p.new_value_int(target_idx as _), target_src_info);
@@ -2310,6 +2358,18 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 ctx.this.expr_int(delay)?;
                 ctx.this.chunk.emit_bytecode(SpriteAnimeAddFrame, src_info);
             }
+            b"SPRITEWIDTH" => {
+                ctx.result()?;
+                let [name] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_str(name)?;
+                ctx.this.chunk.emit_bytecode(SpriteWidth, src_info);
+            }
+            b"SPRITEHEIGHT" => {
+                ctx.result()?;
+                let [name] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_str(name)?;
+                ctx.this.chunk.emit_bytecode(SpriteHeight, src_info);
+            }
             b"GETBIT" => {
                 ctx.result()?;
                 let [val, bit] = ctx.unpack_some_args(args)?;
@@ -2512,7 +2572,6 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             }
             b"SAVETEXT" => {
                 ctx.result()?;
-                // TODO: SAVETEXT
                 let [text, file_no, force_save_dir, force_utf8];
                 match args.len() {
                     2 => {
@@ -2539,6 +2598,33 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 ctx.this.expr_int(force_utf8)?;
                 ctx.this.chunk.emit_bytecode(SaveText, src_info);
             }
+            b"LOADTEXT" => {
+                ctx.results()?;
+                let [file_no, force_save_dir, force_utf8];
+                match args.len() {
+                    1 => {
+                        [file_no] = ctx.unpack_some_args(args)?;
+                        force_save_dir = EraExpr::new_int(0, src_info);
+                        force_utf8 = EraExpr::new_int(0, src_info);
+                    }
+                    3 => {
+                        [file_no, force_save_dir, force_utf8] = ctx.unpack_some_args(args)?;
+                    }
+                    _ => bail_opt!(
+                        ctx.this,
+                        ctx.src_info,
+                        format!(
+                            "no overload of `{}` accepts {} arguments",
+                            ctx.target,
+                            args.len()
+                        )
+                    ),
+                }
+                ctx.this.expr_int(file_no)?;
+                ctx.this.expr_int(force_save_dir)?;
+                ctx.this.expr_int(force_utf8)?;
+                ctx.this.chunk.emit_bytecode(LoadText, src_info);
+            }
             b"FINDELEMENT" | b"FINDLASTELEMENT" => {
                 ctx.result()?;
                 let bytecode = if target.eq_ignore_ascii_case("FINDLASTELEMENT") {
@@ -2553,6 +2639,15 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         [avar, value] = ctx.unpack_some_args(args)?;
                         var = ctx.this.unpack_var_expr_from_expr(avar)?;
                         start_idx = EraExpr::new_int(0, src_info);
+                        end_idx = EraExpr::new_int(-1, src_info);
+                        complete_match = EraExpr::new_int(0, src_info);
+                    }
+                    3 => {
+                        let [avar, avalue, astart_idx] = ctx.unpack_args(args)?;
+                        let avar = ctx.unpack_some_arg(avar, 0)?;
+                        var = ctx.this.unpack_var_expr_from_expr(avar)?;
+                        value = ctx.unpack_some_arg(avalue, 1)?;
+                        start_idx = astart_idx.unwrap_or_else(|| EraExpr::new_int(0, src_info));
                         end_idx = EraExpr::new_int(-1, src_info);
                         complete_match = EraExpr::new_int(0, src_info);
                     }
@@ -3147,6 +3242,53 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let [] = ctx.unpack_some_args(args)?;
                 ctx.this.chunk.emit_bytecode(PrintLineIsEmpty, src_info);
             }
+            b"ENCODETOUNI" => {
+                ctx.result()?;
+                let [haystack, pos];
+                match args.len() {
+                    1 => {
+                        [haystack] = ctx.unpack_some_args(args)?;
+                        pos = EraExpr::new_int(0, src_info);
+                    }
+                    2 => {
+                        [haystack, pos] = ctx.unpack_some_args(args)?;
+                    }
+                    _ => bail_opt!(
+                        ctx.this,
+                        ctx.src_info,
+                        format!(
+                            "no overload of `{}` accepts {} arguments",
+                            ctx.target,
+                            args.len()
+                        )
+                    ),
+                }
+                ctx.this.expr_str(haystack)?;
+                ctx.this.expr_int(pos)?;
+                ctx.this.chunk.emit_bytecode(EncodeToUnicode, src_info);
+            }
+            b"GETCONFIG" => {
+                ctx.result()?;
+                let [name] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_str(name)?;
+                ctx.this.chunk.emit_bytecode(GetConfig, src_info);
+            }
+            b"GETCONFIGS" => {
+                ctx.results()?;
+                let [name] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_str(name)?;
+                ctx.this.chunk.emit_bytecode(GetConfigS, src_info);
+            }
+            b"ISSKIP" => {
+                ctx.result()?;
+                let [] = ctx.unpack_some_args(args)?;
+                ctx.this.arr_get_int("@SKIPDISP", vec![], src_info)?;
+            }
+            b"MOUSESKIP" | b"MESSKIP" => {
+                ctx.result()?;
+                let [] = ctx.unpack_some_args(args)?;
+                ctx.this.arr_get_int("@MESSKIP", vec![], src_info)?;
+            }
             _ => bail_opt!(
                 ctx.this,
                 src_info,
@@ -3157,7 +3299,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         Some(ctx.ret_kind)
     }
     #[must_use]
-    fn statement(&mut self, func_kind: EraFunKind, stmt: EraStmt) -> Option<()> {
+    fn statement_raw(&mut self, func_kind: EraFunKind, stmt: EraStmt) -> Option<()> {
         use EraBytecodePrimaryType::*;
         use EraCommandStmt as Cmd;
         use EraExpressionValueKind::*;
@@ -3286,29 +3428,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.chunk.emit_bytecode(Wait, x.src_info);
             }
             Cmd::If(x) => {
-                // TODO: Optimize when there is no else body
-                self.expression(x.cond)?;
-                let backtrack_then = self.chunk.emit_jump_cond_hold(x.src_info);
-                for stmt in x.else_body {
-                    self.statement(func_kind, stmt)?;
-                }
-                // HACK: Steal source pos info from last statement
-                let last_src_info = self
-                    .chunk
-                    .source_info_at(self.chunk.cur_bytes_cnt() - 1)
-                    .unwrap();
-                let backtrack_done = self.chunk.emit_jump_hold(last_src_info);
-                if backtrack_then.complete(self.chunk).is_none() {
-                    self.report_err(x.src_info, true, "jump too far to be encoded in bytecode");
-                    return None;
-                }
-                for stmt in x.body {
-                    self.statement(func_kind, stmt)?;
-                }
-                if backtrack_done.complete(self.chunk).is_none() {
-                    self.report_err(x.src_info, true, "jump too far to be encoded in bytecode");
-                    return None;
-                }
+                self.cmd_if_stmt(func_kind, x)?;
             }
             Cmd::Quit(x) => {
                 self.chunk.emit_bytecode(Quit, x.src_info);
@@ -3328,7 +3448,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let mut bt_else: Option<EraBytecodeChunkBacktrackHolder> = None;
                 for (case_conds, case_body) in x.cases {
                     if let Some(bt) = bt_else.take() {
-                        bt.complete(self.chunk)?;
+                        bt.complete(self.chunk).unwrap();
                     }
                     let mut bt_bodies = Vec::new();
                     for case_cond in case_conds {
@@ -3399,7 +3519,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     }
                     bt_else = Some(self.chunk.emit_jump_hold(x.src_info));
                     for bt in bt_bodies {
-                        bt.complete(self.chunk)?;
+                        bt.complete(self.chunk).unwrap();
                     }
                     // HACK: Pop stack early to prevent unbalanced stack
                     self.chunk.emit_bytecode(Pop, x.src_info);
@@ -3409,13 +3529,15 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     bt_dones.push(self.chunk.emit_jump_hold(x.src_info));
                 }
                 if let Some(bt) = bt_else {
-                    bt.complete(self.chunk)?;
+                    bt.complete(self.chunk).unwrap();
                 }
                 for stmt in x.case_else {
                     self.statement(func_kind, stmt)?;
                 }
                 for bt in bt_dones {
-                    bt.complete(self.chunk)?;
+                    if bt.complete(self.chunk).is_none() {
+                        bail_opt!(self, x.src_info, "jump too far to be encoded in bytecode");
+                    }
                 }
                 // self.chunk.emit_bytecode(Pop, x.src_info);
 
@@ -3444,10 +3566,10 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 }
                 let loop_struct = self.loop_structs.pop().unwrap();
                 for bt in loop_struct.continue_queue {
-                    bt.complete_at(self.chunk, start_pos)?;
+                    bt.complete_at(self.chunk, start_pos).unwrap();
                 }
                 for bt in loop_struct.done_queue {
-                    bt.complete(self.chunk)?;
+                    bt.complete(self.chunk).unwrap();
                 }
             }
             Cmd::Call(x) => match x.func {
@@ -3634,7 +3756,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     Some(())
                 };
                 step_fn(self)?;
-                bt_body.complete(self.chunk)?;
+                bt_body.complete(self.chunk).unwrap();
                 self.chunk.emit_bytecode(Duplicate, x.src_info);
                 self.arr_get_int("COUNT", vec![], x.src_info)?;
                 self.chunk.emit_bytecode(CompareLEq, x.src_info);
@@ -3648,14 +3770,14 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 }
                 let loop_struct = self.loop_structs.pop().unwrap();
                 for bt in loop_struct.continue_queue {
-                    bt.complete_at(self.chunk, start_pos)?;
+                    bt.complete_at(self.chunk, start_pos).unwrap();
                 }
                 for bt in loop_struct.done_queue {
-                    bt.complete(self.chunk)?;
+                    bt.complete(self.chunk).unwrap();
                 }
                 // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
                 step_fn(self)?;
-                bt_done.complete(self.chunk)?;
+                bt_done.complete(self.chunk).unwrap();
                 self.chunk.emit_bytecode(Pop, x.src_info);
 
                 self.stack_balance -= 1;
@@ -3750,7 +3872,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.loop_structs
                     .push(EraLoopStructCodeMetadata::new(self.stack_balance));
                 emit_step_fn(self, x.src_info);
-                bt_body.complete(self.chunk)?;
+                bt_body.complete(self.chunk).unwrap();
                 emit_cond_fn(self, x.src_info);
                 let bt_done = self.chunk.emit_jump_cond_hold(x.src_info);
                 for stmt in x.body {
@@ -3762,14 +3884,14 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 }
                 let loop_struct = self.loop_structs.pop().unwrap();
                 for bt in loop_struct.continue_queue {
-                    bt.complete_at(self.chunk, start_pos)?;
+                    bt.complete_at(self.chunk, start_pos).unwrap();
                 }
                 for bt in loop_struct.done_queue {
-                    bt.complete(self.chunk)?;
+                    bt.complete(self.chunk).unwrap();
                 }
                 // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
                 emit_step_fn(self, x.src_info);
-                bt_done.complete(self.chunk)?;
+                bt_done.complete(self.chunk).unwrap();
                 self.chunk.emit_bytecode(Pop, x.src_info);
                 self.chunk.emit_bytecode(Pop, x.src_info);
                 self.chunk.emit_bytecode(Pop, x.src_info);
@@ -3789,13 +3911,14 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.expression(x.cond)?;
                 self.chunk
                     .emit_jump_cond_hold(si)
-                    .complete_at(self.chunk, start_pos);
+                    .complete_at(self.chunk, start_pos)
+                    .unwrap();
                 let loop_struct = self.loop_structs.pop().unwrap();
                 for bt in loop_struct.continue_queue {
-                    bt.complete_at(self.chunk, continue_pos)?;
+                    bt.complete_at(self.chunk, continue_pos).unwrap();
                 }
                 for bt in loop_struct.done_queue {
-                    bt.complete(self.chunk)?;
+                    bt.complete(self.chunk).unwrap();
                 }
             }
             Cmd::Split(x) => {
@@ -4212,11 +4335,21 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.chunk.emit_pop(x.src_info);
             }
             // TODO...
+            Cmd::SkipDisp(x) => {
+                self.arr_set("@SKIPDISP", vec![], x.src_info, |this| {
+                    this.expr_int(x.is_skip)?;
+                    Some(TInteger)
+                })?;
+                self.chunk.emit_pop(x.src_info);
+            }
             Cmd::Begin(x) => {
                 self.chunk.emit_bytecode(BeginSystemProcedure, x.src_info);
                 self.chunk.append_u8(x.proc as _, x.src_info);
             }
-            // TODO...
+            Cmd::DoTrain(x) => {
+                self.expr_int(x.number)?;
+                self.chunk.emit_bytecode(DoTrain, x.src_info);
+            }
             Cmd::Redraw(x) => {
                 self.arr_set("@REDRAW", vec![], x.src_info, |this| {
                     this.expr_int(x.arg)?;
@@ -4326,6 +4459,24 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.expr_int(x.chara)?;
                 self.chunk.emit_bytecode(ResetCharaStain, x.src_info);
             }
+            Cmd::SaveChara(x) => {
+                let charas_cnt = x.charas.len();
+                self.expr_str(x.filename)?;
+                self.expr_str(x.memo)?;
+                for chara in x.charas {
+                    self.expr_int(chara)?;
+                }
+                self.chunk.emit_bytecode(SaveChara, x.src_info);
+                self.chunk.append_u8(charas_cnt as _, x.src_info);
+            }
+            Cmd::LoadChara(x) => {
+                self.arr_set("RESULT", vec![], x.src_info, |this| {
+                    this.expr_str(x.filename)?;
+                    this.chunk.emit_bytecode(LoadChara, x.src_info);
+                    Some(TInteger)
+                })?;
+                self.chunk.emit_bytecode(Pop, x.src_info);
+            }
             // TODO...
             Cmd::SaveData(x) => {
                 self.expr_int(x.save_id)?;
@@ -4336,7 +4487,8 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 // HACK: RESTART is unconditional GOTO start of function body
                 self.chunk
                     .emit_jump_hold(x.src_info)
-                    .complete_at(self.chunk, self.body_start_pos);
+                    .complete_at(self.chunk, self.body_start_pos)
+                    .unwrap();
             }
             Cmd::GetTime(x) => {
                 let src_info = x.src_info;
@@ -4391,6 +4543,16 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         }
 
         Some(())
+    }
+    #[must_use]
+    fn statement(&mut self, func_kind: EraFunKind, stmt: EraStmt) -> Option<()> {
+        // HACK: Recover even when there are compilation errors
+        _ = self.statement_raw(func_kind, stmt);
+        if self.fatal_stop {
+            None
+        } else {
+            Some(())
+        }
     }
     // Precondition: string on stack
     // Postcondition: empty stack
@@ -4456,6 +4618,47 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         }
         Some(())
     }
+    // NOTE: This function is strengthened to prevent stack overflow when encountered
+    //       too deep nesting of IF-ELSEIF's.
+    fn cmd_if_stmt(&mut self, func_kind: EraFunKind, stmt: crate::parser::EraIfStmt) -> Option<()> {
+        let x = stmt;
+        // TODO: Optimize when there is no else body
+        self.expression(x.cond)?;
+        let backtrack_then = self.chunk.emit_jump_cond_hold(x.src_info);
+        match TryInto::<[_; 1]>::try_into(x.else_body) {
+            Ok([stmt]) => {
+                if let EraStmt::Command(EraCommandStmt::If(x)) = stmt {
+                    // STRENGTHENED: Prevent stack overflow in debug builds.
+                    self.cmd_if_stmt(func_kind, x)?;
+                } else {
+                    self.statement(func_kind, stmt)?;
+                }
+            }
+            Err(else_body) => {
+                for stmt in else_body {
+                    self.statement(func_kind, stmt)?;
+                }
+            }
+        }
+        // HACK: Steal source pos info from last statement
+        let last_src_info = self
+            .chunk
+            .source_info_at(self.chunk.cur_bytes_cnt() - 1)
+            .unwrap();
+        let backtrack_done = self.chunk.emit_jump_hold(last_src_info);
+        if backtrack_then.complete(self.chunk).is_none() {
+            self.report_err(x.src_info, true, "jump too far to be encoded in bytecode");
+            return None;
+        }
+        for stmt in x.body {
+            self.statement(func_kind, stmt)?;
+        }
+        if backtrack_done.complete(self.chunk).is_none() {
+            self.report_err(x.src_info, true, "jump too far to be encoded in bytecode");
+            return None;
+        }
+        Some(())
+    }
     #[must_use]
     fn var_arr(&mut self, var_name: &str, src_info: SourcePosInfo) -> Option<EraVarArrCompileInfo> {
         use EraBytecodePrimaryType::*;
@@ -4501,11 +4704,25 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             } else if var_name.eq_ignore_ascii_case("CHARANUM") {
                 return Some(Pseudo(EraPseudoVarKind::CharaNum));
             } else {
+                let vars: Vec<_> = self
+                    .func_info
+                    .local_vars
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .collect();
+                let mut vars = vars.join(", ");
+                if vars.is_empty() {
+                    vars.push_str("<none>");
+                }
                 bail_opt!(
                     self,
-                    src_info,
-                    true,
-                    format!("undefined variable `{}`", var_name)
+                    [
+                        (src_info, format!("undefined variable `{}`", var_name)),
+                        (
+                            self.func_info.src_info,
+                            format!("note: local variables are: {vars}")
+                        )
+                    ]
                 );
             }
         }
@@ -4564,11 +4781,25 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             } else if var_name.eq_ignore_ascii_case("CHARANUM") {
                 return Some(Pseudo(EraPseudoVarKind::CharaNum));
             } else {
+                let vars: Vec<_> = self
+                    .func_info
+                    .local_vars
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .collect();
+                let mut vars = vars.join(", ");
+                if vars.is_empty() {
+                    vars.push_str("<none>");
+                }
                 bail_opt!(
                     self,
-                    src_info,
-                    true,
-                    format!("undefined variable `{}`", var_name)
+                    [
+                        (src_info, format!("undefined variable `{}`", var_name)),
+                        (
+                            self.func_info.src_info,
+                            format!("note: local variables are: {vars}")
+                        )
+                    ]
                 );
             }
         }

@@ -14,8 +14,10 @@ pub enum EraBytecodePrimaryType {
     ReturnString,
     Jump,
     JumpW,
+    JumpWW,
     JumpCond,
     JumpCondW,
+    JumpCondWW,
     //FunJump,
     /*  FunCall:
         Stack should contain <args...> <function>.
@@ -135,6 +137,7 @@ pub enum EraBytecodePrimaryType {
     StringToFull,
     BuildBarString,
     EscapeRegexStr,
+    EncodeToUnicode,
     // -----
     Print,
     PrintLine,
@@ -159,8 +162,11 @@ pub enum EraBytecodePrimaryType {
     SpriteCreated,
     SpriteAnimeCreate,
     SpriteAnimeAddFrame,
+    SpriteWidth,
+    SpriteHeight,
     CheckFont,
     SaveText,
+    LoadText,
     FindElement,
     FindLastElement,
     FindChara,
@@ -193,9 +199,14 @@ pub enum EraBytecodePrimaryType {
     LoadGame,
     SaveGame,
     BeginSystemProcedure,
+    DoTrain,
     PrintLineIsEmpty,
     ResetData,
     ResetCharaStain,
+    SaveChara,
+    LoadChara,
+    GetConfig,
+    GetConfigS,
     // -----
     ExtendedBytecode1 = 192, // Values >= ExtendedBytecode should do extended lookup
 }
