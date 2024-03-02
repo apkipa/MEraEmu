@@ -591,6 +591,7 @@ pub struct EraIfStmt {
 
 #[derive(Debug, Clone)]
 pub struct EraWaitStmt {
+    pub any_key: bool,
     pub is_force: bool,
     pub src_info: SourcePosInfo,
 }
@@ -1979,8 +1980,9 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"SELECTCASE" => Cmd::SelectCase(self.r().stmt_selectcase()?),
                         b"SIF" => Cmd::If(self.r().stmt_sif()?),
                         b"QUIT" => Cmd::Quit(self.r().stmt_quit()?),
-                        b"WAIT" => Cmd::Wait(self.r().stmt_wait(false)?),
-                        b"FORCEWAIT" => Cmd::Wait(self.r().stmt_wait(true)?),
+                        b"WAIT" => Cmd::Wait(self.r().stmt_wait(false, false)?),
+                        b"FORCEWAIT" => Cmd::Wait(self.r().stmt_wait(false, true)?),
+                        b"WAITANYKEY" => Cmd::Wait(self.r().stmt_wait(true, false)?),
                         b"WHILE" => Cmd::While(self.r().stmt_while()?),
                         b"RETURN" | b"RETURNF" => Cmd::Return(self.r().stmt_return()?),
                         b"CALL" | b"CALLF" => Cmd::Call(self.r().stmt_call()?),
@@ -2180,6 +2182,8 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"MAXCARRAY"
                         | b"MINARRAY"
                         | b"MINCARRAY"
+                        | b"INRANGEARRAY"
+                        | b"INRANGECARRAY"
                         | b"TOUPPER"
                         | b"TOLOWER"
                         | b"TOHALF"
@@ -2195,7 +2199,17 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"GETCONFIGS"
                         | b"ISSKIP"
                         | b"MOUSESKIP"
-                        | b"MESSKIP" => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
+                        | b"MESSKIP"
+                        | b"CONVERT"
+                        | b"PRINTCPERLINE"
+                        | b"PRINTCLENGTH"
+                        | b"COLOR_FROMNAME"
+                        | b"COLOR_FROMRGB"
+                        | b"HTML_TOPLAINTEXT"
+                        | b"GETKEY"
+                        | b"GETKEYTRIGGERED"
+                        | b"FIND_CHARADATA"
+                        => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
                         _ => return Some(self.stmt_expression()?),
                     }
                 }
@@ -3035,9 +3049,10 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             src_info: self.src_info,
         })
     }
-    fn stmt_wait(&mut self, is_force: bool) -> Option<EraWaitStmt> {
-        self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+    fn stmt_wait(&mut self, any_key: bool, is_force: bool) -> Option<EraWaitStmt> {
+        self.consume_newline()?;
         Some(EraWaitStmt {
+            any_key,
             is_force,
             src_info: self.src_info,
         })
@@ -3610,6 +3625,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             let a1_si = a1.source_pos_info();
             let a2_si = a2.source_pos_info();
             let a3_si = a3.source_pos_info();
+            // TODO: Check argument range [0, 255]
             let add_fn = |a: EraExpr, si, b: EraExpr| {
                 EraExpr::Binary(
                     a.into(),

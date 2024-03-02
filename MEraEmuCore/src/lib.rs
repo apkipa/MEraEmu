@@ -70,16 +70,21 @@ mod tests {
                 self.last_msg_ignored = true;
                 return;
             }
-            if self.last_msg_ignored && info.msg.starts_with("note: ") {
+            let is_note = info.msg.starts_with("note: ");
+            if self.last_msg_ignored && is_note {
                 self.last_msg_ignored = false;
                 return;
             }
             self.last_msg_ignored = false;
             let (noun, color) = if info.is_error {
-                self.err_cnt += 1;
+                if !is_note {
+                    self.err_cnt += 1;
+                }
                 ("error", Color::Red)
             } else {
-                self.warn_cnt += 1;
+                if !is_note {
+                    self.warn_cnt += 1;
+                }
                 ("warning", Color::BrightYellow)
             };
             *self.errors.borrow_mut() += &format!(
@@ -109,7 +114,7 @@ mod tests {
         fn on_html_print(&mut self, content: &str) {
             self.output += content;
         }
-        fn on_wait(&mut self, is_force: bool) {}
+        fn on_wait(&mut self, any_key: bool, is_force: bool) {}
         fn on_twait(&mut self, duration: i64, is_force: bool) {}
         fn on_input_int(
             &mut self,
@@ -272,6 +277,16 @@ mod tests {
         fn on_spriteheight(&mut self, name: &str) -> i64 {
             0
         }
+        // Filesystem subsystem
+        fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>> {
+            anyhow::bail!("no file");
+        }
+        fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()> {
+            anyhow::bail!("no file");
+        }
+        fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
+            anyhow::bail!("no file");
+        }
         // Others
         fn on_check_font(&mut self, font_name: &str) -> i64 {
             0
@@ -284,6 +299,9 @@ mod tests {
         }
         fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String> {
             anyhow::bail!("no config");
+        }
+        fn on_get_key_state(&mut self, key_code: i64) -> i64 {
+            0
         }
     }
 
@@ -442,8 +460,14 @@ mod tests {
         engine.reg_int("@TOOLTIP_DURATION")?;
         engine.reg_int("@SKIPDISP")?;
         engine.reg_int("@MESSKIP")?;
+        engine.reg_int("@ANIMETIMER")?;
+        engine.reg_int("@PRINTCPERLINE")?;
+        engine.reg_int("@PRINTCLENGTH")?;
+        // engine.reg_str("DRAWLINESTR_UNIT")?;
+        engine.reg_str("DRAWLINESTR")?;
         engine.reg_int("SCREENWIDTH")?;
         engine.reg_int("LINECOUNT")?;
+        engine.reg_str("SAVEDATA_TEXT")?;
         let mut total_cnt = 0usize;
         let mut pass_cnt = 0usize;
         // Load CSV files

@@ -472,7 +472,7 @@ pub trait EraVirtualMachineCallback {
     // TODO: Debug is a global flag inside VM?
     fn on_debugprint(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
     fn on_html_print(&mut self, content: &str);
-    fn on_wait(&mut self, is_force: bool);
+    fn on_wait(&mut self, any_key: bool, is_force: bool);
     fn on_twait(&mut self, duration: i64, is_force: bool);
     fn on_input_int(
         &mut self,
@@ -572,12 +572,19 @@ pub trait EraVirtualMachineCallback {
     ) -> i64;
     fn on_spritewidth(&mut self, name: &str) -> i64;
     fn on_spriteheight(&mut self, name: &str) -> i64;
+    // Filesystem subsystem
+    fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>>;
+    fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()>;
+    fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>>;
     // Others
     fn on_check_font(&mut self, font_name: &str) -> i64;
     // NOTE: Returns UTC timestamp (in milliseconds).
     fn on_get_host_time(&mut self) -> u64;
     fn on_get_config_int(&mut self, name: &str) -> anyhow::Result<i64>;
     fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String>;
+    // NOTE: Returns { b15 = <key down>, b0 = <key triggered> }. For key codes, refer
+    //       to https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes.
+    fn on_get_key_state(&mut self, key_code: i64) -> i64;
     // Private
     /// Translates strings to indices.
     fn on_csv_get_num(&mut self, name: &str) -> Option<u32>;
@@ -723,6 +730,16 @@ impl EraVirtualMachine {
         for _ in 0..max_inst_cnt {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
+            }
+
+            // Verify stack size
+            const MAX_FUN_FRAME_SIZE: usize = 1024;
+            if ctx.stack.len() - ctx.cur_frame.stack_start > MAX_FUN_FRAME_SIZE {
+                bail_opt!(
+                    ctx,
+                    true,
+                    format!("execution of one function ran out of stack space. This possibly indicates broken codegen.")
+                );
             }
 
             let mut ip_offset_delta: isize = 1;

@@ -130,6 +130,8 @@ pub enum EraBytecodePrimaryType {
     MaxCArray,
     MinArray,
     MinCArray,
+    InRangeArray,
+    InRangeCArray,
     StringIsValidInteger,
     StringToUpper,
     StringToLower,
@@ -138,6 +140,10 @@ pub enum EraBytecodePrimaryType {
     BuildBarString,
     EscapeRegexStr,
     EncodeToUnicode,
+    UnicodeToStr,
+    IntToStrWithBase,
+    HtmlTagSplit,
+    HtmlToPlainText,
     // -----
     Print,
     PrintLine,
@@ -207,6 +213,8 @@ pub enum EraBytecodePrimaryType {
     LoadChara,
     GetConfig,
     GetConfigS,
+    KbGetKeyState,  // Returns i64 with b15 = <key down>, b0 = <key triggered>
+    FindCharaDataFile,
     // -----
     ExtendedBytecode1 = 192, // Values >= ExtendedBytecode should do extended lookup
 }

@@ -97,7 +97,7 @@ pub trait MEraEngineSysCallback {
     //fn on_debugprint(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
     /// Callback for HTML_PRINT statements.
     fn on_html_print(&mut self, content: &str);
-    fn on_wait(&mut self, is_force: bool);
+    fn on_wait(&mut self, any_key: bool, is_force: bool);
     fn on_twait(&mut self, duration: i64, is_force: bool);
     fn on_input_int(
         &mut self,
@@ -198,11 +198,19 @@ pub trait MEraEngineSysCallback {
     ) -> i64;
     fn on_spritewidth(&mut self, name: &str) -> i64;
     fn on_spriteheight(&mut self, name: &str) -> i64;
+    // Filesystem subsystem
+    fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>>;
+    fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()>;
+    fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>>;
     // Others
     fn on_check_font(&mut self, font_name: &str) -> i64;
+    // NOTE: Returns UTC timestamp (in milliseconds).
     fn on_get_host_time(&mut self) -> u64;
     fn on_get_config_int(&mut self, name: &str) -> anyhow::Result<i64>;
     fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String>;
+    // NOTE: Returns { b15 = <key down>, b0 = <key triggered> }. For key codes, refer
+    //       to https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes.
+    fn on_get_key_state(&mut self, key_code: i64) -> i64;
 }
 
 pub struct ExecSourceInfo {
@@ -278,7 +286,7 @@ impl MEraEngineSysCallback for EmptyCallback {
     fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {}
     //fn on_debugprint(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {}
     fn on_html_print(&mut self, content: &str) {}
-    fn on_wait(&mut self, is_force: bool) {}
+    fn on_wait(&mut self, any_key: bool, is_force: bool) {}
     fn on_twait(&mut self, duration: i64, is_force: bool) {}
     fn on_input_int(
         &mut self,
@@ -429,6 +437,16 @@ impl MEraEngineSysCallback for EmptyCallback {
     fn on_spriteheight(&mut self, name: &str) -> i64 {
         0
     }
+    // Filesystem subsystem
+    fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("no such file");
+    }
+    fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()> {
+        anyhow::bail!("no such file");
+    }
+    fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
     // Others
     fn on_check_font(&mut self, font_name: &str) -> i64 {
         0
@@ -441,6 +459,9 @@ impl MEraEngineSysCallback for EmptyCallback {
     }
     fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String> {
         anyhow::bail!("no such config entry");
+    }
+    fn on_get_key_state(&mut self, key_code: i64) -> i64 {
+        0
     }
 }
 
@@ -1252,8 +1273,8 @@ impl<'a> MEraEngine<'a> {
             fn on_html_print(&mut self, content: &str) {
                 self.callback.on_html_print(content)
             }
-            fn on_wait(&mut self, is_force: bool) {
-                self.callback.on_wait(is_force)
+            fn on_wait(&mut self, any_key: bool, is_force: bool) {
+                self.callback.on_wait(any_key, is_force)
             }
             fn on_twait(&mut self, duration: i64, is_force: bool) {
                 self.callback.on_twait(duration, is_force)
@@ -1455,6 +1476,16 @@ impl<'a> MEraEngine<'a> {
             fn on_spriteheight(&mut self, name: &str) -> i64 {
                 self.callback.on_spriteheight(name)
             }
+            // Filesystem subsystem
+            fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>> {
+                self.callback.on_read_file(path)
+            }
+            fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()> {
+                self.callback.on_write_file(path, data)
+            }
+            fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
+                self.callback.on_list_file(path)
+            }
             // Others
             fn on_check_font(&mut self, font_name: &str) -> i64 {
                 self.callback.on_check_font(font_name)
@@ -1467,6 +1498,9 @@ impl<'a> MEraEngine<'a> {
             }
             fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String> {
                 self.callback.on_get_config_str(name)
+            }
+            fn on_get_key_state(&mut self, key_code: i64) -> i64 {
+                self.callback.on_get_key_state(key_code)
             }
             // Private
             fn on_csv_get_num(&mut self, name: &str) -> Option<u32> {
