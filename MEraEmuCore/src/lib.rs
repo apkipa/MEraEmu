@@ -8,6 +8,7 @@ mod routine;
 mod util;
 mod vm;
 
+pub use bytecode::PrintExtendedFlags;
 pub use vm::EraColorMatrix;
 
 #[cxx::bridge]
@@ -350,9 +351,9 @@ mod tests {
                 ;#DIM cnt = 10000000
                 #DIM cnt = 100
                 #DIM DYNAMIC sum1
-                ;WHILE cnt > 0
-                ;    cnt = cnt - 1
-                ;WEND
+                WHILE cnt > 0
+                    cnt = cnt - 1
+                WEND
                 ;cnt = 100
                 FOR LOCAL, 100, 0, -1
                     sum1 += LOCAL

@@ -65,6 +65,7 @@ pub enum EraBytecodePrimaryType {
     // HACK: Special bytecode for handling increments & decrements
     IncMDArrayVal,
     DecMDArrayVal,
+    BuildArrayIndexFromMD,
     CopyArrayContent,
     Add,
     Subtract,
@@ -213,7 +214,7 @@ pub enum EraBytecodePrimaryType {
     LoadChara,
     GetConfig,
     GetConfigS,
-    KbGetKeyState,  // Returns i64 with b15 = <key down>, b0 = <key triggered>
+    KbGetKeyState, // Returns i64 with b15 = <key down>, b0 = <key triggered>
     FindCharaDataFile,
     // -----
     ExtendedBytecode1 = 192, // Values >= ExtendedBytecode should do extended lookup
@@ -309,13 +310,13 @@ pub struct StrValue {
 #[derive(Debug, Clone)]
 pub struct ArrIntValue {
     pub vals: Vec<IntValue>,
-    pub dims: Vec<u32>,
+    pub dims: smallvec::SmallVec<[u32; 3]>,
     // immutable: bool,
 }
 #[derive(Debug, Clone)]
 pub struct ArrStrValue {
     pub vals: Vec<Rc<StrValue>>,
-    pub dims: Vec<u32>,
+    pub dims: smallvec::SmallVec<[u32; 3]>,
     // immutable: bool,
 }
 // pub struct ArrValue {
@@ -324,21 +325,26 @@ pub struct ArrStrValue {
 // }
 
 impl ArrIntValue {
+    #[inline(always)]
     pub fn flat_get(&self, idx: usize) -> Option<&IntValue> {
         self.vals.get(idx)
     }
+    #[inline(always)]
     pub fn flat_get_mut(&mut self, idx: usize) -> Option<&mut IntValue> {
         self.vals.get_mut(idx)
     }
+    #[inline(always)]
     pub fn get(&self, idxs: &[u32]) -> Option<&IntValue> {
         let index = self.calc_idx(idxs)?;
         self.vals.get(index)
     }
+    #[inline(always)]
     pub fn get_mut(&mut self, idxs: &[u32]) -> Option<&mut IntValue> {
         let index = self.calc_idx(idxs)?;
         self.vals.get_mut(index)
     }
-    fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
+    #[inline(always)]
+    pub fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
         if idxs.len() > self.dims.len() {
             return None;
         }
@@ -360,21 +366,31 @@ impl ArrIntValue {
     }
 }
 impl ArrStrValue {
+    #[must_use]
+    #[inline(always)]
     pub fn flat_get(&self, idx: usize) -> Option<&Rc<StrValue>> {
         self.vals.get(idx)
     }
+    #[must_use]
+    #[inline(always)]
     pub fn flat_get_mut(&mut self, idx: usize) -> Option<&mut Rc<StrValue>> {
         self.vals.get_mut(idx)
     }
+    #[must_use]
+    #[inline(always)]
     pub fn get(&self, idxs: &[u32]) -> Option<&Rc<StrValue>> {
         let index = self.calc_idx(idxs)?;
         self.vals.get(index)
     }
+    #[must_use]
+    #[inline(always)]
     pub fn get_mut(&mut self, idxs: &[u32]) -> Option<&mut Rc<StrValue>> {
         let index = self.calc_idx(idxs)?;
         self.vals.get_mut(index)
     }
-    fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
+    #[must_use]
+    #[inline(always)]
+    pub fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
         if idxs.len() > self.dims.len() {
             return None;
         }
@@ -526,7 +542,7 @@ impl Value {
     pub fn new_str_rc(val: Rc<StrValue>) -> Self {
         Value(ValueInner::Str(val))
     }
-    pub fn new_int_arr(mut dims: Vec<u32>, mut vals: Vec<IntValue>) -> Self {
+    pub fn new_int_arr(mut dims: smallvec::SmallVec<[u32; 3]>, mut vals: Vec<IntValue>) -> Self {
         if dims.is_empty() {
             dims.push(1);
         }
@@ -538,7 +554,10 @@ impl Value {
             dims,
         }))))
     }
-    pub fn new_str_arr(mut dims: Vec<u32>, mut vals: Vec<Rc<StrValue>>) -> Self {
+    pub fn new_str_arr(
+        mut dims: smallvec::SmallVec<[u32; 3]>,
+        mut vals: Vec<Rc<StrValue>>,
+    ) -> Self {
         if dims.is_empty() {
             dims.push(1);
         }
@@ -551,10 +570,10 @@ impl Value {
         }))))
     }
     pub fn new_int_0darr(val: i64) -> Self {
-        Self::new_int_arr(vec![1], vec![IntValue { val }])
+        Self::new_int_arr(smallvec::smallvec![1], vec![IntValue { val }])
     }
     pub fn new_str_0darr(val: String) -> Self {
-        Self::new_str_arr(vec![1], vec![Rc::new(StrValue { val })])
+        Self::new_str_arr(smallvec::smallvec![1], vec![Rc::new(StrValue { val })])
     }
     pub fn into_unpacked(self) -> FlatValue {
         use ptr_union::Enum4::*;

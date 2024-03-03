@@ -9,11 +9,12 @@ use crate::{
 use std::{
     cell::RefCell,
     collections::HashMap,
+    mem::MaybeUninit,
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
 };
 
-struct EraErrReportContext<'a> {
+struct EraVirtualMachineContext<'a> {
     chunks: &'a [EraBytecodeChunk],
     callback: &'a mut dyn EraVirtualMachineCallback,
     stack: &'a mut Vec<EraTrappableValue>,
@@ -21,7 +22,7 @@ struct EraErrReportContext<'a> {
     cur_chunk: &'a EraBytecodeChunk,
     global_vars: &'a mut EraVarPool,
 }
-impl EraErrReportContext<'_> {
+impl EraVirtualMachineContext<'_> {
     fn report_err<V: Into<String>>(&mut self, is_error: bool, msg: V) {
         EraVirtualMachine::report_err(
             self.callback,
@@ -32,6 +33,7 @@ impl EraErrReportContext<'_> {
         );
     }
     #[must_use]
+    #[inline(always)]
     fn chunk_read_u8(&mut self, offset: usize) -> Option<u8> {
         match self.cur_chunk.read_u8(offset) {
             Some(x) => Some(x),
@@ -42,6 +44,7 @@ impl EraErrReportContext<'_> {
         }
     }
     #[must_use]
+    #[inline(always)]
     fn chunk_read_u16(&mut self, offset: usize) -> Option<u16> {
         match self.cur_chunk.read_u16(offset) {
             Some(x) => Some(x),
@@ -52,6 +55,7 @@ impl EraErrReportContext<'_> {
         }
     }
     #[must_use]
+    #[inline(always)]
     fn chunk_read_u32(&mut self, offset: usize) -> Option<u32> {
         match self.cur_chunk.read_u32(offset) {
             Some(x) => Some(x),
@@ -62,12 +66,21 @@ impl EraErrReportContext<'_> {
         }
     }
     #[must_use]
+    #[inline(always)]
     fn pop_stack<const N: usize>(&mut self) -> Option<[EraTrappableValue; N]> {
         match self.stack.len().checked_sub(N) {
             Some(new_len) => {
-                let mut it = self.stack.drain(new_len..);
-                let res: [_; N] = std::array::from_fn(|_| it.next().unwrap());
-                assert!(matches!(it.next(), None));
+                // let mut it = self.stack.drain(new_len..);
+                // let res: [_; N] = std::array::from_fn(|_| it.next().unwrap());
+                // assert!(matches!(it.next(), None));
+                // TODO: SAFETY
+                let res = unsafe {
+                    let mut res: MaybeUninit<[EraTrappableValue; N]> = MaybeUninit::uninit();
+                    (res.as_mut_ptr() as *mut EraTrappableValue)
+                        .copy_from(self.stack.as_ptr().add(new_len) as _, N);
+                    self.stack.set_len(new_len);
+                    res.assume_init()
+                };
                 Some(res)
             }
             None => {
@@ -76,7 +89,47 @@ impl EraErrReportContext<'_> {
             }
         }
     }
+    // #[must_use]
+    // #[inline(always)]
+    // fn pop_stack_dyn(
+    //     &mut self,
+    //     count: usize,
+    // ) -> Option<smallvec::SmallVec<[EraTrappableValue; 3]>> {
+    //     const INLINE_LEN: usize = 3;
+    //     match self.stack.len().checked_sub(count) {
+    //         Some(new_len) => {
+    //             let res = if count <= INLINE_LEN {
+    //                 // TODO: SAFETY
+    //                 unsafe {
+    //                     let mut res: MaybeUninit<[EraTrappableValue; INLINE_LEN]> =
+    //                         MaybeUninit::uninit();
+    //                     (res.as_mut_ptr() as *mut EraTrappableValue)
+    //                         .copy_from(self.stack.as_ptr().add(new_len) as _, count);
+    //                     self.stack.set_len(new_len);
+    //                     smallvec::SmallVec::from_buf_and_len_unchecked(res, count)
+    //                 }
+    //             } else {
+    //                 let mut res: smallvec::SmallVec<[EraTrappableValue; INLINE_LEN]> =
+    //                     smallvec::SmallVec::with_capacity(count);
+    //                 // TODO: SAFETY
+    //                 unsafe {
+    //                     res.as_mut_ptr()
+    //                         .copy_from(self.stack.as_ptr().add(new_len) as _, count);
+    //                     self.stack.set_len(new_len);
+    //                     res.set_len(count);
+    //                 }
+    //                 res
+    //             };
+    //             Some(res)
+    //         }
+    //         None => {
+    //             self.report_err(true, "too few elements in stack");
+    //             None
+    //         }
+    //     }
+    // }
     #[must_use]
+    #[inline(always)]
     fn pop_stack_dyn(
         &mut self,
         count: usize,
@@ -90,6 +143,7 @@ impl EraErrReportContext<'_> {
         }
     }
     #[must_use]
+    #[inline(always)]
     fn unpack_int(&mut self, value: Value) -> Option<crate::bytecode::IntValue> {
         match value.into_unpacked() {
             FlatValue::Int(x) => Some(x),
@@ -100,6 +154,7 @@ impl EraErrReportContext<'_> {
         }
     }
     #[must_use]
+    #[inline(always)]
     fn unpack_str(&mut self, value: Value) -> Option<Rc<crate::bytecode::StrValue>> {
         match value.into_unpacked() {
             FlatValue::Str(x) => Some(x),
@@ -110,6 +165,7 @@ impl EraErrReportContext<'_> {
         }
     }
     #[must_use]
+    #[inline(always)]
     fn unpack_arrint(&mut self, value: Value) -> Option<Rc<RefCell<crate::bytecode::ArrIntValue>>> {
         match value.into_unpacked() {
             FlatValue::ArrInt(x) => Some(x),
@@ -120,6 +176,7 @@ impl EraErrReportContext<'_> {
         }
     }
     #[must_use]
+    #[inline(always)]
     fn unpack_arrstr(&mut self, value: Value) -> Option<Rc<RefCell<crate::bytecode::ArrStrValue>>> {
         match value.into_unpacked() {
             FlatValue::ArrStr(x) => Some(x),
@@ -130,6 +187,7 @@ impl EraErrReportContext<'_> {
         }
     }
     #[must_use]
+    #[inline(always)]
     fn get_var_arrint(&mut self, name: &str) -> Option<Rc<RefCell<crate::bytecode::ArrIntValue>>> {
         let Some(FlatValue::ArrInt(var)) = self
             .global_vars
@@ -142,6 +200,7 @@ impl EraErrReportContext<'_> {
         Some(var)
     }
     #[must_use]
+    #[inline(always)]
     fn get_var_arrstr(&mut self, name: &str) -> Option<Rc<RefCell<crate::bytecode::ArrStrValue>>> {
         let Some(FlatValue::ArrStr(var)) = self
             .global_vars
@@ -394,7 +453,7 @@ pub struct EraVirtualMachine {
     is_halted: bool,
     uniform_gen: SimpleUniformGenerator,
     // Variable address -> metadata index
-    trap_vars: HashMap<*const (), usize>,
+    trap_vars: hashbrown::HashMap<*const (), usize>,
     charas_count: usize,
 }
 
@@ -601,7 +660,7 @@ impl EraVirtualMachine {
             frames: Vec::new(),
             is_halted: false,
             uniform_gen: SimpleUniformGenerator::new(),
-            trap_vars: HashMap::new(),
+            trap_vars: hashbrown::HashMap::new(),
             charas_count: 0,
         };
         this
@@ -672,7 +731,7 @@ impl EraVirtualMachine {
         macro_rules! make_ctx {
             ($self:expr, $ctx:expr) => {{
                 $ctx = match loop {
-                    break Ok(EraErrReportContext {
+                    break Ok(EraVirtualMachineContext {
                         chunks: $self.chunks.as_slice(),
                         callback,
                         stack: &mut $self.stack,
@@ -1388,6 +1447,7 @@ impl EraVirtualMachine {
                     ip_offset_delta += 1;
                     let idxs = ctx
                         .pop_stack_dyn(idxs_cnt as _)?
+                        .into_iter()
                         .map(|x| match x.val.into_unpacked() {
                             // TODO: Check overflow
                             FlatValue::Int(x) => Some(x.val as u32),
@@ -1400,7 +1460,7 @@ impl EraVirtualMachine {
                     let [arr] = ctx.pop_stack()?;
                     let value = match arr.val.into_unpacked() {
                         FlatValue::ArrInt(x) => {
-                            let x_ptr = Rc::as_ptr(&x) as _;
+                            let x_ptr: *const () = Rc::as_ptr(&x) as _;
                             let mut x = x.borrow_mut();
                             if arr.is_trap {
                                 assert_eq!(
@@ -1435,7 +1495,7 @@ impl EraVirtualMachine {
                             //x.borrow().get(&idxs).map(|x| Value::new_int_obj(x.clone()))
                         }
                         FlatValue::ArrStr(x) => {
-                            let x_ptr = Rc::as_ptr(&x) as _;
+                            let x_ptr: *const () = Rc::as_ptr(&x) as _;
                             let mut x = x.borrow_mut();
                             if arr.is_trap {
                                 assert_eq!(
@@ -1489,6 +1549,7 @@ impl EraVirtualMachine {
                     let [src_value] = ctx.pop_stack()?;
                     let idxs = ctx
                         .pop_stack_dyn(idxs_cnt as _)?
+                        .into_iter()
                         .map(|x| match x.val.into_unpacked() {
                             // TODO: Check overflow
                             FlatValue::Int(x) => Some(x.val as u32),
@@ -1505,7 +1566,7 @@ impl EraVirtualMachine {
                         src_value.clone().val.into_unpacked(),
                     ) {
                         (FlatValue::ArrInt(dst), FlatValue::Int(src)) => {
-                            let dst_ptr = Rc::as_ptr(&dst) as _;
+                            let dst_ptr: *const () = Rc::as_ptr(&dst) as _;
                             let mut dst = dst.borrow_mut();
                             match dst.get_mut(&idxs) {
                                 Some(x) => x.val = src.val,
@@ -1534,7 +1595,7 @@ impl EraVirtualMachine {
                             }
                         }
                         (FlatValue::ArrStr(dst), FlatValue::Str(src)) => {
-                            let dst_ptr = Rc::as_ptr(&dst) as _;
+                            let dst_ptr: *const () = Rc::as_ptr(&dst) as _;
                             let mut dst = dst.borrow_mut();
                             match dst.get_mut(&idxs) {
                                 Some(x) => *x = src.clone(),
@@ -1589,7 +1650,7 @@ impl EraVirtualMachine {
                     // };
                     let value = match dst.val.into_unpacked() {
                         FlatValue::ArrInt(x) => {
-                            let x_ptr = Rc::as_ptr(&x) as _;
+                            let x_ptr: *const () = Rc::as_ptr(&x) as _;
                             let mut x = x.borrow_mut();
                             if dst.is_trap {
                                 assert_eq!(
@@ -1623,7 +1684,7 @@ impl EraVirtualMachine {
                             }
                         }
                         FlatValue::ArrStr(x) => {
-                            let x_ptr = Rc::as_ptr(&x) as _;
+                            let x_ptr: *const () = Rc::as_ptr(&x) as _;
                             let mut x = x.borrow_mut();
                             if dst.is_trap {
                                 assert_eq!(
@@ -1673,7 +1734,7 @@ impl EraVirtualMachine {
                     let is_trap = dst.is_trap;
                     match (dst.val.into_unpacked(), src.clone().val.into_unpacked()) {
                         (FlatValue::ArrInt(dst), FlatValue::Int(src)) => {
-                            let dst_ptr = Rc::as_ptr(&dst) as _;
+                            let dst_ptr: *const () = Rc::as_ptr(&dst) as _;
                             let mut dst = dst.borrow_mut();
                             match dst.flat_get_mut(idx) {
                                 Some(x) => x.val = src.val,
@@ -1704,7 +1765,7 @@ impl EraVirtualMachine {
                             }
                         }
                         (FlatValue::ArrStr(dst), FlatValue::Str(src)) => {
-                            let dst_ptr = Rc::as_ptr(&dst) as _;
+                            let dst_ptr: *const () = Rc::as_ptr(&dst) as _;
                             let mut dst = dst.borrow_mut();
                             match dst.flat_get_mut(idx) {
                                 Some(x) => *x = src.clone(),
@@ -1740,6 +1801,33 @@ impl EraVirtualMachine {
                         _ => bail_opt!(ctx, true, "destination is not an array"),
                     }
                     ctx.stack.push(src);
+                }
+                BuildArrayIndexFromMD => {
+                    let idxs_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 1;
+                    let idxs = ctx
+                        .pop_stack_dyn(idxs_cnt as _)?
+                        .into_iter()
+                        .map(|x| match x.val.into_unpacked() {
+                            // TODO: Check overflow
+                            FlatValue::Int(x) => Some(x.val as u32),
+                            _ => None,
+                        })
+                        .collect::<Option<smallvec::SmallVec<[_; 3]>>>();
+                    let Some(idxs) = idxs else {
+                        bail_opt!(ctx, true, "expected integers as operands");
+                    };
+                    let [arr] = ctx.pop_stack()?;
+                    let index = match arr.val.clone().into_unpacked() {
+                        FlatValue::ArrInt(x) => x.borrow().calc_idx(&idxs),
+                        FlatValue::ArrStr(x) => x.borrow().calc_idx(&idxs),
+                        _ => bail_opt!(ctx, true, "expected arrays as operands"),
+                    };
+                    let Some(index) = index else {
+                        bail_opt!(ctx, true, "invalid indices into array");
+                    };
+                    ctx.stack.push(arr);
+                    ctx.stack.push(Value::new_int(index as _).into());
                 }
                 CopyArrayContent => {
                     // TODO: Support trapped arrays???
@@ -2019,8 +2107,8 @@ impl EraVirtualMachine {
             msg: msg.into(),
         });
     }
-    fn check_trap_var(trap_vars: &HashMap<*const (), usize>, value: &Value) -> Option<usize> {
-        let addr = match value.clone().into_unpacked() {
+    fn check_trap_var(trap_vars: &hashbrown::HashMap<*const (), usize>, value: &Value) -> Option<usize> {
+        let addr: *const () = match value.clone().into_unpacked() {
             FlatValue::Int(_) | FlatValue::Str(_) => return None,
             FlatValue::ArrInt(x) => Rc::as_ptr(&x) as _,
             FlatValue::ArrStr(x) => Rc::as_ptr(&x) as _,

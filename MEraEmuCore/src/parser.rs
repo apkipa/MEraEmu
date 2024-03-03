@@ -511,7 +511,7 @@ impl EraLiteral {
 #[derive(Debug, Clone)]
 pub struct EraVarDecl {
     pub name: String,
-    pub dims: Vec<u32>,
+    pub dims: smallvec::SmallVec<[u32; 3]>,
     pub inits: Vec<EraExpr>,
     pub is_string: bool,
     pub is_ref: bool,
@@ -1670,7 +1670,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         let mut is_dynamic = false;
         let mut is_savedata = false;
         let mut is_charadata = false;
-        let mut dims = Vec::new();
+        let mut dims = smallvec::SmallVec::new();
         let mut inits = Vec::new();
         let name = loop {
             let token = self.read_token(EraLexerMode::SharpDecl);
@@ -2208,8 +2208,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"HTML_TOPLAINTEXT"
                         | b"GETKEY"
                         | b"GETKEYTRIGGERED"
-                        | b"FIND_CHARADATA"
-                        => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
+                        | b"FIND_CHARADATA" => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
                         _ => return Some(self.stmt_expression()?),
                     }
                 }

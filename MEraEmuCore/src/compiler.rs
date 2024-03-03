@@ -714,19 +714,19 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             }
             self.vars.add_var(
                 &format!("LOCAL@{}", func_name),
-                Value::new_int_arr(vec![16], Vec::new()),
+                Value::new_int_arr(smallvec::smallvec![16], Vec::new()),
             );
             self.vars.add_var(
                 &format!("LOCALS@{}", func_name),
-                Value::new_str_arr(vec![16], Vec::new()),
+                Value::new_str_arr(smallvec::smallvec![16], Vec::new()),
             );
             self.vars.add_var(
                 &format!("ARG@{}", func_name),
-                Value::new_int_arr(vec![16], Vec::new()),
+                Value::new_int_arr(smallvec::smallvec![16], Vec::new()),
             );
             self.vars.add_var(
                 &format!("ARGS@{}", func_name),
-                Value::new_str_arr(vec![16], Vec::new()),
+                Value::new_str_arr(smallvec::smallvec![16], Vec::new()),
             );
 
             // Local variables
@@ -766,10 +766,11 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         } else {
                             has_init = !x.inits.is_empty();
                             if x.dims.is_empty() {
-                                x.dims = vec![(x.inits.len() as u32).max(1)];
+                                x.dims = smallvec::smallvec![(x.inits.len() as u32).max(1)];
                             }
                             let arr_len = x.dims.iter().fold(1, |acc, &x| acc * x);
-                            if (arr_len as usize) < x.inits.len() {
+                            // NOTE: We need to reject zero-sized arrays (they can only be REF arrays)
+                            if (arr_len as usize) < x.inits.len().max(1) {
                                 self.report_err(
                                     src_info,
                                     false,
@@ -989,8 +990,12 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             .collect::<Option<Vec<_>>>()?;
 
                         let rhs = match kind {
-                            ValueKind::ArrInt => Value::new_int_arr(vec![0], Vec::new()),
-                            ValueKind::ArrStr => Value::new_str_arr(vec![0], Vec::new()),
+                            ValueKind::ArrInt => {
+                                Value::new_int_arr(smallvec::smallvec![0], Vec::new())
+                            }
+                            ValueKind::ArrStr => {
+                                Value::new_str_arr(smallvec::smallvec![0], Vec::new())
+                            }
                             ValueKind::Int => self.new_value_int(0),
                             ValueKind::Str => self.new_value_str(String::new()),
                         };
@@ -3458,10 +3463,14 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let [r, g, b] = ctx.unpack_some_args(args)?;
                 // TODO: Check argument range [0, 255]
                 ctx.this.expr_int(r)?;
-                ctx.this.chunk.emit_load_const(ctx.this.p.new_value_int(16), src_info);
+                ctx.this
+                    .chunk
+                    .emit_load_const(ctx.this.p.new_value_int(16), src_info);
                 ctx.this.chunk.emit_bytecode(BitShiftL, src_info);
                 ctx.this.expr_int(g)?;
-                ctx.this.chunk.emit_load_const(ctx.this.p.new_value_int(8), src_info);
+                ctx.this
+                    .chunk
+                    .emit_load_const(ctx.this.p.new_value_int(8), src_info);
                 ctx.this.chunk.emit_bytecode(BitShiftL, src_info);
                 ctx.this.chunk.emit_bytecode(Add, src_info);
                 ctx.this.expr_int(b)?;
@@ -3478,7 +3487,9 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let [keycode] = ctx.unpack_some_args(args)?;
                 ctx.this.expr_int(keycode)?;
                 ctx.this.chunk.emit_bytecode(KbGetKeyState, src_info);
-                ctx.this.chunk.emit_load_const(ctx.this.p.new_value_int(15), src_info);
+                ctx.this
+                    .chunk
+                    .emit_load_const(ctx.this.p.new_value_int(15), src_info);
                 ctx.this.chunk.emit_bytecode(GetBit, src_info);
             }
             b"GETKEYTRIGGERED" => {
@@ -3486,7 +3497,9 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let [keycode] = ctx.unpack_some_args(args)?;
                 ctx.this.expr_int(keycode)?;
                 ctx.this.chunk.emit_bytecode(KbGetKeyState, src_info);
-                ctx.this.chunk.emit_load_const(ctx.this.p.new_value_int(1), src_info);
+                ctx.this
+                    .chunk
+                    .emit_load_const(ctx.this.p.new_value_int(1), src_info);
                 ctx.this.chunk.emit_bytecode(BitAnd, src_info);
             }
             b"FIND_CHARADATA" => {
@@ -5220,24 +5233,12 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     }
                 }
                 let idx_len = idx_len;
-                // FIXME: Insert checks for indices overflow for MD arrays
-                self.chunk
-                    .emit_load_const(self.p.new_value_int(0), src_info);
-                let stride = var_dims.iter().skip(idx_len).fold(1, |acc, &x| acc * x);
-                let strides = var_dims
-                    .iter()
-                    .take(idx_len)
-                    .rev()
-                    .scan(stride, |acc, x| {
-                        let r = Some(*acc);
-                        *acc *= x;
-                        r
-                    })
-                    .collect::<Vec<_>>();
+                assert_eq!(idx_len, idxs.len());
                 let is_csv_var = routine::is_csv_var(&var_name);
-                for (idx, stride) in idxs.into_iter().zip(strides.into_iter().rev()) {
-                    let src_info = idx.source_pos_info();
 
+                // TODO: Optimize access for 0d / 1d arrays
+
+                for idx in idxs {
                     let idx_kind = match idx {
                         // HACK: Contextual indices replacing
                         EraExpr::Term(EraTermExpr::Var(x))
@@ -5267,18 +5268,16 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                             self.report_err(
                                 src_info,
                                 false,
-                                "using strings as indices is discouraged",
+                                "using strings as array indices is discouraged",
                             );
                             self.chunk.emit_bytecode(CsvGetNum, src_info);
                         }
                         _ => bail_opt!(self, src_info, true, "array indices must be integers"),
                     }
-
-                    self.chunk
-                        .emit_load_const(self.p.new_value_int(stride as _), src_info);
-                    self.chunk.emit_bytecode(Multiply, src_info);
-                    self.chunk.emit_bytecode(Add, src_info);
                 }
+
+                self.chunk.emit_bytecode(BuildArrayIndexFromMD, src_info);
+                self.chunk.append_u8(idx_len as _, src_info);
             }
         }
         Some(slim_info)

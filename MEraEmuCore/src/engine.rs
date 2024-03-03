@@ -21,7 +21,7 @@ use crate::util::*;
 
 struct InitialVarDesc {
     pub is_string: bool,
-    pub dims: Vec<u32>,
+    pub dims: smallvec::SmallVec<[u32; 3]>,
     pub is_const: bool,
     pub is_charadata: bool,
     pub initial_sval: Option<Vec<Rc<StrValue>>>,
@@ -473,27 +473,27 @@ impl<'a> MEraEngine<'a> {
             fn add_item(
                 &mut self,
                 name: &str,
-                dims: Vec<u32>,
+                dims: smallvec::SmallVec<[u32; 3]>,
                 is_string: bool,
                 is_const: bool,
                 is_charadata: bool,
             );
-            fn add_int(&mut self, name: &str, dims: Vec<u32>) {
+            fn add_int(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
                 self.add_item(name, dims, false, false, false)
             }
-            fn add_str(&mut self, name: &str, dims: Vec<u32>) {
+            fn add_str(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
                 self.add_item(name, dims, true, false, false)
             }
-            fn add_const_int(&mut self, name: &str, dims: Vec<u32>) {
+            fn add_const_int(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
                 self.add_item(name, dims, false, true, false)
             }
-            fn add_const_str(&mut self, name: &str, dims: Vec<u32>) {
+            fn add_const_str(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
                 self.add_item(name, dims, true, true, false)
             }
-            fn add_chara_int(&mut self, name: &str, dims: Vec<u32>) {
+            fn add_chara_int(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
                 self.add_item(name, dims, false, false, true)
             }
-            fn add_chara_str(&mut self, name: &str, dims: Vec<u32>) {
+            fn add_chara_str(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
                 self.add_item(name, dims, true, false, true)
             }
         }
@@ -501,7 +501,7 @@ impl<'a> MEraEngine<'a> {
             fn add_item(
                 &mut self,
                 name: &str,
-                dims: Vec<u32>,
+                dims: smallvec::SmallVec<[u32; 3]>,
                 is_string: bool,
                 is_const: bool,
                 is_charadata: bool,
@@ -522,120 +522,120 @@ impl<'a> MEraEngine<'a> {
         // ………………………………………………
         // 数値配列型変数
         // ………………………………………………
-        iv.add_int("DAY", vec![1]);
-        iv.add_int("MONEY", vec![1]);
-        iv.add_int("TIME", vec![1]);
-        iv.add_int("ITEM", vec![1]);
-        iv.add_int("ITEMSALES", vec![1]);
-        iv.add_int("NOITEM", vec![1]);
-        iv.add_int("BOUGHT", vec![1]);
-        iv.add_int("PBAND", vec![1]);
-        iv.add_int("FLAG", vec![1]);
-        iv.add_int("TFLAG", vec![1]);
-        iv.add_int("TARGET", vec![1]);
-        iv.add_int("MASTER", vec![1]);
-        iv.add_int("PLAYER", vec![1]);
-        iv.add_int("ASSI", vec![1]);
-        iv.add_int("ASSIPLAY", vec![1]);
-        iv.add_int("UP", vec![1]);
-        iv.add_int("DOWN", vec![1]);
-        iv.add_int("LOSEBASE", vec![1]);
-        iv.add_int("PALAMLV", vec![1]);
-        iv.add_int("EXPLV", vec![1]);
-        iv.add_int("EJAC", vec![1]);
-        iv.add_int("PREVCOM", vec![1]);
-        iv.add_int("SELECTCOM", vec![1]);
-        iv.add_int("NEXTCOM", vec![1]);
-        iv.add_int("RESULT", vec![1]);
-        iv.add_int("COUNT", vec![1]);
-        iv.add_int("A", vec![1]);
-        iv.add_int("B", vec![1]);
-        iv.add_int("C", vec![1]);
-        iv.add_int("D", vec![1]);
-        iv.add_int("E", vec![1]);
-        iv.add_int("F", vec![1]);
-        iv.add_int("G", vec![1]);
-        iv.add_int("H", vec![1]);
-        iv.add_int("I", vec![1]);
-        iv.add_int("J", vec![1]);
-        iv.add_int("K", vec![1]);
-        iv.add_int("L", vec![1]);
-        iv.add_int("M", vec![1]);
-        iv.add_int("N", vec![1]);
-        iv.add_int("O", vec![1]);
-        iv.add_int("P", vec![1]);
-        iv.add_int("Q", vec![1]);
-        iv.add_int("R", vec![1]);
-        iv.add_int("S", vec![1]);
-        iv.add_int("T", vec![1]);
-        iv.add_int("U", vec![1]);
-        iv.add_int("V", vec![1]);
-        iv.add_int("W", vec![1]);
-        iv.add_int("X", vec![1]);
-        iv.add_int("Y", vec![1]);
-        iv.add_int("Z", vec![1]);
-        iv.add_int("ITEMPRICE", vec![1]);
+        iv.add_int("DAY", smallvec::smallvec![1]);
+        iv.add_int("MONEY", smallvec::smallvec![1]);
+        iv.add_int("TIME", smallvec::smallvec![1]);
+        iv.add_int("ITEM", smallvec::smallvec![1]);
+        iv.add_int("ITEMSALES", smallvec::smallvec![1]);
+        iv.add_int("NOITEM", smallvec::smallvec![1]);
+        iv.add_int("BOUGHT", smallvec::smallvec![1]);
+        iv.add_int("PBAND", smallvec::smallvec![1]);
+        iv.add_int("FLAG", smallvec::smallvec![1]);
+        iv.add_int("TFLAG", smallvec::smallvec![1]);
+        iv.add_int("TARGET", smallvec::smallvec![1]);
+        iv.add_int("MASTER", smallvec::smallvec![1]);
+        iv.add_int("PLAYER", smallvec::smallvec![1]);
+        iv.add_int("ASSI", smallvec::smallvec![1]);
+        iv.add_int("ASSIPLAY", smallvec::smallvec![1]);
+        iv.add_int("UP", smallvec::smallvec![1]);
+        iv.add_int("DOWN", smallvec::smallvec![1]);
+        iv.add_int("LOSEBASE", smallvec::smallvec![1]);
+        iv.add_int("PALAMLV", smallvec::smallvec![1]);
+        iv.add_int("EXPLV", smallvec::smallvec![1]);
+        iv.add_int("EJAC", smallvec::smallvec![1]);
+        iv.add_int("PREVCOM", smallvec::smallvec![1]);
+        iv.add_int("SELECTCOM", smallvec::smallvec![1]);
+        iv.add_int("NEXTCOM", smallvec::smallvec![1]);
+        iv.add_int("RESULT", smallvec::smallvec![1]);
+        iv.add_int("COUNT", smallvec::smallvec![1]);
+        iv.add_int("A", smallvec::smallvec![1]);
+        iv.add_int("B", smallvec::smallvec![1]);
+        iv.add_int("C", smallvec::smallvec![1]);
+        iv.add_int("D", smallvec::smallvec![1]);
+        iv.add_int("E", smallvec::smallvec![1]);
+        iv.add_int("F", smallvec::smallvec![1]);
+        iv.add_int("G", smallvec::smallvec![1]);
+        iv.add_int("H", smallvec::smallvec![1]);
+        iv.add_int("I", smallvec::smallvec![1]);
+        iv.add_int("J", smallvec::smallvec![1]);
+        iv.add_int("K", smallvec::smallvec![1]);
+        iv.add_int("L", smallvec::smallvec![1]);
+        iv.add_int("M", smallvec::smallvec![1]);
+        iv.add_int("N", smallvec::smallvec![1]);
+        iv.add_int("O", smallvec::smallvec![1]);
+        iv.add_int("P", smallvec::smallvec![1]);
+        iv.add_int("Q", smallvec::smallvec![1]);
+        iv.add_int("R", smallvec::smallvec![1]);
+        iv.add_int("S", smallvec::smallvec![1]);
+        iv.add_int("T", smallvec::smallvec![1]);
+        iv.add_int("U", smallvec::smallvec![1]);
+        iv.add_int("V", smallvec::smallvec![1]);
+        iv.add_int("W", smallvec::smallvec![1]);
+        iv.add_int("X", smallvec::smallvec![1]);
+        iv.add_int("Y", smallvec::smallvec![1]);
+        iv.add_int("Z", smallvec::smallvec![1]);
+        iv.add_int("ITEMPRICE", smallvec::smallvec![1]);
         // ………………………………………………
         // 文字列配列型変数
         // ………………………………………………
-        iv.add_str("SAVESTR", vec![1]);
-        iv.add_str("RESULTS", vec![1]);
-        iv.add_str("TSTR", vec![1]);
-        iv.add_str("STR", vec![1]);
+        iv.add_str("SAVESTR", smallvec::smallvec![1]);
+        iv.add_str("RESULTS", smallvec::smallvec![1]);
+        iv.add_str("TSTR", smallvec::smallvec![1]);
+        iv.add_str("STR", smallvec::smallvec![1]);
         // ITEMNAMEとITEMPRICEは片方を変更すると他方も同じ値に変更されます
-        iv.add_str("ITEMNAME", vec![1]);
-        iv.add_str("ABLNAME", vec![1]);
-        iv.add_str("EXPNAME", vec![1]);
-        iv.add_str("TALENTNAME", vec![1]);
-        iv.add_str("PALAMNAME", vec![1]);
-        iv.add_str("TRAINNAME", vec![1]);
-        iv.add_str("MARKNAME", vec![1]);
-        iv.add_str("BASENAME", vec![1]);
-        iv.add_str("SOURCENAME", vec![1]);
-        iv.add_str("EXNAME", vec![1]);
-        iv.add_str("EQUIPNAME", vec![1]);
-        iv.add_str("TEQUIPNAME", vec![1]);
-        iv.add_str("FLAGNAME", vec![1]);
-        iv.add_str("CFLAGNAME", vec![1]);
-        iv.add_str("TFLAGNAME", vec![1]);
-        iv.add_str("TCVARNAME", vec![1]);
-        iv.add_str("CSTRNAME", vec![1]);
-        iv.add_str("STAINNAME", vec![1]);
-        iv.add_str("STRNAME", vec![1]);
-        iv.add_str("TSTRNAME", vec![1]);
-        iv.add_str("SAVESTRNAME", vec![1]);
+        iv.add_str("ITEMNAME", smallvec::smallvec![1]);
+        iv.add_str("ABLNAME", smallvec::smallvec![1]);
+        iv.add_str("EXPNAME", smallvec::smallvec![1]);
+        iv.add_str("TALENTNAME", smallvec::smallvec![1]);
+        iv.add_str("PALAMNAME", smallvec::smallvec![1]);
+        iv.add_str("TRAINNAME", smallvec::smallvec![1]);
+        iv.add_str("MARKNAME", smallvec::smallvec![1]);
+        iv.add_str("BASENAME", smallvec::smallvec![1]);
+        iv.add_str("SOURCENAME", smallvec::smallvec![1]);
+        iv.add_str("EXNAME", smallvec::smallvec![1]);
+        iv.add_str("EQUIPNAME", smallvec::smallvec![1]);
+        iv.add_str("TEQUIPNAME", smallvec::smallvec![1]);
+        iv.add_str("FLAGNAME", smallvec::smallvec![1]);
+        iv.add_str("CFLAGNAME", smallvec::smallvec![1]);
+        iv.add_str("TFLAGNAME", smallvec::smallvec![1]);
+        iv.add_str("TCVARNAME", smallvec::smallvec![1]);
+        iv.add_str("CSTRNAME", smallvec::smallvec![1]);
+        iv.add_str("STAINNAME", smallvec::smallvec![1]);
+        iv.add_str("STRNAME", smallvec::smallvec![1]);
+        iv.add_str("TSTRNAME", smallvec::smallvec![1]);
+        iv.add_str("SAVESTRNAME", smallvec::smallvec![1]);
         // ………………………………………………
         // 角色変数
         // ………………………………………………
-        iv.add_chara_int("BASE", vec![1]);
-        iv.add_chara_int("MAXBASE", vec![1]);
-        iv.add_chara_int("DOWNBASE", vec![1]);
-        iv.add_chara_int("ABL", vec![1]);
-        iv.add_chara_int("TALENT", vec![1]);
-        iv.add_chara_int("EXP", vec![1]);
-        iv.add_chara_int("MARK", vec![1]);
-        iv.add_chara_int("PALAM", vec![1]);
-        iv.add_chara_int("SOURCE", vec![1]);
-        iv.add_chara_int("EX", vec![1]);
-        iv.add_chara_int("NOWEX", vec![1]);
-        iv.add_chara_int("CFLAG", vec![1]);
-        iv.add_chara_int("JUEL", vec![1]);
-        iv.add_chara_int("GOTJUEL", vec![1]);
-        iv.add_chara_int("CUP", vec![1]);
-        iv.add_chara_int("CDOWN", vec![1]);
-        iv.add_chara_int("RELATION", vec![1]);
-        iv.add_chara_int("EQUIP", vec![1]);
-        iv.add_chara_int("TEQUIP", vec![1]);
-        iv.add_chara_int("STAIN", vec![1]);
-        iv.add_chara_int("TCVAR", vec![1]);
+        iv.add_chara_int("BASE", smallvec::smallvec![1]);
+        iv.add_chara_int("MAXBASE", smallvec::smallvec![1]);
+        iv.add_chara_int("DOWNBASE", smallvec::smallvec![1]);
+        iv.add_chara_int("ABL", smallvec::smallvec![1]);
+        iv.add_chara_int("TALENT", smallvec::smallvec![1]);
+        iv.add_chara_int("EXP", smallvec::smallvec![1]);
+        iv.add_chara_int("MARK", smallvec::smallvec![1]);
+        iv.add_chara_int("PALAM", smallvec::smallvec![1]);
+        iv.add_chara_int("SOURCE", smallvec::smallvec![1]);
+        iv.add_chara_int("EX", smallvec::smallvec![1]);
+        iv.add_chara_int("NOWEX", smallvec::smallvec![1]);
+        iv.add_chara_int("CFLAG", smallvec::smallvec![1]);
+        iv.add_chara_int("JUEL", smallvec::smallvec![1]);
+        iv.add_chara_int("GOTJUEL", smallvec::smallvec![1]);
+        iv.add_chara_int("CUP", smallvec::smallvec![1]);
+        iv.add_chara_int("CDOWN", smallvec::smallvec![1]);
+        iv.add_chara_int("RELATION", smallvec::smallvec![1]);
+        iv.add_chara_int("EQUIP", smallvec::smallvec![1]);
+        iv.add_chara_int("TEQUIP", smallvec::smallvec![1]);
+        iv.add_chara_int("STAIN", smallvec::smallvec![1]);
+        iv.add_chara_int("TCVAR", smallvec::smallvec![1]);
         // ………………………………………………
         // 角色文字列変数
         // ………………………………………………
-        iv.add_chara_str("NAME", vec![1]);
-        iv.add_chara_str("CALLNAME", vec![1]);
-        iv.add_chara_str("NICKNAME", vec![1]);
-        iv.add_chara_str("MASTERNAME", vec![1]);
-        iv.add_chara_str("CSTR", vec![1]);
+        iv.add_chara_str("NAME", smallvec::smallvec![1]);
+        iv.add_chara_str("CALLNAME", smallvec::smallvec![1]);
+        iv.add_chara_str("NICKNAME", smallvec::smallvec![1]);
+        iv.add_chara_str("MASTERNAME", smallvec::smallvec![1]);
+        iv.add_chara_str("CSTR", smallvec::smallvec![1]);
         // ………………………………………………
         // 特殊一時変数・一時文字列変数
         // ………………………………………………
@@ -643,8 +643,8 @@ impl<'a> MEraEngine<'a> {
         // LOCALS,100
         // ARG,200
         // ARGS,100
-        iv.add_int("GLOBAL", vec![1]);
-        iv.add_str("GLOBALS", vec![1]);
+        iv.add_int("GLOBAL", smallvec::smallvec![1]);
+        iv.add_str("GLOBALS", smallvec::smallvec![1]);
         // ………………………………………………
         // 二次元配列型変数
         // ………………………………………………
@@ -655,8 +655,8 @@ impl<'a> MEraEngine<'a> {
         // DD,100,100
         // DE,100,100
         // MISC variables
-        iv.add_chara_int("NO", vec![1]);
-        iv.add_chara_int("ISASSI", vec![1]);
+        iv.add_chara_int("NO", smallvec::smallvec![1]);
+        iv.add_chara_int("ISASSI", smallvec::smallvec![1]);
 
         MEraEngine {
             file_inputs: Vec::new(),
@@ -1168,9 +1168,9 @@ impl<'a> MEraEngine<'a> {
         watch: bool,
     ) -> Result<(), MEraEngineError> {
         let val = if is_string {
-            crate::bytecode::Value::new_str_arr(vec![dimension as _], Vec::new())
+            crate::bytecode::Value::new_str_arr(smallvec::smallvec![dimension as _], Vec::new())
         } else {
-            crate::bytecode::Value::new_int_arr(vec![dimension as _], Vec::new())
+            crate::bytecode::Value::new_int_arr(smallvec::smallvec![dimension as _], Vec::new())
         };
         let var_idx = self
             .global_vars
