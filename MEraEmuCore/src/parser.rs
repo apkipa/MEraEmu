@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use indoc::concatdoc;
@@ -233,264 +233,433 @@ impl EraExpr {
                 "overflow during constant expression evaluation",
             )
         }
+        fn make_invalid_arith_err(src_info: SourcePosInfo) -> EraParseErrorInfo {
+            make_err(
+                src_info,
+                true,
+                "invalid arithmetic during constant expression evaluation",
+            )
+        }
 
-        Ok(match self {
-            EraExpr::Term(x) => match x {
-                EraTermExpr::Var(x) => match vars.get_var_info_by_name(&x.name) {
-                    Some(info) if info.is_const => {
-                        let idxs = x
-                            .idxs
-                            .into_iter()
-                            .map(|x| match x.try_evaluate_constant(vars)? {
-                                EraLiteral::Integer(x, _) => Ok(x as u32),
-                                EraLiteral::String(_, src_info) => {
-                                    Err(make_err(src_info, true, "expected integer here"))
+        enum ExprStackValue {
+            Expr(EraExpr),
+            Op(EraTokenLite),
+        }
+
+        // Use a dedicated stack to prevent stack overflow
+        let mut expr_stack = Vec::new();
+        let mut val_stack = Vec::new();
+
+        expr_stack.push(ExprStackValue::Expr(self));
+        while let Some(value) = expr_stack.pop() {
+            use EraLiteral as EL;
+            let expr = match value {
+                ExprStackValue::Expr(x) => x,
+                ExprStackValue::Op(op) => {
+                    match op.kind {
+                        EraTokenKind::Plus => {
+                            let b = val_stack.pop().unwrap();
+                            let a = val_stack.pop().unwrap();
+                            match (a, b) {
+                                (EL::Integer(a, a_si), EL::Integer(b, b_si)) => {
+                                    let x = match a.checked_add(b) {
+                                        Some(x) => x,
+                                        None => {
+                                            return Err(make_overflow_err(op.src_info));
+                                        }
+                                    };
+                                    val_stack.push(EL::Integer(x, a_si));
                                 }
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        match info.val.clone().into_unpacked() {
-                            FlatValue::ArrInt(v) => EraLiteral::Integer(
-                                v.borrow()
-                                    .get(&idxs)
-                                    .ok_or_else(|| {
-                                        make_err(x.src_info, true, "not a constant expression")
-                                    })?
-                                    .val,
-                                src_info,
-                            ),
-                            FlatValue::ArrStr(v) => EraLiteral::String(
-                                v.borrow()
-                                    .get(&idxs)
-                                    .ok_or_else(|| {
-                                        make_err(x.src_info, true, "not a constant expression")
-                                    })?
-                                    .val
-                                    .clone(),
-                                src_info,
-                            ),
-                            _ => todo!(),
-                        }
-                    }
-                    _ => return Err(make_err(x.src_info, true, "not a constant expression")),
-                },
-                EraTermExpr::StrForm(x) => {
-                    let mut result = String::new();
-                    for part in x.parts {
-                        match part {
-                            EraStrFormExprPart::Literal(x, _) => result.push_str(&x),
-                            // FIXME: Constant string interpolation formatting
-                            EraStrFormExprPart::Expression(x) => {
-                                match x.expr.try_evaluate_constant(vars)? {
-                                    EraLiteral::Integer(x, _) => result.push_str(&x.to_string()),
-                                    EraLiteral::String(x, _) => result.push_str(&x),
+                                (EL::String(a, a_si), EL::String(b, b_si)) => {
+                                    let x = a + &b;
+                                    val_stack.push(EL::String(x, a_si));
+                                }
+                                _ => {
+                                    return Err(make_invalid_arith_err(op.src_info));
                                 }
                             }
                         }
+                        EraTokenKind::Minus => {
+                            let b = val_stack.pop().unwrap();
+                            let a = val_stack.pop().unwrap();
+                            match (a, b) {
+                                (EL::Integer(a, a_si), EL::Integer(b, b_si)) => {
+                                    let x = match a.checked_sub(b) {
+                                        Some(x) => x,
+                                        None => {
+                                            return Err(make_overflow_err(op.src_info));
+                                        }
+                                    };
+                                    val_stack.push(EL::Integer(x, a_si));
+                                }
+                                _ => {
+                                    return Err(make_invalid_arith_err(op.src_info));
+                                }
+                            }
+                        }
+                        EraTokenKind::Multiply => {
+                            let b = val_stack.pop().unwrap();
+                            let a = val_stack.pop().unwrap();
+                            match (a, b) {
+                                (EL::Integer(a, a_si), EL::Integer(b, b_si)) => {
+                                    let x = match a.checked_mul(b) {
+                                        Some(x) => x,
+                                        None => {
+                                            return Err(make_overflow_err(op.src_info));
+                                        }
+                                    };
+                                    val_stack.push(EL::Integer(x, a_si));
+                                }
+                                _ => {
+                                    return Err(make_invalid_arith_err(op.src_info));
+                                }
+                            }
+                        }
+                        EraTokenKind::Divide => {
+                            let b = val_stack.pop().unwrap();
+                            let a = val_stack.pop().unwrap();
+                            match (a, b) {
+                                (EL::Integer(a, a_si), EL::Integer(b, b_si)) => {
+                                    let x = match a.checked_div(b) {
+                                        Some(x) => x,
+                                        None => {
+                                            return Err(make_overflow_err(op.src_info));
+                                        }
+                                    };
+                                    val_stack.push(EL::Integer(x, a_si));
+                                }
+                                _ => {
+                                    return Err(make_invalid_arith_err(op.src_info));
+                                }
+                            }
+                        }
+                        EraTokenKind::BitShiftL => {
+                            let b = val_stack.pop().unwrap();
+                            let a = val_stack.pop().unwrap();
+                            match (a, b) {
+                                (EL::Integer(a, a_si), EL::Integer(b, b_si)) => {
+                                    let x = match a.checked_shl(b.try_into().unwrap_or(u32::MAX)) {
+                                        Some(x) => x,
+                                        None => {
+                                            return Err(make_overflow_err(op.src_info));
+                                        }
+                                    };
+                                    val_stack.push(EL::Integer(x, a_si));
+                                }
+                                _ => {
+                                    return Err(make_invalid_arith_err(op.src_info));
+                                }
+                            }
+                        }
+                        EraTokenKind::BitShiftR => {
+                            let b = val_stack.pop().unwrap();
+                            let a = val_stack.pop().unwrap();
+                            match (a, b) {
+                                (EL::Integer(a, a_si), EL::Integer(b, b_si)) => {
+                                    let x = match a.checked_shr(b.try_into().unwrap_or(u32::MAX)) {
+                                        Some(x) => x,
+                                        None => {
+                                            return Err(make_overflow_err(op.src_info));
+                                        }
+                                    };
+                                    val_stack.push(EL::Integer(x, a_si));
+                                }
+                                _ => {
+                                    return Err(make_invalid_arith_err(op.src_info));
+                                }
+                            }
+                        }
+                        _ => return Err(make_err(op.src_info, true, "not a constant expression")),
                     }
-                    EraLiteral::String(result, x.src_info)
+                    continue;
                 }
-                EraTermExpr::Literal(x) => match x {
-                    EraLiteral::Integer(x, _) => EraLiteral::Integer(x, src_info),
-                    EraLiteral::String(x, _) => EraLiteral::String(x, src_info),
-                },
-            },
-            EraExpr::Grouping(_, x, _) => x.try_evaluate_constant(vars)?,
-            EraExpr::PreUnary(op, x) => match (op.kind, x.try_evaluate_constant(vars)?) {
-                (EraTokenKind::Plus, EraLiteral::Integer(x, _)) => EraLiteral::Integer(x, src_info),
-                (EraTokenKind::Minus, EraLiteral::Integer(x, cur_si)) => {
-                    let x = match 0i64.checked_sub(x) {
-                        Some(x) => x,
-                        None => {
-                            return Err(make_overflow_err(cur_si));
+            };
+            // Expand expression
+            let literal = match expr {
+                EraExpr::Term(x) => match x {
+                    EraTermExpr::Var(x) => match vars.get_var_info_by_name(&x.name) {
+                        Some(info) if info.is_const => {
+                            let idxs = x
+                                .idxs
+                                .into_iter()
+                                .map(|x| match x.try_evaluate_constant(vars)? {
+                                    EraLiteral::Integer(x, _) => Ok(x as u32),
+                                    EraLiteral::String(_, src_info) => {
+                                        Err(make_err(src_info, true, "expected integer here"))
+                                    }
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            match info.val.clone().into_unpacked() {
+                                FlatValue::ArrInt(v) => EraLiteral::Integer(
+                                    v.borrow()
+                                        .get(&idxs)
+                                        .ok_or_else(|| {
+                                            make_err(x.src_info, true, "not a constant expression")
+                                        })?
+                                        .val,
+                                    src_info,
+                                ),
+                                FlatValue::ArrStr(v) => EraLiteral::String(
+                                    v.borrow()
+                                        .get(&idxs)
+                                        .ok_or_else(|| {
+                                            make_err(x.src_info, true, "not a constant expression")
+                                        })?
+                                        .val
+                                        .clone(),
+                                    src_info,
+                                ),
+                                _ => todo!(),
+                            }
                         }
-                    };
-                    EraLiteral::Integer(x, src_info)
-                }
-                _ => {
-                    return Err(make_err(
-                        op.src_info,
-                        true,
-                        "invalid arithmetic during constant expression evaluation",
-                    ));
-                }
-            },
-            EraExpr::PostUnary(x, op) => match (x.try_evaluate_constant(vars)?, op.kind) {
-                _ => {
-                    return Err(make_err(
-                        op.src_info,
-                        true,
-                        "invalid arithmetic during constant expression evaluation",
-                    ));
-                }
-            },
-            EraExpr::FunCall(fun, args) => {
-                let fun_si = fun.source_pos_info();
-                let EraExpr::Term(EraTermExpr::Var(mut fun)) = *fun else {
-                    return Err(make_err(
-                        fun_si,
-                        true,
-                        "invalid function call during constant expression evaluation",
-                    ));
-                };
-                fun.name.make_ascii_uppercase();
-                // HACK: Whitelist specific functions
-                match fun.name.as_str() {
-                    "UNICODE" => {
-                        if args.len() != 1 {
-                            return Err(make_err(
-                                fun_si,
-                                true,
-                                "invalid function call during constant expression evaluation",
-                            ));
-                        }
-                        let arg = args.into_iter().next().unwrap();
-                        let arg = if let Some(arg) = arg {
-                            Self::unwrap_int_constant(arg.try_evaluate_constant(vars)?)?
-                        } else {
-                            0
-                        };
+                        _ => return Err(make_err(x.src_info, true, "not a constant expression")),
+                    },
+                    EraTermExpr::StrForm(x) => {
                         let mut result = String::new();
-                        result
-                            .push(char::from_u32(arg as _).unwrap_or(char::REPLACEMENT_CHARACTER));
-                        EraLiteral::String(result, fun_si)
-                    }
-                    "VARSIZE" => {
-                        if args.len() != 1 {
-                            // TODO: constexpr VARSIZE
-                            return Err(make_err(
-                                fun_si,
-                                true,
-                                "invalid function call during constant expression evaluation",
-                            ));
+                        for part in x.parts {
+                            match part {
+                                EraStrFormExprPart::Literal(x, _) => result.push_str(&x),
+                                // FIXME: Constant string interpolation formatting
+                                EraStrFormExprPart::Expression(x) => {
+                                    match x.expr.try_evaluate_constant(vars)? {
+                                        EraLiteral::Integer(x, _) => {
+                                            result.push_str(&x.to_string())
+                                        }
+                                        EraLiteral::String(x, _) => result.push_str(&x),
+                                    }
+                                }
+                            }
                         }
-                        let arg = args.into_iter().next().unwrap();
-                        let arg = if let Some(arg) = arg {
-                            Self::unwrap_str_constant(arg.try_evaluate_constant(vars)?)?
-                        } else {
-                            String::new()
+                        EraLiteral::String(result, x.src_info)
+                    }
+                    EraTermExpr::Literal(x) => match x {
+                        EraLiteral::Integer(x, _) => EraLiteral::Integer(x, src_info),
+                        EraLiteral::String(x, _) => EraLiteral::String(x, src_info),
+                    },
+                },
+                EraExpr::Grouping(_, x, _) => x.try_evaluate_constant(vars)?,
+                EraExpr::PreUnary(op, x) => match (op.kind, x.try_evaluate_constant(vars)?) {
+                    (EraTokenKind::Plus, EraLiteral::Integer(x, _)) => {
+                        EraLiteral::Integer(x, src_info)
+                    }
+                    (EraTokenKind::Minus, EraLiteral::Integer(x, cur_si)) => {
+                        let x = match 0i64.checked_sub(x) {
+                            Some(x) => x,
+                            None => {
+                                return Err(make_overflow_err(cur_si));
+                            }
                         };
-                        let Some(value) = vars.get_var(&arg) else {
-                            return Err(make_err(
-                                fun_si,
-                                true,
-                                format!("variable `{arg}` does not exist"),
-                            ));
-                        };
-                        let varsize = match value.clone().into_unpacked() {
-                            FlatValue::ArrInt(x) => *x.borrow().dims.first().unwrap(),
-                            FlatValue::ArrStr(x) => *x.borrow().dims.first().unwrap(),
-                            _ => unreachable!(),
-                        };
-                        EraLiteral::Integer(varsize as _, fun_si)
+                        EraLiteral::Integer(x, src_info)
                     }
                     _ => {
+                        return Err(make_err(
+                            op.src_info,
+                            true,
+                            "invalid arithmetic during constant expression evaluation",
+                        ));
+                    }
+                },
+                EraExpr::PostUnary(x, op) => match (x.try_evaluate_constant(vars)?, op.kind) {
+                    _ => {
+                        return Err(make_err(
+                            op.src_info,
+                            true,
+                            "invalid arithmetic during constant expression evaluation",
+                        ));
+                    }
+                },
+                EraExpr::FunCall(fun, args) => {
+                    let fun_si = fun.source_pos_info();
+                    let EraExpr::Term(EraTermExpr::Var(mut fun)) = *fun else {
                         return Err(make_err(
                             fun_si,
                             true,
                             "invalid function call during constant expression evaluation",
-                        ))
+                        ));
+                    };
+                    fun.name.make_ascii_uppercase();
+                    // HACK: Whitelist specific functions
+                    match fun.name.as_str() {
+                        "UNICODE" => {
+                            if args.len() != 1 {
+                                return Err(make_err(
+                                    fun_si,
+                                    true,
+                                    "invalid function call during constant expression evaluation",
+                                ));
+                            }
+                            let arg = args.into_iter().next().unwrap();
+                            let arg = if let Some(arg) = arg {
+                                Self::unwrap_int_constant(arg.try_evaluate_constant(vars)?)?
+                            } else {
+                                0
+                            };
+                            let mut result = String::new();
+                            result.push(
+                                char::from_u32(arg as _).unwrap_or(char::REPLACEMENT_CHARACTER),
+                            );
+                            EraLiteral::String(result, fun_si)
+                        }
+                        "VARSIZE" => {
+                            if args.len() != 1 {
+                                // TODO: constexpr VARSIZE
+                                return Err(make_err(
+                                    fun_si,
+                                    true,
+                                    "invalid function call during constant expression evaluation",
+                                ));
+                            }
+                            let arg = args.into_iter().next().unwrap();
+                            let arg = if let Some(arg) = arg {
+                                Self::unwrap_str_constant(arg.try_evaluate_constant(vars)?)?
+                            } else {
+                                String::new()
+                            };
+                            let Some(value) = vars.get_var(&arg) else {
+                                return Err(make_err(
+                                    fun_si,
+                                    true,
+                                    format!("variable `{arg}` does not exist"),
+                                ));
+                            };
+                            let varsize = match value.clone().into_unpacked() {
+                                FlatValue::ArrInt(x) => *x.borrow().dims.first().unwrap(),
+                                FlatValue::ArrStr(x) => *x.borrow().dims.first().unwrap(),
+                                _ => unreachable!(),
+                            };
+                            EraLiteral::Integer(varsize as _, fun_si)
+                        }
+                        _ => {
+                            return Err(make_err(
+                                fun_si,
+                                true,
+                                "invalid function call during constant expression evaluation",
+                            ))
+                        }
                     }
                 }
-            }
-            EraExpr::Binary(x1, op, x2) => match (
-                x1.try_evaluate_constant(vars)?,
-                op.kind,
-                x2.try_evaluate_constant(vars)?,
-            ) {
-                (EraLiteral::Integer(x1, _), EraTokenKind::Plus, EraLiteral::Integer(x2, _)) => {
-                    let x = match x1.checked_add(x2) {
-                        Some(x) => x,
-                        None => {
-                            return Err(make_overflow_err(op.src_info));
-                        }
+                // EraExpr::Binary(x1, op, x2) => match (
+                //     x1.try_evaluate_constant(vars)?,
+                //     op.kind,
+                //     x2.try_evaluate_constant(vars)?,
+                // ) {
+                //     (
+                //         EraLiteral::Integer(x1, _),
+                //         EraTokenKind::Plus,
+                //         EraLiteral::Integer(x2, _),
+                //     ) => {
+                //         let x = match x1.checked_add(x2) {
+                //             Some(x) => x,
+                //             None => {
+                //                 return Err(make_overflow_err(op.src_info));
+                //             }
+                //         };
+                //         EraLiteral::Integer(x, src_info)
+                //     }
+                //     (EraLiteral::String(x1, _), EraTokenKind::Plus, EraLiteral::String(x2, _)) => {
+                //         let x = x1 + &x2;
+                //         EraLiteral::String(x, src_info)
+                //     }
+                //     (
+                //         EraLiteral::Integer(x1, _),
+                //         EraTokenKind::Minus,
+                //         EraLiteral::Integer(x2, _),
+                //     ) => {
+                //         let x = match x1.checked_sub(x2) {
+                //             Some(x) => x,
+                //             None => {
+                //                 return Err(make_overflow_err(op.src_info));
+                //             }
+                //         };
+                //         EraLiteral::Integer(x, src_info)
+                //     }
+                //     (
+                //         EraLiteral::Integer(x1, _),
+                //         EraTokenKind::Multiply,
+                //         EraLiteral::Integer(x2, _),
+                //     ) => {
+                //         let x = match x1.checked_mul(x2) {
+                //             Some(x) => x,
+                //             None => {
+                //                 return Err(make_overflow_err(op.src_info));
+                //             }
+                //         };
+                //         EraLiteral::Integer(x, src_info)
+                //     }
+                //     (
+                //         EraLiteral::Integer(x1, _),
+                //         EraTokenKind::Divide,
+                //         EraLiteral::Integer(x2, _),
+                //     ) => {
+                //         let x = match x1.checked_div(x2) {
+                //             Some(x) => x,
+                //             None => {
+                //                 return Err(make_overflow_err(op.src_info));
+                //             }
+                //         };
+                //         EraLiteral::Integer(x, src_info)
+                //     }
+                //     (
+                //         EraLiteral::Integer(x1, _),
+                //         EraTokenKind::BitShiftL,
+                //         EraLiteral::Integer(x2, _),
+                //     ) => {
+                //         // HACK: Overflow error report for x2 by replacing Err with u32::MAX
+                //         let x = match x1.checked_shl(x2.try_into().unwrap_or(u32::MAX)) {
+                //             Some(x) => x,
+                //             None => {
+                //                 return Err(make_overflow_err(op.src_info));
+                //             }
+                //         };
+                //         EraLiteral::Integer(x, src_info)
+                //     }
+                //     (
+                //         EraLiteral::Integer(x1, _),
+                //         EraTokenKind::BitShiftR,
+                //         EraLiteral::Integer(x2, _),
+                //     ) => {
+                //         let x = match x1.checked_shr(x2.try_into().unwrap_or(u32::MAX)) {
+                //             Some(x) => x,
+                //             None => {
+                //                 return Err(make_overflow_err(op.src_info));
+                //             }
+                //         };
+                //         EraLiteral::Integer(x, src_info)
+                //     }
+                //     _ => {
+                //         return Err(make_err(
+                //             op.src_info,
+                //             true,
+                //             "invalid arithmetic during constant expression evaluation",
+                //         ));
+                //     }
+                // },
+                EraExpr::Binary(x1, op, x2) => {
+                    expr_stack.push(ExprStackValue::Op(op));
+                    expr_stack.push(ExprStackValue::Expr(*x2));
+                    expr_stack.push(ExprStackValue::Expr(*x1));
+                    continue;
+                },
+                EraExpr::Ternary(x1, _, x2, _, x3) => {
+                    let x1 = x1.try_evaluate_constant(vars)?;
+                    let x2 = x2.try_evaluate_constant(vars)?;
+                    let x3 = x3.try_evaluate_constant(vars)?;
+                    let x1 = match x1 {
+                        EraLiteral::Integer(x, _) => x != 0,
+                        EraLiteral::String(_, _) => true,
                     };
-                    EraLiteral::Integer(x, src_info)
+                    if x1 {
+                        x2
+                    } else {
+                        x3
+                    }
                 }
-                (EraLiteral::String(x1, _), EraTokenKind::Plus, EraLiteral::String(x2, _)) => {
-                    let x = x1 + &x2;
-                    EraLiteral::String(x, src_info)
-                }
-                (EraLiteral::Integer(x1, _), EraTokenKind::Minus, EraLiteral::Integer(x2, _)) => {
-                    let x = match x1.checked_sub(x2) {
-                        Some(x) => x,
-                        None => {
-                            return Err(make_overflow_err(op.src_info));
-                        }
-                    };
-                    EraLiteral::Integer(x, src_info)
-                }
-                (
-                    EraLiteral::Integer(x1, _),
-                    EraTokenKind::Multiply,
-                    EraLiteral::Integer(x2, _),
-                ) => {
-                    let x = match x1.checked_mul(x2) {
-                        Some(x) => x,
-                        None => {
-                            return Err(make_overflow_err(op.src_info));
-                        }
-                    };
-                    EraLiteral::Integer(x, src_info)
-                }
-                (EraLiteral::Integer(x1, _), EraTokenKind::Divide, EraLiteral::Integer(x2, _)) => {
-                    let x = match x1.checked_div(x2) {
-                        Some(x) => x,
-                        None => {
-                            return Err(make_overflow_err(op.src_info));
-                        }
-                    };
-                    EraLiteral::Integer(x, src_info)
-                }
-                (
-                    EraLiteral::Integer(x1, _),
-                    EraTokenKind::BitShiftL,
-                    EraLiteral::Integer(x2, _),
-                ) => {
-                    // HACK: Overflow error report for x2 by replacing Err with u32::MAX
-                    let x = match x1.checked_shl(x2.try_into().unwrap_or(u32::MAX)) {
-                        Some(x) => x,
-                        None => {
-                            return Err(make_overflow_err(op.src_info));
-                        }
-                    };
-                    EraLiteral::Integer(x, src_info)
-                }
-                (
-                    EraLiteral::Integer(x1, _),
-                    EraTokenKind::BitShiftR,
-                    EraLiteral::Integer(x2, _),
-                ) => {
-                    let x = match x1.checked_shr(x2.try_into().unwrap_or(u32::MAX)) {
-                        Some(x) => x,
-                        None => {
-                            return Err(make_overflow_err(op.src_info));
-                        }
-                    };
-                    EraLiteral::Integer(x, src_info)
-                }
-                _ => {
-                    return Err(make_err(
-                        op.src_info,
-                        true,
-                        "invalid arithmetic during constant expression evaluation",
-                    ));
-                }
-            },
-            EraExpr::Ternary(x1, _, x2, _, x3) => {
-                let x1 = x1.try_evaluate_constant(vars)?;
-                let x2 = x2.try_evaluate_constant(vars)?;
-                let x3 = x3.try_evaluate_constant(vars)?;
-                let x1 = match x1 {
-                    EraLiteral::Integer(x, _) => x != 0,
-                    EraLiteral::String(_, _) => true,
-                };
-                if x1 {
-                    x2
-                } else {
-                    x3
-                }
-            }
-        })
+            };
+            val_stack.push(literal);
+        }
+
+        let [result] = TryInto::<[_; 1]>::try_into(val_stack).expect("stack value count is not 1");
+        Ok(result)
     }
 }
 

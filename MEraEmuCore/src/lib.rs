@@ -347,6 +347,7 @@ mod tests {
                 ;#DIM REF xre
                 #DIM val = 1 + 1 ;*0
                 #DIMS world_str, -2 + 3 = ""
+                #DIMS tmpstr = "[" + ";" + "&" + "]"
 
                 ;#DIM cnt = 10000000
                 #DIM cnt = 100
@@ -402,6 +403,8 @@ mod tests {
                 REND
                 PRINTFORM {COUNT}
 
+                PRINTV tmpstr
+
                 QUIT
                 PRINTFORM not printed
         "#};
@@ -432,7 +435,7 @@ mod tests {
         drop(engine);
         assert_eq!(
             &callback.output,
-            "(5050)Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135"
+            "(5050)Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135[;&]"
         );
 
         Ok(())

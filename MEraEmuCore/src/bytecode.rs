@@ -21,8 +21,8 @@ pub enum EraBytecodePrimaryType {
     //FunJump,
     /*  FunCall:
         Stack should contain <args...> <function>.
-        Note that for dynamic calls, interaction with arguments & return
-        values are impossible.
+        Note that for dynamic calls, arguments must be packed, and interaction
+        with return values are impossible.
     */
     FunCall,
     TryFunCall, // Returns whether function exists
@@ -58,10 +58,10 @@ pub enum EraBytecodePrimaryType {
     SetGlobal,
     GetLocal,
     SetLocal,
-    GetArrayVal,
-    SetArrayVal,
     GetMDArrayVal, // Requires an imm8 to describe dimensions count; may be slow
     SetMDArrayVal,
+    GetArrayVal,
+    SetArrayVal,
     // HACK: Special bytecode for handling increments & decrements
     IncMDArrayVal,
     DecMDArrayVal,

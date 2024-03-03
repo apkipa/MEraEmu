@@ -316,11 +316,45 @@ macro_rules! vm_pop_stack {
         }
     };
 }
-// macro_rules! arr_visit_mut {
-//     ($ctx:expr, ) => {
-//         // ...
-//     };
-// }
+
+macro_rules! unpack_int {
+    ($ctx:expr, $value:ident) => {
+        let $value = $ctx.unpack_int($value.into())?;
+    };
+}
+macro_rules! unpack_str {
+    ($ctx:expr, $value:ident) => {
+        let $value = $ctx.unpack_str($value.into())?;
+    };
+}
+macro_rules! unpack_arrint_mut {
+    ($ctx:expr, $value:ident) => {
+        let $value = $ctx.unpack_arrint($value.into())?;
+        let mut $value = $value.borrow_mut();
+    };
+}
+macro_rules! unpack_arrstr_mut {
+    ($ctx:expr, $value:ident) => {
+        let $value = $ctx.unpack_arrstr($value.into())?;
+        let mut $value = $value.borrow_mut();
+    };
+}
+macro_rules! unpack_arrint_idx_mut {
+    ($ctx:expr, $value:ident, $index:expr) => {
+        let $value = $ctx.unpack_arrint($value.into())?;
+        let mut $value = $value.borrow_mut();
+        let Some($value) = $value.flat_get_mut($index as _) else {
+            bail_opt!($ctx, true, "invalid indices into array");
+        };
+    };
+}
+macro_rules! arr_idx_mut {
+    ($ctx:expr, $value:ident, $index:expr) => {
+        let Some($value) = $value.flat_get_mut($index as _) else {
+            bail_opt!($ctx, true, "invalid indices into array");
+        };
+    };
+}
 
 #[derive(Default)]
 pub struct EraVarPool {
@@ -769,20 +803,6 @@ impl EraVirtualMachine {
         let mut ctx;
         make_ctx!(self, ctx);
 
-        // let Some(FlatValue::ArrInt(vresult)) = ctx
-        //     .global_vars
-        //     .get_var("RESULT")
-        //     .map(|x| x.clone().into_unpacked())
-        // else {
-        //     bail_opt!(ctx, None, true, "variable `RESULT` not properly defined");
-        // };
-        // let Some(FlatValue::ArrStr(vresults)) = ctx
-        //     .global_vars
-        //     .get_var("RESULTS")
-        //     .map(|x| x.clone().into_unpacked())
-        // else {
-        //     bail_opt!(ctx, None, true, "variable `RESULTS` not properly defined");
-        // };
         let vresult = ctx.get_var_arrint("RESULT")?;
         let vresults = ctx.get_var_arrstr("RESULTS")?;
 
@@ -835,8 +855,21 @@ impl EraVirtualMachine {
                     let msg = msg.as_ref().map(|x| x.val.as_str()).unwrap_or("<invalid>");
                     bail_opt!(ctx, true, format!("invalid bytecode: {msg}"));
                 }
-                Pop => {
-                    [_] = ctx.pop_stack()?;
+                Throw => {
+                    let msg = ctx.stack.pop().and_then(|x| match x.val.into_unpacked() {
+                        FlatValue::Int(x) => Some(Rc::new(StrValue {
+                            val: x.val.to_string(),
+                        })),
+                        FlatValue::Str(x) => Some(x.clone()),
+                        FlatValue::ArrInt(x) => x.borrow().vals.first().map(|x| {
+                            Rc::new(StrValue {
+                                val: x.val.to_string(),
+                            })
+                        }),
+                        FlatValue::ArrStr(x) => x.borrow().vals.first().map(|x| x.clone()),
+                    });
+                    let msg = msg.as_ref().map(|x| x.val.as_str()).unwrap_or("<invalid>");
+                    bail_opt!(ctx, true, format!("THROW: {msg}"));
                 }
                 ReturnVoid => {
                     ctx.stack.drain(ctx.cur_frame.stack_start..);
@@ -854,11 +887,51 @@ impl EraVirtualMachine {
                     }
                     ip_offset_delta = 0;
                 }
+                Jump | JumpW | JumpWW => {
+                    let imm_ip = ctx.cur_frame.ip.offset + 1;
+                    let offset: isize = match primary_bytecode {
+                        Jump => ctx.chunk_read_u8(imm_ip)? as i8 as _,
+                        JumpW => ctx.chunk_read_u16(imm_ip)? as i16 as _,
+                        JumpWW => ctx.chunk_read_u32(imm_ip)? as i32 as _,
+                        _ => unreachable!(),
+                    };
+                    ip_offset_delta = offset;
+                }
+                JumpCond | JumpCondW | JumpCondWW => {
+                    let imm_ip = ctx.cur_frame.ip.offset + 1;
+                    let offset_delta;
+                    let offset: isize = match primary_bytecode {
+                        JumpCond => {
+                            offset_delta = 1;
+                            ctx.chunk_read_u8(imm_ip)? as i8 as _
+                        }
+                        JumpCondW => {
+                            offset_delta = 2;
+                            ctx.chunk_read_u16(imm_ip)? as i16 as _
+                        }
+                        JumpCondWW => {
+                            offset_delta = 4;
+                            ctx.chunk_read_u32(imm_ip)? as i32 as _
+                        }
+                        _ => unreachable!(),
+                    };
+                    ip_offset_delta += offset_delta;
+                    let [value] = ctx.pop_stack()?;
+                    match value.val.into_unpacked() {
+                        FlatValue::Int(x) => {
+                            if x.val != 0 {
+                                ip_offset_delta = offset;
+                            }
+                        }
+                        FlatValue::Str(_) => ip_offset_delta = offset,
+                        _ => bail_opt!(ctx, true, "expected primitive values as operands"),
+                    }
+                }
                 FunCall => {
                     let args_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)? as _;
                     ip_offset_delta += 1;
                     let [entry] = ctx.pop_stack()?;
-                    // NOTE: We ignore the return value is we are looking up the callee
+                    // NOTE: We ignore the return value if we are looking up the callee
                     //       dynamically (i.e. by string instead of index)
                     let ignore_return_value;
                     let func_info = match entry.val.into_unpacked() {
@@ -1028,6 +1101,9 @@ impl EraVirtualMachine {
                         ctx.stack.push(Value::new_int(0).into());
                     }
                 }
+                // FunExists => {
+                //     // TODO...
+                // }
                 LoadConst | LoadConstW | LoadConstWW => {
                     let imm_ip = ctx.cur_frame.ip.offset + 1;
                     let offset_delta;
@@ -1065,6 +1141,37 @@ impl EraVirtualMachine {
                     let imm = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)? as i8;
                     ip_offset_delta += 1;
                     ctx.stack.push(Value::new_int(imm as _).into());
+                }
+                ConvertToString => {
+                    let [value] = ctx.pop_stack()?;
+                    let value = match value.val.into_unpacked() {
+                        FlatValue::Int(x) => Value::new_str(x.val.to_string()),
+                        FlatValue::Str(x) => Value::new_str_rc(x),
+                        _ => bail_opt!(ctx, true, "expected primitive values as operands"),
+                    };
+                    ctx.stack.push(value.into());
+                }
+                ConvertToInteger => {
+                    let [value] = ctx.pop_stack()?;
+                    let value = match value.val.into_unpacked() {
+                        FlatValue::Int(x) => Value::new_int_obj(x),
+                        FlatValue::Str(x) => {
+                            let x = match x.val.parse() {
+                                Ok(x) => x,
+                                Err(_) => bail_opt!(
+                                    ctx,
+                                    true,
+                                    format!(
+                                        "string `{}` cannot be converted to a valid integer",
+                                        x.val
+                                    )
+                                ),
+                            };
+                            Value::new_int(x)
+                        }
+                        _ => bail_opt!(ctx, true, "expected primitive values as operands"),
+                    };
+                    ctx.stack.push(value.into());
                 }
                 BuildString => {
                     let count = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
@@ -1113,225 +1220,8 @@ impl EraVirtualMachine {
                     };
                     ctx.stack.push(value.into());
                 }
-                ConvertToString => {
-                    let [value] = ctx.pop_stack()?;
-                    let value = match value.val.into_unpacked() {
-                        FlatValue::Int(x) => Value::new_str(x.val.to_string()),
-                        FlatValue::Str(x) => Value::new_str_rc(x),
-                        _ => bail_opt!(ctx, true, "expected primitive values as operands"),
-                    };
-                    ctx.stack.push(value.into());
-                }
-                ConvertToInteger => {
-                    let [value] = ctx.pop_stack()?;
-                    let value = match value.val.into_unpacked() {
-                        FlatValue::Int(x) => Value::new_int_obj(x),
-                        FlatValue::Str(x) => {
-                            let x = match x.val.parse() {
-                                Ok(x) => x,
-                                Err(_) => bail_opt!(
-                                    ctx,
-                                    true,
-                                    format!(
-                                        "string `{}` cannot be converted to a valid integer",
-                                        x.val
-                                    )
-                                ),
-                            };
-                            Value::new_int(x)
-                        }
-                        _ => bail_opt!(ctx, true, "expected primitive values as operands"),
-                    };
-                    ctx.stack.push(value.into());
-                }
-                Print | PrintExtended => {
-                    let [value] = ctx.pop_stack()?;
-                    let flags = match primary_bytecode {
-                        Print => PrintExtendedFlags::new(),
-                        PrintExtended => {
-                            let flags = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?.into();
-                            ip_offset_delta += 1;
-                            flags
-                        }
-                        _ => unreachable!(),
-                    };
-                    match value.val.into_unpacked() {
-                        FlatValue::Int(x) => ctx.callback.on_print(&x.val.to_string(), flags),
-                        FlatValue::Str(x) => ctx.callback.on_print(&x.val, flags),
-                        _ => bail_opt!(ctx, true, "expected primitive values as operands"),
-                    }
-                }
-                Add => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
-                            // TODO: Strict integer arithmetic check
-                            Value::new_int(lhs.val.wrapping_add(rhs.val))
-                        }
-                        (FlatValue::Str(lhs), FlatValue::Str(rhs)) => {
-                            Value::new_str(lhs.val.clone() + &rhs.val)
-                        }
-                        x => {
-                            bail_opt!(ctx,
-                                true,
-                                format!("expected primitive values of same type as operands, found {x:?}")
-                            );
-                        }
-                    };
-                    ctx.stack.push(result.into());
-                }
-                Subtract => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
-                            // TODO: Strict integer arithmetic check
-                            Value::new_int(lhs.val.wrapping_sub(rhs.val))
-                        }
-                        x => bail_opt!(
-                            ctx,
-                            true,
-                            format!("expected integer values as operands, found {x:?}")
-                        ),
-                    };
-                    ctx.stack.push(result.into());
-                }
-                Multiply => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
-                            // TODO: Strict integer arithmetic check
-                            Value::new_int(lhs.val.wrapping_mul(rhs.val))
-                        }
-                        // TODO: String * Int
-                        x => bail_opt!(
-                            ctx,
-                            true,
-                            format!("expected <integer, integer> or <integer, string> as operands, found {x:?}")
-                        ),
-                    };
-                    ctx.stack.push(result.into());
-                }
-                Divide => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
-                            // TODO: Strict integer arithmetic check
-                            if rhs.val == 0 {
-                                bail_opt!(ctx, true, "division by zero");
-                            }
-                            Value::new_int(lhs.val.wrapping_div(rhs.val))
-                        }
-                        x => bail_opt!(
-                            ctx,
-                            true,
-                            format!("expected integer values as operands, found {x:?}")
-                        ),
-                    };
-                    ctx.stack.push(result.into());
-                }
-                Modulo => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
-                            // TODO: Strict integer arithmetic check
-                            if rhs.val == 0 {
-                                bail_opt!(ctx, true, "modulus by zero");
-                            }
-                            // TODO: Determine the proper remainder operation?
-                            Value::new_int(lhs.val.wrapping_rem(rhs.val))
-                        }
-                        x => bail_opt!(
-                            ctx,
-                            true,
-                            format!("expected integer values as operands, found {x:?}")
-                        ),
-                    };
-                    ctx.stack.push(result.into());
-                }
-                Negate => {
-                    let [value] = ctx.pop_stack()?;
-                    let result = match value.val.into_unpacked() {
-                        FlatValue::Int(x) => Value::new_int(x.val.wrapping_neg()),
-                        _ => bail_opt!(ctx, true, "expected integer values as operands"),
-                    };
-                    ctx.stack.push(result.into());
-                }
-                BitAnd | BitOr | BitXor | BitShiftL | BitShiftR => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result =
-                        Value::new_int(match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
-                            (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
-                                BitAnd => lhs.val & rhs.val,
-                                BitOr => lhs.val | rhs.val,
-                                BitXor => lhs.val ^ rhs.val,
-                                BitShiftL => lhs.val.wrapping_shl(rhs.val as _),
-                                BitShiftR => lhs.val.wrapping_shr(rhs.val as _),
-                                _ => unreachable!(),
-                            },
-                            _ => bail_opt!(ctx, true, "expected integer values as operands"),
-                        });
-                    ctx.stack.push(result.into());
-                }
-                BitNot => {
-                    let [x] = ctx.pop_stack()?;
-                    let x = ctx.unpack_int(x.into())?;
-                    ctx.stack.push(Value::new_int(!x.val).into());
-                }
-                CompareL | CompareEq | CompareLEq => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = Value::new_int(
-                        match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
-                            (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
-                                CompareL => lhs.val < rhs.val,
-                                CompareEq => lhs.val == rhs.val,
-                                CompareLEq => lhs.val <= rhs.val,
-                                _ => unreachable!(),
-                            },
-                            (FlatValue::Str(lhs), FlatValue::Str(rhs)) => match primary_bytecode {
-                                CompareL => lhs.val < rhs.val,
-                                CompareEq => lhs.val == rhs.val,
-                                CompareLEq => lhs.val <= rhs.val,
-                                _ => unreachable!(),
-                            },
-                            _ => bail_opt!(
-                                ctx,
-                                true,
-                                "expected <integer, integer> or <string, string> as operands"
-                            ),
-                        }
-                        .into(),
-                    );
-                    ctx.stack.push(result.into());
-                }
-                LogicalAnd | LogicalOr => {
-                    // TODO: Remove this
-                    todo!()
-                    // let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    // let result = Value::new_int(match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
-                    //     (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
-                    //         LogicalAnd => lhs.val && rhs.val,
-                    //         LogicalOr => lhs.val || rhs.val,
-                    //         _ => unreachable!(),
-                    //     },
-                    //     _ => {
-                    //         vm_report_err!(
-                    //             ctx,
-                    //             cur_frame,
-                    //             true,
-                    //             "expected integer values as operands"
-                    //         );
-                    //         return None;
-                    //     }
-                    // });
-                    // ctx.stack.push(result);
-                }
-                LogicalNot => {
-                    let [value] = ctx.pop_stack()?;
-                    let result = Value::new_int(match value.val.into_unpacked() {
-                        FlatValue::Int(x) => (x.val == 0) as _,
-                        _ => bail_opt!(ctx, true, "expected integer values as operands"),
-                    });
-                    ctx.stack.push(result.into());
+                Pop => {
+                    [_] = ctx.pop_stack()?;
                 }
                 Duplicate => {
                     let [value] = ctx.pop_stack()?;
@@ -1866,6 +1756,192 @@ impl EraVirtualMachine {
                         _ => bail_opt!(ctx, true, "expected arrays of same type as operands"),
                     }
                 }
+                Add => {
+                    let [lhs, rhs] = ctx.pop_stack()?;
+                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
+                            // TODO: Strict integer arithmetic check
+                            Value::new_int(lhs.val.wrapping_add(rhs.val))
+                        }
+                        (FlatValue::Str(lhs), FlatValue::Str(rhs)) => {
+                            Value::new_str(lhs.val.clone() + &rhs.val)
+                        }
+                        x => {
+                            bail_opt!(ctx,
+                                true,
+                                format!("expected primitive values of same type as operands, found {x:?}")
+                            );
+                        }
+                    };
+                    ctx.stack.push(result.into());
+                }
+                Subtract => {
+                    let [lhs, rhs] = ctx.pop_stack()?;
+                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
+                            // TODO: Strict integer arithmetic check
+                            Value::new_int(lhs.val.wrapping_sub(rhs.val))
+                        }
+                        x => bail_opt!(
+                            ctx,
+                            true,
+                            format!("expected integer values as operands, found {x:?}")
+                        ),
+                    };
+                    ctx.stack.push(result.into());
+                }
+                Multiply => {
+                    let [lhs, rhs] = ctx.pop_stack()?;
+                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
+                            // TODO: Strict integer arithmetic check
+                            Value::new_int(lhs.val.wrapping_mul(rhs.val))
+                        }
+                        // TODO: String * Int
+                        x => bail_opt!(
+                            ctx,
+                            true,
+                            format!("expected <integer, integer> or <integer, string> as operands, found {x:?}")
+                        ),
+                    };
+                    ctx.stack.push(result.into());
+                }
+                Divide => {
+                    let [lhs, rhs] = ctx.pop_stack()?;
+                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
+                            // TODO: Strict integer arithmetic check
+                            if rhs.val == 0 {
+                                bail_opt!(ctx, true, "division by zero");
+                            }
+                            Value::new_int(lhs.val.wrapping_div(rhs.val))
+                        }
+                        x => bail_opt!(
+                            ctx,
+                            true,
+                            format!("expected integer values as operands, found {x:?}")
+                        ),
+                    };
+                    ctx.stack.push(result.into());
+                }
+                Modulo => {
+                    let [lhs, rhs] = ctx.pop_stack()?;
+                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
+                            // TODO: Strict integer arithmetic check
+                            if rhs.val == 0 {
+                                bail_opt!(ctx, true, "modulus by zero");
+                            }
+                            // TODO: Determine the proper remainder operation?
+                            Value::new_int(lhs.val.wrapping_rem(rhs.val))
+                        }
+                        x => bail_opt!(
+                            ctx,
+                            true,
+                            format!("expected integer values as operands, found {x:?}")
+                        ),
+                    };
+                    ctx.stack.push(result.into());
+                }
+                Negate => {
+                    let [value] = ctx.pop_stack()?;
+                    let result = match value.val.into_unpacked() {
+                        FlatValue::Int(x) => Value::new_int(x.val.wrapping_neg()),
+                        _ => bail_opt!(ctx, true, "expected integer values as operands"),
+                    };
+                    ctx.stack.push(result.into());
+                }
+                BitAnd | BitOr | BitXor | BitShiftL | BitShiftR => {
+                    let [lhs, rhs] = ctx.pop_stack()?;
+                    let result =
+                        Value::new_int(match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                            (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
+                                BitAnd => lhs.val & rhs.val,
+                                BitOr => lhs.val | rhs.val,
+                                BitXor => lhs.val ^ rhs.val,
+                                BitShiftL => lhs.val.wrapping_shl(rhs.val as _),
+                                BitShiftR => lhs.val.wrapping_shr(rhs.val as _),
+                                _ => unreachable!(),
+                            },
+                            _ => bail_opt!(ctx, true, "expected integer values as operands"),
+                        });
+                    ctx.stack.push(result.into());
+                }
+                BitNot => {
+                    let [x] = ctx.pop_stack()?;
+                    let x = ctx.unpack_int(x.into())?;
+                    ctx.stack.push(Value::new_int(!x.val).into());
+                }
+                CompareL | CompareEq | CompareLEq => {
+                    let [lhs, rhs] = ctx.pop_stack()?;
+                    let result = Value::new_int(
+                        match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                            (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
+                                CompareL => lhs.val < rhs.val,
+                                CompareEq => lhs.val == rhs.val,
+                                CompareLEq => lhs.val <= rhs.val,
+                                _ => unreachable!(),
+                            },
+                            (FlatValue::Str(lhs), FlatValue::Str(rhs)) => match primary_bytecode {
+                                CompareL => lhs.val < rhs.val,
+                                CompareEq => lhs.val == rhs.val,
+                                CompareLEq => lhs.val <= rhs.val,
+                                _ => unreachable!(),
+                            },
+                            _ => bail_opt!(
+                                ctx,
+                                true,
+                                "expected <integer, integer> or <string, string> as operands"
+                            ),
+                        }
+                        .into(),
+                    );
+                    ctx.stack.push(result.into());
+                }
+                LogicalAnd | LogicalOr => {
+                    // TODO: Remove this
+                    todo!()
+                    // let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
+                    // let result = Value::new_int(match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                    //     (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
+                    //         LogicalAnd => lhs.val && rhs.val,
+                    //         LogicalOr => lhs.val || rhs.val,
+                    //         _ => unreachable!(),
+                    //     },
+                    //     _ => {
+                    //         vm_report_err!(
+                    //             ctx,
+                    //             cur_frame,
+                    //             true,
+                    //             "expected integer values as operands"
+                    //         );
+                    //         return None;
+                    //     }
+                    // });
+                    // ctx.stack.push(result);
+                }
+                LogicalNot => {
+                    let [value] = ctx.pop_stack()?;
+                    let result = Value::new_int(match value.val.into_unpacked() {
+                        FlatValue::Int(x) => (x.val == 0) as _,
+                        _ => bail_opt!(ctx, true, "expected integer values as operands"),
+                    });
+                    ctx.stack.push(result.into());
+                }
+                GetRandomRange => {
+                    let [lower, upper] = ctx.pop_stack()?;
+                    let lower = ctx.unpack_int(lower.into())?;
+                    let upper = ctx.unpack_int(upper.into())?;
+                    if lower.val >= upper.val {
+                        bail_opt!(ctx, true, "random range is empty");
+                    }
+                    let range_len = (upper.val - lower.val) as _;
+                    let rand_num = self
+                        .uniform_gen
+                        .gen_range(0..range_len, || ctx.callback.on_get_rand());
+                    let result = lower.val.wrapping_add_unsigned(rand_num);
+                    ctx.stack.push(Value::new_int(result).into());
+                }
                 GetRandomMax => {
                     let [upper] = ctx.pop_stack()?;
                     let upper = match upper.val.into_unpacked() {
@@ -1878,61 +1954,24 @@ impl EraVirtualMachine {
                         .gen_range(0..upper, || ctx.callback.on_get_rand());
                     ctx.stack.push(Value::new_int(result as _).into());
                 }
-                Jump | JumpW | JumpWW => {
-                    let imm_ip = ctx.cur_frame.ip.offset + 1;
-                    let offset: isize = match primary_bytecode {
-                        Jump => ctx.chunk_read_u8(imm_ip)? as i8 as _,
-                        JumpW => ctx.chunk_read_u16(imm_ip)? as i16 as _,
-                        JumpWW => ctx.chunk_read_u32(imm_ip)? as i32 as _,
-                        _ => unreachable!(),
-                    };
-                    ip_offset_delta = offset;
-                }
-                JumpCond | JumpCondW | JumpCondWW => {
-                    let imm_ip = ctx.cur_frame.ip.offset + 1;
-                    let offset_delta;
-                    let offset: isize = match primary_bytecode {
-                        JumpCond => {
-                            offset_delta = 1;
-                            ctx.chunk_read_u8(imm_ip)? as i8 as _
-                        }
-                        JumpCondW => {
-                            offset_delta = 2;
-                            ctx.chunk_read_u16(imm_ip)? as i16 as _
-                        }
-                        JumpCondWW => {
-                            offset_delta = 4;
-                            ctx.chunk_read_u32(imm_ip)? as i32 as _
-                        }
-                        _ => unreachable!(),
-                    };
-                    ip_offset_delta += offset_delta;
-                    let [value] = ctx.pop_stack()?;
-                    match value.val.into_unpacked() {
-                        FlatValue::Int(x) => {
-                            if x.val != 0 {
-                                ip_offset_delta = offset;
-                            }
-                        }
-                        FlatValue::Str(_) => ip_offset_delta = offset,
-                        _ => bail_opt!(ctx, true, "expected primitive values as operands"),
+                SplitString => {
+                    // TODO: Make split count as return value of SplitString instead
+                    let [input, separator, dest, dest_i, dest_count, dest_count_i] =
+                        ctx.pop_stack()?;
+                    unpack_str!(ctx, input);
+                    unpack_str!(ctx, separator);
+                    unpack_int!(ctx, dest_count_i);
+                    unpack_arrstr_mut!(ctx, dest);
+                    unpack_arrint_idx_mut!(ctx, dest_count, dest_count_i.val);
+                    let mut count = 0;
+                    for part in input.val.split(&separator.val) {
+                        arr_idx_mut!(ctx, dest, count);
+                        *dest = Rc::new(StrValue {
+                            val: part.to_owned(),
+                        });
+                        count += 1;
                     }
-                }
-                Throw => {
-                    let msg = ctx.stack.pop().and_then(|x| match x.val.into_unpacked() {
-                        FlatValue::Int(x) => Some(Rc::new(StrValue {
-                            val: x.val.to_string(),
-                        })),
-                        FlatValue::Str(x) => Some(x.clone()),
-                        FlatValue::ArrInt(x) => x.borrow().vals.first().map(|x| {
-                            Rc::new(StrValue {
-                                val: x.val.to_string(),
-                            })
-                        }),
-                        FlatValue::ArrStr(x) => x.borrow().vals.first().map(|x| x.clone()),
-                    });
-                    let msg = msg.as_ref().map(|x| x.val.as_str()).unwrap_or("<invalid>");
-                    bail_opt!(ctx, true, format!("THROW: {msg}"));
+                    dest_count.val = count;
                 }
                 MaximumInt => {
                     let [a1, a2] = ctx.pop_stack()?;
@@ -2014,6 +2053,24 @@ impl EraVirtualMachine {
                         _ => unreachable!(),
                     };
                     ctx.stack.push(Value::new_str(result).into());
+                }
+                Print | PrintLine | PrintExtended => {
+                    let [value] = ctx.pop_stack()?;
+                    let flags = match primary_bytecode {
+                        Print => PrintExtendedFlags::new(),
+                        PrintLine => PrintExtendedFlags::new().with_is_line(true),
+                        PrintExtended => {
+                            let flags = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?.into();
+                            ip_offset_delta += 1;
+                            flags
+                        }
+                        _ => unreachable!(),
+                    };
+                    match value.val.into_unpacked() {
+                        FlatValue::Int(x) => ctx.callback.on_print(&x.val.to_string(), flags),
+                        FlatValue::Str(x) => ctx.callback.on_print(&x.val, flags),
+                        _ => bail_opt!(ctx, true, "expected primitive values as operands"),
+                    }
                 }
                 GCreate => {
                     let [gid, width, height] = ctx.pop_stack()?;
@@ -2107,7 +2164,10 @@ impl EraVirtualMachine {
             msg: msg.into(),
         });
     }
-    fn check_trap_var(trap_vars: &hashbrown::HashMap<*const (), usize>, value: &Value) -> Option<usize> {
+    fn check_trap_var(
+        trap_vars: &hashbrown::HashMap<*const (), usize>,
+        value: &Value,
+    ) -> Option<usize> {
         let addr: *const () = match value.clone().into_unpacked() {
             FlatValue::Int(_) | FlatValue::Str(_) => return None,
             FlatValue::ArrInt(x) => Rc::as_ptr(&x) as _,
