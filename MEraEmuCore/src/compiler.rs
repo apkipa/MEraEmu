@@ -2509,8 +2509,13 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 ctx.this.expr_int(length)?;
                 ctx.this.chunk.emit_bytecode(bytecode, src_info);
             }
-            b"STRFIND" => {
+            b"STRFIND" | b"STRFINDU" => {
                 ctx.result()?;
+                let bytecode = match upper_target.as_bytes() {
+                    b"STRFIND" => StrFind,
+                    b"STRFINDU" => StrFindU,
+                    _ => unreachable!(),
+                };
                 let [haystack, needle, start_pos];
                 match args.len() {
                     2 => {
@@ -2533,45 +2538,18 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 ctx.this.expr_str(haystack)?;
                 ctx.this.expr_str(needle)?;
                 ctx.this.expr_int(start_pos)?;
-                ctx.this.chunk.emit_bytecode(StrFind, src_info);
+                ctx.this.chunk.emit_bytecode(bytecode, src_info);
             }
-            b"STRFINDU" => {
+            b"STRLENS" | b"STRLENSU" => {
                 ctx.result()?;
-                let [haystack, needle, start_pos];
-                match args.len() {
-                    2 => {
-                        [haystack, needle] = ctx.unpack_some_args(args)?;
-                        start_pos = EraExpr::new_int(0, src_info);
-                    }
-                    3 => {
-                        [haystack, needle, start_pos] = ctx.unpack_some_args(args)?;
-                    }
-                    _ => bail_opt!(
-                        ctx.this,
-                        ctx.src_info,
-                        format!(
-                            "no overload of `{}` accepts {} arguments",
-                            ctx.target,
-                            args.len()
-                        )
-                    ),
-                }
-                ctx.this.expr_str(haystack)?;
-                ctx.this.expr_str(needle)?;
-                ctx.this.expr_int(start_pos)?;
-                ctx.this.chunk.emit_bytecode(StrFindU, src_info);
-            }
-            b"STRLENS" => {
-                ctx.result()?;
+                let bytecode = match upper_target.as_bytes() {
+                    b"STRLENS" => StrLen,
+                    b"STRLENSU" => StrLenU,
+                    _ => unreachable!(),
+                };
                 let [haystack] = ctx.unpack_some_args(args)?;
                 ctx.this.expr_str(haystack)?;
-                ctx.this.chunk.emit_bytecode(StrLen, src_info);
-            }
-            b"STRLENSU" => {
-                ctx.result()?;
-                let [haystack] = ctx.unpack_some_args(args)?;
-                ctx.this.expr_str(haystack)?;
-                ctx.this.chunk.emit_bytecode(StrLenU, src_info);
+                ctx.this.chunk.emit_bytecode(bytecode, src_info);
             }
             b"STRCOUNT" => {
                 ctx.result()?;
@@ -4717,8 +4695,8 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             }
             Cmd::HtmlTagSplit(x) => {
                 self.expr_str(x.html)?;
-                self.var_arr_int(&x.var_count.name, x.var_count.src_info)?;
                 self.var_arr_str(&x.var_tags.name, x.var_tags.src_info)?;
+                self.var_arr_int(&x.var_count.name, x.var_count.src_info)?;
                 self.chunk.emit_bytecode(HtmlTagSplit, x.src_info);
             }
             Cmd::Power(x) => {

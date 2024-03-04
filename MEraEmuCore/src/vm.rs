@@ -2007,15 +2007,21 @@ impl EraVirtualMachine {
                     let in_range = (amin.val..=amax.val).contains(&a.val);
                     ctx.stack.push(Value::new_int(in_range.into()).into());
                 }
-                GetBit => {
+                GetBit | SetBit | ClearBit | InvertBit => {
                     let [val, bit] = ctx.pop_stack()?;
                     let val = ctx.unpack_int(val.into())?;
                     let bit = ctx.unpack_int(bit.into())?;
                     if !(0..64).contains(&bit.val) {
                         bail_opt!(ctx, true, "precondition 0 <= bit < 64 was not satisfied");
                     }
-                    let is_bit_set = (val.val & (1 << bit.val)) != 0;
-                    ctx.stack.push(Value::new_int(is_bit_set.into()).into());
+                    let result = match primary_bytecode {
+                        GetBit => (val.val >> bit.val) & 1,
+                        SetBit => val.val | (1 << bit.val),
+                        ClearBit => val.val & !(1 << bit.val),
+                        InvertBit => val.val ^ (1 << bit.val),
+                        _ => unreachable!(),
+                    };
+                    ctx.stack.push(Value::new_int(result).into());
                 }
                 TimesFloat => {
                     let [target, target_idx, factor] = ctx.pop_stack()?;
@@ -2028,6 +2034,114 @@ impl EraVirtualMachine {
                     };
                     target.val = (target.val as f64 * factor) as _;
                 }
+                ReplaceString => {
+                    let [haystack, needle, replace_with] = ctx.pop_stack()?;
+                    unpack_str!(ctx, haystack);
+                    unpack_str!(ctx, needle);
+                    unpack_str!(ctx, replace_with);
+                    let re = match regex::Regex::new(&needle.val) {
+                        Ok(re) => re,
+                        Err(e) => bail_opt!(ctx, true, format!("failed to compile regex: {e}")),
+                    };
+                    let result = re
+                        .replace_all(&haystack.val, &replace_with.val)
+                        .into_owned();
+                    ctx.stack.push(Value::new_str(result).into());
+                }
+                RepeatString => {
+                    let [a1, a2] = ctx.pop_stack()?;
+                    let (haystack, count) = match (a1.val.into_unpacked(), a2.val.into_unpacked()) {
+                        (FlatValue::Int(count), FlatValue::Str(haystack)) => (haystack, count),
+                        (FlatValue::Str(haystack), FlatValue::Int(count)) => (haystack, count),
+                        _ => bail_opt!(ctx, true, "operands must be (int, str)"),
+                    };
+                    let result = haystack.val.repeat(count.val.max(0) as _);
+                    ctx.stack.push(Value::new_str(result).into());
+                }
+                SubString | SubStringU => {
+                    let [haystack, start_pos, length] = ctx.pop_stack()?;
+                    unpack_str!(ctx, haystack);
+                    unpack_int!(ctx, start_pos);
+                    unpack_int!(ctx, length);
+                    let haystack = &haystack.val;
+                    let start_pos = start_pos.val.max(0) as usize;
+                    let length = if length.val < 0 {
+                        usize::MAX
+                    } else {
+                        length.val as _
+                    };
+                    let result = if length <= 0 {
+                        String::new()
+                    } else {
+                        let haystack_len = haystack.len();
+                        let idx_fn = |(index, _)| index;
+                        let mut it = haystack.char_indices();
+                        let start_byte_pos = it.nth(start_pos).map_or(haystack_len, &idx_fn);
+                        let end_byte_pos = it.nth(length - 1).map_or(haystack_len, &idx_fn);
+                        // TODO: SAFETY
+                        unsafe {
+                            haystack
+                                .get_unchecked(start_byte_pos..end_byte_pos)
+                                .to_owned()
+                        }
+                    };
+                    ctx.stack.push(Value::new_str(result).into());
+                }
+                StrFind | StrFindU => {
+                    let [haystack, needle, start_pos] = ctx.pop_stack()?;
+                    unpack_str!(ctx, haystack);
+                    unpack_str!(ctx, needle);
+                    unpack_int!(ctx, start_pos);
+                    let haystack = &haystack.val;
+                    let needle = &needle.val;
+                    let start_pos = start_pos.val.max(0) as usize;
+                    let haystack_len = haystack.len();
+                    let start_byte_pos = haystack
+                        .char_indices()
+                        .nth(start_pos)
+                        .map_or(haystack_len, |(index, _)| index);
+                    // TODO: SAFETY
+                    let result = unsafe {
+                        let haystack = haystack.get_unchecked(start_byte_pos..haystack_len);
+                        haystack.find(needle).map_or(-1, |pos| {
+                            haystack
+                                .char_indices()
+                                .position(|x| x.0 == pos)
+                                .unwrap_unchecked() as _
+                        })
+                    };
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                StrLen | StrLenU => {
+                    let [haystack] = ctx.pop_stack()?;
+                    unpack_str!(ctx, haystack);
+                    let result = haystack.val.chars().count() as _;
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                CountSubString => {
+                    let [haystack, needle] = ctx.pop_stack()?;
+                    unpack_str!(ctx, haystack);
+                    unpack_str!(ctx, needle);
+                    let result = haystack.val.matches(&needle.val).count() as _;
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                StrCharAtU => {
+                    let [haystack, pos] = ctx.pop_stack()?;
+                    unpack_str!(ctx, haystack);
+                    unpack_int!(ctx, pos);
+                    let haystack = &haystack.val;
+                    let pos = pos.val;
+                    let result = if pos < 0 {
+                        String::new()
+                    } else {
+                        let pos = pos as _;
+                        haystack
+                            .chars()
+                            .nth(pos)
+                            .map_or(String::new(), |x| x.to_string())
+                    };
+                    ctx.stack.push(Value::new_str(result).into());
+                }
                 FormatIntToStr => {
                     use crate::util::number::formatting::csharp_format_i64;
 
@@ -2039,6 +2153,12 @@ impl EraVirtualMachine {
                         Err(e) => bail_opt!(ctx, true, format!("failed to format integer: {e}")),
                     };
                     ctx.stack.push(Value::new_str(result).into());
+                }
+                StringIsValidInteger => {
+                    let [value] = ctx.pop_stack()?;
+                    unpack_str!(ctx, value);
+                    let result = value.val.parse::<i64>().is_ok().into();
+                    ctx.stack.push(Value::new_int(result).into());
                 }
                 StringToUpper | StringToLower | StringToHalf | StringToFull => {
                     use full2half::CharacterWidth;
@@ -2054,6 +2174,167 @@ impl EraVirtualMachine {
                     };
                     ctx.stack.push(Value::new_str(result).into());
                 }
+                BuildBarString => {
+                    use muldiv::MulDiv;
+
+                    let [value, max_value, length] = ctx.pop_stack()?;
+                    unpack_int!(ctx, value);
+                    unpack_int!(ctx, max_value);
+                    unpack_int!(ctx, length);
+                    if length.val < 0 {
+                        bail_opt!(ctx, true, "bar string length cannot be negative");
+                    }
+                    if length.val > 1024 {
+                        bail_opt!(ctx, true, "bar string length too long");
+                    }
+                    let length = length.val as u32;
+                    let max_value = max_value.val.max(0) as u32;
+                    let value = (value.val.max(0) as u32).min(max_value);
+                    let Some(fill_cnt) = value.mul_div_floor(length, max_value) else {
+                        unreachable!();
+                        // TODO: Strict integer arithmetic check
+                        // bail_opt!(ctx, true, "unexpected arithmetic overflow");
+                    };
+                    let rest_cnt = length - fill_cnt;
+                    let mut result = String::with_capacity(length as usize + 2);
+                    result.push('[');
+                    result += &"*".repeat(fill_cnt as _);
+                    result += &".".repeat(rest_cnt as _);
+                    result.push(']');
+                    ctx.stack.push(Value::new_str(result).into());
+                }
+                EscapeRegexStr => {
+                    let [value] = ctx.pop_stack()?;
+                    unpack_str!(ctx, value);
+                    let result = regex::escape(&value.val);
+                    ctx.stack.push(Value::new_str(result).into());
+                }
+                EncodeToUnicode => {
+                    let [haystack, pos] = ctx.pop_stack()?;
+                    unpack_str!(ctx, haystack);
+                    unpack_int!(ctx, pos);
+                    let Ok(pos) = pos.val.try_into() else {
+                        bail_opt!(ctx, true, "invalid index into string");
+                    };
+                    let Some(result) = haystack.val.chars().nth(pos) else {
+                        bail_opt!(ctx, true, "invalid index into string");
+                    };
+                    ctx.stack.push(Value::new_int(result as _).into());
+                }
+                UnicodeToStr => {
+                    let [value] = ctx.pop_stack()?;
+                    unpack_int!(ctx, value);
+                    let Some(result) = value.val.try_into().map(char::from_u32).ok().flatten()
+                    else {
+                        bail_opt!(ctx, true, "value is not a valid Unicode scalar value");
+                    };
+                    ctx.stack.push(Value::new_str(result.to_string()).into());
+                }
+                IntToStrWithBase => {
+                    let [value, base] = ctx.pop_stack()?;
+                    unpack_int!(ctx, value);
+                    unpack_int!(ctx, base);
+                    let value = value.val;
+                    let base = base.val;
+                    let result = match base {
+                        2 => format!("{value:b}"),
+                        8 => format!("{value:o}"),
+                        10 => format!("{value}"),
+                        16 => format!("{value:x}"),
+                        _ => bail_opt!(ctx, true, format!("{} is not a valid base", base)),
+                    };
+                    ctx.stack.push(Value::new_str(result).into());
+                }
+                HtmlTagSplit => {
+                    let [html, tags, count] = ctx.pop_stack()?;
+                    unpack_str!(ctx, html);
+                    unpack_arrstr_mut!(ctx, tags);
+                    unpack_arrint_idx_mut!(ctx, count, 0);
+                    // TODO: Honor trapped variables
+                    let mut parts_count: usize = 0;
+                    for part in crate::util::html::split_html_tags(&html.val) {
+                        let Ok(part) = part else {
+                            bail_opt!(ctx, true, "found invalid html tag while parsing");
+                        };
+                        arr_idx_mut!(ctx, tags, parts_count);
+                        *tags = Rc::new(StrValue {
+                            val: part.to_owned(),
+                        });
+                        parts_count += 1;
+                    }
+                    count.val = parts_count as _;
+                }
+                HtmlToPlainText => {
+                    let [html] = ctx.pop_stack()?;
+                    unpack_str!(ctx, html);
+                    let result = nanohtml2text::html2text(&html.val);
+                    ctx.stack.push(Value::new_str(result).into());
+                }
+                PowerInt => {
+                    let [base, exponent] = ctx.pop_stack()?;
+                    unpack_int!(ctx, base);
+                    unpack_int!(ctx, exponent);
+                    let result = base.val.wrapping_pow(exponent.val as _);
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                SqrtInt | CbrtInt | LogInt | Log10Int | ExponentInt | AbsInt => {
+                    use num_integer::Roots;
+
+                    let [value] = ctx.pop_stack()?;
+                    unpack_int!(ctx, value);
+                    let v = value.val;
+                    let result = match primary_bytecode {
+                        SqrtInt => v.sqrt(),
+                        CbrtInt => v.cbrt(),
+                        // FIXME: Use f128 when https://github.com/rust-lang/rust/issues/116909
+                        //        stabilizes.
+                        LogInt => (v as f64).ln() as _,
+                        Log10Int => v.ilog10().into(),
+                        ExponentInt => (v as f64).exp() as _,
+                        AbsInt => v.wrapping_abs(),
+                        _ => unreachable!(),
+                    };
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                GroupMatch => {
+                    let args_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 1;
+                    let mut it = ctx.pop_stack_dyn(args_cnt as usize + 1)?;
+                    let mut count = 0;
+                    match it.next().unwrap().val.into_unpacked() {
+                        FlatValue::Int(x) => {
+                            for y in it {
+                                let FlatValue::Int(y) = y.val.into_unpacked() else {
+                                    count = -1;
+                                    break;
+                                };
+                                if x.val == y.val {
+                                    count += 1;
+                                }
+                            }
+                        }
+                        FlatValue::Str(x) => {
+                            for y in it {
+                                let FlatValue::Str(y) = y.val.into_unpacked() else {
+                                    count = -1;
+                                    break;
+                                };
+                                if x.val == y.val {
+                                    count += 1;
+                                }
+                            }
+                        }
+                        _ => {
+                            drop(it);
+                            bail_opt!(ctx, true, "value must not be arrays")
+                        }
+                    }
+                    if count < 0 {
+                        bail_opt!(ctx, true, "invalid GroupMatch operands");
+                    }
+                    ctx.stack.push(Value::new_int(count).into());
+                }
+                // TODO...
                 Print | PrintLine | PrintExtended => {
                     let [value] = ctx.pop_stack()?;
                     let flags = match primary_bytecode {

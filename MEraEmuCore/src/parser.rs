@@ -639,7 +639,7 @@ impl EraExpr {
                     expr_stack.push(ExprStackValue::Expr(*x2));
                     expr_stack.push(ExprStackValue::Expr(*x1));
                     continue;
-                },
+                }
                 EraExpr::Ternary(x1, _, x2, _, x3) => {
                     let x1 = x1.try_evaluate_constant(vars)?;
                     let x2 = x2.try_evaluate_constant(vars)?;
@@ -1248,8 +1248,8 @@ pub struct EraSetAnimeTimerStmt {
 #[derive(Debug, Clone)]
 pub struct EraHtmlTagSplitStmt {
     pub html: EraExpr,
-    pub var_count: EraVarExpr,
     pub var_tags: EraVarExpr,
+    pub var_count: EraVarExpr,
     pub src_info: SourcePosInfo,
 }
 
@@ -4391,20 +4391,20 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn stmt_html_tagsplit(&mut self) -> Option<EraHtmlTagSplitStmt> {
         let src_info = self.src_info;
         let html = self.expression(true)?;
-        let var_count = if self.matches_comma().is_some() {
-            self.var_expression()?
-        } else {
-            EraVarExpr {
-                name: "RESULT".to_owned(),
-                idxs: Vec::new(),
-                src_info,
-            }
-        };
         let var_tags = if self.matches_comma().is_some() {
             self.var_expression()?
         } else {
             EraVarExpr {
                 name: "RESULTS".to_owned(),
+                idxs: Vec::new(),
+                src_info,
+            }
+        };
+        let var_count = if self.matches_comma().is_some() {
+            self.var_expression()?
+        } else {
+            EraVarExpr {
+                name: "RESULT".to_owned(),
                 idxs: Vec::new(),
                 src_info,
             }
