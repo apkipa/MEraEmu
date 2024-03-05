@@ -1,4 +1,4 @@
-use std::{cell::RefCell, ops::Deref, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, ops::Deref, rc::Rc};
 
 #[repr(u8)]
 #[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
@@ -657,4 +657,24 @@ impl SourcePosLenInfo {
     pub fn new(line: u32, column: u32, len: u32) -> Self {
         SourcePosLenInfo { line, column, len }
     }
+}
+
+#[derive(Debug, Default)]
+pub struct EraCharaInitTemplate {
+    pub no: u32,
+    pub csv_no: u32,
+    pub name: String,
+    pub callname: String,
+    pub nickname: String,
+    pub mastername: String,
+    pub maxbase: BTreeMap<u32, i64>,
+    pub mark: BTreeMap<u32, i64>,
+    pub exp: BTreeMap<u32, i64>,
+    pub abl: BTreeMap<u32, i64>,
+    pub talent: BTreeMap<u32, i64>,
+    pub relation: BTreeMap<u32, i64>,
+    pub cflag: BTreeMap<u32, i64>,
+    pub equip: BTreeMap<u32, i64>,
+    pub juel: BTreeMap<u32, i64>,
+    pub cstr: BTreeMap<u32, String>,
 }

@@ -1,14 +1,14 @@
 use crate::{
     bytecode::{
-        ArrIntValue, EraBytecodePrimaryType, FlatValue, PadStringFlags, PrintExtendedFlags,
-        SourcePosInfo, StrValue, Value, ValueKind,
+        ArrIntValue, EraBytecodePrimaryType, EraCharaInitTemplate, FlatValue, PadStringFlags,
+        PrintExtendedFlags, SourcePosInfo, StrValue, Value, ValueKind,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
     util::*,
 };
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     mem::MaybeUninit,
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
@@ -488,6 +488,7 @@ pub struct EraVirtualMachine {
     uniform_gen: SimpleUniformGenerator,
     // Variable address -> metadata index
     trap_vars: hashbrown::HashMap<*const (), usize>,
+    chara_templates: BTreeMap<u32, EraCharaInitTemplate>,
     charas_count: usize,
 }
 
@@ -684,7 +685,10 @@ pub trait EraVirtualMachineCallback {
 }
 
 impl EraVirtualMachine {
-    pub fn new(compilation: EraBytecodeCompilation) -> Self {
+    pub fn new(
+        compilation: EraBytecodeCompilation,
+        chara_templates: BTreeMap<u32, EraCharaInitTemplate>,
+    ) -> Self {
         let mut this = EraVirtualMachine {
             func_names: compilation.func_names,
             funcs: compilation.funcs,
@@ -695,6 +699,7 @@ impl EraVirtualMachine {
             is_halted: false,
             uniform_gen: SimpleUniformGenerator::new(),
             trap_vars: hashbrown::HashMap::new(),
+            chara_templates,
             charas_count: 0,
         };
         this

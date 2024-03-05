@@ -555,7 +555,10 @@ mod tests {
             _ = load_csv(&csv, kind);
         }
         for csv in chara_csvs {
-            load_csv(&csv, engine::EraCsvLoadKind::Chara_)?;
+            if let Err(e) = load_csv(&csv, engine::EraCsvLoadKind::Chara_) {
+                panic!("{}", errors.borrow());
+                return Err(e);
+            }
         }
         let mut erhs = Vec::new();
         let mut erbs = Vec::new();

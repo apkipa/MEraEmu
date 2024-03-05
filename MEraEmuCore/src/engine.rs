@@ -10,7 +10,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::{
-    bytecode::{IntValue, SourcePosInfo, StrValue, Value},
+    bytecode::{EraCharaInitTemplate, IntValue, SourcePosInfo, StrValue, Value},
     compiler::{EraBytecodeCompilation, EraCompilerFileInput},
     lexer::EraLexerTempStorage,
     parser::EraParserSlimVarTypeInfo,
@@ -37,7 +37,7 @@ pub struct MEraEngine<'a> {
     watching_vars: HashSet<Rc<CaselessStr>>,
     replace_list: HashMap<Box<[u8]>, Box<[u8]>>,
     define_list: HashMap<Box<[u8]>, Box<[u8]>>,
-    chara_list: BTreeMap<usize, Vec<(Box<[u8]>, Box<[u8]>, Box<[u8]>)>>,
+    chara_list: BTreeMap<u32, EraCharaInitTemplate>,
     initial_vars: Option<hashbrown::HashMap<Ascii<String>, InitialVarDesc>>,
     contextual_indices: HashMap<Ascii<String>, u32>,
 }
@@ -842,24 +842,205 @@ impl<'a> MEraEngine<'a> {
             EraCsvLoadKind::Chara_ => {
                 static RE: Lazy<Regex> =
                     Lazy::new(|| Regex::new(r"^(?:|.*[/\\])Chara(\d+).*\.(?i:csv)$").unwrap());
-                let Some(chara_id) = RE.captures(filename) else {
+                let Some(csv_no) = RE.captures(filename) else {
                     return Err(MEraEngineError::new(
                         "Chara csv must be numbered".to_owned(),
                     ));
                 };
-                let Ok(chara_id) = chara_id[1].parse() else {
+                let Ok(csv_no) = csv_no[1].parse() else {
                     return Err(MEraEngineError::new(
                         "Chara csv number is invalid".to_owned(),
                     ));
                 };
-                match self.chara_list.entry(chara_id) {
+                // Fill character template
+                let rows = crate::csv::parse_csv_loose(content).unwrap();
+                let mut chara_template = EraCharaInitTemplate::default();
+                chara_template.csv_no = csv_no;
+                for (line_n, mut cols) in rows {
+                    let src_info = SourcePosInfo {
+                        line: line_n,
+                        column: 1,
+                    };
+                    if cols.len() < 2 {
+                        self.callback.on_compile_error(&EraScriptErrorInfo {
+                            filename,
+                            src_info: src_info.into(),
+                            is_error: true,
+                            msg: "too few columns in CSV line",
+                        });
+                        continue;
+                    }
+                    cols[0].make_ascii_uppercase();
+                    let parse_u32 = |this: &mut Self, val: &str| -> Result<u32, _> {
+                        match val.parse() {
+                            Ok(x) => Ok(x),
+                            Err(_) => {
+                                this.callback.on_compile_error(&EraScriptErrorInfo {
+                                    filename,
+                                    src_info: src_info.into(),
+                                    is_error: true,
+                                    msg: "failed to parse u32",
+                                });
+                                Err(MEraEngineError::new("failed to parse u32".to_owned()))
+                            }
+                        }
+                    };
+                    let parse_i64 = |this: &mut Self, mut val: &str| -> Result<i64, _> {
+                        // HACK: Ignore bad characters after integers
+                        if let Some(pos) = val.find(|x| !matches!(x, '0'..='9' | ' ' | '\t' | '-'))
+                        {
+                            let (left, right) = val.split_at(pos);
+                            this.callback.on_compile_error(&EraScriptErrorInfo {
+                                filename,
+                                src_info: src_info.into(),
+                                is_error: true,
+                                msg: &format!(
+                                    "`{}` is not `;`; did you misspell?",
+                                    right.chars().next().unwrap()
+                                ),
+                            });
+                            val = left.trim();
+                        }
+                        match val.parse() {
+                            Ok(x) => Ok(x),
+                            Err(_) => {
+                                this.callback.on_compile_error(&EraScriptErrorInfo {
+                                    filename,
+                                    src_info: src_info.into(),
+                                    is_error: true,
+                                    msg: "failed to parse i64",
+                                });
+                                Err(MEraEngineError::new("failed to parse i64".to_owned()))
+                            }
+                        }
+                    };
+                    let get_contextual_idx =
+                        |this: &mut Self, val: &str| -> Result<u32, _> {
+                            let Some(idx) = val.parse().ok().or_else(|| {
+                                this.contextual_indices.get(Ascii::new_str(val)).copied()
+                            }) else {
+                                let msg = format!("invalid CSV variable index `{val}`");
+                                this.callback.on_compile_error(&EraScriptErrorInfo {
+                                    filename,
+                                    src_info: src_info.into(),
+                                    is_error: true,
+                                    msg: &msg,
+                                });
+                                return Err(MEraEngineError::new(msg));
+                            };
+                            Ok(idx)
+                        };
+                    let get_col_2_str = |this: &mut Self,
+                                         cols: &mut [String]|
+                     -> Result<String, MEraEngineError> {
+                        match cols.get_mut(2) {
+                            Some(x) if !x.is_empty() => Ok(std::mem::take(x)),
+                            _ => {
+                                this.callback.on_compile_error(&EraScriptErrorInfo {
+                                    filename,
+                                    src_info: src_info.into(),
+                                    is_error: true,
+                                    msg: "the 3rd column is missing; assuming an empty string was given",
+                                });
+                                Ok(String::new())
+                            }
+                        }
+                    };
+                    let get_col_2_i64 =
+                        |this: &mut Self, cols: &[String]| -> Result<i64, MEraEngineError> {
+                            match cols.get(2) {
+                                Some(x) if !x.is_empty() => Ok(parse_i64(this, x)?),
+                                _ => {
+                                    this.callback.on_compile_error(&EraScriptErrorInfo {
+                                        filename,
+                                        src_info: src_info.into(),
+                                        is_error: true,
+                                        msg: "the 3rd column is missing; assuming 1 was given",
+                                    });
+                                    Ok(1)
+                                }
+                            }
+                        };
+                    match cols[0].as_str() {
+                        "NO" | "番号" => {
+                            chara_template.no = parse_u32(self, &cols[1])?;
+                        }
+                        "NAME" | "名前" => {
+                            chara_template.name = std::mem::take(&mut cols[1]);
+                        }
+                        "CALLNAME" | "呼び名" => {
+                            chara_template.callname = std::mem::take(&mut cols[1]);
+                        }
+                        "NICKNAME" | "あだ名" => {
+                            chara_template.nickname = std::mem::take(&mut cols[1]);
+                        }
+                        "MASTERNAME" | "主人の呼び方" => {
+                            chara_template.mastername = std::mem::take(&mut cols[1]);
+                        }
+                        "MARK" | "刻印" => {
+                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let val = get_col_2_i64(self, &mut cols)?;
+                            chara_template.mark.insert(idx, val);
+                        }
+                        "EXP" | "経験" => {
+                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let val = get_col_2_i64(self, &mut cols)?;
+                            chara_template.exp.insert(idx, val);
+                        }
+                        "ABL" | "能力" => {
+                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let val = get_col_2_i64(self, &mut cols)?;
+                            chara_template.abl.insert(idx, val);
+                        }
+                        "BASE" | "基礎" => {
+                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let val = get_col_2_i64(self, &mut cols)?;
+                            chara_template.maxbase.insert(idx, val);
+                        }
+                        "TALENT" | "素質" => {
+                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let val = get_col_2_i64(self, &mut cols)?;
+                            chara_template.talent.insert(idx, val);
+                        }
+                        "RELATION" | "相性" => {
+                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let val = get_col_2_i64(self, &mut cols)?;
+                            chara_template.relation.insert(idx, val);
+                        }
+                        "CFLAG" | "フラグ" => {
+                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let val = get_col_2_i64(self, &mut cols)?;
+                            chara_template.cflag.insert(idx, val);
+                        }
+                        "EQUIP" | "装着物" => {
+                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let val = get_col_2_i64(self, &mut cols)?;
+                            chara_template.equip.insert(idx, val);
+                        }
+                        "JUEL" | "珠" => {
+                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let val = get_col_2_i64(self, &mut cols)?;
+                            chara_template.juel.insert(idx, val);
+                        }
+                        "CSTR" => {
+                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let val = get_col_2_str(self, &mut cols)?;
+                            chara_template.cstr.insert(idx, val);
+                        }
+                        "ISASSI" | "助手" => continue,
+                        _ => todo!(),
+                    }
+                }
+                // Add to character template list
+                let key = chara_template.no;
+                match self.chara_list.entry(key) {
                     std::collections::btree_map::Entry::Occupied(_) => {
                         return Err(MEraEngineError::new(format!(
-                            "Character id {chara_id} already exists"
+                            "Character CSV id {key} already exists"
                         )));
                     }
                     std::collections::btree_map::Entry::Vacant(e) => {
-                        //e.insert(todo!());
+                        e.insert(chara_template);
                     }
                 }
             }
@@ -1223,7 +1404,8 @@ impl<'a> MEraEngine<'a> {
             chunk: entry_info.chunk_idx as _,
             offset: entry_info.offset as _,
         };
-        let mut vm = crate::vm::EraVirtualMachine::new(compilation);
+        let mut vm =
+            crate::vm::EraVirtualMachine::new(compilation, std::mem::take(&mut self.chara_list));
         vm.reset_exec_and_ip(entry_ip);
         for var in std::mem::take(&mut self.watching_vars) {
             vm.register_var_callback(var.as_str()).ok_or_else(|| {
