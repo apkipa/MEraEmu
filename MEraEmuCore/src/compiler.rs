@@ -644,6 +644,16 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             // if is_const {
                             //     const_vars.insert(name);
                             // }
+                            if self
+                                .contextual_indices
+                                .contains_key(Ascii::new_str(&x.name))
+                            {
+                                self.report_err(
+                                    x.src_info,
+                                    false,
+                                    "this declaration might be shadowed by a CSV index name",
+                                );
+                            }
                         }
                         EraSharpDecl::DefineDecl(_) => (),
                         _ => {
@@ -825,6 +835,16 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         local_decl.src_info,
                         false,
                         "this declaration shadows a global variable with the same name",
+                    );
+                }
+                if self
+                    .contextual_indices
+                    .contains_key(Ascii::new_str(&var_name))
+                {
+                    self.report_err(
+                        local_decl.src_info,
+                        false,
+                        "this declaration might be shadowed by a CSV index name",
                     );
                 }
                 if !local_decl.is_dynamic && !local_decl.is_ref {

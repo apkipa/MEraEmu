@@ -1,7 +1,7 @@
 use crate::{
     bytecode::{
-        ArrIntValue, EraBytecodePrimaryType, EraCharaInitTemplate, FlatValue, PadStringFlags,
-        PrintExtendedFlags, SourcePosInfo, StrValue, Value, ValueKind,
+        ArrIntValue, EraBytecodePrimaryType, EraCharaInitTemplate, FlatValue, IntValue,
+        PadStringFlags, PrintExtendedFlags, SourcePosInfo, StrValue, Value, ValueKind,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
     util::*,
@@ -2331,13 +2331,81 @@ impl EraVirtualMachine {
                         }
                         _ => {
                             drop(it);
-                            bail_opt!(ctx, true, "value must not be arrays")
+                            bail_opt!(ctx, true, "value must not be arrays");
                         }
                     }
                     if count < 0 {
                         bail_opt!(ctx, true, "invalid GroupMatch operands");
                     }
                     ctx.stack.push(Value::new_int(count).into());
+                }
+                ArrayCountMatches | CArrayCountMatches => {
+                    let [arr, arr_i, val, start_idx, end_idx] = ctx.pop_stack()?;
+                    unpack_int!(ctx, arr_i);
+                    unpack_int!(ctx, start_idx);
+                    unpack_int!(ctx, end_idx);
+                    let arr_i = arr_i.val as usize;
+                    let start_idx = start_idx.val.max(0) as usize;
+                    let end_idx = if end_idx.val < 0 {
+                        usize::MAX
+                    } else {
+                        // (end_idx.val as usize).max(start_idx)
+                        end_idx.val as _
+                    };
+                    let result = match arr.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let x = x.borrow();
+                            unpack_int!(ctx, val);
+                            // let (dim_size, stride, start_offset);
+                            // // NOTE: We strip extra index and re-apply provided index range
+                            // let is_chara_mode = matches!(primary_bytecode, CArrayCountMatches);
+                            // if is_chara_mode {
+                            //     dim_size = self.charas_count;
+                            //     stride = x.dims.iter().map(|&x| x as usize).skip(1).product();
+                            //     start_offset = arr_i.val as usize % stride;
+                            // } else {
+                            //     dim_size = x.dims.last().copied().unwrap() as usize;
+                            //     stride = 1;
+                            //     start_offset = arr_i.val as usize / dim_size * dim_size + start_idx;
+                            // }
+                            // let start_offset = {
+                            //     let low = arr_i % stride;
+                            //     let factor = dim_size * stride;
+                            //     let high = arr_i / factor * factor;
+                            // }
+                            // let count = if start_idx >= dim_size {
+                            //     0
+                            // } else {
+                            //     end_idx.min(dim_size) - start_idx
+                            // };
+
+                            // NOTE: We strip extra index and re-apply provided index range
+                            let is_chara_mode = matches!(primary_bytecode, CArrayCountMatches);
+                            let (dim_pos, end_idx) = if is_chara_mode {
+                                (0, end_idx.min(self.charas_count))
+                            } else {
+                                (usize::MAX, end_idx)
+                            };
+                            x.stride_iter(arr_i, dim_pos, start_idx, end_idx)
+                                .filter(|x| x.val == val.val)
+                                .count()
+                        }
+                        FlatValue::ArrStr(x) => {
+                            unpack_str!(ctx, val);
+                            todo!()
+                        }
+                        _ => bail_opt!(ctx, true, "value must be arrays"),
+                    };
+                    // let (start_offset, stride, count) = match primary_bytecode {
+                    //     ArrayCountMatches => {
+                    //         todo!()
+                    //     }
+                    //     CArrayCountMatches => {
+                    //         todo!()
+                    //     }
+                    //     _ => unreachable!(),
+                    // };
+                    ctx.stack.push(Value::new_int(result as _).into());
                 }
                 // TODO...
                 Print | PrintLine | PrintExtended => {
@@ -2523,6 +2591,76 @@ impl SimpleUniformGenerator {
             if data < len {
                 break low + data;
             }
+        }
+    }
+}
+
+trait EraArrayExtendAccess<'a> {
+    type Item: 'a;
+    fn stride_iter(
+        &'a self,
+        idx: usize,
+        dim_pos: usize,
+        start_idx: usize,
+        end_idx: usize,
+    ) -> impl Iterator<Item = Self::Item>;
+}
+
+impl<'a> EraArrayExtendAccess<'a> for ArrIntValue {
+    type Item = &'a IntValue;
+    fn stride_iter(
+        &'a self,
+        idx: usize,
+        dim_pos: usize,
+        start_idx: usize,
+        end_idx: usize,
+    ) -> impl Iterator<Item = Self::Item> {
+        struct Iter<'a> {
+            src: &'a ArrIntValue,
+            offset: usize,
+            stride: usize,
+            count: usize,
+        }
+        impl<'a> Iterator for Iter<'a> {
+            type Item = &'a IntValue;
+            fn next(&mut self) -> Option<Self::Item> {
+                if self.count == 0 {
+                    return None;
+                }
+                let Some(item) = self.src.flat_get(self.offset) else {
+                    self.count = 0;
+                    return None;
+                };
+                self.count -= 1;
+                self.offset += self.stride;
+                Some(item)
+            }
+        }
+
+        let dim_pos = dim_pos.min(self.dims.len() - 1);
+        let dim_size = self.dims.get(dim_pos).copied().unwrap() as usize;
+        let stride = self
+            .dims
+            .iter()
+            .skip(dim_pos + 1)
+            .map(|&x| x as usize)
+            .product();
+
+        let count = end_idx.min(dim_size).saturating_sub(start_idx);
+        let offset = if count <= 0 {
+            0
+        } else {
+            let low = idx % stride;
+            let factor = dim_size * stride;
+            let high = idx / factor * factor;
+            low + high + start_idx * stride
+        };
+
+        Iter {
+            src: self,
+            offset,
+            stride,
+            count,
         }
     }
 }
