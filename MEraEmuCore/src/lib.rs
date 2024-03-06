@@ -22,7 +22,7 @@ pub use engine::{
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, sync::atomic::AtomicBool};
+    use std::{cell::RefCell, collections::BTreeMap, sync::atomic::AtomicBool};
 
     use colored::{Color, Colorize};
     use indoc::indoc;
@@ -444,6 +444,7 @@ mod tests {
     fn assembled_game() -> anyhow::Result<()> {
         // TODO: Redact this
         let game_base_dir = r#"D:\MyData\Games\Others\1\eraTW\TW4.881画蛇添足版（04.07更新）\"#;
+        // let game_base_dir = r#"D:\MyData\Games\Others\1\eraTW\eratw-sub-modding-888ab0cd\"#;
         // let game_base_dir = r#"D:\MyData\Games\Others\1\eratohoK\"#;
 
         let errors = RefCell::new(String::new());
@@ -577,6 +578,9 @@ mod tests {
                 // println!("warn: skipping file `{}`", i.path().display());
             }
         }
+        let get_phy_mem = || memory_stats::memory_stats().unwrap().physical_mem;
+        let mut last_mem_usage = get_phy_mem();
+        let mut file_mem_usages = Vec::new();
         for erb_path in erhs.into_iter().chain(erbs.into_iter()) {
             let mut erb = std::fs::read(&erb_path)?;
             // HACK: Fix missing newlines
@@ -596,6 +600,17 @@ mod tests {
                 );
             }
             total_cnt += 1;
+            let cur_mem_usage = get_phy_mem();
+            file_mem_usages.push((
+                erb_path.to_string_lossy().into_owned(),
+                cur_mem_usage.saturating_sub(last_mem_usage),
+            ));
+            last_mem_usage = cur_mem_usage;
+        }
+        println!("Top 10 files with highest memory consumption:");
+        file_mem_usages.sort_by_key(|x| x.1);
+        for (path, mem_usage) in file_mem_usages.into_iter().rev().take(10) {
+            println!("{path}: {}", size::Size::from_bytes(mem_usage));
         }
         *errors.borrow_mut() += &format!(
             "[FINIALIZE, used mem = {}]\n",

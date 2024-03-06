@@ -131,12 +131,6 @@ pub enum EraBytecodePrimaryType {
     GroupMatch,
     ArrayCountMatches,
     CArrayCountMatches,
-    ArrayRemove,
-    ArraySortAsc,
-    ArraySortDesc,
-    ArrayMSort,
-    ArrayCopy,
-    ArrayShift,
     SumArray,
     SumCArray,
     MaxArray,
@@ -145,6 +139,12 @@ pub enum EraBytecodePrimaryType {
     MinCArray,
     InRangeArray,
     InRangeCArray,
+    ArrayRemove,
+    ArraySortAsc,
+    ArraySortDesc,
+    ArrayMSort,
+    ArrayCopy,
+    ArrayShift,
     // -----
     Print,
     PrintLine,
@@ -294,12 +294,12 @@ pub struct PadStringFlags {
     __: modular_bitfield::specifiers::B6,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IntValue {
     pub val: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StrValue {
     pub val: String,
     // TODO: Use Arc/Rc and string interning

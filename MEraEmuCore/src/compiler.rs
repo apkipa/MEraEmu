@@ -2594,7 +2594,8 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 ctx.results()?;
                 let [] = ctx.unpack_some_args(args)?;
                 ctx.this.arr_get_int("@ALIGN", vec![], src_info)?;
-                todo!("unimplemented: @ALIGN int to string");
+                //todo!("unimplemented: @ALIGN int to string");
+                bail_opt!(ctx.this, src_info, "unimplemented: @ALIGN int to string");
             }
             b"MAX" => {
                 ctx.result()?;

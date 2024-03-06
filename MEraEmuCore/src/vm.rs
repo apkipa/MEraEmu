@@ -1,7 +1,7 @@
 use crate::{
     bytecode::{
-        ArrIntValue, EraBytecodePrimaryType, EraCharaInitTemplate, FlatValue, IntValue,
-        PadStringFlags, PrintExtendedFlags, SourcePosInfo, StrValue, Value, ValueKind,
+        ArrIntValue, ArrStrValue, EraBytecodePrimaryType, EraCharaInitTemplate, FlatValue,
+        IntValue, PadStringFlags, PrintExtendedFlags, SourcePosInfo, StrValue, Value, ValueKind,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
     util::*,
@@ -9,6 +9,7 @@ use crate::{
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
+    future::Future,
     mem::MaybeUninit,
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
@@ -492,6 +493,14 @@ pub struct EraVirtualMachine {
     charas_count: usize,
 }
 
+pub struct EraVirtualMachineStackTraceFrame {
+    pub ip: EraExecIp,
+}
+
+pub struct EraVirtualMachineStackTrace {
+    pub frames: Vec<EraVirtualMachineStackTraceFrame>,
+}
+
 pub struct EraRuntimeErrorInfo {
     pub file_name: String,
     pub src_info: SourcePosInfo,
@@ -758,6 +767,45 @@ impl EraVirtualMachine {
         }
 
         !self.is_halted
+    }
+    // NOTE: Pass in empty data to revert patches
+    pub fn patch_bytecode(&mut self, chunk_idx: usize, offset: usize, data: &[u8]) -> bool {
+        todo!()
+    }
+    // NOTE: Returns a future which requires calling execute() on VM to resolve
+    //       (calling poll has no effect).
+    // NOTE: You can't have more than one concurrent external eval requests,
+    //       or the latter will fail.
+    pub fn external_eval_any(
+        &mut self,
+        expr: &str,
+    ) -> impl Future<Output = Result<Option<Value>, ()>> {
+        struct Fut {
+            // TODO...
+        }
+        impl Future for Fut {
+            type Output = Result<Option<Value>, ()>;
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                // TODO: poll checks whether VM has done executing eval, or the eval
+                //       has been interrupted, or VM itself dropped.
+                todo!()
+            }
+        }
+        Fut {}
+    }
+    pub fn get_stack_trace(&self) -> EraVirtualMachineStackTrace {
+        let frames = self
+            .frames
+            .iter()
+            .map(|x| EraVirtualMachineStackTraceFrame { ip: x.ip })
+            .collect();
+        EraVirtualMachineStackTrace { frames }
+    }
+    pub fn get_chunk(&self, index: usize) -> Option<&EraBytecodeChunk> {
+        self.chunks.get(index)
     }
     fn execute_inner(
         &mut self,
@@ -2349,63 +2397,286 @@ impl EraVirtualMachine {
                     let end_idx = if end_idx.val < 0 {
                         usize::MAX
                     } else {
-                        // (end_idx.val as usize).max(start_idx)
                         end_idx.val as _
+                    };
+                    let is_chara_mode = matches!(primary_bytecode, CArrayCountMatches);
+                    let (dim_pos, end_idx) = if is_chara_mode {
+                        (0, end_idx.min(self.charas_count))
+                    } else {
+                        (usize::MAX, end_idx)
                     };
                     let result = match arr.val.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let x = x.borrow();
                             unpack_int!(ctx, val);
-                            // let (dim_size, stride, start_offset);
-                            // // NOTE: We strip extra index and re-apply provided index range
-                            // let is_chara_mode = matches!(primary_bytecode, CArrayCountMatches);
-                            // if is_chara_mode {
-                            //     dim_size = self.charas_count;
-                            //     stride = x.dims.iter().map(|&x| x as usize).skip(1).product();
-                            //     start_offset = arr_i.val as usize % stride;
-                            // } else {
-                            //     dim_size = x.dims.last().copied().unwrap() as usize;
-                            //     stride = 1;
-                            //     start_offset = arr_i.val as usize / dim_size * dim_size + start_idx;
-                            // }
-                            // let start_offset = {
-                            //     let low = arr_i % stride;
-                            //     let factor = dim_size * stride;
-                            //     let high = arr_i / factor * factor;
-                            // }
-                            // let count = if start_idx >= dim_size {
-                            //     0
-                            // } else {
-                            //     end_idx.min(dim_size) - start_idx
-                            // };
-
                             // NOTE: We strip extra index and re-apply provided index range
-                            let is_chara_mode = matches!(primary_bytecode, CArrayCountMatches);
-                            let (dim_pos, end_idx) = if is_chara_mode {
-                                (0, end_idx.min(self.charas_count))
-                            } else {
-                                (usize::MAX, end_idx)
-                            };
                             x.stride_iter(arr_i, dim_pos, start_idx, end_idx)
                                 .filter(|x| x.val == val.val)
                                 .count()
                         }
                         FlatValue::ArrStr(x) => {
+                            let x = x.borrow();
                             unpack_str!(ctx, val);
-                            todo!()
+                            // NOTE: We strip extra index and re-apply provided index range
+                            x.stride_iter(arr_i, dim_pos, start_idx, end_idx)
+                                .filter(|x| x.val == val.val)
+                                .count()
                         }
                         _ => bail_opt!(ctx, true, "value must be arrays"),
                     };
-                    // let (start_offset, stride, count) = match primary_bytecode {
-                    //     ArrayCountMatches => {
-                    //         todo!()
-                    //     }
-                    //     CArrayCountMatches => {
-                    //         todo!()
-                    //     }
-                    //     _ => unreachable!(),
-                    // };
                     ctx.stack.push(Value::new_int(result as _).into());
+                }
+                SumArray | SumCArray | MaxArray | MaxCArray | MinArray | MinCArray => {
+                    let [arr, arr_i, start_idx, end_idx] = ctx.pop_stack()?;
+                    unpack_arrint_mut!(ctx, arr);
+                    unpack_int!(ctx, arr_i);
+                    unpack_int!(ctx, start_idx);
+                    unpack_int!(ctx, end_idx);
+                    let arr_i = arr_i.val as usize;
+                    let start_idx = start_idx.val.max(0) as usize;
+                    let end_idx = if end_idx.val < 0 {
+                        usize::MAX
+                    } else {
+                        end_idx.val as _
+                    };
+                    let is_chara_mode =
+                        matches!(primary_bytecode, SumCArray | MaxCArray | MinCArray);
+                    let (dim_pos, end_idx) = if is_chara_mode {
+                        (0, end_idx.min(self.charas_count))
+                    } else {
+                        (usize::MAX, end_idx)
+                    };
+                    let it = arr
+                        .stride_iter(arr_i, dim_pos, start_idx, end_idx)
+                        .map(|x| x.val);
+                    let result = match primary_bytecode {
+                        SumArray | SumCArray => Some(it.sum()),
+                        MaxArray | MaxCArray => it.max(),
+                        MinArray | MinCArray => it.min(),
+                        _ => unreachable!(),
+                    };
+                    let Some(result) = result else {
+                        bail_opt!(ctx, true, "cannot produce a result for empty array range");
+                    };
+                    ctx.stack.push(Value::new_int(result as _).into());
+                }
+                InRangeArray | InRangeCArray => {
+                    let [arr, arr_i, lower, upper, start_idx, end_idx] = ctx.pop_stack()?;
+                    unpack_arrint_mut!(ctx, arr);
+                    unpack_int!(ctx, arr_i);
+                    unpack_int!(ctx, lower);
+                    unpack_int!(ctx, upper);
+                    unpack_int!(ctx, start_idx);
+                    unpack_int!(ctx, end_idx);
+                    let arr_i = arr_i.val as usize;
+                    let start_idx = start_idx.val.max(0) as usize;
+                    let end_idx = if end_idx.val < 0 {
+                        usize::MAX
+                    } else {
+                        end_idx.val as _
+                    };
+                    let is_chara_mode = matches!(primary_bytecode, InRangeCArray);
+                    let (dim_pos, end_idx) = if is_chara_mode {
+                        (0, end_idx.min(self.charas_count))
+                    } else {
+                        (usize::MAX, end_idx)
+                    };
+                    let it = arr
+                        .stride_iter(arr_i, dim_pos, start_idx, end_idx)
+                        .map(|x| x.val);
+                    let result = it.filter(|x| (lower.val..upper.val).contains(x)).count();
+                    ctx.stack.push(Value::new_int(result as _).into());
+                }
+                ArrayRemove => {
+                    let [arr, start_idx, count] = ctx.pop_stack()?;
+                    unpack_int!(ctx, start_idx);
+                    unpack_int!(ctx, count);
+                    let start_idx = start_idx.val.max(0) as usize;
+                    let count = if count.val < 0 {
+                        usize::MAX
+                    } else {
+                        count.val as _
+                    };
+                    match arr.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let mut x = x.borrow_mut();
+                            let dim_size = *x.dims.last().unwrap() as usize;
+                            let count = dim_size.saturating_sub(start_idx).min(count);
+                            if count > 0 {
+                                let orig_len = x.vals.len();
+                                x.vals.drain(start_idx..(start_idx + count));
+                                x.vals.resize(orig_len, Default::default());
+                            }
+                        }
+                        FlatValue::ArrStr(x) => {
+                            let mut x = x.borrow_mut();
+                            let dim_size = *x.dims.last().unwrap() as usize;
+                            let count = dim_size.saturating_sub(start_idx).min(count);
+                            if count > 0 {
+                                let orig_len = x.vals.len();
+                                x.vals.drain(start_idx..(start_idx + count));
+                                x.vals.resize(orig_len, Default::default());
+                            }
+                        }
+                        _ => bail_opt!(ctx, true, "value must be arrays"),
+                    }
+                }
+                ArraySortAsc | ArraySortDesc => {
+                    let [arr, start_idx, count] = ctx.pop_stack()?;
+                    unpack_int!(ctx, start_idx);
+                    unpack_int!(ctx, count);
+                    let start_idx = start_idx.val.max(0) as usize;
+                    let count = if count.val < 0 {
+                        usize::MAX
+                    } else {
+                        count.val as _
+                    };
+                    let is_ascending = matches!(primary_bytecode, ArraySortAsc);
+                    match arr.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let mut x = x.borrow_mut();
+                            let dim_size = *x.dims.last().unwrap() as usize;
+                            let count = dim_size.saturating_sub(start_idx).min(count);
+                            if count > 0 {
+                                x.vals[start_idx..(start_idx + count)].sort_by(|a, b| {
+                                    if is_ascending {
+                                        a.val.cmp(&b.val)
+                                    } else {
+                                        b.val.cmp(&a.val)
+                                    }
+                                });
+                            }
+                        }
+                        FlatValue::ArrStr(x) => {
+                            let mut x = x.borrow_mut();
+                            let dim_size = *x.dims.last().unwrap() as usize;
+                            let count = dim_size.saturating_sub(start_idx).min(count);
+                            if count > 0 {
+                                x.vals[start_idx..(start_idx + count)].sort_by(|a, b| {
+                                    if is_ascending {
+                                        a.val.cmp(&b.val)
+                                    } else {
+                                        b.val.cmp(&a.val)
+                                    }
+                                });
+                            }
+                        }
+                        _ => bail_opt!(ctx, true, "value must be arrays"),
+                    }
+                }
+                ArrayMSort => {
+                    let subs_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 1;
+                    let mut it = ctx.pop_stack_dyn(subs_cnt as usize + 1)?;
+                    let prim_arr = it.next().unwrap();
+                    let mut interrupted = false;
+                    let mut err_msg = "";
+                    match prim_arr.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let mut x = x.borrow_mut();
+                            let dim_size = *x.dims.last().unwrap() as usize;
+                            let vals = &mut x.vals[..dim_size];
+                            // Generate sort indices
+                            let mut sort_idxs = Vec::from_iter(
+                                vals.iter()
+                                    .take_while(|x| x.val != 0)
+                                    .enumerate()
+                                    .map(|(i, _)| i),
+                            );
+                            sort_idxs.sort_by_key(|k| &vals[*k].val);
+                            // Sort original array
+                            let sorted_vals =
+                                Vec::from_iter(sort_idxs.iter().map(|x| vals[*x].clone()));
+                            for (d, s) in vals.iter_mut().zip(sorted_vals.into_iter()) {
+                                *d = s;
+                            }
+                            // Sort sub arrays
+                            for sub_arr in it {
+                                let sub_arr = match sub_arr.val.into_unpacked() {
+                                    FlatValue::ArrInt(x) => x,
+                                    _ => {
+                                        err_msg = "value must be an array of integer";
+                                        break;
+                                    }
+                                };
+                                let mut sub_arr = sub_arr.borrow_mut();
+                                if sort_idxs.len() > *sub_arr.dims.first().unwrap() as usize {
+                                    interrupted = true;
+                                    break;
+                                }
+                                let stride: usize =
+                                    sub_arr.dims.iter().map(|x| *x as usize).skip(1).product();
+                                let mut sorted_vals = Vec::with_capacity(sort_idxs.len() * stride);
+                                for i in sort_idxs.iter().copied() {
+                                    let offset = i * stride;
+                                    sorted_vals.extend_from_slice(
+                                        &sub_arr.vals[offset..(offset + stride)],
+                                    );
+                                }
+                                for (d, s) in sub_arr.vals.iter_mut().zip(sorted_vals.into_iter()) {
+                                    *d = s;
+                                }
+                            }
+                        }
+                        FlatValue::ArrStr(x) => {
+                            let mut x = x.borrow_mut();
+                            let dim_size = *x.dims.last().unwrap() as usize;
+                            let vals = &mut x.vals[..dim_size];
+                            // Generate sort indices
+                            let mut sort_idxs = Vec::from_iter(
+                                vals.iter()
+                                    .take_while(|x| !x.val.is_empty())
+                                    .enumerate()
+                                    .map(|(i, _)| i),
+                            );
+                            sort_idxs.sort_by_key(|k| &vals[*k].val);
+                            // Sort original array
+                            let sorted_vals =
+                                Vec::from_iter(sort_idxs.iter().map(|x| vals[*x].clone()));
+                            for (d, s) in vals.iter_mut().zip(sorted_vals.into_iter()) {
+                                *d = s;
+                            }
+                            // Sort sub arrays
+                            for sub_arr in it {
+                                let sub_arr = match sub_arr.val.into_unpacked() {
+                                    FlatValue::ArrStr(x) => x,
+                                    _ => {
+                                        err_msg = "value must be an array of string";
+                                        break;
+                                    }
+                                };
+                                let mut sub_arr = sub_arr.borrow_mut();
+                                if sort_idxs.len() > *sub_arr.dims.first().unwrap() as usize {
+                                    interrupted = true;
+                                    break;
+                                }
+                                let stride: usize =
+                                    sub_arr.dims.iter().map(|x| *x as usize).skip(1).product();
+                                let mut sorted_vals = Vec::with_capacity(sort_idxs.len() * stride);
+                                for i in sort_idxs.iter().copied() {
+                                    let offset = i * stride;
+                                    sorted_vals.extend_from_slice(
+                                        &sub_arr.vals[offset..(offset + stride)],
+                                    );
+                                }
+                                for (d, s) in sub_arr.vals.iter_mut().zip(sorted_vals.into_iter()) {
+                                    *d = s;
+                                }
+                            }
+                        }
+                        _ => {
+                            drop(it);
+                            bail_opt!(ctx, true, "value must be arrays");
+                        }
+                    }
+                    if !err_msg.is_empty() {
+                        bail_opt!(ctx, true, err_msg);
+                    }
+                    // Write to RESULT:0
+                    vresult.borrow_mut().vals[0].val = (!interrupted).into();
+                }
+                ArrayCopy => {
+                    todo!()
                 }
                 // TODO...
                 Print | PrintLine | PrintExtended => {
@@ -2661,6 +2932,75 @@ impl<'a> EraArrayExtendAccess<'a> for ArrIntValue {
             offset,
             stride,
             count,
+        }
+    }
+}
+
+impl<'a> EraArrayExtendAccess<'a> for ArrStrValue {
+    type Item = &'a Rc<StrValue>;
+    fn stride_iter(
+        &'a self,
+        idx: usize,
+        dim_pos: usize,
+        start_idx: usize,
+        end_idx: usize,
+    ) -> impl Iterator<Item = Self::Item> {
+        struct Iter<'a> {
+            src: &'a ArrStrValue,
+            offset: usize,
+            stride: usize,
+            count: usize,
+        }
+        impl<'a> Iterator for Iter<'a> {
+            type Item = &'a Rc<StrValue>;
+            fn next(&mut self) -> Option<Self::Item> {
+                if self.count == 0 {
+                    return None;
+                }
+                let Some(item) = self.src.flat_get(self.offset) else {
+                    self.count = 0;
+                    return None;
+                };
+                self.count -= 1;
+                self.offset += self.stride;
+                Some(item)
+            }
+        }
+
+        let dim_pos = dim_pos.min(self.dims.len() - 1);
+        let dim_size = self.dims.get(dim_pos).copied().unwrap() as usize;
+        let stride = self
+            .dims
+            .iter()
+            .skip(dim_pos + 1)
+            .map(|&x| x as usize)
+            .product();
+
+        let count = end_idx.min(dim_size).saturating_sub(start_idx);
+        let offset = if count <= 0 {
+            0
+        } else {
+            let low = idx % stride;
+            let factor = dim_size * stride;
+            let high = idx / factor * factor;
+            low + high + start_idx * stride
+        };
+
+        Iter {
+            src: self,
+            offset,
+            stride,
+            count,
+        }
+    }
+}
+
+fn place_at_indices<T>(original: &mut [T], indices: &mut [usize]) {
+    for i in 0..indices.len() {
+        while i != indices[i] {
+            let new_i = indices[i];
+            indices.swap(i, new_i);
+            original.swap(i, new_i);
         }
     }
 }

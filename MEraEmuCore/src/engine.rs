@@ -42,7 +42,7 @@ pub struct MEraEngine<'a> {
     contextual_indices: HashMap<Ascii<String>, u32>,
 }
 
-pub const MAX_CHARA_COUNT: u32 = 1024;
+pub const MAX_CHARA_COUNT: u32 = 768;
 
 #[derive(thiserror::Error, Debug)]
 #[error("{msg}")]
