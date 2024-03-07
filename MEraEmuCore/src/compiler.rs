@@ -4311,6 +4311,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     TVoid => bail_opt!(self, x.src_info, "value cannot be void"),
                 }
                 self.chunk.emit_bytecode(PrintButton, x.src_info);
+                self.chunk.append_u8(x.flags.into(), x.src_info);
             }
             Cmd::ArrayRemove(x) => {
                 let info = self.var_arr_no_pseudo(&x.target.name, x.target.src_info)?;

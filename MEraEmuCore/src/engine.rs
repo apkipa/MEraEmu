@@ -145,6 +145,8 @@ pub trait MEraEngineSysCallback {
         expiry_msg: &str,
         can_click: bool,
     ) -> Option<String>;
+    fn on_reuselastline(&mut self, content: &str);
+    fn on_clearline(&mut self, count: i64);
     fn on_print_button(
         &mut self,
         content: &str,
@@ -350,6 +352,8 @@ impl MEraEngineSysCallback for EmptyCallback {
     ) -> Option<String> {
         None
     }
+    fn on_reuselastline(&mut self, content: &str) {}
+    fn on_clearline(&mut self, count: i64) {}
     fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
         Ok(0)
     }
@@ -1548,6 +1552,12 @@ impl<'a> MEraEngine<'a> {
                     expiry_msg,
                     can_click,
                 )
+            }
+            fn on_reuselastline(&mut self, content: &str) {
+                self.callback.on_reuselastline(content)
+            }
+            fn on_clearline(&mut self, count: i64) {
+                self.callback.on_clearline(count)
             }
             fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
                 self.callback.on_var_get_int(name, idx)

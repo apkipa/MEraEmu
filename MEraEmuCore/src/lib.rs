@@ -179,6 +179,8 @@ mod tests {
         ) -> Option<String> {
             None
         }
+        fn on_reuselastline(&mut self, content: &str) {}
+        fn on_clearline(&mut self, count: i64) {}
         fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
             Ok(0)
         }

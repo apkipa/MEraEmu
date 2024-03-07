@@ -1,7 +1,8 @@
 use crate::{
     bytecode::{
-        ArrIntValue, ArrStrValue, EraBytecodePrimaryType, EraCharaInitTemplate, FlatValue,
-        IntValue, PadStringFlags, PrintExtendedFlags, SourcePosInfo, StrValue, Value, ValueKind,
+        ArrIntValue, ArrStrValue, EraBytecodePrimaryType, EraCharaInitTemplate,
+        EraCsvGetProp2SubBytecodeType, EraInputSubBytecodeType, FlatValue, IntValue,
+        PadStringFlags, PrintExtendedFlags, SourcePosInfo, StrValue, Value, ValueKind,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
     util::*,
@@ -357,6 +358,28 @@ macro_rules! arr_idx_mut {
     };
 }
 
+macro_rules! pop_stack_inner_unpack {
+    ($ctx:expr, $var_name:ident:i) => {
+        unpack_int!($ctx, $var_name);
+    };
+    ($ctx:expr, $var_name:ident:s) => {
+        unpack_str!($ctx, $var_name);
+    };
+    // -----
+    ($ctx:expr, $var_name:ident:b) => {
+        unpack_int!($ctx, $var_name);
+        let $var_name = $var_name.val != 0;
+    };
+}
+macro_rules! pop_stack {
+    ($ctx:expr, $($var_name:ident:$type:ident),+) => {
+        let [$($var_name),+] = $ctx.pop_stack()?;
+        $(
+            pop_stack_inner_unpack!($ctx, $var_name:$type);
+        )+
+    };
+}
+
 #[derive(Default)]
 pub struct EraVarPool {
     // Mapping from names to indices.
@@ -567,6 +590,37 @@ impl Default for EraColorMatrix {
         }
     }
 }
+impl From<[[f32; 5]; 5]> for EraColorMatrix {
+    fn from(value: [[f32; 5]; 5]) -> Self {
+        EraColorMatrix {
+            m00: value[0][0],
+            m01: value[0][1],
+            m02: value[0][2],
+            m03: value[0][3],
+            m04: value[0][4],
+            m10: value[1][0],
+            m11: value[1][1],
+            m12: value[1][2],
+            m13: value[1][3],
+            m14: value[1][4],
+            m20: value[2][0],
+            m21: value[2][1],
+            m22: value[2][2],
+            m23: value[2][3],
+            m24: value[2][4],
+            m30: value[3][0],
+            m31: value[3][1],
+            m32: value[3][2],
+            m33: value[3][3],
+            m34: value[3][4],
+            m40: value[4][0],
+            m41: value[4][1],
+            m42: value[4][2],
+            m43: value[4][3],
+            m44: value[4][4],
+        }
+    }
+}
 
 pub trait EraVirtualMachineCallback {
     fn on_execution_error(&mut self, error: EraRuntimeErrorInfo);
@@ -623,6 +677,8 @@ pub trait EraVirtualMachineCallback {
         expiry_msg: &str,
         can_click: bool,
     ) -> Option<String>;
+    fn on_reuselastline(&mut self, content: &str);
+    fn on_clearline(&mut self, count: i64);
     fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error>;
     fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error>;
     fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error>;
@@ -2676,9 +2732,119 @@ impl EraVirtualMachine {
                     vresult.borrow_mut().vals[0].val = (!interrupted).into();
                 }
                 ArrayCopy => {
-                    todo!()
+                    let [afrom, ato] = ctx.pop_stack()?;
+                    match afrom.val.into_unpacked() {
+                        FlatValue::ArrInt(afrom) => {
+                            let afrom = afrom.borrow();
+                            unpack_arrint_mut!(ctx, ato);
+                            if afrom.dims.len() != ato.dims.len() {
+                                bail_opt!(ctx, true, "array dimension mismatch");
+                            }
+                            let upper_dims: Vec<_> = afrom
+                                .dims
+                                .iter()
+                                .zip(ato.dims.iter())
+                                .map(|(a, b)| *a.min(b))
+                                .collect();
+                            let mut idxs = vec![0; upper_dims.len()];
+                            loop {
+                                *ato.get_mut(&idxs).unwrap() = afrom.get(&idxs).unwrap().clone();
+                                // Increment index
+                                *idxs.last_mut().unwrap() += 1;
+                                for i in (1..idxs.len()).rev() {
+                                    if idxs[i] >= upper_dims[i] {
+                                        idxs[i] -= upper_dims[i];
+                                        idxs[i - 1] += 1;
+                                    }
+                                }
+                                if idxs[0] >= upper_dims[0] {
+                                    break;
+                                }
+                            }
+                        }
+                        FlatValue::ArrStr(afrom) => {
+                            let afrom = afrom.borrow();
+                            unpack_arrstr_mut!(ctx, ato);
+                            if afrom.dims.len() != ato.dims.len() {
+                                bail_opt!(ctx, true, "array dimension mismatch");
+                            }
+                            let upper_dims: Vec<_> = afrom
+                                .dims
+                                .iter()
+                                .zip(ato.dims.iter())
+                                .map(|(a, b)| *a.min(b))
+                                .collect();
+                            let mut idxs = vec![0; upper_dims.len()];
+                            loop {
+                                *ato.get_mut(&idxs).unwrap() = afrom.get(&idxs).unwrap().clone();
+                                // Increment index
+                                *idxs.last_mut().unwrap() += 1;
+                                for i in (1..idxs.len()).rev() {
+                                    if idxs[i] >= upper_dims[i] {
+                                        idxs[i] -= upper_dims[i];
+                                        idxs[i - 1] += 1;
+                                    }
+                                }
+                                if idxs[0] >= upper_dims[0] {
+                                    break;
+                                }
+                            }
+                        }
+                        _ => bail_opt!(ctx, true, "value must be arrays"),
+                    }
                 }
-                // TODO...
+                ArrayShift => {
+                    let [arr, shift_count, value, start_idx, target_count] = ctx.pop_stack()?;
+                    unpack_int!(ctx, shift_count);
+                    unpack_int!(ctx, start_idx);
+                    unpack_int!(ctx, target_count);
+                    let abs_shift_count = shift_count.val.unsigned_abs() as usize;
+                    let start_idx = start_idx.val.max(0) as usize;
+                    let target_count = if target_count.val < 0 {
+                        usize::MAX
+                    } else {
+                        target_count.val as _
+                    };
+                    match arr.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let mut x = x.borrow_mut();
+                            unpack_int!(ctx, value);
+                            let dim_size = *x.dims.last().unwrap() as usize;
+                            let target_count = dim_size.saturating_sub(start_idx).min(target_count);
+                            let target_vals = &mut x.vals[start_idx..(start_idx + target_count)];
+                            if abs_shift_count >= target_count {
+                                target_vals.fill(value);
+                            } else {
+                                if shift_count.val < 0 {
+                                    target_vals[..abs_shift_count].fill(value);
+                                    target_vals.rotate_left(abs_shift_count);
+                                } else {
+                                    target_vals.rotate_right(abs_shift_count);
+                                    target_vals[..abs_shift_count].fill(value);
+                                }
+                            }
+                        }
+                        FlatValue::ArrStr(x) => {
+                            let mut x = x.borrow_mut();
+                            unpack_str!(ctx, value);
+                            let dim_size = *x.dims.last().unwrap() as usize;
+                            let target_count = dim_size.saturating_sub(start_idx).min(target_count);
+                            let target_vals = &mut x.vals[start_idx..(start_idx + target_count)];
+                            if abs_shift_count >= target_count {
+                                target_vals.fill(value);
+                            } else {
+                                if shift_count.val < 0 {
+                                    target_vals[..abs_shift_count].fill(value);
+                                    target_vals.rotate_left(abs_shift_count);
+                                } else {
+                                    target_vals.rotate_right(abs_shift_count);
+                                    target_vals[..abs_shift_count].fill(value);
+                                }
+                            }
+                        }
+                        _ => bail_opt!(ctx, true, "value must be arrays"),
+                    }
+                }
                 Print | PrintLine | PrintExtended => {
                     let [value] = ctx.pop_stack()?;
                     let flags = match primary_bytecode {
@@ -2697,6 +2863,38 @@ impl EraVirtualMachine {
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
                     }
                 }
+                HtmlPrint => {
+                    let [html] = ctx.pop_stack()?;
+                    unpack_str!(ctx, html);
+                    ctx.callback.on_html_print(&html.val);
+                }
+                PrintButton => {
+                    let flags = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 1;
+                    let [content, value] = ctx.pop_stack()?;
+                    unpack_str!(ctx, content);
+                    unpack_str!(ctx, value);
+                    ctx.callback
+                        .on_print_button(&content.val, &value.val, flags.into());
+                }
+                Wait => {
+                    let [any_key, is_force] = ctx.pop_stack()?;
+                    unpack_int!(ctx, any_key);
+                    unpack_int!(ctx, is_force);
+                    let any_key = any_key.val != 0;
+                    let is_force = is_force.val != 0;
+                    ctx.callback.on_wait(any_key, is_force);
+                }
+                TWait => {
+                    let [duration, is_force] = ctx.pop_stack()?;
+                    unpack_int!(ctx, duration);
+                    unpack_int!(ctx, is_force);
+                    let is_force = is_force.val != 0;
+                    ctx.callback.on_twait(duration.val, is_force);
+                }
+                PrintImg | PrintImg4 => {
+                    todo!("PrintImg")
+                }
                 GCreate => {
                     let [gid, width, height] = ctx.pop_stack()?;
                     let gid = ctx.unpack_int(gid.into())?;
@@ -2712,8 +2910,556 @@ impl EraVirtualMachine {
                     let ret = ctx.callback.on_gcreatefromfile(gid.val, &file_path.val);
                     ctx.stack.push(Value::new_int(ret).into());
                 }
+                GDispose => {
+                    let [gid] = ctx.pop_stack()?;
+                    unpack_int!(ctx, gid);
+                    let ret = ctx.callback.on_gdispose(gid.val);
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                GCreated => {
+                    let [gid] = ctx.pop_stack()?;
+                    unpack_int!(ctx, gid);
+                    let ret = ctx.callback.on_gcreated(gid.val);
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                GDrawSprite | GDrawSpriteWithColorMatrix => {
+                    let (gid, sprite_name, dest_x, dest_y, dest_width, dest_height, color_matrix);
+                    match primary_bytecode {
+                        GDrawSprite => {
+                            [gid, sprite_name, dest_x, dest_y, dest_width, dest_height] =
+                                ctx.pop_stack()?;
+                            color_matrix = None;
+                        }
+                        GDrawSpriteWithColorMatrix => {
+                            let acolor_matrix;
+                            [
+                                gid,
+                                sprite_name,
+                                dest_x,
+                                dest_y,
+                                dest_width,
+                                dest_height,
+                                acolor_matrix,
+                            ] = ctx.pop_stack()?;
+                            unpack_arrint_mut!(ctx, acolor_matrix);
+                            // Parse ColorMatrix
+                            // TODO: EmuEra uses VariableTerm to convey indices info,
+                            //       support this by adding full indices as a single
+                            //       VM stack value.
+                            if acolor_matrix.dims.len() != 2 {
+                                bail_opt!(
+                                    ctx,
+                                    true,
+                                    "ColorMatrix array has too few or unsupported dimensions"
+                                );
+                            }
+                            let mut clr_mat = [[0.0; 5]; 5];
+                            for i in 0..5 {
+                                for j in 0..5 {
+                                    let idxs = &[i as _, j as _];
+                                    let Some(val) = acolor_matrix.get(idxs) else {
+                                        bail_opt!(ctx, true, "invalid indices into array");
+                                    };
+                                    clr_mat[i][j] = val.val as f32 / 256.0;
+                                }
+                            }
+                            color_matrix = Some(EraColorMatrix::from(clr_mat));
+                        }
+                        _ => unreachable!(),
+                    }
+                    unpack_int!(ctx, gid);
+                    unpack_str!(ctx, sprite_name);
+                    unpack_int!(ctx, dest_x);
+                    unpack_int!(ctx, dest_y);
+                    unpack_int!(ctx, dest_width);
+                    unpack_int!(ctx, dest_height);
+                    let ret = ctx.callback.on_gdrawsprite(
+                        gid.val,
+                        &sprite_name.val,
+                        dest_x.val,
+                        dest_y.val,
+                        dest_width.val,
+                        dest_height.val,
+                        color_matrix.as_ref(),
+                    );
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                GClear => {
+                    let [gid, color] = ctx.pop_stack()?;
+                    unpack_int!(ctx, gid);
+                    unpack_int!(ctx, color);
+                    let ret = ctx.callback.on_gclear(gid.val, color.val);
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                SpriteCreate => {
+                    let [sprite_name, gid, x, y, width, height] = ctx.pop_stack()?;
+                    unpack_str!(ctx, sprite_name);
+                    unpack_int!(ctx, gid);
+                    unpack_int!(ctx, x);
+                    unpack_int!(ctx, y);
+                    unpack_int!(ctx, width);
+                    unpack_int!(ctx, height);
+                    let ret = ctx.callback.on_spritecreate(
+                        &sprite_name.val,
+                        gid.val,
+                        x.val,
+                        y.val,
+                        width.val,
+                        height.val,
+                    );
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                SpriteDispose => {
+                    let [name] = ctx.pop_stack()?;
+                    unpack_str!(ctx, name);
+                    let ret = ctx.callback.on_spritedispose(&name.val);
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                SpriteCreated => {
+                    let [name] = ctx.pop_stack()?;
+                    unpack_str!(ctx, name);
+                    let ret = ctx.callback.on_spritecreated(&name.val);
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                SpriteAnimeCreate => {
+                    let [name, width, height] = ctx.pop_stack()?;
+                    unpack_str!(ctx, name);
+                    unpack_int!(ctx, width);
+                    unpack_int!(ctx, height);
+                    let ret = ctx
+                        .callback
+                        .on_spriteanimecreate(&name.val, width.val, height.val);
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                SpriteAnimeAddFrame => {
+                    let [name, gid, x, y, width, height, offset_x, offset_y, delay] =
+                        ctx.pop_stack()?;
+                    unpack_str!(ctx, name);
+                    unpack_int!(ctx, gid);
+                    unpack_int!(ctx, x);
+                    unpack_int!(ctx, y);
+                    unpack_int!(ctx, width);
+                    unpack_int!(ctx, height);
+                    unpack_int!(ctx, offset_x);
+                    unpack_int!(ctx, offset_y);
+                    unpack_int!(ctx, delay);
+                    let ret = ctx.callback.on_spriteanimeaddframe(
+                        &name.val,
+                        gid.val,
+                        x.val,
+                        y.val,
+                        width.val,
+                        height.val,
+                        offset_x.val,
+                        offset_y.val,
+                        delay.val,
+                    );
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                SpriteWidth => {
+                    let [name] = ctx.pop_stack()?;
+                    unpack_str!(ctx, name);
+                    let ret = ctx.callback.on_spritewidth(&name.val);
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                SpriteHeight => {
+                    let [name] = ctx.pop_stack()?;
+                    unpack_str!(ctx, name);
+                    let ret = ctx.callback.on_spriteheight(&name.val);
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                CheckFont => {
+                    let [font_name] = ctx.pop_stack()?;
+                    unpack_str!(ctx, font_name);
+                    let ret = ctx.callback.on_check_font(&font_name.val);
+                    ctx.stack.push(Value::new_int(ret).into());
+                }
+                SaveText => {
+                    // TODO...
+                    bail_opt!(ctx, true, "SaveText not implemented");
+                }
+                LoadText => {
+                    // TODO...
+                    bail_opt!(ctx, true, "LoadText not implemented");
+                }
+                FindElement | FindLastElement => {
+                    let [var, value, start_idx, end_idx, complete_match] = ctx.pop_stack()?;
+                    unpack_int!(ctx, start_idx);
+                    unpack_int!(ctx, end_idx);
+                    unpack_int!(ctx, complete_match);
+                    let start_idx = start_idx.val.max(0) as usize;
+                    let end_idx = if end_idx.val < 0 {
+                        usize::MAX
+                    } else {
+                        end_idx.val as _
+                    };
+                    let is_reverse = matches!(primary_bytecode, FindLastElement);
+                    let result = match var.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let x = x.borrow();
+                            unpack_int!(ctx, value);
+                            let (dim_pos, end_idx) = (usize::MAX, end_idx);
+                            let mut it =
+                                x.stride_iter(0, dim_pos, start_idx, end_idx).map(|x| x.val);
+                            let result = if is_reverse {
+                                it.rposition(|x| x == value.val)
+                            } else {
+                                it.position(|x| x == value.val)
+                            };
+                            result.map(|x| (x + start_idx) as i64).unwrap_or(-1)
+                        }
+                        FlatValue::ArrStr(x) => {
+                            let x = x.borrow();
+                            unpack_str!(ctx, value);
+                            let Ok(mut re) = regex::Regex::new(&value.val) else {
+                                bail_opt!(ctx, true, "invalid regex");
+                            };
+                            if complete_match.val != 0 {
+                                re = regex::Regex::new(&format!("^(?:{})$", value.val)).unwrap()
+                            }
+                            let (dim_pos, end_idx) = (usize::MAX, end_idx);
+                            let mut it = x
+                                .stride_iter(0, dim_pos, start_idx, end_idx)
+                                .map(|x| &x.val);
+                            let result = if is_reverse {
+                                it.rposition(|x| re.is_match(x))
+                            } else {
+                                it.position(|x| re.is_match(x))
+                            };
+                            result.map(|x| (x + start_idx) as i64).unwrap_or(-1)
+                        }
+                        _ => bail_opt!(ctx, true, "value must be arrays"),
+                    };
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                FindChara | FindLastChara => {
+                    let [var, var_i, value, start_idx, end_idx] = ctx.pop_stack()?;
+                    unpack_int!(ctx, var_i);
+                    unpack_int!(ctx, start_idx);
+                    unpack_int!(ctx, end_idx);
+                    let var_i = var_i.val as usize;
+                    let start_idx = start_idx.val.max(0) as usize;
+                    let end_idx = if end_idx.val < 0 {
+                        usize::MAX
+                    } else {
+                        end_idx.val as _
+                    };
+                    let is_reverse = matches!(primary_bytecode, FindLastChara);
+                    let result = match var.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let x = x.borrow();
+                            unpack_int!(ctx, value);
+                            let (dim_pos, end_idx) = (0, end_idx.min(self.charas_count));
+                            let mut it = x
+                                .stride_iter(var_i, dim_pos, start_idx, end_idx)
+                                .map(|x| x.val);
+                            let result = if is_reverse {
+                                it.rposition(|x| x == value.val)
+                            } else {
+                                it.position(|x| x == value.val)
+                            };
+                            result.map(|x| (x + start_idx) as i64).unwrap_or(-1)
+                        }
+                        FlatValue::ArrStr(x) => {
+                            let x = x.borrow();
+                            unpack_str!(ctx, value);
+                            let (dim_pos, end_idx) = (0, end_idx.min(self.charas_count));
+                            let mut it = x
+                                .stride_iter(var_i, dim_pos, start_idx, end_idx)
+                                .map(|x| &x.val);
+                            let result = if is_reverse {
+                                it.rposition(|x| x == &value.val)
+                            } else {
+                                it.position(|x| x == &value.val)
+                            };
+                            result.map(|x| (x + start_idx) as i64).unwrap_or(-1)
+                        }
+                        _ => bail_opt!(ctx, true, "value must be arrays"),
+                    };
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                VarSet => {
+                    let [arr, value, start_idx, end_idx] = ctx.pop_stack()?;
+                    unpack_int!(ctx, start_idx);
+                    unpack_int!(ctx, end_idx);
+                    let start_idx = start_idx.val.max(0) as usize;
+                    let end_idx = if end_idx.val < 0 {
+                        usize::MAX
+                    } else {
+                        end_idx.val as _
+                    };
+                    match arr.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let mut x = x.borrow_mut();
+                            unpack_int!(ctx, value);
+                            let dim_size = *x.dims.last().unwrap() as usize;
+                            let count = dim_size.min(end_idx).saturating_sub(start_idx);
+                            if count > 0 {
+                                x.vals[start_idx..(start_idx + count)].fill(value);
+                            }
+                        }
+                        FlatValue::ArrStr(x) => {
+                            let mut x = x.borrow_mut();
+                            unpack_str!(ctx, value);
+                            let dim_size = *x.dims.last().unwrap() as usize;
+                            let count = dim_size.min(end_idx).saturating_sub(start_idx);
+                            if count > 0 {
+                                x.vals[start_idx..(start_idx + count)].fill(value);
+                            }
+                        }
+                        _ => bail_opt!(ctx, true, "value must be arrays"),
+                    }
+                }
+                CVarSet => {
+                    let [arr, index, value, start_idx, end_idx] = ctx.pop_stack()?;
+                    unpack_int!(ctx, index);
+                    unpack_int!(ctx, start_idx);
+                    unpack_int!(ctx, end_idx);
+                    let start_idx = start_idx.val.max(0) as usize;
+                    let end_idx = if end_idx.val < 0 {
+                        usize::MAX
+                    } else {
+                        end_idx.val as _
+                    };
+                    match arr.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => {
+                            let mut x = x.borrow_mut();
+                            unpack_int!(ctx, value);
+                            if !(0..x.dims.last().map(|x| *x as i64).unwrap()).contains(&index.val)
+                            {
+                                bail_opt!(ctx, true, "invalid indices into array");
+                            }
+                            let index = index.val as usize;
+                            let dim_size = self.charas_count;
+                            let count = dim_size.min(end_idx).saturating_sub(start_idx);
+                            let stride: usize =
+                                x.dims.iter().skip(1).map(|x| *x as usize).product();
+                            if count > 0 {
+                                for i in start_idx..(start_idx + count) {
+                                    x.vals[i * stride + index] = value.clone();
+                                }
+                            }
+                        }
+                        FlatValue::ArrStr(x) => {
+                            let mut x = x.borrow_mut();
+                            unpack_str!(ctx, value);
+                            if !(0..x.dims.last().map(|x| *x as i64).unwrap()).contains(&index.val)
+                            {
+                                bail_opt!(ctx, true, "invalid indices into array");
+                            }
+                            let index = index.val as usize;
+                            let dim_size = self.charas_count;
+                            let count = dim_size.min(end_idx).saturating_sub(start_idx);
+                            let stride: usize =
+                                x.dims.iter().skip(1).map(|x| *x as usize).product();
+                            if count > 0 {
+                                for i in start_idx..(start_idx + count) {
+                                    x.vals[i * stride + index] = value.clone();
+                                }
+                            }
+                        }
+                        _ => bail_opt!(ctx, true, "value must be arrays"),
+                    }
+                }
+                GetCharaNum => {
+                    ctx.stack
+                        .push(Value::new_int(self.charas_count as _).into());
+                }
+                GetHostTimeRaw => {
+                    let result = ctx.callback.on_get_host_time();
+                    ctx.stack.push(Value::new_int(result as _).into());
+                }
+                GetHostTime => {
+                    use chrono::*;
+                    // NOTE: Native time zone info is used
+                    let result = ctx.callback.on_get_host_time();
+                    let t = DateTime::from_timestamp_millis(result as _).unwrap();
+                    let t: DateTime<Local> = t.into();
+                    let mut result = t.year() as i64;
+                    result = result * 100 + t.month() as i64;
+                    result = result * 100 + t.day() as i64;
+                    result = result * 100 + t.hour() as i64;
+                    result = result * 100 + t.minute() as i64;
+                    result = result * 100 + t.second() as i64;
+                    result = result * 1000 + (t.nanosecond() as i64) / 1_000_000;
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                GetHostTimeS => {
+                    use chrono::*;
+                    // NOTE: Native time zone info is used
+                    let result = ctx.callback.on_get_host_time();
+                    let t = DateTime::from_timestamp_millis(result as _).unwrap();
+                    let t: DateTime<Local> = t.into();
+                    let result = t.format("%Y/%m/%d %H:%M:%S");
+                    ctx.stack.push(Value::new_str(result.to_string()).into());
+                }
+                Input => {
+                    let sub_bc = EraInputSubBytecodeType::from(
+                        ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?,
+                    );
+                    ip_offset_delta += 1;
+                    macro_rules! handle_default {
+                        ($ctx:expr, $sub_bc:expr, $default_value:ident:i) => {
+                            let $default_value = if $sub_bc.has_default_value() {
+                                pop_stack!(ctx, $default_value:i);
+                                Some($default_value.val)
+                            } else {
+                                None
+                            };
+                        };
+                        ($ctx:expr, $sub_bc:expr, $default_value:ident:s) => {
+                            let $default_value = if $sub_bc.has_default_value() {
+                                pop_stack!(ctx, $default_value:s);
+                                Some($default_value)
+                            } else {
+                                None
+                            };
+                            let $default_value = $default_value.as_ref().map(|x| x.val.as_str());
+                        };
+                    }
+                    macro_rules! handle_result {
+                        ($vresult:ident:i, $result:expr) => {
+                            if let Some(r) = $result {
+                                $vresult.borrow_mut().vals[0] = IntValue { val: r };
+                            }
+                        };
+                        ($vresult:ident:s, $result:expr) => {
+                            if let Some(r) = $result {
+                                $vresult.borrow_mut().vals[0] = Rc::new(StrValue { val: r });
+                            }
+                        };
+                    }
+                    match (sub_bc.is_string(), sub_bc.is_one(), sub_bc.is_timed()) {
+                        (false, false, false) => {
+                            pop_stack!(ctx, can_click:b, allow_skip:b);
+                            handle_default!(ctx, sub_bc, default_value:i);
+                            let r = ctx
+                                .callback
+                                .on_input_int(default_value, can_click, allow_skip);
+                            handle_result!(vresult:i, r);
+                        }
+                        (true, false, false) => {
+                            pop_stack!(ctx, can_click:b, allow_skip:b);
+                            handle_default!(ctx, sub_bc, default_value:s);
+                            let r = ctx
+                                .callback
+                                .on_input_str(default_value, can_click, allow_skip);
+                            handle_result!(vresults:s, r);
+                        }
+                        (false, false, true) => {
+                            pop_stack!(ctx, time_limit:i, default_value:i, show_prompt:b, expiry_msg:s, can_click:b);
+                            let r = ctx.callback.on_tinput_int(
+                                time_limit.val,
+                                default_value.val,
+                                show_prompt,
+                                &expiry_msg.val,
+                                can_click,
+                            );
+                            handle_result!(vresult:i, r);
+                        }
+                        (true, false, true) => {
+                            pop_stack!(ctx, time_limit:i, default_value:s, show_prompt:b, expiry_msg:s, can_click:b);
+                            let r = ctx.callback.on_tinput_str(
+                                time_limit.val,
+                                &default_value.val,
+                                show_prompt,
+                                &expiry_msg.val,
+                                can_click,
+                            );
+                            handle_result!(vresults:s, r);
+                        }
+                        (false, true, false) => {
+                            handle_default!(ctx, sub_bc, default_value:i);
+                            let r = ctx.callback.on_oneinput_int(default_value);
+                            handle_result!(vresult:i, r);
+                        }
+                        (true, true, false) => {
+                            handle_default!(ctx, sub_bc, default_value:s);
+                            let r = ctx.callback.on_oneinput_str(default_value);
+                            handle_result!(vresults:s, r);
+                        }
+                        (false, true, true) => {
+                            pop_stack!(ctx, time_limit:i, default_value:i, show_prompt:b, expiry_msg:s, can_click:b);
+                            let r = ctx.callback.on_toneinput_int(
+                                time_limit.val,
+                                default_value.val,
+                                show_prompt,
+                                &expiry_msg.val,
+                                can_click,
+                            );
+                            handle_result!(vresult:i, r);
+                        }
+                        (true, true, true) => {
+                            pop_stack!(ctx, time_limit:i, default_value:s, show_prompt:b, expiry_msg:s, can_click:b);
+                            let r = ctx.callback.on_toneinput_str(
+                                time_limit.val,
+                                &default_value.val,
+                                show_prompt,
+                                &expiry_msg.val,
+                                can_click,
+                            );
+                            handle_result!(vresults:s, r);
+                        }
+                    }
+                }
+                ReuseLastLine => {
+                    pop_stack!(ctx, content:s);
+                    ctx.callback.on_reuselastline(&content.val);
+                }
+                ClearLine => {
+                    pop_stack!(ctx, count:i);
+                    ctx.callback.on_clearline(count.val);
+                }
                 CsvGetProp2 => {
-                    todo!("CsvGetProp2")
+                    use EraCsvGetProp2SubBytecodeType::*;
+                    let Some(sub_bc) = EraCsvGetProp2SubBytecodeType::try_from_i(
+                        ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?,
+                    ) else {
+                        bail_opt!(
+                            ctx,
+                            true,
+                            "invalid EraCsvGetProp2SubBytecodeType (memory corrupted?)"
+                        );
+                    };
+                    ip_offset_delta += 1;
+                    pop_stack!(ctx, chara_no:i, index:i);
+                    let Some(chara_template) = self.chara_templates.get(&(chara_no.val as _))
+                    else {
+                        bail_opt!(ctx, true, "no such character template");
+                    };
+                    let index = index.val as u32;
+                    match sub_bc {
+                        CsvName | CsvCallName | CsvNickName | CsvMasterName | CsvCStr => {
+                            // Return string
+                            let r = match sub_bc {
+                                CsvName => Some(&chara_template.name),
+                                CsvCallName => Some(&chara_template.callname),
+                                CsvNickName => Some(&chara_template.nickname),
+                                CsvMasterName => Some(&chara_template.mastername),
+                                CsvCStr => chara_template.cstr.get(&index),
+                                _ => unreachable!(),
+                            };
+                            let r = r.map(|x| x.to_owned()).unwrap_or_default();
+                            ctx.stack.push(Value::new_str(r).into());
+                        }
+                        _ => {
+                            // Return integer
+                            let r = match sub_bc {
+                                CsvBase => chara_template.maxbase.get(&index),
+                                CsvAbl => chara_template.abl.get(&index),
+                                CsvTalent => chara_template.talent.get(&index),
+                                CsvMark => chara_template.mark.get(&index),
+                                CsvExp => chara_template.exp.get(&index),
+                                CsvRelation => chara_template.relation.get(&index),
+                                CsvJuel => chara_template.juel.get(&index),
+                                CsvEquip => chara_template.equip.get(&index),
+                                CsvCFlag => chara_template.cflag.get(&index),
+                                _ => unreachable!(),
+                            };
+                            let r = r.map(|x| x.to_owned()).unwrap_or_default();
+                            ctx.stack.push(Value::new_int(r).into());
+                        }
+                    }
                 }
                 CsvGetNum => {
                     let [name] = ctx.pop_stack()?;
@@ -2725,6 +3471,7 @@ impl EraVirtualMachine {
                         .unwrap_or(-1);
                     ctx.stack.push(Value::new_int(result).into());
                 }
+                // TODO...
                 GetPalamLv | GetExpLv => {
                     let [value, max_lv] = ctx.pop_stack()?;
                     let value = ctx.unpack_int(value.into())?;
@@ -2885,7 +3632,7 @@ impl<'a> EraArrayExtendAccess<'a> for ArrIntValue {
         dim_pos: usize,
         start_idx: usize,
         end_idx: usize,
-    ) -> impl Iterator<Item = Self::Item> {
+    ) -> impl Iterator<Item = Self::Item> + DoubleEndedIterator + ExactSizeIterator {
         struct Iter<'a> {
             src: &'a ArrIntValue,
             offset: usize,
@@ -2899,14 +3646,32 @@ impl<'a> EraArrayExtendAccess<'a> for ArrIntValue {
                     return None;
                 }
                 let Some(item) = self.src.flat_get(self.offset) else {
-                    self.count = 0;
-                    return None;
+                    unreachable!();
+                    // self.count = 0;
+                    // return None;
                 };
                 self.count -= 1;
                 self.offset += self.stride;
                 Some(item)
             }
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (self.count, Some(self.count))
+            }
         }
+        impl DoubleEndedIterator for Iter<'_> {
+            fn next_back(&mut self) -> Option<Self::Item> {
+                if self.count == 0 {
+                    return None;
+                }
+                self.count -= 1;
+                let item = self
+                    .src
+                    .flat_get(self.offset + self.count * self.stride)
+                    .unwrap();
+                Some(item)
+            }
+        }
+        impl ExactSizeIterator for Iter<'_> {}
 
         let dim_pos = dim_pos.min(self.dims.len() - 1);
         let dim_size = self.dims.get(dim_pos).copied().unwrap() as usize;
@@ -2944,7 +3709,7 @@ impl<'a> EraArrayExtendAccess<'a> for ArrStrValue {
         dim_pos: usize,
         start_idx: usize,
         end_idx: usize,
-    ) -> impl Iterator<Item = Self::Item> {
+    ) -> impl Iterator<Item = Self::Item> + DoubleEndedIterator + ExactSizeIterator {
         struct Iter<'a> {
             src: &'a ArrStrValue,
             offset: usize,
@@ -2958,14 +3723,32 @@ impl<'a> EraArrayExtendAccess<'a> for ArrStrValue {
                     return None;
                 }
                 let Some(item) = self.src.flat_get(self.offset) else {
-                    self.count = 0;
-                    return None;
+                    unreachable!();
+                    // self.count = 0;
+                    // return None;
                 };
                 self.count -= 1;
                 self.offset += self.stride;
                 Some(item)
             }
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (self.count, Some(self.count))
+            }
         }
+        impl DoubleEndedIterator for Iter<'_> {
+            fn next_back(&mut self) -> Option<Self::Item> {
+                if self.count == 0 {
+                    return None;
+                }
+                self.count -= 1;
+                let item = self
+                    .src
+                    .flat_get(self.offset + self.count * self.stride)
+                    .unwrap();
+                Some(item)
+            }
+        }
+        impl ExactSizeIterator for Iter<'_> {}
 
         let dim_pos = dim_pos.min(self.dims.len() - 1);
         let dim_size = self.dims.get(dim_pos).copied().unwrap() as usize;
