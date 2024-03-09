@@ -12,6 +12,7 @@ pub enum EraBytecodePrimaryType {
     ReturnVoid,
     ReturnInteger,
     ReturnString,
+    ReturnNaked, // Merges current frame into previous frame, for syscalls only
     Jump,
     JumpW,
     JumpWW,
@@ -26,7 +27,9 @@ pub enum EraBytecodePrimaryType {
     */
     FunCall,
     TryFunCall, // Returns whether function exists
+    TryFunCallForce,
     FunExists,
+    RestartExecAtFun, // Function must not accept arguments
     // LoadString,
     // LoadStringW,
     // LoadStringWW,
@@ -203,10 +206,10 @@ pub enum EraBytecodePrimaryType {
     GetCharaRegNum,
     LoadGlobal,
     SaveGlobal,
-    LoadGame,
-    SaveGame,
-    BeginSystemProcedure,
-    DoTrain,
+    // LoadGame,
+    // SaveGame,
+    // BeginSystemProcedure,
+    // DoTrain,
     PrintLineIsEmpty,
     ResetData,
     ResetCharaStain,
@@ -217,7 +220,8 @@ pub enum EraBytecodePrimaryType {
     KbGetKeyState, // Returns i64 with b15 = <key down>, b0 = <key triggered>
     FindCharaDataFile,
     // -----
-    ExtendedBytecode1 = 192, // Values >= ExtendedBytecode should do extended lookup
+    SystemIntrinsics = 192,
+    ExtendedBytecode1, // Values >= ExtendedBytecode should do extended lookup
 }
 impl EraBytecodePrimaryType {
     pub fn from_i(value: u8) -> Self {
@@ -269,6 +273,22 @@ impl EraCsvGetProp2SubBytecodeType {
     pub fn to_i(self) -> u8 {
         num_traits::ToPrimitive::to_u8(&self).unwrap()
     }
+}
+#[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone)]
+pub enum EraBeginSystemProcedureKind {
+    First,
+    Title,
+    Train,
+    AfterTrain,
+    AblUp,
+    TurnEnd,
+    Shop,
+}
+#[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
+pub enum SystemIntrinsicsKind {
+    LoadGamePrintText,
 }
 
 #[modular_bitfield::bitfield]

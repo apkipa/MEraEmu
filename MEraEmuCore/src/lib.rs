@@ -418,10 +418,13 @@ mod tests {
         engine.register_global_var("WINDOW_TITLE", true, 1, true)?;
         _ = engine.load_erb("main.erb", main_erb.as_bytes());
         _ = engine.finialize_load_srcs();
+        let stop_flag = AtomicBool::new(false);
+        _ = engine.do_execution(&stop_flag, 1024 * 1024);
+        assert!(engine.get_is_halted());
+        drop(engine);
         {
             let errors = errors.borrow();
             if errors.contains("error:") {
-                drop(engine);
                 panic!(
                     "compile output:\n{errors}\nexec output:\n{}",
                     callback.output
@@ -431,10 +434,6 @@ mod tests {
                 println!("compile output:\n{errors}");
             }
         }
-        let stop_flag = AtomicBool::new(false);
-        engine.do_execution(&stop_flag, 1024 * 1024)?;
-        assert!(engine.get_is_halted());
-        drop(engine);
         assert_eq!(
             &callback.output,
             "(5050)Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135[;&]"

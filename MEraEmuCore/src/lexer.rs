@@ -849,7 +849,7 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
     }
     // NOTE: Assuming input is UTF-8
     fn is_ident_char(ch: u8) -> bool {
-        ch.is_ascii_alphanumeric() || ch == b'_' || !ch.is_ascii()
+        ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'$') || !ch.is_ascii()
     }
     fn is_at_end(&self) -> bool {
         self.i.src.is_empty()

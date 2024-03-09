@@ -3,7 +3,9 @@ use std::rc::Rc;
 
 use indoc::concatdoc;
 
-use crate::bytecode::{FlatValue, IntValue, PadStringFlags, StrValue, Value, ValueKind};
+use crate::bytecode::{
+    EraBeginSystemProcedureKind, FlatValue, IntValue, PadStringFlags, StrValue, Value, ValueKind,
+};
 use crate::{routine, util::*};
 
 use crate::vm::EraVarPool;
@@ -1111,18 +1113,6 @@ pub struct EraSkipDispStmt {
     pub src_info: SourcePosInfo,
 }
 
-#[repr(u8)]
-#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone)]
-pub enum EraBeginSystemProcedureKind {
-    First,
-    Title,
-    Train,
-    AfterTrain,
-    AblUp,
-    TurnEnd,
-    Shop,
-}
-
 #[derive(Debug, Clone)]
 pub struct EraBeginStmt {
     pub proc: EraBeginSystemProcedureKind,
@@ -1289,7 +1279,7 @@ pub enum EraStmt {
     Invalid(SourcePosInfo),
 }
 impl EraStmt {
-    fn source_pos_info(&self) -> SourcePosInfo {
+    pub fn source_pos_info(&self) -> SourcePosInfo {
         use EraStmt::*;
         match self {
             Expr(x) => x.source_pos_info(),

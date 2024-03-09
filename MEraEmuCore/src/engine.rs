@@ -6,6 +6,7 @@ use std::{
     sync::atomic::AtomicBool,
 };
 
+use indoc::indoc;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -1370,7 +1371,12 @@ impl<'a> MEraEngine<'a> {
     /// Mark the completion of source code loading. All previously loaded code will be assembled
     /// and compiled into bytecode.
     pub fn finialize_load_srcs(&mut self) -> Result<(), MEraEngineError> {
-        use crate::vm::{EraExecIp, EraVarPool};
+        use crate::vm::EraExecIp;
+
+        // Add built-in functions invoking foundation intrinsics, which are
+        // used by LOADGAME, BEGIN TRAIN, etc.
+        self.load_builtin_srcs()?;
+
         let callback = RefCell::new(self.callback.deref_mut());
         let mut compiler = crate::compiler::EraCompiler::new(|e| {
             callback.borrow_mut().on_compile_error(&EraScriptErrorInfo {
@@ -1397,13 +1403,17 @@ impl<'a> MEraEngine<'a> {
                 ));
             }
         };
-        let entry_info = match compilation.func_names.get(CaselessStr::new("SYSTEM_TITLE")) {
+        let entry_info = match compilation
+            .func_names
+            .get(CaselessStr::new("SYSPROC_BEGIN_TITLE"))
+        {
             Some(x) => *x,
             None => {
                 return Err(MEraEngineError::new("entry function not found".to_owned()));
             }
         };
         let entry_info = &compilation.funcs[entry_info];
+        assert_eq!(entry_info.args.len(), 0);
         let entry_ip = EraExecIp {
             chunk: entry_info.chunk_idx as _,
             offset: entry_info.offset as _,
@@ -1738,5 +1748,14 @@ impl<'a> MEraEngine<'a> {
     }
     pub fn get_version(&self) -> String {
         "MEraEngine in MEraEmuCore v0.1.0".to_owned()
+    }
+    fn load_builtin_srcs(&mut self) -> Result<(), MEraEngineError> {
+        // TODO: Expose builtin source code to user for debugging
+
+        const SYS_SRC: &str = include_str!("sys_src.ERB");
+
+        self.load_erb("<builtin>", SYS_SRC.as_bytes())?;
+
+        Ok(())
     }
 }

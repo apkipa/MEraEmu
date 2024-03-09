@@ -12,7 +12,7 @@ pub fn is_chara_var_name(name: &str) -> bool {
 pub fn is_chara_nodim(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
     match name.as_str() {
-        "NAME" | "CALLNAME" | "NICKNAME" | "MASTERNAME" => true,
+        "NO" | "NAME" | "CALLNAME" | "NICKNAME" | "MASTERNAME" => true,
         _ => false,
     }
 }

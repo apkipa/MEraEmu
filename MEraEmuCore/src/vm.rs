@@ -1,3 +1,6 @@
+use either::Either;
+use itertools::Itertools;
+
 use crate::{
     bytecode::{
         ArrIntValue, ArrStrValue, EraBytecodePrimaryType, EraCharaInitTemplate,
@@ -384,6 +387,7 @@ macro_rules! pop_stack {
 pub struct EraVarPool {
     // Mapping from names to indices.
     var_names: HashMap<Rc<CaselessStr>, usize>,
+    chara_var_idxs: Vec<usize>,
     vars: Vec<EraVarInfo>,
 }
 
@@ -398,6 +402,7 @@ impl EraVarPool {
     pub fn new() -> Self {
         EraVarPool {
             var_names: HashMap::new(),
+            chara_var_idxs: Vec::new(),
             vars: Vec::new(),
         }
     }
@@ -427,6 +432,9 @@ impl EraVarPool {
             is_const,
             is_charadata,
         });
+        if is_charadata {
+            self.chara_var_idxs.push(var_idx);
+        }
         Some(var_idx)
     }
     #[must_use]
@@ -945,6 +953,11 @@ impl EraVirtualMachine {
                     )
                 ),
             };
+            // TODO: Remove this
+            // println!(
+            //     "{primary_bytecode:?}, {:?}",
+            //     ctx.cur_chunk.source_info_at(ctx.cur_frame.ip.offset)
+            // );
             match primary_bytecode {
                 DebugBreak => break,
                 Quit => return None,
@@ -1047,19 +1060,23 @@ impl EraVirtualMachine {
                         // TODO: Check index overflow
                         FlatValue::Int(x) => {
                             ignore_return_value = false;
-                            self.funcs.get(x.val as usize)
+                            let Some(x) = self.funcs.get(x.val as usize) else {
+                                bail_opt!(ctx, true, "invalid index into function pool");
+                            };
+                            x
                         }
                         FlatValue::Str(x) => {
                             ignore_return_value = true;
-                            self.func_names
+                            let func_info = self
+                                .func_names
                                 .get(CaselessStr::new(&x.val))
-                                .map(|&x| &self.funcs[x])
+                                .map(|&x| &self.funcs[x]);
+                            let Some(x) = func_info else {
+                                bail_opt!(ctx, true, format!("function `{}` not found", x.val));
+                            };
+                            x
                         }
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
-                    };
-                    let func_info = match func_info {
-                        Some(x) => x,
-                        None => bail_opt!(ctx, true, "invalid index into function pool"),
                     };
                     if func_info.args.len() != args_cnt {
                         bail_opt!(
@@ -1104,19 +1121,26 @@ impl EraVirtualMachine {
                         );
                     }
                 }
-                TryFunCall => {
+                TryFunCall | TryFunCallForce => {
+                    let is_force = matches!(primary_bytecode, TryFunCallForce);
+
                     let args_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)? as _;
                     ip_offset_delta += 1;
                     let [entry] = ctx.pop_stack()?;
                     // NOTE: We unconditionally ignore return values
-                    let func_info = match entry.val.into_unpacked() {
+                    let entry = match entry.val.into_unpacked() {
                         // TODO: Check index overflow
-                        FlatValue::Int(x) => self.funcs.get(x.val as usize),
-                        FlatValue::Str(x) => self
+                        FlatValue::Int(x) => Either::Left(x),
+                        FlatValue::Str(x) => Either::Right(x),
+                        _ => bail_opt!(ctx, true, "expected primitive values as operands"),
+                    };
+                    let func_info = match &entry {
+                        // TODO: Check index overflow
+                        Either::Left(x) => self.funcs.get(x.val as usize),
+                        Either::Right(x) => self
                             .func_names
                             .get(CaselessStr::new(&x.val))
                             .map(|&x| &self.funcs[x]),
-                        _ => bail_opt!(ctx, true, "expected primitive values as operands"),
                     };
                     if let Some(func_info) = func_info {
                         if func_info.args.len() != args_cnt {
@@ -1127,7 +1151,9 @@ impl EraVirtualMachine {
                         let args_pack = ctx.pop_stack_dyn(args_cnt * 2)?.collect::<Vec<_>>();
 
                         // Function exists
-                        ctx.stack.push(Value::new_int(1).into());
+                        if !is_force {
+                            ctx.stack.push(Value::new_int(1).into());
+                        }
 
                         let stack_start = ctx.stack.len();
                         for (arg_pack, param) in
@@ -1207,12 +1233,32 @@ impl EraVirtualMachine {
                         }
                     } else {
                         // Function does not exist
-                        ctx.stack.push(Value::new_int(0).into());
+                        if is_force {
+                            let msg = match entry {
+                                Either::Left(x) => format!("function `{}` not found", x.val),
+                                Either::Right(x) => format!("function `{}` not found", x.val),
+                            };
+                            bail_opt!(ctx, true, msg);
+                        } else {
+                            ctx.stack.push(Value::new_int(0).into());
+                        }
                     }
                 }
                 // FunExists => {
                 //     // TODO...
                 // }
+                RestartExecAtFun => {
+                    pop_stack!(ctx, entry:i);
+                    let Some(entry_info) = self.funcs.get(entry.val as usize) else {
+                        bail_opt!(ctx, true, format!("function `{}` not found", entry.val));
+                    };
+                    self.reset_exec_and_ip(EraExecIp {
+                        chunk: entry_info.chunk_idx as _,
+                        offset: entry_info.offset as _,
+                    });
+                    ip_offset_delta = 0;
+                    make_ctx!(self, ctx);
+                }
                 LoadConst | LoadConstW | LoadConstWW => {
                     let imm_ip = ctx.cur_frame.ip.offset + 1;
                     let offset_delta;
@@ -1794,6 +1840,16 @@ impl EraVirtualMachine {
                                 }
                             }
                         }
+                        // (FlatValue::ArrInt(dst), src) => {
+                        //     // TODO: Remove this branch
+                        //     dbg!(dst, src);
+                        //     bail_opt!(ctx, true, "value type mismatches array element type")
+                        // }
+                        // (FlatValue::ArrStr(dst), src) => {
+                        //     // TODO: Remove this branch
+                        //     dbg!(dst, src);
+                        //     bail_opt!(ctx, true, "value type mismatches array element type")
+                        // }
                         (FlatValue::ArrInt(_) | FlatValue::ArrStr(_), _) => {
                             bail_opt!(ctx, true, "value type mismatches array element type")
                         }
@@ -2395,8 +2451,7 @@ impl EraVirtualMachine {
                     let result = match primary_bytecode {
                         SqrtInt => v.sqrt(),
                         CbrtInt => v.cbrt(),
-                        // FIXME: Use f128 when https://github.com/rust-lang/rust/issues/116909
-                        //        stabilizes.
+                        // FIXME: Use f128 when https://github.com/rust-lang/rust/issues/116909 lands.
                         LogInt => (v as f64).ln() as _,
                         Log10Int => v.ilog10().into(),
                         ExponentInt => (v as f64).exp() as _,
@@ -3471,7 +3526,11 @@ impl EraVirtualMachine {
                         .unwrap_or(-1);
                     ctx.stack.push(Value::new_int(result).into());
                 }
-                // TODO...
+                CharaCsvExists => {
+                    pop_stack!(ctx, chara_no:i);
+                    let result = self.chara_templates.contains_key(&(chara_no.val as _));
+                    ctx.stack.push(Value::new_int(result.into()).into());
+                }
                 GetPalamLv | GetExpLv => {
                     let [value, max_lv] = ctx.pop_stack()?;
                     let value = ctx.unpack_int(value.into())?;
@@ -3495,7 +3554,275 @@ impl EraVirtualMachine {
                     }
                     ctx.stack.push(Value::new_int(result).into());
                 }
-                Invalid | _ => bail_opt!(
+                AddChara => {
+                    pop_stack!(ctx, chara_no:i);
+                    let Some(chara_template) = self.chara_templates.get(&(chara_no.val as _))
+                    else {
+                        bail_opt!(ctx, true, "no such character template");
+                    };
+                    let chara_idx = self.charas_count;
+                    if self.charas_count + 1 >= crate::engine::MAX_CHARA_COUNT as usize {
+                        bail_opt!(ctx, true, "character count exceeds limit");
+                    }
+                    self.charas_count += 1;
+                    for chara_var_idx in ctx.global_vars.chara_var_idxs.iter().copied() {
+                        let chara_var = &mut ctx.global_vars.vars[chara_var_idx];
+                        match chara_var.val.clone().into_unpacked() {
+                            FlatValue::ArrInt(x) => {
+                                let mut x = x.borrow_mut();
+                                let stride: usize =
+                                    x.dims.iter().skip(1).map(|x| *x as usize).product();
+                                let start_idx = chara_idx * stride;
+                                let end_idx = (chara_idx + 1) * stride;
+                                match chara_var.name.as_str() {
+                                    "NO" => {
+                                        x.vals[start_idx] = chara_no.clone();
+                                    }
+                                    _ => {
+                                        let empty_map = Default::default();
+                                        let src = match chara_var.name.as_str() {
+                                            "MAXBASE" => &chara_template.maxbase,
+                                            "MARK" => &chara_template.mark,
+                                            "EXP" => &chara_template.exp,
+                                            "TALENT" => &chara_template.talent,
+                                            "RELATION" => &chara_template.relation,
+                                            "CFLAG" => &chara_template.cflag,
+                                            "EQUIP" => &chara_template.equip,
+                                            "JUEL" => &chara_template.juel,
+                                            _ => &empty_map,
+                                        };
+                                        x.vals[start_idx..end_idx].fill(Default::default());
+                                        for (&sk, &sv) in src {
+                                            x.vals[start_idx + sk as usize] = IntValue { val: sv };
+                                        }
+                                    }
+                                }
+                            }
+                            FlatValue::ArrStr(x) => {
+                                let mut x = x.borrow_mut();
+                                let stride: usize =
+                                    x.dims.iter().skip(1).map(|x| *x as usize).product();
+                                let start_idx = chara_idx * stride;
+                                let end_idx = (chara_idx + 1) * stride;
+                                match chara_var.name.as_str() {
+                                    "NAME" | "CALLNAME" | "NICKNAME" | "MASTERNAME" => {
+                                        let src = match chara_var.name.as_str() {
+                                            "NAME" => &chara_template.name,
+                                            "CALLNAME" => &chara_template.callname,
+                                            "NICKNAME" => &chara_template.nickname,
+                                            "MASTERNAME" => &chara_template.mastername,
+                                            _ => unreachable!(),
+                                        };
+                                        x.vals[start_idx] = Rc::new(StrValue {
+                                            val: src.to_owned(),
+                                        });
+                                    }
+                                    _ => {
+                                        let empty_map = Default::default();
+                                        let src = match chara_var.name.as_str() {
+                                            "CFLAG" => &chara_template.cstr,
+                                            _ => &empty_map,
+                                        };
+                                        x.vals[start_idx..end_idx].fill(Default::default());
+                                        for (&sk, sv) in src {
+                                            x.vals[start_idx + sk as usize] =
+                                                Rc::new(StrValue { val: sv.to_owned() });
+                                        }
+                                    }
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                AddVoidChara => {
+                    todo!("AddVoidChara")
+                }
+                PickUpChara => {
+                    let charas_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 1;
+                    // FIXME: Adjust TARGET:0 & MASTER:0 accordingly
+                    // NOTE: We need to deduplicate numbers without changing the order
+                    let pickup_charas = ctx
+                        .pop_stack_dyn(charas_cnt as _)?
+                        .map(|x| match x.val.into_unpacked() {
+                            FlatValue::Int(x) if (0..self.charas_count as _).contains(&x.val) => {
+                                Ok(x.val as usize)
+                            }
+                            _ => Err(()),
+                        })
+                        .process_results(|x| x.unique().collect::<Vec<_>>())
+                        .ok();
+                    let Some(mut pickup_charas) = pickup_charas else {
+                        bail_opt!(ctx, true, "invalid character number");
+                    };
+                    self.charas_count = pickup_charas.len();
+                    for orig_idx in 0..pickup_charas.len() {
+                        let pickup_idx = pickup_charas[orig_idx];
+                        if orig_idx == pickup_idx {
+                            continue;
+                        }
+                        // Swap array content
+                        for &chara_var_idx in &ctx.global_vars.chara_var_idxs {
+                            let chara_var = &mut ctx.global_vars.vars[chara_var_idx];
+                            match chara_var.val.clone().into_unpacked() {
+                                FlatValue::ArrInt(x) => {
+                                    let mut x = x.borrow_mut();
+                                    let stride: usize =
+                                        x.dims.iter().skip(1).map(|x| *x as usize).product();
+                                    assert!(orig_idx < pickup_idx);
+                                    let (left, right) = x.vals.split_at_mut(pickup_idx * stride);
+                                    left[(orig_idx * stride)..][..stride]
+                                        .swap_with_slice(&mut right[..stride]);
+                                }
+                                FlatValue::ArrStr(x) => {
+                                    let mut x = x.borrow_mut();
+                                    let stride: usize =
+                                        x.dims.iter().skip(1).map(|x| *x as usize).product();
+                                    assert!(orig_idx < pickup_idx);
+                                    let (left, right) = x.vals.split_at_mut(pickup_idx * stride);
+                                    left[(orig_idx * stride)..][..stride]
+                                        .swap_with_slice(&mut right[..stride]);
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        // Update indices as the consequence of swapping
+                        if let Some(idx) = pickup_charas.iter().position(|&x| x == orig_idx) {
+                            pickup_charas.swap(orig_idx, idx);
+                        }
+                    }
+                }
+                DeleteChara => {
+                    let charas_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 1;
+                    // NOTE: We need to deduplicate numbers without changing the order
+                    let del_charas = ctx
+                        .pop_stack_dyn(charas_cnt as _)?
+                        .map(|x| match x.val.into_unpacked() {
+                            FlatValue::Int(x) if (0..self.charas_count as _).contains(&x.val) => {
+                                Some(x.val as usize)
+                            }
+                            _ => None,
+                        })
+                        .collect::<Option<hashbrown::HashSet<_>>>();
+                    let Some(del_charas) = del_charas else {
+                        bail_opt!(ctx, true, "invalid character number");
+                    };
+                    self.charas_count -= del_charas.len();
+                    for &chara_var_idx in &ctx.global_vars.chara_var_idxs {
+                        let chara_var = &mut ctx.global_vars.vars[chara_var_idx];
+                        match chara_var.val.clone().into_unpacked() {
+                            FlatValue::ArrInt(x) => {
+                                let mut x = x.borrow_mut();
+                                let stride: usize =
+                                    x.dims.iter().skip(1).map(|x| *x as usize).product();
+                                let mut index = 0;
+                                let old_len = x.vals.len();
+                                x.vals.retain(|_| {
+                                    index += 1;
+                                    !del_charas.contains(&((index - 1) / stride))
+                                });
+                                x.vals.extend(
+                                    std::iter::repeat(Default::default())
+                                        .take(del_charas.len() * stride),
+                                );
+                                assert_eq!(old_len, x.vals.len());
+                            }
+                            FlatValue::ArrStr(x) => {
+                                let mut x = x.borrow_mut();
+                                let stride: usize =
+                                    x.dims.iter().skip(1).map(|x| *x as usize).product();
+                                let mut index = 0;
+                                let old_len = x.vals.len();
+                                x.vals.retain(|_| {
+                                    index += 1;
+                                    !del_charas.contains(&((index - 1) / stride))
+                                });
+                                x.vals.extend(
+                                    std::iter::repeat(Default::default())
+                                        .take(del_charas.len() * stride),
+                                );
+                                assert_eq!(old_len, x.vals.len());
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                SwapChara => {
+                    pop_stack!(ctx, chara1:i, chara2:i);
+                    for i in [chara1.val, chara2.val] {
+                        if !(0..self.charas_count as i64).contains(&i) {
+                            bail_opt!(ctx, true, "invalid character number");
+                        }
+                    }
+                    let chara1 = chara1.val as usize;
+                    let chara2 = chara2.val as usize;
+                    if chara1 != chara2 {
+                        let (chara1, chara2) = (chara1.min(chara2), chara1.max(chara2));
+                        for &chara_var_idx in &ctx.global_vars.chara_var_idxs {
+                            let chara_var = &mut ctx.global_vars.vars[chara_var_idx];
+                            match chara_var.val.clone().into_unpacked() {
+                                FlatValue::ArrInt(x) => {
+                                    let mut x = x.borrow_mut();
+                                    let stride: usize =
+                                        x.dims.iter().skip(1).map(|x| *x as usize).product();
+                                    let mut it = x.vals.chunks_exact_mut(stride);
+                                    it.nth(chara1)
+                                        .unwrap()
+                                        .swap_with_slice(it.nth(chara2 - chara1 - 1).unwrap());
+                                }
+                                FlatValue::ArrStr(x) => {
+                                    let mut x = x.borrow_mut();
+                                    let stride: usize =
+                                        x.dims.iter().skip(1).map(|x| *x as usize).product();
+                                    let mut it = x.vals.chunks_exact_mut(stride);
+                                    it.nth(chara1)
+                                        .unwrap()
+                                        .swap_with_slice(it.nth(chara2 - chara1 - 1).unwrap());
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                    }
+                }
+                AddCopyChara => {
+                    todo!("AddCopyChara")
+                }
+                SaveData => {
+                    pop_stack!(ctx, save_id:i, save_info:s);
+                    // TODO...
+                    ctx.report_err(true, "SaveData not yet implemented");
+                }
+                GetCharaRegNum => {
+                    pop_stack!(ctx, chara_no:i);
+                    let Some(nos) = ctx.global_vars.get_var("NO") else {
+                        bail_opt!(ctx, true, "variable `NO` not properly defined");
+                    };
+                    let FlatValue::ArrInt(nos) = nos.clone().into_unpacked() else {
+                        bail_opt!(ctx, true, "variable `NO` not properly defined");
+                    };
+                    let nos = nos.borrow();
+                    let result = nos
+                        .stride_iter(0, 0, 0, self.charas_count)
+                        .position(|x| x.val == chara_no.val)
+                        .map(|x| x as _)
+                        .unwrap_or(-1);
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                LoadGlobal => {
+                    // TODO...
+                    ctx.report_err(true, "LoadGlobal not yet implemented");
+                    ctx.stack.push(Value::new_int(0).into());
+                }
+                SaveGlobal => {
+                    // TODO...
+                    ctx.report_err(true, "SaveGlobal not yet implemented");
+                    ctx.stack.push(Value::new_int(0).into());
+                }
+                // TODO...
+                Invalid => bail_opt!(ctx, true, "invalid bytecode"),
+                _ => bail_opt!(
                     ctx,
                     true,
                     format!("invalid or unimplemented bytecode `{primary_bytecode:?}`")

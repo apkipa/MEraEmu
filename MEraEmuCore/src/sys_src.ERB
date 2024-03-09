@@ -1,0 +1,290 @@
+; sys_src.ERB
+;
+; Brief:
+;     Built-in source code used by engine for internal
+; procedures such as LOADGAME, BEGIN TRAIN, etc. Do NOT
+; modify the source code unless you know what this means.
+;
+
+@SYSPROC_LOADGAME
+    #DIM DYNAMIC LoadSucceeded = 0
+    SYSINTRINSIC_LoadGameInit()
+    SYSINTRINSIC_LoadGamePrintText()
+    $INPUT_LOOP
+    INPUT
+    SIF RESULT == 100
+        GOTO TEARDOWN
+    SELECTCASE LOADDATA(RESULT)
+        CASE -1
+            ; Catastrophic error
+            PRINTFORML ERROR: The save is broken. Exiting.
+            GOTO TEARDOWN
+        CASE 0
+            ; Empty save slot
+            PRINTFORML The save is empty.
+            GOTO INPUT_LOOP
+        CASEELSE
+            ; Load save succeeded
+            ; NOTE: This path should be unreachable
+            LoadSucceeded = 1
+    ENDSELECT
+    $TEARDOWN
+    ; Clean up and return to caller
+    SYSINTRINSIC_LoadGameUninit()
+    SIF LoadSucceeded
+        ; SYSPROC_DATALOADED()
+        THROW Unreachable path; this is a bug.
+@SYSPROC_SAVEGAME
+    ; TODO: SYSPROC_SAVEGAME
+    PRINTFORM Warning: SYSPROC_SAVEGAME not yet implemented
+@SYSPROC_BEGIN_FIRST
+    SYSPROC_INVOKE_USER_EVENT_NORETURN("EVENTFIRST")
+@SYSPROC_BEGIN_TITLE
+    ; Init storage
+    LOCAL@SYSPROC_STORE_MANAGER = -1
+
+    TRYCCALL SYSTEM_TITLE
+        THROW @SYSTEM_TITLE must not return
+    CATCH
+        THROW SYSPROC_BEGIN_TITLE not yet implemented
+    ENDCATCH
+@SYSPROC_BEGIN_TRAIN
+    #DIM DYNAMIC DoTrainCmdNo
+    ; Handle DOTRAIN
+    IF (DoTrainCmdNo = LOCAL@SYSPROC_STORE_MANAGER) >= 0
+        LOCAL@SYSPROC_STORE_MANAGER = -1
+        JUMP SYSPROC_TRAIN_BODY(DoTrainCmdNo)
+    ENDIF
+    ; Init train data
+    ; TODO: Use SYSINTRINSIC_ResetTrainData()
+    ASSIPLAY = 0
+    PREVCOM = NEXTCOM = -1
+    VARSET TFLAG
+    VARSET TSTR
+    FOR LOCAL, 0, VARSIZE("PALAMNAME")
+        CVARSET GOTJUEL, LOCAL
+    NEXT
+    FOR LOCAL, 0, VARSIZE("TEQUIPNAME")
+        CVARSET TEQUIP, LOCAL
+    NEXT
+    FOR LOCAL, 0, VARSIZE("EXNAME")
+        CVARSET EX, LOCAL
+    NEXT
+    FOR LOCAL, 0, CHARANUM
+        RESET_STAIN LOCAL
+    NEXT
+    FOR LOCAL, 0, VARSIZE("PALAMNAME")
+        CVARSET PALAM, LOCAL
+    NEXT
+    FOR LOCAL, 0, VARSIZE("SOURCENAME")
+        CVARSET SOURCE, LOCAL
+    NEXT
+    FOR LOCAL, 0, VARSIZE("TCVARNAME")
+        CVARSET TCVAR, LOCAL
+    NEXT
+    ; Start train procedure
+    SYSPROC_TRYINVOKE_USER_EVENT("EVENTTRAIN")
+    ; Train loop
+    SYSPROC_TRAIN_BODY(-1)
+@SYSPROC_BEGIN_AFTERTRAIN
+    SYSPROC_INVOKE_USER_EVENT_NORETURN("EVENTEND")
+@SYSPROC_BEGIN_ABLUP
+    SYSPROC_ABLUP_BODY()
+@SYSPROC_BEGIN_TURNEND
+    SYSPROC_INVOKE_USER_EVENT_NORETURN("EVENTTURNEND")
+@SYSPROC_BEGIN_SHOP
+    SYSPROC_TRYINVOKE_USER_EVENT("EVENTSHOP")
+    ; TODO: SYSPROC_BEGIN_SHOP.AutoSave
+    PRINTFORML Warning: AutoSave not yet implemented
+    SYSPROC_SHOP_BODY()
+@SYSPROC_DOTRAIN(DoTrainCmdNo)
+    #DIM DYNAMIC DoTrainCmdNo
+    LOCAL@SYSPROC_STORE_MANAGER = DoTrainCmdNo
+    BEGIN TRAIN
+
+; --------------------
+
+@SYSPROC_STORE_MANAGER
+    ; A meta function playing the role of storage provider
+@SYSPROC_TRYINVOKE_USER_EVENT(func_name)
+    #FUNCTION
+    #DIMS DYNAMIC func_name
+    #DIM DYNAMIC invoked = 0
+    TRYCCALLFORM %func_name%@ONLY
+        invoked = 1
+    CATCH
+    ENDCATCH
+    IF invoked == 0
+        TRYCCALLFORM %func_name%@PRI
+            invoked = 1
+        CATCH
+        ENDCATCH
+        TRYCCALLFORM %func_name%@NORMAL
+            invoked = 1
+        CATCH
+        ENDCATCH
+        TRYCCALLFORM %func_name%@LATER
+            invoked = 1
+        CATCH
+        ENDCATCH
+    ENDIF
+    RETURNF invoked
+@SYSPROC_INVOKE_USER_EVENT_NORETURN(func_name)
+    #DIMS DYNAMIC func_name
+    SIF !SYSPROC_TRYINVOKE_USER_EVENT(func_name)
+        THROW Cannot invoke event @%func_name%
+    THROW %func_name% must not return
+@SYSPROC_INVOKE_USER_FUNC_FORCE(func_name)
+    #DIMS DYNAMIC func_name
+    ; TRYCCALLFORM %func_name%
+    ; CATCH
+    ;     THROW Cannot invoke @%func_name%
+    ; ENDCATCH
+    CALLFORM %func_name%
+@SYSPROC_DATALOADED
+    ; Try to free resources first
+    SYSINTRINSIC_LoadGameUninit()
+    TRYCALL SYSTEM_LOADEND
+    SYSPROC_EVENTLOAD()
+@SYSPROC_EVENTLOAD
+    SYSPROC_TRYINVOKE_USER_EVENT("EVENTLOAD")
+    SYSPROC_SHOP_BODY()
+@SYSPROC_SHOP_BODY
+    ; FIXME: Read from config instead
+    #DIM CONST MaxShopItemCount = 100
+    SYSPROC_INVOKE_USER_FUNC_FORCE("SHOW_SHOP")
+    INPUT
+    IF INRANGE(RESULT, 0, MaxShopItemCount)
+        ; TODO: Default shopping procedure
+        PRINTFORML Warning: Default shopping not yet implemented
+    ELSE
+        ; Delegate to USERSHOP
+        SYSPROC_INVOKE_USER_FUNC_FORCE("USERSHOP")
+        ; TRYCCALL USERSHOP
+        ; CATCH
+        ;     THROW Cannot invoke @USERSHOP
+        ; ENDCATCH
+    ENDIF
+    RESTART
+@SYSPROC_ABLUP_BODY
+    #DIM CONST MaxCount = 100
+    SYSPROC_INVOKE_USER_FUNC_FORCE("SHOW_JUEL")
+    SYSPROC_INVOKE_USER_FUNC_FORCE("SHOW_ABLUP_SELECT")
+    ; TRYCCALL SHOW_JUEL
+    ; CATCH
+    ;     THROW Cannot invoke @SHOW_JUEL
+    ; ENDCATCH
+    ; TRYCCALL SHOW_ABLUP_SELECT
+    ; CATCH
+    ;     THROW Cannot invoke @SHOW_ABLUP_SELECT
+    ; ENDCATCH
+    INPUT
+    IF INRANGE(RESULT, 0, MaxCount)
+        ; TODO: Default ablup procedure
+        PRINTFORML Warning: Default ablup not yet implemented
+    ELSE
+        ; Delegate to USERABLUP
+        SYSPROC_INVOKE_USER_FUNC_FORCE("USERABLUP")
+    ENDIF
+    RESTART
+@SYSPROC_TRAIN_BODY(DoTrainComNo)
+    #DIM DYNAMIC DoTrainComNo
+    ;#DIM DYNAMIC invoked = 0
+    #DIM DYNAMIC comable, VARSIZE("TRAINNAME")
+    ;#DIM DYNAMIC comable_count = 0
+    #DIM DYNAMIC comable_add_count
+    #DIM DYNAMIC select_com
+    #DIM CONST IsCTrain = 0
+
+    ; Handle DOTRAIN
+    IF INRANGE(DoTrainComNo, VARSIZE("TRAINNAME"), 0)
+        SELECTCOM = DoTrainComNo
+        DoTrainComNo = -1
+        GOTO DOTRAIN_START
+    ENDIF
+
+    IF NEXTCOM >= 0
+        THROW NEXTCOM >= 0 support is unimplemented
+    ENDIF
+    ; NEXTCOM < 0
+    SYSPROC_INVOKE_USER_FUNC_FORCE("SHOW_STATUS")
+    VARSET comable, -1
+    comable_add_count = -1
+    ; Check all COMs
+    FOR LOCAL, 0, VARSIZE("TRAINNAME")
+        SIF TRAINNAME:LOCAL == ""
+            CONTINUE
+        RESULT = 0
+        ; Check if COM is eligible
+        TRYCCALLFORM COM_ABLE{LOCAL}
+        CATCH
+            RESULT = 1
+        ENDCATCH
+        comable_add_count++
+        IF RESULT
+            ; Add to COM list
+            comable:comable_add_count = LOCAL
+            ; TODO: CTrain flag?
+            IF !IsCTrain
+                PRINTFORMC %TRAINNAME:LOCAL%[{comable_add_count,3}]
+            ENDIF
+        ENDIF
+    NEXT
+    SYSPROC_INVOKE_USER_FUNC_FORCE("SHOW_USERCOM")
+    ; Reset after SHOW_USERCOM
+    VARSET UP
+    VARSET DOWN
+    VARSET LOSEBASE
+    FOR LOCAL, 0, VARSIZE("BASENAME")
+        CVARSET DOWNBASE, LOCAL
+    NEXT
+    FOR LOCAL, 0, VARSIZE("PALAMNAME")
+        CVARSET CUP, LOCAL
+        CVARSET CDOWN, LOCAL
+    NEXT
+    IF !IsCTrain
+        ; Input COM number
+        INPUT
+    ELSE
+        ; TODO...
+        THROW IsCTrain not yet implemented
+    ENDIF
+    ; Pick COM by number
+    select_com = -1
+    IF !IsCTrain
+        SIF INRANGE(RESULT, VARSIZE("TRAINNAME"), 0)
+            select_com = comable:RESULT
+    ELSE
+        select_com = FINDELEMENT(comable, RESULT)
+    ENDIF
+    IF select_com >= 0
+        SELECTCOM = select_com
+        FOR LOCAL, 0, VARSIZE("EXNAME")
+            CVARSET NOWEX, LOCAL
+        NEXT
+        $DOTRAIN_START
+        SYSPROC_TRYINVOKE_USER_EVENT("EVENTCOM")
+        SYSPROC_INVOKE_USER_FUNC_FORCE(@"COM{SELECTCOM}")
+        IF RESULT
+            SYSPROC_INVOKE_USER_FUNC_FORCE("SOURCE_CHECK")
+            FOR LOCAL, 0, VARSIZE("SOURCENAME")
+                CVARSET SOURCE, LOCAL
+            NEXT
+            SYSPROC_TRYINVOKE_USER_EVENT("EVENTCOMEND")
+        ENDIF
+    ELSE
+        SIF IsCTrain
+            PRINTFORML Warning: Cannot execute train command
+        SYSPROC_INVOKE_USER_FUNC_FORCE("USERCOM")
+    ENDIF
+    ; TODO: Reset some data
+    IF 0 ; todo condition
+    ELSE
+        IF 0 ; todo condition
+            TRYCCALL CALLTRAINEND
+            CATCH
+            ENDCATCH
+        ENDIF
+    ENDIF
+    ; Restart train loop
+    RESTART
