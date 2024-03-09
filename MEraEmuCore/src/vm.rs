@@ -388,6 +388,7 @@ pub struct EraVarPool {
     // Mapping from names to indices.
     var_names: HashMap<Rc<CaselessStr>, usize>,
     chara_var_idxs: Vec<usize>,
+    global_var_idxs: Vec<usize>,
     vars: Vec<EraVarInfo>,
 }
 
@@ -396,6 +397,7 @@ pub struct EraVarInfo {
     pub val: Value,
     pub is_const: bool,
     pub is_charadata: bool,
+    pub is_global: bool,
 }
 
 impl EraVarPool {
@@ -403,12 +405,13 @@ impl EraVarPool {
         EraVarPool {
             var_names: HashMap::new(),
             chara_var_idxs: Vec::new(),
+            global_var_idxs: Vec::new(),
             vars: Vec::new(),
         }
     }
     #[must_use]
     pub fn add_var(&mut self, name: &str, val: Value) -> Option<usize> {
-        self.add_var_ex(name, val, false, false)
+        self.add_var_ex(name, val, false, false, false)
     }
     #[must_use]
     pub fn add_var_ex(
@@ -417,6 +420,7 @@ impl EraVarPool {
         val: Value,
         is_const: bool,
         is_charadata: bool,
+        is_global: bool,
     ) -> Option<usize> {
         let name: Rc<CaselessStr> = CaselessStr::new(name).into();
         let var_idx = self.vars.len();
@@ -431,9 +435,13 @@ impl EraVarPool {
             val,
             is_const,
             is_charadata,
+            is_global,
         });
         if is_charadata {
             self.chara_var_idxs.push(var_idx);
+        }
+        if is_global {
+            self.global_var_idxs.push(var_idx);
         }
         Some(var_idx)
     }
@@ -3696,7 +3704,7 @@ impl EraVirtualMachine {
                 DeleteChara => {
                     let charas_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
                     ip_offset_delta += 1;
-                    // NOTE: We need to deduplicate numbers without changing the order
+                    // NOTE: We need to deduplicate numbers
                     let del_charas = ctx
                         .pop_stack_dyn(charas_cnt as _)?
                         .map(|x| match x.val.into_unpacked() {
@@ -3796,10 +3804,11 @@ impl EraVirtualMachine {
                 }
                 GetCharaRegNum => {
                     pop_stack!(ctx, chara_no:i);
-                    let Some(nos) = ctx.global_vars.get_var("NO") else {
-                        bail_opt!(ctx, true, "variable `NO` not properly defined");
-                    };
-                    let FlatValue::ArrInt(nos) = nos.clone().into_unpacked() else {
+                    let Some(FlatValue::ArrInt(nos)) = ctx
+                        .global_vars
+                        .get_var("NO")
+                        .map(|x| x.clone().into_unpacked())
+                    else {
                         bail_opt!(ctx, true, "variable `NO` not properly defined");
                     };
                     let nos = nos.borrow();
@@ -3820,7 +3829,123 @@ impl EraVirtualMachine {
                     ctx.report_err(true, "SaveGlobal not yet implemented");
                     ctx.stack.push(Value::new_int(0).into());
                 }
-                // TODO...
+                ResetData => {
+                    // TODO: Fully reset data according to Emuera
+                    self.charas_count = 0;
+                    for var in &ctx.global_vars.vars {
+                        match var.val.clone().into_unpacked() {
+                            FlatValue::ArrInt(x) => {
+                                let mut x = x.borrow_mut();
+                                let should_reset = var.is_charadata
+                                    || !matches!(var.name.as_str(), "GLOBAL" | "ITEMPRICE");
+                                if should_reset {
+                                    x.vals.fill(Default::default());
+                                }
+                            }
+                            FlatValue::ArrStr(x) => {
+                                let mut x = x.borrow_mut();
+                                let should_reset = var.is_charadata
+                                    || !matches!(var.name.as_str(), "GLOBALS" | "STR");
+                                if should_reset {
+                                    x.vals.fill(Default::default());
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                ResetCharaStain => {
+                    pop_stack!(ctx, chara:i);
+                    if !(0..self.charas_count as i64).contains(&chara.val) {
+                        bail_opt!(ctx, true, "invalid character number");
+                    }
+                    let chara = chara.val as usize;
+                    let Some(FlatValue::ArrInt(stain)) = ctx
+                        .global_vars
+                        .get_var("STAIN")
+                        .map(|x| x.clone().into_unpacked())
+                    else {
+                        bail_opt!(ctx, true, "variable `STAIN` not properly defined");
+                    };
+                    let mut stain = stain.borrow_mut();
+                    let stride: usize = stain.dims.iter().skip(1).map(|&x| x as usize).product();
+                    const DEFAULT_STAIN: &[i64] = &[0, 0, 2, 1, 8];
+                    for (d, s) in stain.vals[(chara * stride)..((chara + 1) * stride)]
+                        .iter_mut()
+                        .zip(DEFAULT_STAIN.iter().copied().chain(std::iter::repeat(0)))
+                    {
+                        *d = IntValue { val: s };
+                    }
+                }
+                SaveChara => {
+                    let charas_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 1;
+                    // NOTE: We need to deduplicate numbers
+                    let del_charas = ctx
+                        .pop_stack_dyn(charas_cnt as _)?
+                        .map(|x| match x.val.into_unpacked() {
+                            FlatValue::Int(x) if (0..self.charas_count as _).contains(&x.val) => {
+                                Some(x.val as usize)
+                            }
+                            _ => None,
+                        })
+                        .collect::<Option<hashbrown::HashSet<_>>>();
+                    let Some(del_charas) = del_charas else {
+                        bail_opt!(ctx, true, "invalid character number");
+                    };
+                    pop_stack!(ctx, filename:s, memo:s);
+                    // TODO...
+                    ctx.report_err(true, "SaveChara not yet implemented");
+                }
+                LoadChara => {
+                    // TODO...
+                    pop_stack!(ctx, filename:s);
+                    ctx.report_err(true, "LoadChara not yet implemented");
+                    ctx.stack.push(Value::new_int(0).into());
+                }
+                GetConfig => {
+                    pop_stack!(ctx, name:s);
+                    let val = match ctx.callback.on_get_config_int(&name.val) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            bail_opt!(
+                                ctx,
+                                true,
+                                format!("cannot get config item `{}`: {e}", name.val)
+                            );
+                        }
+                    };
+                    ctx.stack.push(Value::new_int(val).into());
+                }
+                GetConfigS => {
+                    pop_stack!(ctx, name:s);
+                    let val = match ctx.callback.on_get_config_str(&name.val) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            bail_opt!(
+                                ctx,
+                                true,
+                                format!("cannot get config item `{}`: {e}", name.val)
+                            );
+                        }
+                    };
+                    ctx.stack.push(Value::new_str(val).into());
+                }
+                KbGetKeyState => {
+                    pop_stack!(ctx, keycode:i);
+                    let result = ctx.callback.on_get_key_state(keycode.val);
+                    ctx.stack.push(Value::new_int(result).into());
+                }
+                FindCharaDataFile => {
+                    // TODO...
+                    pop_stack!(ctx, filename:s);
+                    ctx.report_err(true, "FindCharaDataFile not yet implemented");
+                    ctx.stack.push(Value::new_int(0).into());
+                }
+                SystemIntrinsics => {
+                    // TODO: SystemIntrinsics
+                    bail_opt!(ctx, true, "SystemIntrinsics not yet implemented");
+                }
                 Invalid => bail_opt!(ctx, true, "invalid bytecode"),
                 _ => bail_opt!(
                     ctx,

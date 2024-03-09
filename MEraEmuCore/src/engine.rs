@@ -25,6 +25,7 @@ struct InitialVarDesc {
     pub dims: smallvec::SmallVec<[u32; 3]>,
     pub is_const: bool,
     pub is_charadata: bool,
+    pub is_global: bool,
     pub initial_sval: Option<Vec<Rc<StrValue>>>,
     pub initial_ival: Option<Vec<IntValue>>,
 }
@@ -482,24 +483,25 @@ impl<'a> MEraEngine<'a> {
                 is_string: bool,
                 is_const: bool,
                 is_charadata: bool,
+                is_global: bool,
             );
             fn add_int(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
-                self.add_item(name, dims, false, false, false)
+                self.add_item(name, dims, false, false, false, false)
             }
             fn add_str(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
-                self.add_item(name, dims, true, false, false)
+                self.add_item(name, dims, true, false, false, false)
             }
             fn add_const_int(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
-                self.add_item(name, dims, false, true, false)
+                self.add_item(name, dims, false, true, false, false)
             }
             fn add_const_str(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
-                self.add_item(name, dims, true, true, false)
+                self.add_item(name, dims, true, true, false, false)
             }
             fn add_chara_int(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
-                self.add_item(name, dims, false, false, true)
+                self.add_item(name, dims, false, false, true, false)
             }
             fn add_chara_str(&mut self, name: &str, dims: smallvec::SmallVec<[u32; 3]>) {
-                self.add_item(name, dims, true, false, true)
+                self.add_item(name, dims, true, false, true, false)
             }
         }
         impl Adhoc for T1 {
@@ -510,6 +512,7 @@ impl<'a> MEraEngine<'a> {
                 is_string: bool,
                 is_const: bool,
                 is_charadata: bool,
+                is_global: bool,
             ) {
                 self.insert(
                     name.to_owned().into(),
@@ -518,6 +521,7 @@ impl<'a> MEraEngine<'a> {
                         dims,
                         is_const,
                         is_charadata,
+                        is_global,
                         initial_sval: None,
                         initial_ival: None,
                     },
@@ -1176,6 +1180,7 @@ impl<'a> MEraEngine<'a> {
                             Value::new_int_0darr(value),
                             true,
                             false,
+                            false,
                         );
                         Ok(())
                     }
@@ -1188,6 +1193,7 @@ impl<'a> MEraEngine<'a> {
                             name,
                             Value::new_str_0darr(value),
                             true,
+                            false,
                             false,
                         );
                         Ok(())
@@ -1277,7 +1283,13 @@ impl<'a> MEraEngine<'a> {
                 };
                 if self
                     .global_vars
-                    .add_var_ex(&name, val, var_desc.is_const, var_desc.is_charadata)
+                    .add_var_ex(
+                        &name,
+                        val,
+                        var_desc.is_const,
+                        var_desc.is_charadata,
+                        var_desc.is_global,
+                    )
                     .is_none()
                 {
                     panic!("variable `{name}` was redefined");

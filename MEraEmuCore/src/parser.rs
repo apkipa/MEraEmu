@@ -1667,7 +1667,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         let (var_name, var_val) = self.materialize_var_decl(x.clone())?;
                         if self
                             .global_vars
-                            .add_var_ex(&var_name, var_val, x.is_const, x.is_charadata)
+                            .add_var_ex(&var_name, var_val, x.is_const, x.is_charadata, x.is_global)
                             .is_none()
                         {
                             self.report_err(

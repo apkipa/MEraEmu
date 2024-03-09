@@ -469,6 +469,7 @@ mod tests {
         engine.reg_int("@ANIMETIMER")?;
         engine.reg_int("@PRINTCPERLINE")?;
         engine.reg_int("@PRINTCLENGTH")?;
+        engine.reg_int("@LINEISEMPTY")?;
         // engine.reg_str("DRAWLINESTR_UNIT")?;
         engine.reg_str("DRAWLINESTR")?;
         engine.reg_int("SCREENWIDTH")?;

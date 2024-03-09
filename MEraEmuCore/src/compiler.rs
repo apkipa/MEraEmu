@@ -3401,7 +3401,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             b"LINEISEMPTY" => {
                 ctx.result()?;
                 let [] = ctx.unpack_some_args(args)?;
-                ctx.this.chunk.emit_bytecode(PrintLineIsEmpty, src_info);
+                ctx.this.arr_get_int("@LINEISEMPTY", vec![], src_info)?;
             }
             b"ENCODETOUNI" => {
                 ctx.result()?;

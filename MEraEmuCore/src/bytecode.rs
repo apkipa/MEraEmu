@@ -210,7 +210,6 @@ pub enum EraBytecodePrimaryType {
     // SaveGame,
     // BeginSystemProcedure,
     // DoTrain,
-    PrintLineIsEmpty,
     ResetData,
     ResetCharaStain,
     SaveChara,
