@@ -49,7 +49,7 @@ pub const MAX_CHARA_COUNT: u32 = 768;
 #[derive(thiserror::Error, Debug)]
 #[error("{msg}")]
 pub struct MEraEngineError {
-    msg: String,
+    pub msg: String,
 }
 impl MEraEngineError {
     pub fn new(msg: String) -> Self {
@@ -78,6 +78,7 @@ impl Default for MEraEngineConfig {
 }
 
 // NOTE: This struct does not expose bytecode info
+#[derive(Debug, Clone)]
 pub struct EraScriptErrorInfo<'a> {
     pub filename: &'a str,
     pub src_info: ExecSourceInfo,
@@ -217,6 +218,7 @@ pub trait MEraEngineSysCallback {
     fn on_get_key_state(&mut self, key_code: i64) -> i64;
 }
 
+#[derive(Debug, Clone)]
 pub struct ExecSourceInfo {
     pub line: u32,
     pub column: u32,
@@ -244,7 +246,9 @@ struct ReplExprResult {
     value: crate::bytecode::Value,
 }
 
+#[safer_ffi::derive_ReprC]
 #[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
 pub enum EraCsvLoadKind {
     Abl,
     Exp,

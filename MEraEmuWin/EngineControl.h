@@ -4,28 +4,120 @@
 #include "winrt/Windows.UI.Xaml.Markup.h"
 #include "winrt/Windows.UI.Xaml.Interop.h"
 #include "winrt/Windows.UI.Xaml.Controls.Primitives.h"
+#include "EngineUnhandledExceptionEventArgs.g.h"
 #include "EngineControl.g.h"
 
-namespace winrt::MEraEmuWin::implementation
-{
-    struct EngineControl : EngineControlT<EngineControl>
-    {
-        EngineControl() 
-        {
-            // Xaml objects should not call InitializeComponent during construction.
-            // See https://github.com/microsoft/cppwinrt/tree/master/nuget#initializecomponent
+#include "MEraEngine.hpp"
+
+#include <future>
+
+// TODO: Move to tools header
+#define DP_NAMESPACE winrt::MEraEmuWin
+//#define DP_CLASS EngineControl
+#define DP_DECLARE(name)    \
+    static Windows::UI::Xaml::DependencyProperty m_ ## name ## Property
+#define DP_DECLARE_METHOD(name)                                         \
+    static Windows::UI::Xaml::DependencyProperty name ## Property() {   \
+        return m_ ## name ## Property;                                  \
+    }
+#define DP_DEFINE_METHOD(name, type)                                    \
+    void DP_CLASS::name(type value) {                                   \
+        using winrt::Windows::Foundation::IInspectable;                 \
+        if constexpr (std::is_base_of_v<IInspectable, type>) {          \
+            SetValue(m_ ## name ## Property, box_value(value));         \
+        }                                                               \
+        else {                                                          \
+            if (name() == value) { return; }                            \
+            SetValue(m_ ## name ## Property, box_value(value));         \
+        }                                                               \
+    }                                                                   \
+    type DP_CLASS::name() {                                             \
+        return unbox_value<type>(GetValue(m_ ## name ## Property));     \
+    }
+#define DP_DEFINE(name, ...)                                                    \
+    DependencyProperty DP_CLASS::m_ ## name ## Property =                       \
+        DependencyProperty::Register(                                           \
+            L"" #name,                                                          \
+            winrt::xaml_typename<decltype(std::declval<DP_CLASS>().name())>(),  \
+            winrt::xaml_typename<DP_NAMESPACE::DP_CLASS>(),                     \
+            Windows::UI::Xaml::PropertyMetadata{ __VA_ARGS__ }                  \
+        )
+
+namespace winrt::MEraEmuWin::implementation {
+    struct EngineSharedData;
+    struct InputRequest;
+    struct MEraEmuWinEngineSysCallback;
+    struct EngineUIPrintLineData;
+
+    struct EngineUnhandledExceptionEventArgs : EngineUnhandledExceptionEventArgsT<EngineUnhandledExceptionEventArgs> {
+        EngineUnhandledExceptionEventArgs(hresult code, hstring const& msg) :
+            m_code(code), m_msg(msg) {}
+
+        hresult Code() noexcept { return m_code; }
+        hstring Message() noexcept { return m_msg; }
+
+    private:
+        hresult m_code;
+        hstring m_msg;
+    };
+
+    struct EngineControl : EngineControlT<EngineControl> {
+        EngineControl();
+        ~EngineControl();
+        void InitializeComponent();
+
+        event_token UnhandledException(Windows::Foundation::EventHandler<MEraEmuWin::EngineUnhandledExceptionEventArgs> h) {
+            return m_ev_UnhandledException.add(h);
+        }
+        void UnhandledException(event_token et) noexcept { m_ev_UnhandledException.remove(et); }
+
+        void EngineForeColor(Windows::UI::Color value);
+        Windows::UI::Color EngineForeColor();
+        void EngineBackColor(Windows::UI::Color value);
+        Windows::UI::Color EngineBackColor();
+
+        DP_DECLARE_METHOD(EngineForeColor);
+        DP_DECLARE_METHOD(EngineBackColor);
+
+        // XAML helpers
+        Windows::UI::Xaml::Media::SolidColorBrush ColorToBrush(Windows::UI::Color value) {
+            return Windows::UI::Xaml::Media::SolidColorBrush(value);
         }
 
-        int32_t MyProperty();
-        void MyProperty(int32_t value);
+        // Non-midl methods
+        void Bootstrap(hstring const& game_base_dir);
 
-        void ClickHandler(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
+        void IsUserSkipping();
+
+    private:
+        friend EngineSharedData;
+        friend MEraEmuWinEngineSysCallback;
+
+        void InitEngineUI();
+        void UpdateEngineUI();
+        void EmitUnhandledExceptionEvent(std::exception_ptr ex);
+        void UpdateEngineImageOutput();
+        void InitD2DDevice(bool force_software);
+        void UpdateUIWidth(uint64_t new_width);
+
+        // NOTE: Wait flag is ignored deliberately
+        void RoutinePrint(hstring const& content, PrintExtendedFlags flags);
+        void RoutineWait(std::unique_ptr<InputRequest> request);
+
+        DP_DECLARE(EngineForeColor);
+        DP_DECLARE(EngineBackColor);
+
+        std::shared_ptr<EngineSharedData> m_sd;
+        event<Windows::Foundation::EventHandler<MEraEmuWin::EngineUnhandledExceptionEventArgs>> m_ev_UnhandledException;
+        IVirtualSurfaceImageSourceNative* m_vsis_noref{};
+        ISurfaceImageSourceNativeWithD2D* m_vsis_d2d_noref{};
+        uint64_t m_ui_width{};
+        float m_xscale{ 1 }, m_yscale{ 1 };
+        std::vector<EngineUIPrintLineData> m_ui_lines;
+        hstring m_cur_composing_line;
     };
 }
 
-namespace winrt::MEraEmuWin::factory_implementation
-{
-    struct EngineControl : EngineControlT<EngineControl, implementation::EngineControl>
-    {
-    };
+namespace winrt::MEraEmuWin::factory_implementation {
+    struct EngineControl : EngineControlT<EngineControl, implementation::EngineControl> {};
 }

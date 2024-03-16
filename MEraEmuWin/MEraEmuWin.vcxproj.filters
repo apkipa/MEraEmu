@@ -17,9 +17,11 @@
     <ClCompile Include="MainPage.cpp" />
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="MEraEngine.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />
+    <ClInclude Include="MEraEngine.hpp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="Assets\Wide310x150Logo.scale-200.png">
@@ -61,5 +63,8 @@
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="App.exe.manifest" />
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="..\MEraEmuCore\src\lib.rs" />
   </ItemGroup>
 </Project>

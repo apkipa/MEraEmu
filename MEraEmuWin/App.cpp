@@ -5,14 +5,19 @@
 
 #include <winrt/Tenkai.h>
 #include <winrt/Tenkai.UI.Xaml.h>
+#include <winrt/Tenkai.UI.ViewManagement.h>
+
+#include <Tenkai.hpp>
 
 using namespace winrt;
 using namespace Windows::ApplicationModel;
 using namespace Windows::ApplicationModel::Activation;
 using namespace Windows::Foundation;
+using namespace Windows::UI::Core;
 using namespace Windows::UI::Xaml;
 using namespace Windows::UI::Xaml::Controls;
 using namespace Windows::UI::Xaml::Navigation;
+using namespace Windows::UI::Xaml::Input;
 using namespace MEraEmuWin;
 using namespace MEraEmuWin::implementation;
 
@@ -20,20 +25,41 @@ using namespace MEraEmuWin::implementation;
 /// Creates the singleton application object.  This is the first line of authored code
 /// executed, and as such is the logical equivalent of main() or WinMain().
 /// </summary>
-App::App()
-{
+App::App() {
     Suspending({ this, &App::OnSuspending });
 
-#if defined _DEBUG && !defined DISABLE_XAML_GENERATED_BREAK_ON_UNHANDLED_EXCEPTION
-    UnhandledException([this](IInspectable const&, UnhandledExceptionEventArgs const& e)
-    {
-        if (IsDebuggerPresent())
-        {
+    UnhandledException([this](IInspectable const&, UnhandledExceptionEventArgs const& e) {
+        if (IsDebuggerPresent()) {
             auto errorMessage = e.Message();
             __debugbreak();
         }
+        else {
+            e.Handled(true);
+            HWND hwnd{};
+            if (auto wnd = Tenkai::UI::Xaml::Window::GetCurrentMain()) {
+                hwnd = (HWND)wnd.View().Id().Value;
+            }
+            else {
+                hwnd = GetForegroundWindow();
+            }
+            auto rt = MessageBoxW(hwnd,
+                std::format(L"The application encountered an unexpected error:\n\n{}\n\n"
+                    "Select `Retry` to continue, or `Cancel` to exit the application.",
+                    e.Message()
+                ).c_str(),
+                L"Unhandled Exception",
+                MB_ICONERROR | MB_RETRYCANCEL
+            );
+            switch (rt) {
+            case IDRETRY:
+                break;
+            case IDCANCEL:
+            default:
+                Tenkai::AppService::Quit();
+                break;
+            }
+        }
     });
-#endif
 }
 
 /// <summary>
@@ -41,69 +67,47 @@ App::App()
 /// will be used such as when the application is launched to open a specific file.
 /// </summary>
 /// <param name="e">Details about the launch request and process.</param>
-void App::OnLaunched(LaunchActivatedEventArgs const& e)
-{
-#if 0
-    Frame rootFrame{ nullptr };
-    auto content = Window::Current().Content();
-    if (content)
-    {
-        rootFrame = content.try_as<Frame>();
-    }
-
-    // Do not repeat app initialization when the Window already has content,
-    // just ensure that the window is active
-    if (rootFrame == nullptr)
-    {
-        // Create a Frame to act as the navigation context and associate it with
-        // a SuspensionManager key
-        rootFrame = Frame();
-
-        rootFrame.NavigationFailed({ this, &App::OnNavigationFailed });
-
-        if (e.PreviousExecutionState() == ApplicationExecutionState::Terminated)
-        {
-            // Restore the saved session state only when appropriate, scheduling the
-            // final launch steps after the restore is complete
-        }
-
-        if (e.PrelaunchActivated() == false)
-        {
-            if (rootFrame.Content() == nullptr)
-            {
-                // When the navigation stack isn't restored navigate to the first page,
-                // configuring the new page by passing required information as a navigation
-                // parameter
-                rootFrame.Navigate(xaml_typename<MEraEmuWin::MainPage>(), box_value(e.Arguments()));
-            }
-            // Place the frame in the current Window
-            Window::Current().Content(rootFrame);
-            // Ensure the current window is active
-            Window::Current().Activate();
-        }
-    }
-    else
-    {
-        if (e.PrelaunchActivated() == false)
-        {
-            if (rootFrame.Content() == nullptr)
-            {
-                // When the navigation stack isn't restored navigate to the first page,
-                // configuring the new page by passing required information as a navigation
-                // parameter
-                rootFrame.Navigate(xaml_typename<MEraEmuWin::MainPage>(), box_value(e.Arguments()));
-            }
-            // Ensure the current window is active
-            Window::Current().Activate();
-        }
-    }
-#endif
+void App::OnLaunched(LaunchActivatedEventArgs const& e) {
     Tenkai::UI::Xaml::Window main_wnd;
     main_wnd.ExtendsContentIntoTitleBar(true);
     main_wnd.Activate();
     Frame frame;
     frame.Navigate(xaml_typename<MEraEmuWin::MainPage>());
     main_wnd.Content(frame);
+    // TODO: Focus indicator cannot be hidden on Win10 on app launch,
+    //       maybe workaround it?
+    // Fix focus indicator on app launch
+    if (false && !tenkai::win32::GetCurrentOSVersion().is_win11_or_newer()) {
+        static auto get_last_input_t = []() {
+            LASTINPUTINFO lii{ sizeof lii };
+            check_bool(GetLastInputInfo(&lii));
+            return lii.dwTime;
+        };
+        auto last_input_time = get_last_input_t();
+        auto et = std::make_shared_for_overwrite<event_token>();
+        *et = FocusManager::GettingFocus([=](auto&&, GettingFocusEventArgs const& e) {
+            auto cur_input_time = get_last_input_t();
+            if (cur_input_time != last_input_time) {
+                // Revoke
+                FocusManager::GettingFocus(*et);
+                return;
+            }
+            if (e.FocusState() == FocusState::Pointer) {
+                return;
+            }
+            // For simplicity, unconditionally convert to pointer focus or cancel focus
+            e.TryCancel();
+            auto new_elem = e.NewFocusedElement().as<Control>();
+            new_elem.Dispatcher().RunAsync(CoreDispatcherPriority::Normal, [=] {
+                //frame.IsTabStop(true);
+                //frame.Focus(FocusState::Programmatic);
+                //frame.IsTabStop(false);
+                new_elem.Focus(FocusState::Pointer);
+            });
+            // Revoke
+            //FocusManager::GettingFocus(*et);
+        });
+    }
 }
 
 /// <summary>

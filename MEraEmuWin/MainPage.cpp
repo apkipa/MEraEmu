@@ -9,6 +9,8 @@
 
 using namespace winrt;
 using namespace Windows::UI::Xaml;
+using namespace Windows::UI::Xaml::Controls;
+using namespace Windows::UI::Core;
 
 namespace winrt::Tenkai {
     using UI::Xaml::Window;
@@ -22,53 +24,33 @@ namespace winrt::MEraEmuWin::implementation {
         MainPageT::InitializeComponent();
 
         SwitchTitleBar(true);
-    }
 
-    void MainPage::ClickHandler(IInspectable const&, RoutedEventArgs const&) {
-        myButton().Content(box_value(winrt::format(L"{}!", L"Clicked")));
-    }
+        MainEngineControl().UnhandledException([this](auto&&, MEraEmuWin::EngineUnhandledExceptionEventArgs const& e) {
+            ShowErrorDialog(L"运行引擎时出错", hstring(
+                std::format(L"引擎汇报了无法处理的错误:\n0x{:08x}\n{}",
+                    static_cast<uint32_t>(e.Code()), e.Message()
+                ))
+            );
+        });
 
-    void MainPage::SwitchTitleBarButtonClick(IInspectable const&, RoutedEventArgs const&) {
-        auto wnd = Tenkai::Window::GetCurrentMain();
-        auto cur_is_extended = !wnd.ExtendsContentIntoTitleBar();
-        SwitchTitleBar(cur_is_extended);
-    }
-    void MainPage::SwitchBackgroundTransparencyButtonClick(IInspectable const&, RoutedEventArgs const&) {
-        auto wnd = Tenkai::Window::GetCurrentMain();
-        auto wv = wnd.View();
-        wv.IsBackgroundTransparent(!wv.IsBackgroundTransparent());
-    }
-    void MainPage::AskBeforeExitButtonClick(IInspectable const&, RoutedEventArgs const&) {
-        if (m_ask_before_close) { return; }
-        m_ask_before_close = true;
-
-        auto wnd = Tenkai::Window::GetCurrentMain();
-        auto wv = wnd.View();
-        wv.Closing([this](auto&& sender, Tenkai::UI::ViewManagement::WindowViewClosingEventArgs const& e) -> fire_and_forget {
-            using namespace Windows::UI::Xaml::Controls;
-
-            auto that = get_strong();
-
-            e.Handled(true);
-            if (m_is_asking) { co_return; }
-            m_is_asking = true;
-            ContentDialog cd;
-            cd.XamlRoot(this->myButton().XamlRoot());
-            cd.Title(box_value(L"Are you sure you want to exit?"));
-            cd.PrimaryButtonText(L"Yes");
-            cd.CloseButtonText(L"No");
-            auto result = co_await cd.ShowAsync();
-            that->m_is_asking = false;
-            if (result == ContentDialogResult::Primary) {
-                Tenkai::AppService::Quit();
+        Dispatcher().RunAsync(CoreDispatcherPriority::Low, [self = get_strong()]() {
+            hstring game_base_dir{ L".\\" };
+            try {
+                self->MainEngineControl().as<EngineControl>()->Bootstrap(game_base_dir);
+            }
+            catch (hresult_error const& e) {
+                self->ShowErrorDialog(L"启动引擎时出错", hstring(
+                    std::format(L"引擎汇报了无法处理的错误:\n0x{:08x}\n{}",
+                        static_cast<uint32_t>(e.code()), e.message()
+                    ))
+                );
+            }
+            catch (...) {
+                std::abort();
             }
         });
     }
-    fire_and_forget MainPage::RestartAppButtonClick(IInspectable const&, RoutedEventArgs const&) {
-        if (co_await Tenkai::AppService::RequestRestartAsync({})) {
-            Tenkai::AppService::Quit();
-        }
-    }
+
     void MainPage::SwitchTitleBar(bool enable) {
         auto wnd = Tenkai::Window::GetCurrentMain();
         wnd.ExtendsContentIntoTitleBar(enable);
@@ -85,5 +67,13 @@ namespace winrt::MEraEmuWin::implementation {
             wnd.SetTitleBar(nullptr);
             TopElasticRightSpace().Width(GridLengthHelper::FromPixels(0));
         }
+    }
+    void MainPage::ShowErrorDialog(hstring const& title, hstring const& content) {
+        ContentDialog cd;
+        cd.XamlRoot(XamlRoot());
+        cd.Title(box_value(title));
+        cd.Content(box_value(content));
+        cd.CloseButtonText(L"OK");
+        cd.ShowAsync();
     }
 }

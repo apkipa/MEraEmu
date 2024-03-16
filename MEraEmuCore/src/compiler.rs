@@ -4642,6 +4642,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     this.chunk.emit_bytecode(StrLen, x.src_info);
                     Some(TInteger)
                 })?;
+                self.chunk.emit_pop(x.src_info);
             }
             Cmd::StrLenU(x) => {
                 self.arr_set("RESULT", vec![], x.src_info, |this| {
@@ -4649,6 +4650,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     this.chunk.emit_bytecode(StrLenU, x.src_info);
                     Some(TInteger)
                 })?;
+                self.chunk.emit_pop(x.src_info);
             }
             Cmd::Alignment(x) => {
                 self.arr_set("@ALIGN", vec![], x.src_info, |this| {

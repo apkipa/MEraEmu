@@ -548,6 +548,8 @@ pub struct EraRuntimeErrorInfo {
 }
 
 // Reference: https://learn.microsoft.com/en-us/dotnet/api/system.drawing.imaging.colormatrix
+#[safer_ffi::derive_ReprC]
+#[repr(C)]
 pub struct EraColorMatrix {
     pub m00: f32,
     pub m01: f32,

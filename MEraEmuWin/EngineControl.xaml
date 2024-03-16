@@ -7,7 +7,18 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-        <Button x:Name="Button" Click="ClickHandler">Click Me</Button>
-    </StackPanel>
+    <Grid x:Name="LayoutRoot" Background="{x:Bind ColorToBrush(EngineBackColor)}">
+        <ScrollViewer HorizontalScrollMode="Auto" VerticalScrollMode="Enabled"
+                      VerticalScrollBarVisibility="Visible">
+            <Grid>
+                <SwapChainPanel x:Name="BackgroundSwapchainPanel"/>
+                <StackPanel Orientation="Vertical" VerticalAlignment="Bottom" HorizontalAlignment="Left">
+                    <Image x:Name="EngineOutputImage" Stretch="UniformToFill"/>
+                    <TextBox x:Name="UserInputTextBox" TabFocusNavigation="Cycle"
+                             RequestedTheme="Dark" MinHeight="24" Padding="2,2,6,1"
+                             FontSize="13.5"/>
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+    </Grid>
 </UserControl>
