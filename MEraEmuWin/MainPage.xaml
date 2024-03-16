@@ -42,20 +42,6 @@
                        IsHitTestVisible="False" FontSize="13"
                        Text="MEraEmu"/>
         </Grid>
-        <!--
-        <StackPanel Orientation="Vertical" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12" Grid.Row="1">
-            <ProgressRing Width="50" Height="50" IsActive="True"/>
-            <StackPanel Orientation="Horizontal" Spacing="12">
-                <Button x:Name="myButton" Click="ClickHandler">Click Me</Button>
-                <Button Click="SwitchTitleBarButtonClick">Switch title bar</Button>
-                <Button Click="SwitchBackgroundTransparencyButtonClick">Switch background transparency</Button>
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Spacing="12">
-                <Button Click="AskBeforeExitButtonClick">Ask before exit</Button>
-                <Button Click="RestartAppButtonClick">Restart app</Button>
-            </StackPanel>
-        </StackPanel>
-        -->
         <local:EngineControl x:Name="MainEngineControl" Grid.Row="1"/>
     </Grid>
 </Page>

@@ -14,11 +14,6 @@
 #include <fstream>
 #include <filesystem>
 //#include <intrin.h>
-#include <d3d11_2.h>
-#include <d2d1_2.h>
-#include <d2d1_2helper.h>
-#include <dwrite_3.h>
-#include <wincodec.h>
 
 using namespace winrt;
 using namespace Windows::UI;
@@ -159,6 +154,18 @@ namespace winrt::MEraEmuWin::implementation {
 
         se_buf.release();
         return { std::unique_ptr<uint8_t[]>{ buf }, buf_offset };
+    }
+    constexpr uint32_t to_u32(winrt::Windows::UI::Color value) {
+        uint32_t a = value.A, r = value.R, g = value.G, b = value.B;
+        return (a << 24) + (r << 16) + (g << 8) + (b << 0);
+    }
+    constexpr winrt::Windows::UI::Color to_winrt_color(uint32_t value) {
+        return {
+            .A = static_cast<uint8_t>(value >> 24),
+            .R = static_cast<uint8_t>(value >> 16),
+            .G = static_cast<uint8_t>(value >> 8),
+            .B = static_cast<uint8_t>(value >> 0),
+        };
     }
 }
 
@@ -469,13 +476,18 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
 
+    struct EngineUIPrintLineDataEffect {
+        uint32_t starti, endi;
+        uint32_t color;
+    };
     struct EngineUIPrintLineData {
         hstring txt;
         com_ptr<IDWriteTextFormat> txt_fmt;
         com_ptr<IDWriteTextLayout4> txt_layout;
         std::vector<com_ptr<::IUnknown>> inline_objs;   // Usually images
         uint64_t line_height{};
-        uint64_t acc_height{};    // Including current line
+        uint64_t acc_height{};  // Including current line
+        std::vector<EngineUIPrintLineDataEffect> effects;
 
         EngineUIPrintLineData(hstring const& txt, com_ptr<IDWriteTextFormat> const& txt_fmt) :
             txt(txt), txt_fmt(txt_fmt) {}
@@ -497,6 +509,9 @@ namespace winrt::MEraEmuWin::implementation {
                 tmp_layout.put()
             ));
             tmp_layout.as(txt_layout);
+            // TODO: Follow user font settings in the future
+            check_hresult(txt_layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,
+                16, 12));
 
             flush_metrics();
         }
@@ -647,12 +662,14 @@ namespace winrt::MEraEmuWin::implementation {
         throw hresult_error(E_FAIL, to_hstring(e.what()));
     }
     void EngineControl::InitEngineUI() {
+        // Reset UI resources
         m_vsis_noref = nullptr;
         m_vsis_d2d_noref = nullptr;
         // TODO: Proper UI scale
         //m_xscale = m_yscale = XamlRoot().RasterizationScale();
         m_ui_lines.clear();
         m_cur_composing_line = {};
+        m_brush_map.clear();
         UpdateUIWidth(std::exchange(m_ui_width, {}));
         VirtualSurfaceImageSource img_src(0, 0);
         EngineOutputImage().Source(img_src);
@@ -740,10 +757,6 @@ namespace winrt::MEraEmuWin::implementation {
                 m_vsis_d2d_noref->EndDraw();
             });
             // TODO: Offset, clipping, ...
-            /*com_ptr<ID2D1SolidColorBrush> brush;
-            ctx->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Red), brush.put());
-            ctx->DrawRectangle(D2D1::RectF(offset.x, offset.y, offset.x + 10, offset.y + 10),
-                brush.get());*/
             ctx->SetTransform(
                 D2D1::Matrix3x2F::Scale(m_xscale, m_yscale) *
                 D2D1::Matrix3x2F::Translation(offset.x - update_rt.left, offset.y - update_rt.top)
@@ -753,7 +766,7 @@ namespace winrt::MEraEmuWin::implementation {
                     update_rt.left, update_rt.top, update_rt.right, update_rt.bottom),
                 D2D1_ANTIALIAS_MODE_ALIASED
             );*/
-            //ctx->SetDpi(m_xscale * 96, m_yscale * 96);
+            ctx->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
             int dip_rt_top = update_rt.top / m_yscale;
             int dip_rt_bottom = update_rt.bottom / m_yscale;
             ctx->Clear(D2D1::ColorF(D2D1::ColorF::White, 0));
@@ -769,7 +782,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (line_end < size(m_ui_lines)) { line_end++; }
 
             com_ptr<ID2D1SolidColorBrush> brush;
-            ctx->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Red), brush.put());
+            ctx->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Silver), brush.put());
 
             for (int line = line_start; line < line_end; line++) {
                 auto& line_data = m_ui_lines[line];
@@ -848,7 +861,9 @@ namespace winrt::MEraEmuWin::implementation {
 
         com_ptr<IDWriteTextFormat> txt_fmt;
         check_hresult(g_dwrite_factory->CreateTextFormat(
-            L"Consolas",
+            //L"Consolas",
+            //L"ＭＳ ゴシック",
+            L"MS Gothic",
             nullptr,
             DWRITE_FONT_WEIGHT_REGULAR,
             DWRITE_FONT_STYLE_NORMAL,
@@ -871,13 +886,6 @@ namespace winrt::MEraEmuWin::implementation {
         std::format("");
     }
 
-    /*void EngineControl::EngineForeColor(Color value) {
-        if (EngineForeColor() == value) { return; }
-        SetValue(m_EngineForeColorProperty, box_value(value));
-    }
-    Color EngineControl::EngineForeColor() {
-        return unbox_value<Color>(GetValue(m_EngineForeColorProperty));
-    }*/
 #define DP_CLASS EngineControl
     DP_DEFINE(EngineForeColor, box_value(Windows::UI::Colors::White()));
     DP_DEFINE(EngineBackColor, box_value(Windows::UI::Colors::Black()));

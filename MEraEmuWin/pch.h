@@ -10,6 +10,12 @@
 #undef GetCurrentTime
 #endif
 
+#include <d3d11_2.h>
+#include <d2d1_2.h>
+#include <d2d1_2helper.h>
+#include <dwrite_3.h>
+#include <wincodec.h>
+
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
