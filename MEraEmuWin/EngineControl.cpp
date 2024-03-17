@@ -20,9 +20,11 @@ using namespace Windows::UI;
 using namespace Windows::UI::Xaml;
 using namespace Windows::UI::Xaml::Media;
 using namespace Windows::UI::Xaml::Media::Imaging;
+using namespace Windows::UI::Xaml::Input;
 using namespace Windows::UI::Xaml::Controls;
 using namespace Windows::UI::Core;
 using namespace Windows::Foundation;
+using namespace Windows::System;
 using namespace Windows::System::Threading;
 
 namespace winrt::MEraEmuWin::implementation {
@@ -57,7 +59,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (a > b) { std::swap(a, b); }
             if (a < MIN / b) { return false; }
         }
-        out = a + b;
+        out = a * b;
         return true;
     }
     template<typename T>
@@ -83,11 +85,14 @@ namespace winrt::MEraEmuWin::implementation {
             auto ch = str[i];
             if (i == 0 && ch == L'-') {
                 is_negative = true;
+                if (str.size() == 1) { return std::nullopt; }
                 continue;
             }
             if (!(L'0' <= ch && ch <= L'9')) {
                 return std::nullopt;
             }
+            if (!checked_mul<T>(r, 10, r)) { return std::nullopt; }
+            if (!checked_add<T>(r, ch - L'0', r)) { return std::nullopt; }
         }
         if (i != n) { return std::nullopt; }
         if (is_negative) {
@@ -162,11 +167,11 @@ namespace winrt::MEraEmuWin::implementation {
         //       can receive the result or teardown notification.
 
         // Shared parameters
-        int64_t time_limit; // Negatives stand for no limit
-        bool show_time_prompt;
-        hstring expiry_msg;
-        bool is_one;
-        bool can_skip;
+        int64_t time_limit{ -1 }; // Negatives stand for no limit
+        bool show_time_prompt{ false };
+        hstring expiry_msg{};
+        bool is_one{ false };
+        bool can_skip{ false };
 
         //virtual void time_tick() = 0;
         virtual bool try_fulfill(hstring const& input) = 0;
@@ -198,6 +203,17 @@ namespace winrt::MEraEmuWin::implementation {
             }
             promise.set_value(input);
             return true;
+        }
+    };
+    // Input request which rejects any input; can be used for merely waiting
+    struct InputRequestVoid : InputRequest {
+        std::atomic_flag promise{};
+        ~InputRequestVoid() {
+            promise.test_and_set(std::memory_order_relaxed);
+            promise.notify_one();
+        }
+        bool try_fulfill(hstring const& input) override {
+            return false;
         }
     };
 
@@ -312,19 +328,42 @@ namespace winrt::MEraEmuWin::implementation {
         void on_html_print(std::string_view content) override {
             // TODO: on_html_print
         }
-        void on_wait(bool any_key, bool is_force) override
-        {
+        void on_wait(bool any_key, bool is_force) override {
+            // TODO: on_wait
         }
-        void on_twait(int64_t duration, bool is_force) override
-        {
+        void on_twait(int64_t duration, bool is_force) override {
+            // TODO: on_twait
         }
-        std::optional<int64_t> on_input_int(std::optional<int64_t> default_value, bool can_click, bool allow_skip) override
-        {
-            return std::optional<int64_t>();
+        std::optional<int64_t> on_input_int(std::optional<int64_t> default_value, bool can_click, bool allow_skip) override {
+            try {
+                auto input_req = std::make_unique<InputRequestI>();
+                input_req->default_value = default_value;
+                input_req->can_skip = allow_skip;
+                auto future = input_req->promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+                    sd->ui_ctrl->RoutineInput(std::move(input_req));
+                });
+                return future.get();
+            }
+            catch (std::future_error const& e) {
+                return std::nullopt;
+            }
         }
-        const char* on_input_str(std::optional<std::string_view> default_value, bool can_click, bool allow_skip) override
-        {
-            return nullptr;
+        const char* on_input_str(std::optional<std::string_view> default_value, bool can_click, bool allow_skip) override {
+            try {
+                auto input_req = std::make_unique<InputRequestS>();
+                input_req->default_value = default_value.transform([](auto x) { return to_hstring(x); });
+                input_req->can_skip = allow_skip;
+                auto future = input_req->promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+                    sd->ui_ctrl->RoutineInput(std::move(input_req));
+                });
+                m_str_cache = to_string(future.get());
+                return m_str_cache.c_str();
+            }
+            catch (std::future_error const& e) {
+                return nullptr;
+            }
         }
         std::optional<int64_t> on_tinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override
         {
@@ -372,9 +411,17 @@ namespace winrt::MEraEmuWin::implementation {
             "@FOCUSCOLOR"*/
             throw std::exception("no such variable");
         }
-        const char* on_var_get_str(std::string_view name, uint32_t idx) override
-        {
-            return nullptr;
+        const char* on_var_get_str(std::string_view name, uint32_t idx) override {
+            if (name == "WINDOW_TITLE") {
+                std::promise<hstring> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->EngineTitle());
+                });
+                m_str_cache = to_string(future.get());
+                return m_str_cache.c_str();
+            }
+            throw std::exception("no such variable");
         }
         void on_var_set_int(std::string_view name, uint32_t idx, int64_t val) override {
             if (name == "@COLOR") {
@@ -383,10 +430,21 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 return;
             }
+            /*"@COLOR"
+            "@DEFCOLOR"
+            "@BGCOLOR"
+            "@DEFBGCOLOR"
+            "@FOCUSCOLOR"*/
             throw std::exception("no such variable");
         }
-        void on_var_set_str(std::string_view name, uint32_t idx, std::string_view val) override
-        {
+        void on_var_set_str(std::string_view name, uint32_t idx, std::string_view val) override {
+            if (name == "WINDOW_TITLE") {
+                m_sd->queue_ui_work([sd = m_sd, val = to_hstring(val)]() mutable {
+                    sd->ui_ctrl->EngineTitle(val);
+                });
+                return;
+            }
+            throw std::exception("no such variable");
         }
         void on_print_button(std::string_view content, std::string_view value, PrintExtendedFlags flags) override
         {
@@ -466,6 +524,7 @@ namespace winrt::MEraEmuWin::implementation {
 
     private:
         EngineSharedData* const m_sd;
+        std::string m_str_cache;
         std::mt19937_64 m_rand_gen{ std::random_device{}() };
     };
 
@@ -574,6 +633,23 @@ namespace winrt::MEraEmuWin::implementation {
             RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
         });
     }
+    void EngineControl::UserInputTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
+        if (e.Key() == VirtualKey::Enter) {
+            e.Handled(true);
+
+            // Try to fulfill input requests
+            if (auto& input_req = m_outstanding_input_req) {
+                auto input_tb = UserInputTextBox();
+                auto input = input_tb.Text();
+                input_tb.Text({});
+                if (input_req->try_fulfill(input)) {
+                    input_req = nullptr;
+                    // Echo back
+                    RoutinePrint(input, ERA_PEF_IS_LINE);
+                }
+            }
+        }
+    }
     void EngineControl::Bootstrap(hstring const& game_base_dir) try {
         m_sd = std::make_shared<EngineSharedData>();
         m_sd->game_base_dir = game_base_dir;
@@ -648,6 +724,10 @@ namespace winrt::MEraEmuWin::implementation {
                 // Load all ERB files
                 // TODO...
                 for (auto& erb : erbs) {
+                    if (sd->ui_is_dead.load(std::memory_order_relaxed)) {
+                        return;
+                    }
+
                     auto [data, size] = read_utf8_file(erb);
                     engine.load_erb(to_string(erb.c_str()).c_str(), { data.get(), size });
                 }
@@ -726,6 +806,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_vsis_noref->RegisterForUpdatesNeeded(make<RedrawCallback>(this).get());
 
         // Set UI focus
+        VisualStateManager::GoToState(*this, L"ExecutionStarted", true);
         UserInputTextBox().Focus(FocusState::Programmatic);
     }
     void EngineControl::UpdateEngineUI() {
@@ -745,8 +826,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         // TODO: Handle engine thread termination
         if (!m_sd->thread_is_alive.load(std::memory_order_relaxed)) {
-            UserInputTextBox().IsEnabled(false);
-            UserInputTextBox().Text(L"无法在已结束的会话中输入内容");
+            VisualStateManager::GoToState(*this, L"ExecutionEnded", true);
 
             // TODO: Handle engine thread exception
             if (m_sd->thread_exception) {
@@ -968,17 +1048,45 @@ namespace winrt::MEraEmuWin::implementation {
         if (updated) {
             auto height = GetCalculatedUIHeight();
             check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, height * m_yscale));
+            // TODO: Is this an XMAL bug?
+            EngineOutputImage().InvalidateMeasure();
         }
     }
-    void EngineControl::RoutineWait(std::unique_ptr<InputRequest> request) {
-        // TODO...
-        std::format("");
+    void EngineControl::RoutineHtmlPrint(hstring const& content) {
+        // TODO: RoutineHtmlPrint
+        RoutinePrint(content, ERA_PEF_IS_LINE);
+    }
+    void EngineControl::RoutineInput(std::unique_ptr<InputRequest> request) {
+        assert(request);
+
+        // Flush intermediate print contents first
+        if (!m_cur_composing_line.parts.empty()) {
+            RoutinePrint({}, ERA_PEF_IS_LINE);
+        }
+
+        auto& input_req = m_outstanding_input_req;
+        input_req = std::move(request);
+        // Check if we can fulfill the input request immediately
+        if (input_req->is_one) {
+            auto input_tb = UserInputTextBox();
+            auto input = input_tb.Text();
+            if (input_req->try_fulfill(input)) {
+                input_tb.Text({});
+                input_req = nullptr;
+                // Echo back
+                RoutinePrint(input, ERA_PEF_IS_LINE);
+                return;
+            }
+        }
+        // TODO: Check for timeout, ...
     }
 
 #define DP_CLASS EngineControl
     DP_DEFINE(EngineForeColor, box_value(Windows::UI::Colors::Silver()));
     DP_DEFINE(EngineBackColor, box_value(Windows::UI::Colors::Black()));
+    DP_DEFINE(EngineTitle, box_value(L"MEraEmu"));
     DP_DEFINE_METHOD(EngineForeColor, Color);
     DP_DEFINE_METHOD(EngineBackColor, Color);
+    DP_DEFINE_METHOD(EngineTitle, hstring const&);
 #undef DP_CLASS
 }

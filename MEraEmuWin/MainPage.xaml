@@ -38,8 +38,9 @@
                     <MenuFlyoutItem Text="关于..."/>
                 </muxc:MenuBarItem>
             </muxc:MenuBar>
-            <TextBlock Grid.Column="2" HorizontalAlignment="Center" VerticalAlignment="Center"
-                       IsHitTestVisible="False" FontSize="13"
+            <TextBlock x:Name="TitleTextBlock" Grid.Column="2" IsHitTestVisible="False"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       FontSize="13"
                        Text="MEraEmu"/>
         </Grid>
         <local:EngineControl x:Name="MainEngineControl" Grid.Row="1"/>

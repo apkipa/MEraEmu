@@ -25,12 +25,19 @@ namespace winrt::MEraEmuWin::implementation {
 
         SwitchTitleBar(true);
 
-        MainEngineControl().UnhandledException([this](auto&&, MEraEmuWin::EngineUnhandledExceptionEventArgs const& e) {
+        auto engine_ctrl = MainEngineControl();
+        engine_ctrl.UnhandledException([this](auto&&, MEraEmuWin::EngineUnhandledExceptionEventArgs const& e) {
             ShowErrorDialog(L"运行引擎时出错", hstring(
                 std::format(L"引擎汇报了无法处理的错误:\n0x{:08x}\n{}",
                     static_cast<uint32_t>(e.Code()), e.Message()
                 ))
             );
+        });
+        engine_ctrl.RegisterPropertyChangedCallback(engine_ctrl.EngineTitleProperty(), [this](DependencyObject const& sender, auto&&) {
+            auto engine_ctrl = sender.as<EngineControl>();
+            auto title = engine_ctrl->EngineTitle();
+            TitleTextBlock().Text(title);
+            Tenkai::UI::Xaml::Window::GetCurrentMain().Title(title);
         });
 
         Dispatcher().RunAsync(CoreDispatcherPriority::Low, [self = get_strong()]() {

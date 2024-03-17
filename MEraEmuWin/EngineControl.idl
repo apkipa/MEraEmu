@@ -14,6 +14,8 @@ namespace MEraEmuWin {
         Windows.UI.Color EngineForeColor;
         static Windows.UI.Xaml.DependencyProperty EngineBackColorProperty{ get; };
         Windows.UI.Color EngineBackColor;
+        static Windows.UI.Xaml.DependencyProperty EngineTitleProperty{ get; };
+        String EngineTitle;
 
         // XAML helpers
         Windows.UI.Xaml.Media.SolidColorBrush ColorToBrush(Windows.UI.Color value);

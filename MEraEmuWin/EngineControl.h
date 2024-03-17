@@ -23,7 +23,8 @@
 #define DP_DEFINE_METHOD(name, type)                                    \
     void DP_CLASS::name(type value) {                                   \
         using winrt::Windows::Foundation::IInspectable;                 \
-        if constexpr (std::is_base_of_v<IInspectable, type>) {          \
+        using RawT = std::remove_cvref_t<type>;                         \
+        if constexpr (std::is_base_of_v<IInspectable, RawT>) {          \
             SetValue(m_ ## name ## Property, box_value(value));         \
         }                                                               \
         else {                                                          \
@@ -31,8 +32,9 @@
             SetValue(m_ ## name ## Property, box_value(value));         \
         }                                                               \
     }                                                                   \
-    type DP_CLASS::name() {                                             \
-        return unbox_value<type>(GetValue(m_ ## name ## Property));     \
+    std::remove_cvref_t<type> DP_CLASS::name() {                        \
+        using RawT = std::remove_cvref_t<type>;                         \
+        return unbox_value<RawT>(GetValue(m_ ## name ## Property));     \
     }
 #define DP_DEFINE(name, ...)                                                    \
     DependencyProperty DP_CLASS::m_ ## name ## Property =                       \
@@ -48,6 +50,7 @@ namespace winrt::MEraEmuWin::implementation {
     struct InputRequest;
     struct MEraEmuWinEngineSysCallback;
     struct EngineUIPrintLineData;
+    struct InputRequest;
 
     struct EngineUnhandledExceptionEventArgs : EngineUnhandledExceptionEventArgsT<EngineUnhandledExceptionEventArgs> {
         EngineUnhandledExceptionEventArgs(hresult code, hstring const& msg) :
@@ -75,14 +78,19 @@ namespace winrt::MEraEmuWin::implementation {
         Windows::UI::Color EngineForeColor();
         void EngineBackColor(Windows::UI::Color value);
         Windows::UI::Color EngineBackColor();
+        void EngineTitle(hstring const& value);
+        hstring EngineTitle();
 
         DP_DECLARE_METHOD(EngineForeColor);
         DP_DECLARE_METHOD(EngineBackColor);
+        DP_DECLARE_METHOD(EngineTitle);
 
         // XAML helpers
         Windows::UI::Xaml::Media::SolidColorBrush ColorToBrush(Windows::UI::Color value) {
             return Windows::UI::Xaml::Media::SolidColorBrush(value);
         }
+
+        void UserInputTextBox_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
 
         // Non-midl methods
         void Bootstrap(hstring const& game_base_dir);
@@ -106,10 +114,12 @@ namespace winrt::MEraEmuWin::implementation {
 
         // NOTE: Wait flag is ignored deliberately
         void RoutinePrint(hstring const& content, PrintExtendedFlags flags);
-        void RoutineWait(std::unique_ptr<InputRequest> request);
+        void RoutineHtmlPrint(hstring const& content);
+        void RoutineInput(std::unique_ptr<InputRequest> request);
 
         DP_DECLARE(EngineForeColor);
         DP_DECLARE(EngineBackColor);
+        DP_DECLARE(EngineTitle);
 
         std::shared_ptr<EngineSharedData> m_sd;
         event<Windows::Foundation::EventHandler<MEraEmuWin::EngineUnhandledExceptionEventArgs>> m_ev_UnhandledException;
@@ -131,6 +141,7 @@ namespace winrt::MEraEmuWin::implementation {
             };
             std::vector<ComposingLineDataPart> parts;
         } m_cur_composing_line;
+        std::unique_ptr<InputRequest> m_outstanding_input_req;
         // TODO: Button style data
     };
 }
