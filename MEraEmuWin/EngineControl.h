@@ -92,6 +92,7 @@ namespace winrt::MEraEmuWin::implementation {
     private:
         friend EngineSharedData;
         friend MEraEmuWinEngineSysCallback;
+        friend EngineUIPrintLineData;
 
         void InitEngineUI();
         void UpdateEngineUI();
@@ -99,6 +100,9 @@ namespace winrt::MEraEmuWin::implementation {
         void UpdateEngineImageOutput();
         void InitD2DDevice(bool force_software);
         void UpdateUIWidth(uint64_t new_width);
+        uint64_t GetCalculatedUIHeight();
+        ID2D1SolidColorBrush* GetOrCreateSolidColorBrush(uint32_t color);
+        IDWriteTextFormat* GetOrCreateTextFormat(hstring const& font_family);
 
         // NOTE: Wait flag is ignored deliberately
         void RoutinePrint(hstring const& content, PrintExtendedFlags flags);
@@ -111,11 +115,23 @@ namespace winrt::MEraEmuWin::implementation {
         event<Windows::Foundation::EventHandler<MEraEmuWin::EngineUnhandledExceptionEventArgs>> m_ev_UnhandledException;
         IVirtualSurfaceImageSourceNative* m_vsis_noref{};
         ISurfaceImageSourceNativeWithD2D* m_vsis_d2d_noref{};
+        com_ptr<ID2D1DeviceContext> m_d2d_ctx;
         std::unordered_map<uint32_t, com_ptr<ID2D1SolidColorBrush>> m_brush_map;
+        std::unordered_map<hstring, com_ptr<IDWriteTextFormat>> m_font_map;
+        hstring m_default_font_name;
         uint64_t m_ui_width{};
         float m_xscale{ 1 }, m_yscale{ 1 };
+        uint32_t m_focus_color{ D2D1::ColorF::Yellow };
         std::vector<EngineUIPrintLineData> m_ui_lines;
-        hstring m_cur_composing_line;
+        struct ComposingLineData {
+            struct ComposingLineDataPart {
+                hstring str;
+                uint32_t color;
+                // TODO: Styles support (strikethrough, ...)
+            };
+            std::vector<ComposingLineDataPart> parts;
+        } m_cur_composing_line;
+        // TODO: Button style data
     };
 }
 

@@ -98,22 +98,6 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
     std::pair<std::unique_ptr<uint8_t[]>, size_t> read_utf8_file(std::filesystem::path const& path) {
-        //auto file_size = std::filesystem::file_size(path);
-        //std::ifstream fin(path, std::ios::in | std::ios::binary);
-        //std::vector<uint8_t> buf;
-        //buf.reserve(file_size);
-        //auto it = std::istreambuf_iterator<char>(fin);
-        //auto ie = std::istreambuf_iterator<char>();
-        //// Check BOM header
-        //for (int i = 0; i < 3 && it != ie; i++) {
-        //    buf.push_back(*it);
-        //    ++it;
-        //}
-        //if (buf.size() == 3 && (buf[0] == 0xef && buf[1] == 0xbb && buf[2] == 0xbf)) {
-        //    buf.resize(0);
-        //}
-        //std::copy(...);
-        //return buf;
         winrt::file_handle file{ CreateFileW(path.c_str(),
             GENERIC_READ,
             FILE_SHARE_READ,
@@ -233,7 +217,7 @@ namespace winrt::MEraEmuWin::implementation {
         std::exception_ptr thread_exception{ nullptr };
 
         std::mutex ui_mutex;
-        std::vector<std::function<void()>> ui_works;
+        std::vector<std::move_only_function<void()>> ui_works;
 
         // NOTE: Called by UI thread
         void ui_disconnect() {
@@ -256,7 +240,7 @@ namespace winrt::MEraEmuWin::implementation {
             // Triggers UI update, which in turn responds to task disconnection
             queue_ui_work([] {});
         }
-        void queue_ui_work(std::function<void()> work) {
+        void queue_ui_work(std::move_only_function<void()> work) {
             if (!ui_is_alive.load(std::memory_order_relaxed)) {
                 throw hresult_canceled();
             }
@@ -291,8 +275,12 @@ namespace winrt::MEraEmuWin::implementation {
                 filename, src_info.line, src_info.column,
                 is_error ? L"错误" : L"警告", msg
             );
-            m_sd->queue_ui_work([sd = m_sd, final_msg] {
+            auto msg_clr = is_error ? Colors::Red() : Colors::Yellow();
+            m_sd->queue_ui_work([sd = m_sd, final_msg, msg_clr] {
+                auto old_clr = sd->ui_ctrl->EngineForeColor();
+                sd->ui_ctrl->EngineForeColor(msg_clr);
                 sd->ui_ctrl->RoutinePrint(final_msg, ERA_PEF_IS_LINE);
+                sd->ui_ctrl->EngineForeColor(old_clr);
             });
         }
         void on_execute_error(EraScriptErrorInfo const& info) override {
@@ -304,16 +292,20 @@ namespace winrt::MEraEmuWin::implementation {
                 filename, src_info.line, src_info.column,
                 is_error ? L"错误" : L"警告", msg
             );
-            m_sd->queue_ui_work([sd = m_sd, final_msg] {
+            auto msg_clr = is_error ? Colors::Red() : Colors::Yellow();
+            m_sd->queue_ui_work([sd = m_sd, final_msg, msg_clr] {
+                auto old_clr = sd->ui_ctrl->EngineForeColor();
+                sd->ui_ctrl->EngineForeColor(msg_clr);
                 sd->ui_ctrl->RoutinePrint(final_msg, ERA_PEF_IS_LINE);
+                sd->ui_ctrl->EngineForeColor(old_clr);
             });
         }
         uint64_t on_get_rand() override {
             return m_rand_gen();
         }
         void on_print(std::string_view content, PrintExtendedFlags flags) override {
-            m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content)] {
-                sd->ui_ctrl->RoutinePrint(content, ERA_PEF_IS_LINE);
+            m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content), flags] {
+                sd->ui_ctrl->RoutinePrint(content, flags);
             });
             // TODO: on_print() wait flag
         }
@@ -364,16 +356,34 @@ namespace winrt::MEraEmuWin::implementation {
         void on_clearline(int64_t count) override
         {
         }
-        int64_t on_var_get_int(std::string_view name, uint32_t idx) override
-        {
-            return 0;
+        int64_t on_var_get_int(std::string_view name, uint32_t idx) override {
+            if (name == "@COLOR") {
+                std::promise<uint32_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(to_u32(sd->ui_ctrl->EngineForeColor()) & ~0xff000000);
+                });
+                return future.get();
+            }
+            /*"@COLOR"
+            "@DEFCOLOR"
+            "@BGCOLOR"
+            "@DEFBGCOLOR"
+            "@FOCUSCOLOR"*/
+            throw std::exception("no such variable");
         }
         const char* on_var_get_str(std::string_view name, uint32_t idx) override
         {
             return nullptr;
         }
-        void on_var_set_int(std::string_view name, uint32_t idx, int64_t val) override
-        {
+        void on_var_set_int(std::string_view name, uint32_t idx, int64_t val) override {
+            if (name == "@COLOR") {
+                m_sd->queue_ui_work([sd = m_sd, val]() mutable {
+                    sd->ui_ctrl->EngineForeColor(to_winrt_color((uint32_t)val | 0xff000000));
+                });
+                return;
+            }
+            throw std::exception("no such variable");
         }
         void on_var_set_str(std::string_view name, uint32_t idx, std::string_view val) override
         {
@@ -477,7 +487,7 @@ namespace winrt::MEraEmuWin::implementation {
     }
 
     struct EngineUIPrintLineDataEffect {
-        uint32_t starti, endi;
+        uint32_t starti, len;
         uint32_t color;
     };
     struct EngineUIPrintLineData {
@@ -515,6 +525,14 @@ namespace winrt::MEraEmuWin::implementation {
 
             flush_metrics();
         }
+        void flush_effects(EngineControl* ctrl) {
+            txt_layout->SetDrawingEffect(nullptr, { 0, txt.size() });
+            for (auto const& effect : effects) {
+                txt_layout->SetDrawingEffect(
+                    ctrl->GetOrCreateSolidColorBrush(effect.color),
+                    {effect.starti, effect.len});
+            }
+        }
 
     private:
         void flush_metrics() {
@@ -522,11 +540,12 @@ namespace winrt::MEraEmuWin::implementation {
             DWRITE_TEXT_METRICS1 metrics;
             check_hresult(txt_layout->GetMetrics(&metrics));
             line_height = static_cast<uint64_t>(metrics.height);
-            //acc_height += line_height
+            //acc_height += line_height;
         }
     };
 
     EngineControl::EngineControl() {
+        m_default_font_name = L"MS Gothic";
         ensure_global_factory();
     }
     EngineControl::~EngineControl() {
@@ -538,13 +557,21 @@ namespace winrt::MEraEmuWin::implementation {
         EngineControlT::InitializeComponent();
 
         // Register for scale notification
-        BackgroundSwapchainPanel().CompositionScaleChanged([this](SwapChainPanel const& sender, auto&&) {
+        auto bkg_swapchain_panel = BackgroundSwapchainPanel();
+        bkg_swapchain_panel.CompositionScaleChanged([this](SwapChainPanel const& sender, auto&&) {
             m_xscale = sender.CompositionScaleX();
             m_yscale = sender.CompositionScaleY();
         });
+        m_xscale = bkg_swapchain_panel.CompositionScaleX();
+        m_yscale = bkg_swapchain_panel.CompositionScaleY();
         // And width notification
         SizeChanged([this](auto&&, auto&&) {
             UpdateUIWidth((uint64_t)ActualWidth());
+            // Always bring view to bottom
+            RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
+        });
+        EngineOutputImage().SizeChanged([this](auto&&, auto&&) {
+            RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
         });
     }
     void EngineControl::Bootstrap(hstring const& game_base_dir) try {
@@ -665,11 +692,13 @@ namespace winrt::MEraEmuWin::implementation {
         // Reset UI resources
         m_vsis_noref = nullptr;
         m_vsis_d2d_noref = nullptr;
+        m_d2d_ctx = nullptr;
         // TODO: Proper UI scale
         //m_xscale = m_yscale = XamlRoot().RasterizationScale();
         m_ui_lines.clear();
         m_cur_composing_line = {};
         m_brush_map.clear();
+        m_font_map.clear();
         UpdateUIWidth(std::exchange(m_ui_width, {}));
         VirtualSurfaceImageSource img_src(0, 0);
         EngineOutputImage().Source(img_src);
@@ -769,7 +798,9 @@ namespace winrt::MEraEmuWin::implementation {
             ctx->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
             int dip_rt_top = update_rt.top / m_yscale;
             int dip_rt_bottom = update_rt.bottom / m_yscale;
+            // Clear stale bitmap area
             ctx->Clear(D2D1::ColorF(D2D1::ColorF::White, 0));
+            // Obtain lines requiring redraws
             auto ib = begin(m_ui_lines), ie = end(m_ui_lines);
             int line_start = std::ranges::upper_bound(ib, ie, dip_rt_top,
                 [](auto const& a, auto const& b) { return a < b; },
@@ -781,15 +812,16 @@ namespace winrt::MEraEmuWin::implementation {
             ) - ib;
             if (line_end < size(m_ui_lines)) { line_end++; }
 
-            com_ptr<ID2D1SolidColorBrush> brush;
-            ctx->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Silver), brush.put());
+            // Fallback brush (not actually used in practice, as all texts have
+            // color effects applied)
+            auto brush = GetOrCreateSolidColorBrush(D2D1::ColorF::Silver | 0xff000000);
 
             for (int line = line_start; line < line_end; line++) {
                 auto& line_data = m_ui_lines[line];
                 int offx = 0;
                 int offy = line_data.acc_height - line_data.line_height;
                 ctx->DrawTextLayout(D2D1::Point2F(offx, offy), line_data.txt_layout.get(),
-                    brush.get());
+                    brush);
             }
         }
     }
@@ -820,10 +852,10 @@ namespace winrt::MEraEmuWin::implementation {
 
         com_ptr<ID2D1Device> d2d_dev;
         check_hresult(D2D1CreateDevice(dxgi_dev.get(), nullptr, d2d_dev.put()));
-        /*check_hresult(d2d_dev->CreateDeviceContext(
-                D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-                d2d_dev_ctx.put()
-        ));*/
+        check_hresult(d2d_dev->CreateDeviceContext(
+            D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+            m_d2d_ctx.put()
+        ));
 
         // Associate output image with created Direct2D device
         check_hresult(m_vsis_d2d_noref->SetDevice(d2d_dev.get()));
@@ -852,34 +884,91 @@ namespace winrt::MEraEmuWin::implementation {
             m_vsis_noref->Invalidate({ 0, 0, new_w, new_h });
         }
     }
+    uint64_t EngineControl::GetCalculatedUIHeight() {
+        if (m_ui_lines.empty()) { return 0; }
+        return m_ui_lines.back().acc_height;
+    }
+    ID2D1SolidColorBrush* EngineControl::GetOrCreateSolidColorBrush(uint32_t color) {
+        auto& entry = m_brush_map[color];
+        if (!entry) {
+            check_hresult(m_d2d_ctx->CreateSolidColorBrush(
+                D2D1::ColorF(color, (color >> 24) / 255.f), entry.put()));
+        }
+        return entry.get();
+    }
+    IDWriteTextFormat* EngineControl::GetOrCreateTextFormat(hstring const& font_family) {
+        auto& entry = m_font_map[font_family];
+        if (!entry) {
+            check_hresult(g_dwrite_factory->CreateTextFormat(
+                //L"Consolas",
+                //L"ＭＳ ゴシック",
+                //L"MS Gothic",
+                font_family.c_str(),
+                nullptr,
+                DWRITE_FONT_WEIGHT_REGULAR,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                13.5,
+                L"",
+                entry.put()
+            ));
+        }
+        return entry.get();
+    }
     void EngineControl::RoutinePrint(hstring const& content, PrintExtendedFlags flags) {
-        // TODO...
-        int height = 0;
-        if (!m_ui_lines.empty()) {
-            height = m_ui_lines.back().acc_height;
+        bool updated = false;
+
+        auto push_cur_composing_line_fn = [this, &updated] {
+            auto height = GetCalculatedUIHeight();
+
+            // TODO: Support different fonts
+            com_ptr<IDWriteTextFormat> txt_fmt;
+            txt_fmt.copy_from(GetOrCreateTextFormat(m_default_font_name));
+
+            // TODO: Improve string concatenation performance
+            m_ui_lines.emplace_back(hstring{}, txt_fmt);
+            auto& cur_line = m_ui_lines.back();
+            for (auto const& part : m_cur_composing_line.parts) {
+                auto starti = cur_line.txt.size();
+                cur_line.txt = cur_line.txt + part.str;
+                cur_line.effects.push_back({ .starti = starti, .len = part.str.size(),
+                    .color = part.color });
+            }
+            m_cur_composing_line = {};
+
+            cur_line.ensure_layout(m_ui_width);
+            height += cur_line.line_height;
+            cur_line.acc_height = height;
+            cur_line.flush_effects(this);
+
+            updated = true;
+        };
+
+        std::wstring_view content_sv{ content };
+        size_t newline_pos;
+        auto color = to_u32(EngineForeColor());
+        while ((newline_pos = content_sv.find(L'\n')) != content_sv.npos) {
+            auto subsv = content_sv.substr(0, newline_pos);
+            content_sv = content_sv.substr(newline_pos + 1);
+            if (!subsv.empty()) {
+                m_cur_composing_line.parts.push_back(
+                    { .str = hstring(subsv), .color = color });
+            }
+            push_cur_composing_line_fn();
+        }
+        if (!content_sv.empty()) {
+            m_cur_composing_line.parts.push_back(
+                { .str = hstring(content_sv), .color = color });
+        }
+        if (flags & ERA_PEF_IS_LINE) {
+            push_cur_composing_line_fn();
         }
 
-        com_ptr<IDWriteTextFormat> txt_fmt;
-        check_hresult(g_dwrite_factory->CreateTextFormat(
-            //L"Consolas",
-            //L"ＭＳ ゴシック",
-            L"MS Gothic",
-            nullptr,
-            DWRITE_FONT_WEIGHT_REGULAR,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            13.5,
-            L"",
-            txt_fmt.put()
-        ));
-        m_ui_lines.emplace_back(content, txt_fmt);
-        auto& last_line = m_ui_lines.back();
-        last_line.ensure_layout(m_ui_width);
-        height += last_line.line_height;
-        last_line.acc_height = height;
-
         // Resize to trigger updates
-        check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, height * m_yscale));
+        if (updated) {
+            auto height = GetCalculatedUIHeight();
+            check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, height * m_yscale));
+        }
     }
     void EngineControl::RoutineWait(std::unique_ptr<InputRequest> request) {
         // TODO...
@@ -887,7 +976,7 @@ namespace winrt::MEraEmuWin::implementation {
     }
 
 #define DP_CLASS EngineControl
-    DP_DEFINE(EngineForeColor, box_value(Windows::UI::Colors::White()));
+    DP_DEFINE(EngineForeColor, box_value(Windows::UI::Colors::Silver()));
     DP_DEFINE(EngineBackColor, box_value(Windows::UI::Colors::Black()));
     DP_DEFINE_METHOD(EngineForeColor, Color);
     DP_DEFINE_METHOD(EngineBackColor, Color);

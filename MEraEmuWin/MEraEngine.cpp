@@ -77,6 +77,7 @@ T rust_exception_boundary(Functor&& functor) noexcept {
             return { .ok = { true, functor() } };
         }
         else {
+            functor();
             return { .ok = { true } };
         }
     }

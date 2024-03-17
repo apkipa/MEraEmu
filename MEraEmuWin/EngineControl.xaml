@@ -8,8 +8,8 @@
     mc:Ignorable="d">
 
     <Grid x:Name="LayoutRoot" Background="{x:Bind ColorToBrush(EngineBackColor)}">
-        <ScrollViewer HorizontalScrollMode="Auto" VerticalScrollMode="Enabled"
-                      VerticalScrollBarVisibility="Visible">
+        <ScrollViewer x:Name="RootScrollViewer" HorizontalScrollMode="Auto"
+                      VerticalScrollMode="Enabled" VerticalScrollBarVisibility="Visible">
             <Grid>
                 <SwapChainPanel x:Name="BackgroundSwapchainPanel"/>
                 <StackPanel Orientation="Vertical" VerticalAlignment="Bottom" HorizontalAlignment="Left">
