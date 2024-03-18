@@ -113,9 +113,13 @@ namespace winrt::MEraEmuWin::implementation {
         IDWriteTextFormat* GetOrCreateTextFormat(hstring const& font_family);
 
         // NOTE: Wait flag is ignored deliberately
+        void OnInputCountDownTick(IInspectable const&, IInspectable const&);
+        void FlushCurPrintLine();
         void RoutinePrint(hstring const& content, PrintExtendedFlags flags);
         void RoutineHtmlPrint(hstring const& content);
         void RoutineInput(std::unique_ptr<InputRequest> request);
+        void RoutineReuseLastLine(hstring const& content);
+        void RoutineClearLine(uint64_t count);
 
         DP_DECLARE(EngineForeColor);
         DP_DECLARE(EngineBackColor);
@@ -133,6 +137,8 @@ namespace winrt::MEraEmuWin::implementation {
         float m_xscale{ 1 }, m_yscale{ 1 };
         uint32_t m_focus_color{ D2D1::ColorF::Yellow };
         std::vector<EngineUIPrintLineData> m_ui_lines;
+        bool m_reused_last_line{ false };
+        int64_t m_cur_line_alignment{};
         struct ComposingLineData {
             struct ComposingLineDataPart {
                 hstring str;
@@ -142,6 +148,9 @@ namespace winrt::MEraEmuWin::implementation {
             std::vector<ComposingLineDataPart> parts;
         } m_cur_composing_line;
         std::unique_ptr<InputRequest> m_outstanding_input_req;
+        winrt::clock::time_point m_input_start_t;
+        hstring m_input_last_prompt;
+        Windows::UI::Xaml::DispatcherTimer m_input_countdown_timer;
         // TODO: Button style data
     };
 }

@@ -1259,6 +1259,7 @@ mod tests {
         let get_phy_mem = || memory_stats::memory_stats().unwrap().physical_mem;
         let mut last_mem_usage = get_phy_mem();
         let mut file_mem_usages = Vec::new();
+        // TODO: Separate erh with erb when calling into engine
         for erb_path in erhs.into_iter().chain(erbs.into_iter()) {
             let mut erb = std::fs::read(&erb_path)?;
             // HACK: Fix missing newlines

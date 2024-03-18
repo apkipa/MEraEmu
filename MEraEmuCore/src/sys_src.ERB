@@ -288,3 +288,10 @@
     ENDIF
     ; Restart train loop
     RESTART
+
+; --------------------
+
+@SYSFUNC_ALIGN_INT_TO_STR(ARG:0)
+    #FUNCTIONS
+    #DIMS CONST int_str_map = "LEFT", "CENTER", "RIGHT"
+    RETURN int_str_map:(ARG:0)

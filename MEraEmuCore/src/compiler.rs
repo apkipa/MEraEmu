@@ -2607,9 +2607,10 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             b"CURRENTALIGN" => {
                 ctx.results()?;
                 let [] = ctx.unpack_some_args(args)?;
-                ctx.this.arr_get_int("@ALIGN", vec![], src_info)?;
-                //todo!("unimplemented: @ALIGN int to string");
-                bail_opt!(ctx.this, src_info, "unimplemented: @ALIGN int to string");
+                //ctx.this.arr_get_int("@ALIGN", vec![], src_info)?;
+                let args = vec![Some(EraExpr::new_var("@ALIGN".to_owned(), vec![], src_info))];
+                // TODO: Assert return type of SYSFUNC_ALIGN_INT_TO_STR
+                ctx.this.static_fun_call("SYSFUNC_ALIGN_INT_TO_STR", args, src_info)?;
             }
             b"MAX" => {
                 ctx.result()?;
@@ -4224,7 +4225,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.chunk.emit_bytecode(Pop, x.src_info);
             }
             Cmd::ResetBgColor(x) => {
-                self.arr_set("@COLOR", vec![], x.src_info, |this| {
+                self.arr_set("@BGCOLOR", vec![], x.src_info, |this| {
                     this.arr_get_int("@DEFBGCOLOR", vec![], x.src_info)?;
                     Some(TInteger)
                 })?;
@@ -4929,8 +4930,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
     }
     // NOTE: This function is strengthened to prevent stack overflow when encountered
     //       too deep nesting of IF-ELSEIF's.
-    fn cmd_if_stmt(&mut self, func_kind: EraFunKind, stmt: crate::parser::EraIfStmt) -> Option<()> {
-        let x = stmt;
+    fn cmd_if_stmt(&mut self, func_kind: EraFunKind, x: crate::parser::EraIfStmt) -> Option<()> {
         // TODO: Optimize when there is no else body
         self.expression(x.cond)?;
         let backtrack_then = self.chunk.emit_jump_cond_hold(x.src_info);
@@ -5289,11 +5289,12 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                             }
                         } else {
                             if fix_chara_idxs {
-                                self.report_err(
-                                    src_info,
-                                    false,
-                                    "non-compliant use of CHARADATA variable",
-                                );
+                                // Maybe we should not report the omission of TARGET in CHARADATA variable?
+                                // self.report_err(
+                                //     src_info,
+                                //     false,
+                                //     "non-compliant use of CHARADATA variable",
+                                // );
                             }
                         }
                     } else {

@@ -111,7 +111,10 @@ namespace winrt::MEraEmuWin::implementation {
             0,
             nullptr
         ) };
-        check_bool(static_cast<bool>(file));
+        try { check_bool(static_cast<bool>(file)); }
+        catch (hresult_error const& e) {
+            throw hresult_error(e.code(), format(L"Failed to open `{}`: {}", path.c_str(), e.message()));
+        }
         DWORD high_size{};
         auto size = GetFileSize(file.get(), &high_size);
         if (high_size != 0) {
@@ -144,17 +147,52 @@ namespace winrt::MEraEmuWin::implementation {
         se_buf.release();
         return { std::unique_ptr<uint8_t[]>{ buf }, buf_offset };
     }
-    constexpr uint32_t to_u32(winrt::Windows::UI::Color value) {
+    constexpr uint32_t to_u32(winrt::Windows::UI::Color value) noexcept {
         uint32_t a = value.A, r = value.R, g = value.G, b = value.B;
         return (a << 24) + (r << 16) + (g << 8) + (b << 0);
     }
-    constexpr winrt::Windows::UI::Color to_winrt_color(uint32_t value) {
+    constexpr winrt::Windows::UI::Color to_winrt_color(uint32_t value) noexcept {
         return {
             .A = static_cast<uint8_t>(value >> 24),
             .R = static_cast<uint8_t>(value >> 16),
             .G = static_cast<uint8_t>(value >> 8),
             .B = static_cast<uint8_t>(value >> 0),
         };
+    }
+    constexpr wchar_t ascii_tolower(wchar_t ch) noexcept {
+        if (L'A' <= ch && ch <= L'Z') {
+            return ch - 'A' + 'a';
+        }
+        return ch;
+    }
+    constexpr bool istarts_with(std::wstring_view str, std::wstring_view pat) noexcept {
+        if (size(str) < size(pat)) { return false; }
+        std::wstring_view::size_type j{};
+        for (std::wstring_view::size_type i{}; i != size(pat); i++) {
+            if (ascii_tolower(str[i]) != ascii_tolower(pat[i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    constexpr bool iends_with(std::wstring_view str, std::wstring_view pat) noexcept {
+        if (size(str) < size(pat)) { return false; }
+        std::wstring_view::size_type j{};
+        for (auto i = size(str) - size(pat); i != size(str); i++, j++) {
+            if (ascii_tolower(str[i]) != ascii_tolower(pat[j])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    constexpr bool ieq(std::wstring_view a, std::wstring_view b) noexcept {
+        if (size(a) != size(b)) { return false; }
+        for (std::wstring_view::size_type i{}; i != size(a); i++) {
+            if (ascii_tolower(a[i]) != ascii_tolower(b[i])) {
+                return false;
+            }
+        }
+        return true;
     }
 }
 
@@ -170,8 +208,10 @@ namespace winrt::MEraEmuWin::implementation {
         int64_t time_limit{ -1 }; // Negatives stand for no limit
         bool show_time_prompt{ false };
         hstring expiry_msg{};
+        bool show_expiry_msg{ false };
         bool is_one{ false };
         bool can_skip{ false };
+        bool break_user_skip{ false };
 
         //virtual void time_tick() = 0;
         virtual bool try_fulfill(hstring const& input) = 0;
@@ -180,13 +220,20 @@ namespace winrt::MEraEmuWin::implementation {
         std::optional<int64_t> default_value;
         std::promise<int64_t> promise;
 
+        ~InputRequestI() {
+            if (default_value) {
+                promise.set_value(*default_value);
+            }
+        }
         bool try_fulfill(hstring const& input) override {
             if (input.empty() && default_value) {
                 promise.set_value(*default_value);
+                default_value = std::nullopt;
                 return true;
             }
             if (auto r = parse<int64_t>(input)) {
                 promise.set_value(*r);
+                default_value = std::nullopt;
                 return true;
             }
             return false;
@@ -196,24 +243,30 @@ namespace winrt::MEraEmuWin::implementation {
         std::optional<hstring> default_value;
         std::promise<hstring> promise;
 
+        ~InputRequestS() {
+            if (default_value) {
+                promise.set_value(*default_value);
+            }
+        }
         bool try_fulfill(hstring const& input) override {
             if (input.empty() && default_value) {
                 promise.set_value(*default_value);
+                default_value = std::nullopt;
                 return true;
             }
             promise.set_value(input);
+            default_value = std::nullopt;
             return true;
         }
     };
-    // Input request which rejects any input; can be used for merely waiting
+    // Input request which swallows any input; can be used for merely waiting
     struct InputRequestVoid : InputRequest {
-        std::atomic_flag promise{};
+        std::promise<void> promise{};
         ~InputRequestVoid() {
-            promise.test_and_set(std::memory_order_relaxed);
-            promise.notify_one();
+            promise.set_value();
         }
         bool try_fulfill(hstring const& input) override {
-            return false;
+            return true;
         }
     };
 
@@ -326,34 +379,51 @@ namespace winrt::MEraEmuWin::implementation {
             // TODO: on_print() wait flag
         }
         void on_html_print(std::string_view content) override {
-            // TODO: on_html_print
+            m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content)] {
+                sd->ui_ctrl->RoutineHtmlPrint(content);
+            });
         }
         void on_wait(bool any_key, bool is_force) override {
-            // TODO: on_wait
+            auto input_req = std::make_unique<InputRequestVoid>();
+            input_req->can_skip = true;
+            input_req->break_user_skip = is_force;
+            auto future = input_req->promise.get_future();
+            m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+                sd->ui_ctrl->RoutineInput(std::move(input_req));
+            });
+            return future.get();
         }
         void on_twait(int64_t duration, bool is_force) override {
-            // TODO: on_twait
+            auto input_req = std::make_unique<InputRequestVoid>();
+            input_req->time_limit = duration;
+            input_req->can_skip = !is_force;
+            input_req->break_user_skip = true;
+            auto future = input_req->promise.get_future();
+            m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+                sd->ui_ctrl->RoutineInput(std::move(input_req));
+            });
+            return future.get();
         }
         std::optional<int64_t> on_input_int(std::optional<int64_t> default_value, bool can_click, bool allow_skip) override {
             try {
                 auto input_req = std::make_unique<InputRequestI>();
                 input_req->default_value = default_value;
                 input_req->can_skip = allow_skip;
+                input_req->break_user_skip = true;
                 auto future = input_req->promise.get_future();
                 m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
                 });
                 return future.get();
             }
-            catch (std::future_error const& e) {
-                return std::nullopt;
-            }
+            catch (std::future_error const& e) { return std::nullopt; }
         }
         const char* on_input_str(std::optional<std::string_view> default_value, bool can_click, bool allow_skip) override {
             try {
                 auto input_req = std::make_unique<InputRequestS>();
                 input_req->default_value = default_value.transform([](auto x) { return to_hstring(x); });
                 input_req->can_skip = allow_skip;
+                input_req->break_user_skip = true;
                 auto future = input_req->promise.get_future();
                 m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
@@ -361,17 +431,44 @@ namespace winrt::MEraEmuWin::implementation {
                 m_str_cache = to_string(future.get());
                 return m_str_cache.c_str();
             }
-            catch (std::future_error const& e) {
-                return nullptr;
+            catch (std::future_error const& e) { return nullptr; }
+        }
+        std::optional<int64_t> on_tinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
+            try {
+                auto input_req = std::make_unique<InputRequestI>();
+                input_req->time_limit = time_limit;
+                input_req->default_value = default_value;
+                input_req->show_time_prompt = show_prompt;
+                input_req->expiry_msg = to_hstring(expiry_msg);
+                input_req->show_expiry_msg = true;
+                input_req->can_skip = can_click;
+                input_req->break_user_skip = true;
+                auto future = input_req->promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+                    sd->ui_ctrl->RoutineInput(std::move(input_req));
+                });
+                return future.get();
             }
+            catch (std::future_error const& e) { return std::nullopt; }
         }
-        std::optional<int64_t> on_tinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override
-        {
-            return std::optional<int64_t>();
-        }
-        const char* on_tinput_str(int64_t time_limit, std::string_view default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override
-        {
-            return nullptr;
+        const char* on_tinput_str(int64_t time_limit, std::string_view default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
+            try {
+                auto input_req = std::make_unique<InputRequestS>();
+                input_req->time_limit = time_limit;
+                input_req->default_value = to_hstring(default_value);
+                input_req->show_time_prompt = show_prompt;
+                input_req->expiry_msg = to_hstring(expiry_msg);
+                input_req->show_expiry_msg = true;
+                input_req->can_skip = can_click;
+                input_req->break_user_skip = true;
+                auto future = input_req->promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+                    sd->ui_ctrl->RoutineInput(std::move(input_req));
+                });
+                m_str_cache = to_string(future.get());
+                return m_str_cache.c_str();
+            }
+            catch (std::future_error const& e) { return nullptr; }
         }
         std::optional<int64_t> on_oneinput_int(std::optional<int64_t> default_value) override
         {
@@ -389,11 +486,16 @@ namespace winrt::MEraEmuWin::implementation {
         {
             return nullptr;
         }
-        void on_reuselastline(std::string_view content) override
-        {
+        void on_reuselastline(std::string_view content) override {
+            m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content)] {
+                sd->ui_ctrl->RoutineReuseLastLine(content);
+            });
         }
-        void on_clearline(int64_t count) override
-        {
+        void on_clearline(int64_t count) override {
+            if (count <= 0) { return; }
+            m_sd->queue_ui_work([sd = m_sd, count = (uint64_t)count] {
+                sd->ui_ctrl->RoutineClearLine(count);
+            });
         }
         int64_t on_var_get_int(std::string_view name, uint32_t idx) override {
             if (name == "@COLOR") {
@@ -404,11 +506,49 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 return future.get();
             }
-            /*"@COLOR"
-            "@DEFCOLOR"
-            "@BGCOLOR"
-            "@DEFBGCOLOR"
-            "@FOCUSCOLOR"*/
+            if (name == "@DEFCOLOR") {
+                return D2D1::ColorF::Silver;
+            }
+            if (name == "@BGCOLOR") {
+                std::promise<uint32_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(to_u32(sd->ui_ctrl->EngineBackColor()) & ~0xff000000);
+                });
+                return future.get();
+            }
+            if (name == "@DEFBGCOLOR") {
+                return D2D1::ColorF::Black;
+            }
+            if (name == "@FOCUSCOLOR") {
+                return D2D1::ColorF::Yellow;
+            }
+            if (name == "@REDRAW") {
+                // TODO: @REDRAW
+                return 0;
+            }
+            if (name == "@ALIGN") {
+                // TODO: @ALIGN
+                return 0;
+            }
+            // TODO...
+            if (name == "SCREENWIDTH") {
+                // TODO: SCREENWIDTH
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->m_ui_width / 20);
+                });
+                return future.get();
+            }
+            if (name == "LINECOUNT") {
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value((int64_t)sd->ui_ctrl->m_ui_lines.size());
+                });
+                return future.get();
+            }
             throw std::exception("no such variable");
         }
         const char* on_var_get_str(std::string_view name, uint32_t idx) override {
@@ -430,11 +570,22 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 return;
             }
-            /*"@COLOR"
-            "@DEFCOLOR"
-            "@BGCOLOR"
-            "@DEFBGCOLOR"
-            "@FOCUSCOLOR"*/
+            if (name == "@BGCOLOR") {
+                m_sd->queue_ui_work([sd = m_sd, val]() mutable {
+                    sd->ui_ctrl->EngineBackColor(to_winrt_color((uint32_t)val | 0xff000000));
+                });
+                return;
+            }
+            if (name == "@REDRAW") {
+                // TODO: @REDRAW
+                return;
+            }
+            if (name == "@ALIGN") {
+                // TODO: @ALIGN
+                return;
+            }
+            // TODO: Prohibit setting variables @DEF*COLOR?
+            // TODO...
             throw std::exception("no such variable");
         }
         void on_var_set_str(std::string_view name, uint32_t idx, std::string_view val) override {
@@ -505,9 +656,9 @@ namespace winrt::MEraEmuWin::implementation {
         {
             return 0;
         }
-        uint64_t on_get_host_time() override
-        {
-            return 0;
+        uint64_t on_get_host_time() override {
+            auto t = std::chrono::system_clock::now().time_since_epoch();
+            return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(t).count();
         }
         int64_t on_get_config_int(std::string_view name) override
         {
@@ -632,6 +783,11 @@ namespace winrt::MEraEmuWin::implementation {
         EngineOutputImage().SizeChanged([this](auto&&, auto&&) {
             RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
         });
+
+        //m_input_countdown_timer.Interval(std::chrono::milliseconds{ 100 });
+        //m_input_countdown_timer.Interval(std::chrono::milliseconds{ 30 });
+        m_input_countdown_timer.Interval(std::chrono::milliseconds{ 16 });
+        m_input_countdown_timer.Tick({ this, &EngineControl::OnInputCountDownTick });
     }
     void EngineControl::UserInputTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
         if (e.Key() == VirtualKey::Enter) {
@@ -643,9 +799,10 @@ namespace winrt::MEraEmuWin::implementation {
                 auto input = input_tb.Text();
                 input_tb.Text({});
                 if (input_req->try_fulfill(input)) {
+                    m_input_countdown_timer.Stop();
                     input_req = nullptr;
                     // Echo back
-                    RoutinePrint(input, ERA_PEF_IS_LINE);
+                    if (!input.empty()) { RoutinePrint(input, ERA_PEF_IS_LINE); }
                 }
             }
         }
@@ -710,30 +867,103 @@ namespace winrt::MEraEmuWin::implementation {
                 ers("SAVEDATA_TEXT");
 
                 // Collect files used by engine
-                for (auto const& entry : recur_dir_iter(sd->game_base_dir, L"CSV")) {
-                    // TODO...
-                }
-                std::vector<std::filesystem::path> erbs;
-                for (auto const& entry : recur_dir_iter(sd->game_base_dir, L"ERB")) {
-                    // TODO...
-                    erbs.push_back(entry.path());
-                }
-
-                mark_thread_started();
-
-                // Load all ERB files
-                // TODO...
-                for (auto& erb : erbs) {
-                    if (sd->ui_is_dead.load(std::memory_order_relaxed)) {
-                        return;
+                {
+                    std::vector<std::filesystem::path> misc_csvs;
+                    std::vector<std::filesystem::path> chara_csvs;
+                    auto load_csv = [&](std::filesystem::path const& csv, EraCsvLoadKind kind) {
+                        auto [data, size] = read_utf8_file(csv);
+                        engine.load_csv(to_string(csv.c_str()).c_str(), { data.get(), size }, kind);
+                    };
+                    for (auto const& entry : recur_dir_iter(sd->game_base_dir, L"CSV")) {
+                        if (!entry.is_regular_file()) { continue; }
+                        auto const& path = entry.path();
+                        auto filename = path.filename();
+                        std::wstring_view sv{ filename.c_str() };
+                        if (ieq(sv, L"_Rename.csv")) { load_csv(path, ERA_CSV_LOAD_KIND__RENAME); }
+                        else if (ieq(sv, L"VariableSize.csv")) { load_csv(path, ERA_CSV_LOAD_KIND_VARIABLE_SIZE); }
+                        else {
+                            if (!iends_with(sv, L".csv")) { continue; }
+                            if (istarts_with(sv, L"chara")) {
+                                chara_csvs.push_back(path);
+                            }
+                            else {
+                                misc_csvs.push_back(path);
+                            }
+                        }
+                    }
+                    std::vector<std::filesystem::path> erhs;
+                    std::vector<std::filesystem::path> erbs;
+                    for (auto const& entry : recur_dir_iter(sd->game_base_dir, L"ERB")) {
+                        if (!entry.is_regular_file()) { continue; }
+                        auto filename = entry.path().filename();
+                        if (iends_with(filename.c_str(), L".erh")) {
+                            erhs.push_back(entry.path());
+                        }
+                        else if (iends_with(filename.c_str(), L".erb")) {
+                            erbs.push_back(entry.path());
+                        }
+                        else {
+                            // Do nothing
+                        }
                     }
 
-                    auto [data, size] = read_utf8_file(erb);
-                    engine.load_erb(to_string(erb.c_str()).c_str(), { data.get(), size });
+                    // Source loading takes a lot of time, so mark thread as started here
+                    mark_thread_started();
+
+                    // Load CSV files
+                    for (auto& csv : misc_csvs) {
+                        auto filename = csv.filename();
+                        std::wstring_view sv{ filename.c_str() };
+                        if (ieq(sv, L"ABL.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_ABL); }
+                        else if (ieq(sv, L"EXP.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_EXP); }
+                        else if (ieq(sv, L"TALENT.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_TALENT); }
+                        else if (ieq(sv, L"PALAM.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_PALAM); }
+                        else if (ieq(sv, L"TRAIN.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_TRAIN); }
+                        else if (ieq(sv, L"MARK.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_MARK); }
+                        else if (ieq(sv, L"ITEM.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_ITEM); }
+                        else if (ieq(sv, L"BASE.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_BASE); }
+                        else if (ieq(sv, L"SOURCE.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_SOURCE); }
+                        else if (ieq(sv, L"EX.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_EX); }
+                        else if (ieq(sv, L"STR.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_STR); }
+                        else if (ieq(sv, L"EQUIP.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_EQUIP); }
+                        else if (ieq(sv, L"TEQUIP.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_T_EQUIP); }
+                        else if (ieq(sv, L"FLAG.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_FLAG); }
+                        else if (ieq(sv, L"TFLAG.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_T_FLAG); }
+                        else if (ieq(sv, L"CFLAG.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_C_FLAG); }
+                        else if (ieq(sv, L"TCVAR.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_T_C_VAR); }
+                        else if (ieq(sv, L"CSTR.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_C_STR); }
+                        else if (ieq(sv, L"STAIN.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_STAIN); }
+                        else if (ieq(sv, L"CDFLAG1.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_C_D_FLAG1); }
+                        else if (ieq(sv, L"CDFLAG2.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_C_D_FLAG2); }
+                        else if (ieq(sv, L"STRNAME.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_STR_NAME); }
+                        else if (ieq(sv, L"TSTR.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_T_STR); }
+                        else if (ieq(sv, L"SAVESTR.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_SAVE_STR); }
+                        else if (ieq(sv, L"GLOBAL.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_GLOBAL); }
+                        else if (ieq(sv, L"GLOBALS.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_GLOBALS); }
+                        else if (ieq(sv, L"GAMEBASE.CSV")) { load_csv(csv, ERA_CSV_LOAD_KIND_GAME_BASE); }
+                        else {
+                            // Do nothing
+                        }
+                    }
+                    for (auto& csv : chara_csvs) {
+                        load_csv(csv, ERA_CSV_LOAD_KIND_CHARA_);
+                    }
+
+                    // Load ERB files
+                    for (auto& erh : erhs) {
+                        if (sd->ui_is_dead.load(std::memory_order_relaxed)) { return; }
+                        auto [data, size] = read_utf8_file(erh);
+                        engine.load_erh(to_string(erh.c_str()).c_str(), { data.get(), size });
+                    }
+                    for (auto& erb : erbs) {
+                        if (sd->ui_is_dead.load(std::memory_order_relaxed)) { return; }
+                        auto [data, size] = read_utf8_file(erb);
+                        engine.load_erb(to_string(erb.c_str()).c_str(), { data.get(), size });
+                    }
                 }
-                std::exchange(erbs, {});
 
                 // Finialize compilation
+                if (sd->ui_is_dead.load(std::memory_order_relaxed)) { return; }
                 engine.finialize_load_srcs();
 
                 // Main loop
@@ -777,6 +1007,8 @@ namespace winrt::MEraEmuWin::implementation {
         //m_xscale = m_yscale = XamlRoot().RasterizationScale();
         m_ui_lines.clear();
         m_cur_composing_line = {};
+        m_reused_last_line = false;
+        m_cur_line_alignment = {};
         m_brush_map.clear();
         m_font_map.clear();
         UpdateUIWidth(std::exchange(m_ui_width, {}));
@@ -995,10 +1227,60 @@ namespace winrt::MEraEmuWin::implementation {
         }
         return entry.get();
     }
+    void EngineControl::OnInputCountDownTick(IInspectable const&, IInspectable const&) {
+        auto& input_req = m_outstanding_input_req;
+        if (!input_req) {
+            // TODO: Is this unreachable?
+            m_input_countdown_timer.Stop();
+        }
+
+        // Check remaining time
+        auto cur_t = winrt::clock::now();
+        auto remaining_time = std::chrono::milliseconds(input_req->time_limit) -
+            (cur_t - m_input_start_t);
+        if (remaining_time.count() <= 0) {
+            // Expired
+            tenkai::cpp_utils::ScopeExit se_input_req([&] {
+                input_req = nullptr;
+            });
+            m_input_countdown_timer.Stop();
+            if (input_req->show_expiry_msg) {
+                auto expire_msg = input_req->expiry_msg;
+                if (expire_msg.empty()) {
+                    //expire_msg = L"已超时";
+                    expire_msg = L"時間切れ";
+                }
+                RoutinePrint(expire_msg, ERA_PEF_IS_LINE);
+            }
+        }
+        else {
+            // Not expired, print messages if needed
+            if (input_req->show_time_prompt) {
+                auto prompt = format(L"还剩 {:.1f} 秒",
+                    std::chrono::duration<double>(remaining_time).count()
+                );
+                if (m_input_last_prompt != prompt) {
+                    m_input_last_prompt = prompt;
+                    RoutineReuseLastLine(prompt);
+                }
+            }
+        }
+    }
+    void EngineControl::FlushCurPrintLine() {
+        if (!m_cur_composing_line.parts.empty()) {
+            RoutinePrint({}, ERA_PEF_IS_LINE);
+        }
+    }
     void EngineControl::RoutinePrint(hstring const& content, PrintExtendedFlags flags) {
         bool updated = false;
 
         auto push_cur_composing_line_fn = [this, &updated] {
+            // Handle reused last line
+            if (m_reused_last_line) {
+                RoutineClearLine(1);
+                m_reused_last_line = false;
+            }
+
             auto height = GetCalculatedUIHeight();
 
             // TODO: Support different fonts
@@ -1060,10 +1342,11 @@ namespace winrt::MEraEmuWin::implementation {
         assert(request);
 
         // Flush intermediate print contents first
-        if (!m_cur_composing_line.parts.empty()) {
-            RoutinePrint({}, ERA_PEF_IS_LINE);
-        }
+        FlushCurPrintLine();
 
+        m_input_start_t = winrt::clock::now();
+        m_input_last_prompt = {};
+        m_input_countdown_timer.Stop();
         auto& input_req = m_outstanding_input_req;
         input_req = std::move(request);
         // Check if we can fulfill the input request immediately
@@ -1074,11 +1357,42 @@ namespace winrt::MEraEmuWin::implementation {
                 input_tb.Text({});
                 input_req = nullptr;
                 // Echo back
-                RoutinePrint(input, ERA_PEF_IS_LINE);
+                if (!input.empty()) { RoutinePrint(input, ERA_PEF_IS_LINE); }
                 return;
             }
         }
-        // TODO: Check for timeout, ...
+        // Handle timed input
+        if (input_req->time_limit >= 0) {
+            // TODO: More precise countdown handling
+            m_input_countdown_timer.Start();
+        }
+        // TODO: Check if user is skipping
+    }
+    void EngineControl::RoutineReuseLastLine(hstring const& content) {
+        FlushCurPrintLine();
+
+        if (m_reused_last_line) {
+            RoutineClearLine(1);
+            m_reused_last_line = false;
+        }
+        // TODO: Cut off newlines in content
+        RoutinePrint(content, ERA_PEF_IS_LINE);
+        // Mark as reused last line
+        m_reused_last_line = true;
+    }
+    void EngineControl::RoutineClearLine(uint64_t count) {
+        if (count == 0) { return; }
+        auto old_count = (uint64_t)size(m_ui_lines);
+        if (count >= old_count) {
+            m_ui_lines.clear();
+        }
+        else {
+            auto ie = end(m_ui_lines);
+            m_ui_lines.erase(ie - count, ie);
+        }
+        auto height = GetCalculatedUIHeight();
+        check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, height * m_yscale));
+        EngineOutputImage().InvalidateMeasure();
     }
 
 #define DP_CLASS EngineControl

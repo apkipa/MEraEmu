@@ -184,6 +184,9 @@ impl EraExpr {
     pub fn new_str(val: String, src_info: SourcePosInfo) -> Self {
         EraExpr::Term(EraTermExpr::Literal(EraLiteral::String(val, src_info)))
     }
+    pub fn new_var(name: String, idxs: Vec<EraExpr>, src_info: SourcePosInfo) -> Self {
+        EraExpr::Term(EraTermExpr::Var(EraVarExpr { name, idxs, src_info }))
+    }
     fn is_var(&self) -> bool {
         match self {
             Self::Term(EraTermExpr::Var(_)) => true,
@@ -3167,31 +3170,44 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         let mut body = Vec::new();
         let mut else_body = Vec::new();
         let mut is_at_else = false;
-        loop {
-            if let Some(token) = self.matches_command_end(b"ELSEIF") {
-                if is_at_else {
-                    self.synchronize();
-                    self.report_token_err(token.into(), true, "too many ELSEIF command");
+        {
+            // STRENGTHENED: Prevent stack overflow in debug builds.
+            let mut body = &mut body;
+            let mut else_body = &mut else_body;
+            loop {
+                if let Some(token) = self.matches_command_end(b"ELSEIF") {
+                    if is_at_else {
+                        self.synchronize();
+                        self.report_token_err(token.into(), true, "too many ELSEIF command");
+                    }
+                    self.src_info = token.src_info;
+                    else_body.push(EraStmt::Command(EraCommandStmt::If(EraIfStmt {
+                        cond: self.expression(true)?,
+                        body: Vec::new(),
+                        else_body: Vec::new(),
+                        src_info: self.src_info,
+                    })));
+                    (body, else_body) = match else_body.last_mut().unwrap() {
+                        EraStmt::Command(EraCommandStmt::If(x)) => (&mut x.body, &mut x.else_body),
+                        _ => unreachable!(),
+                    };
+                } else if let Some(token) = self.matches_command_end(b"ELSE") {
+                    if is_at_else {
+                        self.synchronize();
+                        self.report_token_err(token.into(), true, "too many ELSE command");
+                    }
+                    is_at_else = true;
+                    self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+                } else if let Some(token) = self.matches_command_end(b"ENDIF") {
+                    self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
+                    break;
+                } else {
+                    let stmt = stmt_at_guard!(self)?;
+                    is_at_else
+                        .then_some(&mut else_body)
+                        .unwrap_or(&mut body)
+                        .push(stmt);
                 }
-                self.src_info = token.src_info;
-                else_body.push(EraStmt::Command(EraCommandStmt::If(self.stmt_if()?)));
-                break;
-            } else if let Some(token) = self.matches_command_end(b"ELSE") {
-                if is_at_else {
-                    self.synchronize();
-                    self.report_token_err(token.into(), true, "too many ELSE command");
-                }
-                is_at_else = true;
-                self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
-            } else if let Some(token) = self.matches_command_end(b"ENDIF") {
-                self.consume(EraLexerMode::Normal, EraTokenKind::LineBreak)?;
-                break;
-            } else {
-                let stmt = stmt_at_guard!(self)?;
-                is_at_else
-                    .then_some(&mut else_body)
-                    .unwrap_or(&mut body)
-                    .push(stmt);
             }
         }
         Some(EraIfStmt {

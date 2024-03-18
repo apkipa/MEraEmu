@@ -28,7 +28,8 @@
                     <Image x:Name="EngineOutputImage" Stretch="UniformToFill"/>
                     <TextBox x:Name="UserInputTextBox" TabFocusNavigation="Cycle"
                              RequestedTheme="Dark" MinHeight="24" Padding="2,2,6,1"
-                             FontSize="13.5" KeyDown="UserInputTextBox_KeyDown"/>
+                             FontSize="13.5" IsSpellCheckEnabled="False"
+                             KeyDown="UserInputTextBox_KeyDown"/>
                 </StackPanel>
             </Grid>
         </ScrollViewer>
