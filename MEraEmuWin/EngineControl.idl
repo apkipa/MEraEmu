@@ -8,6 +8,10 @@ namespace MEraEmuWin {
     runtimeclass EngineControl : Windows.UI.Xaml.Controls.UserControl {
         EngineControl();
 
+        void ReturnToTitle();
+
+        Boolean IsStarted{ get; };
+
         event Windows.Foundation.EventHandler<EngineUnhandledExceptionEventArgs> UnhandledException;
 
         static Windows.UI.Xaml.DependencyProperty EngineForeColorProperty{ get; };

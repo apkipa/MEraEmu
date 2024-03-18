@@ -253,6 +253,7 @@ struct Pair<T1, T2> {
 
 #[derive_ReprC]
 #[repr(C)]
+#[derive(Default, Debug)]
 struct EraExecSourceInfoInterop {
     pub line: u32,
     pub column: u32,
@@ -276,6 +277,47 @@ struct MEraEngineResultInterop<T> {
     ok: FfiOption<T>,
     err: MEraEngineErrorInterop,
 }
+
+#[derive_ReprC]
+#[repr(C)]
+#[derive(Debug)]
+struct MEraEngineStackTraceFrameInterop<'a> {
+    pub file_name: string::str_ref<'a>,
+    pub func_name: string::str_ref<'a>,
+    pub ip: engine::EraExecIpInfo,
+    pub src_info: EraExecSourceInfoInterop,
+}
+#[derive_ReprC]
+#[repr(C)]
+#[derive(Debug)]
+struct MEraEngineStackTraceInterop<'a> {
+    pub frames: repr_c::Vec<MEraEngineStackTraceFrameInterop<'a>>,
+}
+impl Default for MEraEngineStackTraceInterop<'_> {
+    fn default() -> Self {
+        Self {
+            frames: Vec::new().into(),
+        }
+    }
+}
+impl<'a> From<engine::EngineStackTrace<'a>> for MEraEngineStackTraceInterop<'a> {
+    fn from(value: engine::EngineStackTrace<'a>) -> Self {
+        Self {
+            frames: value
+                .frames
+                .into_iter()
+                .map(|x| MEraEngineStackTraceFrameInterop {
+                    file_name: x.file_name.into(),
+                    func_name: x.func_name.into(),
+                    ip: x.ip,
+                    src_info: x.src_info.into(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        }
+    }
+}
+
 #[derive_ReprC]
 #[repr(opaque)]
 struct MEraEngineInterop {
@@ -286,6 +328,10 @@ struct MEraEngineInterop {
 #[ffi_export]
 fn delete_engine_error(e: MEraEngineErrorInterop) {
     drop(e);
+}
+#[ffi_export]
+fn delete_engine_stack_trace(value: MEraEngineStackTraceInterop<'_>) {
+    drop(value);
 }
 #[ffi_export]
 fn new_engine() -> repr_c::Box<MEraEngineInterop> {
@@ -355,6 +401,34 @@ fn engine_do_execution(
 ) -> MEraEngineResultInterop<bool> {
     let stop_flag = unsafe { AtomicBool::from_ptr(stop_flag) };
     engine.i.do_execution(stop_flag, max_inst_cnt).into()
+}
+#[ffi_export]
+fn engine_get_is_halted(engine: &mut MEraEngineInterop) -> bool {
+    engine.i.get_is_halted()
+}
+#[ffi_export]
+fn engine_reset_exec_to_ip(
+    engine: &mut MEraEngineInterop,
+    ip: engine::EraExecIpInfo,
+) -> MEraEngineResultInterop<()> {
+    engine.i.reset_exec_to_ip(ip).into()
+}
+#[ffi_export]
+fn engine_get_func_info(
+    engine: &mut MEraEngineInterop,
+    name: char_p::Ref<'_>,
+) -> MEraEngineResultInterop<engine::EraFuncInfo> {
+    engine.i.get_func_info(name.to_str()).into()
+}
+#[ffi_export]
+fn engine_get_stack_trace(
+    engine: &mut MEraEngineInterop,
+) -> MEraEngineResultInterop<MEraEngineStackTraceInterop<'_>> {
+    engine.i.get_stack_trace().map(Into::into).into()
+}
+#[ffi_export]
+fn engine_get_version() -> string::str_ref<'static> {
+    MEraEngine::get_version().into()
 }
 
 impl<T: Default> From<Result<T, MEraEngineError>> for MEraEngineResultInterop<T> {
@@ -697,11 +771,10 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::BTreeMap, sync::atomic::AtomicBool};
+    use std::{cell::RefCell, sync::atomic::AtomicBool};
 
     use colored::{Color, Colorize};
     use indoc::indoc;
-    use safer_ffi::derive_ReprC;
 
     use super::*;
 

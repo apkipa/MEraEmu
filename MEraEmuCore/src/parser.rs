@@ -185,7 +185,11 @@ impl EraExpr {
         EraExpr::Term(EraTermExpr::Literal(EraLiteral::String(val, src_info)))
     }
     pub fn new_var(name: String, idxs: Vec<EraExpr>, src_info: SourcePosInfo) -> Self {
-        EraExpr::Term(EraTermExpr::Var(EraVarExpr { name, idxs, src_info }))
+        EraExpr::Term(EraTermExpr::Var(EraVarExpr {
+            name,
+            idxs,
+            src_info,
+        }))
     }
     fn is_var(&self) -> bool {
         match self {

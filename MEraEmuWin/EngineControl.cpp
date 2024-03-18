@@ -270,6 +270,24 @@ namespace winrt::MEraEmuWin::implementation {
         }
     };
 
+    enum class EngineThreadTaskKind {
+        None,
+        ReturnToTitle,
+    };
+    struct EngineThreadTask {
+        EngineThreadTask(EngineThreadTaskKind kind) : kind(kind) {}
+        virtual ~EngineThreadTask() {}
+
+        EngineThreadTaskKind kind;
+        //virtual void do_work();
+    };
+
+    enum class EngineThreadState {
+        Died,
+        Vacant,
+        Occupied,
+    };
+
     struct EngineSharedData : std::enable_shared_from_this<EngineSharedData> {
         ~EngineSharedData() {}
 
@@ -277,23 +295,27 @@ namespace winrt::MEraEmuWin::implementation {
         CoreDispatcher ui_dispatcher{ nullptr };
         //weak_ref<EngineControl> ui_ctrl{ nullptr };
         EngineControl* ui_ctrl{};
-        IAsyncAction thread_task{ nullptr };
+        IAsyncAction thread_task_op{ nullptr };
         std::atomic_bool ui_is_alive{ false };
-        // NOTE: Packed with ui_is_alive; used by engine stop_flag
-        std::atomic_bool ui_is_dead{ true };
-        std::atomic_bool thread_is_alive{ false };
+        // Also used as an event queue indicator (?)
+        std::atomic_bool engine_stop_flag{ true };
+        //std::atomic_bool thread_is_alive{ false };
+        std::atomic<EngineThreadState> thread_state{ EngineThreadState::Died };
         std::atomic_bool thread_started{ false };
         std::exception_ptr thread_exception{ nullptr };
+        //std::atomic<EngineThreadTask*> thread_task{};
+        std::unique_ptr<EngineThreadTask> thread_task;
+        bool has_execution_error{ false };
 
         std::mutex ui_mutex;
         std::vector<std::move_only_function<void()>> ui_works;
 
         // NOTE: Called by UI thread
         void ui_disconnect() {
-            if (thread_task) {
-                thread_task.Cancel();
+            if (thread_task_op) {
+                thread_task_op.Cancel();
             }
-            ui_is_dead.store(true, std::memory_order_relaxed);
+            engine_stop_flag.store(true, std::memory_order_relaxed);
             ui_is_alive.store(false, std::memory_order_relaxed);
             ui_is_alive.notify_one();
             // Abandon queued works
@@ -301,17 +323,26 @@ namespace winrt::MEraEmuWin::implementation {
                 std::scoped_lock guard(ui_mutex);
                 return std::exchange(ui_works, {});
             }();
+            queue_thread_work(EngineThreadTaskKind::None);
         }
-        // NOTE: Called by background thread
+        // NOTE: Called by engine (background) thread
         void task_disconnect() {
-            thread_is_alive.store(false, std::memory_order_relaxed);
-            thread_is_alive.notify_one();
+            auto state = thread_state.exchange(EngineThreadState::Died, std::memory_order_relaxed);
+            thread_state.notify_one();
             // Triggers UI update, which in turn responds to task disconnection
             queue_ui_work([] {});
+            if (state == EngineThreadState::Occupied) {
+                engine_stop_flag.wait(false, std::memory_order_acquire);
+                thread_task = nullptr;
+                engine_stop_flag.store(false, std::memory_order_release);
+                engine_stop_flag.notify_one();
+            }
         }
         void queue_ui_work(std::move_only_function<void()> work) {
             if (!ui_is_alive.load(std::memory_order_relaxed)) {
-                throw hresult_canceled();
+                //throw hresult_canceled();
+                // Fail silently
+                return;
             }
             bool has_no_work;
             {
@@ -327,6 +358,29 @@ namespace winrt::MEraEmuWin::implementation {
                     //         EngineControl.
                     self->ui_ctrl->UpdateEngineUI();
                 });
+            }
+        }
+        void queue_thread_work(EngineThreadTaskKind kind) {
+            auto state = EngineThreadState::Vacant;
+            while (!thread_state.compare_exchange_weak(state, EngineThreadState::Occupied, std::memory_order_acq_rel)) {
+                if (state == EngineThreadState::Died) { return; }
+                // TODO: Is wait unnecessary?
+                thread_state.wait(state, std::memory_order_relaxed);
+                state = EngineThreadState::Vacant;
+            }
+            thread_task = std::make_unique<EngineThreadTask>(kind);
+            // Interrupt engine thread so that it can process queued works
+            engine_stop_flag.store(true, std::memory_order_release);
+            engine_stop_flag.notify_one();
+            // SAFETY: Stop flag is reverted even when engine thread is disconnecting
+            engine_stop_flag.wait(true, std::memory_order_acquire);
+            // Task was processed by engine thread, we can return now
+        }
+        void wait_for_thread_disconnect() {
+            while (true) {
+                auto state = thread_state.load(std::memory_order_acquire);
+                if (state == EngineThreadState::Died) { break; }
+                thread_state.wait(state, std::memory_order_relaxed);
             }
         }
     };
@@ -368,6 +422,9 @@ namespace winrt::MEraEmuWin::implementation {
                 sd->ui_ctrl->RoutinePrint(final_msg, ERA_PEF_IS_LINE);
                 sd->ui_ctrl->EngineForeColor(old_clr);
             });
+            // SAFETY: Engine and callback are on the same thread
+            m_sd->has_execution_error = true;
+            //m_sd->engine_stop_flag.store(true, std::memory_order_relaxed);
         }
         uint64_t on_get_rand() override {
             return m_rand_gen();
@@ -760,7 +817,9 @@ namespace winrt::MEraEmuWin::implementation {
     }
     EngineControl::~EngineControl() {
         if (m_sd) {
+            m_outstanding_input_req = nullptr;
             m_sd->ui_disconnect();
+            m_sd->wait_for_thread_disconnect();
         }
     }
     void EngineControl::InitializeComponent() {
@@ -784,10 +843,19 @@ namespace winrt::MEraEmuWin::implementation {
             RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
         });
 
-        //m_input_countdown_timer.Interval(std::chrono::milliseconds{ 100 });
-        //m_input_countdown_timer.Interval(std::chrono::milliseconds{ 30 });
+        // Initialize input countdown timer
         m_input_countdown_timer.Interval(std::chrono::milliseconds{ 16 });
         m_input_countdown_timer.Tick({ this, &EngineControl::OnInputCountDownTick });
+    }
+    void EngineControl::ReturnToTitle() {
+        m_outstanding_input_req = nullptr;
+        m_sd->queue_thread_work(EngineThreadTaskKind::ReturnToTitle);
+
+        m_ui_lines.clear();
+        check_hresult(m_vsis_noref->Resize(0, 0));
+    }
+    bool EngineControl::IsStarted() {
+        return m_sd && m_sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Died;
     }
     void EngineControl::UserInputTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
         if (e.Key() == VirtualKey::Enter) {
@@ -808,15 +876,21 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
     void EngineControl::Bootstrap(hstring const& game_base_dir) try {
+        if (m_sd) {
+            m_outstanding_input_req = nullptr;
+            m_sd->ui_disconnect();
+        }
         m_sd = std::make_shared<EngineSharedData>();
         m_sd->game_base_dir = game_base_dir;
         m_sd->ui_dispatcher = Dispatcher();
         //m_sd->ui_ctrl = get_weak();
         m_sd->ui_ctrl = this;
         // Start a dedicated background thread
-        m_sd->thread_task = ThreadPool::RunAsync([sd = m_sd](IAsyncAction const& op) {
-            sd->thread_is_alive.store(true, std::memory_order_relaxed);
-            sd->thread_is_alive.notify_one();
+        m_sd->thread_task_op = ThreadPool::RunAsync([sd = m_sd](IAsyncAction const& op) {
+            SetThreadDescription(GetCurrentThread(), L"MEraEmu Engine Thread");
+
+            sd->thread_state.store(EngineThreadState::Vacant, std::memory_order_relaxed);
+            sd->thread_state.notify_one();
 
             auto mark_thread_started = [&] {
                 sd->thread_started.store(true, std::memory_order_release);
@@ -865,6 +939,23 @@ namespace winrt::MEraEmuWin::implementation {
                 eri("SCREENWIDTH");
                 eri("LINECOUNT");
                 ers("SAVEDATA_TEXT");
+
+                auto run_ui_task = [&](std::unique_ptr<EngineThreadTask> task, bool loaded) {
+                    if (!loaded) { return; }
+                    if (task->kind == EngineThreadTaskKind::ReturnToTitle) {
+                        // TODO: Reset execution to title
+                        EraFuncInfo func_info;
+                        try {
+                            func_info = engine.get_func_info("SYSPROC_BEGIN_TITLE");
+                        }
+                        // Ignore if function does not exist
+                        catch (...) { return; }
+                        if (func_info.args_cnt != 0) {
+                            throw hresult_error(E_FAIL, L"malformed entry function");
+                        }
+                        engine.reset_exec_to_ip(func_info.entry);
+                    }
+                };
 
                 // Collect files used by engine
                 {
@@ -949,31 +1040,84 @@ namespace winrt::MEraEmuWin::implementation {
                         load_csv(csv, ERA_CSV_LOAD_KIND_CHARA_);
                     }
 
+                    auto try_handle_thread_event = [&] {
+                        if (!sd->engine_stop_flag.load(std::memory_order_acquire)) { return; }
+                        if (sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Occupied) {
+                            // Likely the UI side has just disconnected
+                            return;
+                        }
+                        tenkai::cpp_utils::ScopeExit se_stop_flag([&] {
+                            sd->engine_stop_flag.store(false, std::memory_order_release);
+                            sd->engine_stop_flag.notify_one();
+                            sd->thread_state.store(EngineThreadState::Vacant, std::memory_order_release);
+                            sd->thread_state.notify_one();
+                        });
+                        if (sd->thread_task) {
+                            run_ui_task(std::move(sd->thread_task), false);
+                        }
+                    };
+
                     // Load ERB files
                     for (auto& erh : erhs) {
-                        if (sd->ui_is_dead.load(std::memory_order_relaxed)) { return; }
+                        if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
+                        try_handle_thread_event();
                         auto [data, size] = read_utf8_file(erh);
                         engine.load_erh(to_string(erh.c_str()).c_str(), { data.get(), size });
                     }
                     for (auto& erb : erbs) {
-                        if (sd->ui_is_dead.load(std::memory_order_relaxed)) { return; }
+                        if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
+                        try_handle_thread_event();
                         auto [data, size] = read_utf8_file(erb);
                         engine.load_erb(to_string(erb.c_str()).c_str(), { data.get(), size });
                     }
                 }
 
                 // Finialize compilation
-                if (sd->ui_is_dead.load(std::memory_order_relaxed)) { return; }
+                if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
                 engine.finialize_load_srcs();
 
                 // Main loop
-                //while (sd->ui_is_alive.load(std::memory_order_relaxed)) {
-                //    // TODO...
-                //    Sleep(1);
-                //}
-                engine.do_execution(&sd->ui_is_dead, UINT64_MAX);
-                // TODO: Ensure engine has halted
+                while (sd->ui_is_alive.load(std::memory_order_relaxed)) {
+                    while (!engine.get_is_halted()) {
+                        if (sd->engine_stop_flag.load(std::memory_order_relaxed)) {
+                            break;
+                        }
+                        engine.do_execution(&sd->engine_stop_flag, UINT64_MAX);
+                    }
+                    if (sd->has_execution_error) {
+                        // Dump stack trace when execution error occurs
+                        sd->has_execution_error = false;
+                        std::wstring print_msg = L"函数堆栈跟踪 (最近调用者最先显示):\n";
+                        auto stack_trace = engine.get_stack_trace();
+                        for (const auto& frame : stack_trace.frames) {
+                            print_msg += std::format(L"  {}({},{}):{}\n",
+                                to_hstring(frame.file_name),
+                                to_hstring(frame.src_info.line),
+                                to_hstring(frame.src_info.column),
+                                to_hstring(frame.func_name)
+                            );
+                        }
+                        sd->queue_ui_work([sd, msg = hstring(print_msg)] {
+                            sd->ui_ctrl->RoutinePrint(msg, 0);
+                        });
+                    }
+                    sd->engine_stop_flag.wait(false, std::memory_order_acquire);
+                    if (sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Occupied) {
+                        // Likely the UI side has just disconnected
+                        break;
+                    }
+                    tenkai::cpp_utils::ScopeExit se_stop_flag([&] {
+                        sd->engine_stop_flag.store(false, std::memory_order_release);
+                        sd->engine_stop_flag.notify_one();
+                        sd->thread_state.store(EngineThreadState::Vacant, std::memory_order_release);
+                        sd->thread_state.notify_one();
+                    });
+                    if (sd->thread_task) {
+                        run_ui_task(std::move(sd->thread_task), true);
+                    }
+                }
 
+                // TODO: Do we really need this delay?
                 // HACK: Delay thread tear down to prevent ordering issues
                 Sleep(100);
             }
@@ -981,7 +1125,7 @@ namespace winrt::MEraEmuWin::implementation {
                 sd->thread_exception = std::current_exception();
             }
         }, WorkItemPriority::Normal, WorkItemOptions::TimeSliced);
-        m_sd->ui_is_dead.store(false, std::memory_order_relaxed);
+        m_sd->engine_stop_flag.store(false, std::memory_order_relaxed);
         m_sd->ui_is_alive.store(true, std::memory_order_release);
         m_sd->ui_is_alive.notify_one();
 
@@ -990,7 +1134,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         // Check whether engine has panicked
         m_sd->thread_started.wait(false, std::memory_order_acquire);
-        if (!m_sd->thread_is_alive.load(std::memory_order_relaxed)) {
+        if (m_sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Vacant) {
             assert(m_sd->thread_exception);
             std::rethrow_exception(m_sd->thread_exception);
         }
@@ -1011,6 +1155,8 @@ namespace winrt::MEraEmuWin::implementation {
         m_cur_line_alignment = {};
         m_brush_map.clear();
         m_font_map.clear();
+        ClearValue(m_EngineForeColorProperty);
+        ClearValue(m_EngineBackColorProperty);
         UpdateUIWidth(std::exchange(m_ui_width, {}));
         VirtualSurfaceImageSource img_src(0, 0);
         EngineOutputImage().Source(img_src);
@@ -1056,11 +1202,9 @@ namespace winrt::MEraEmuWin::implementation {
         // TODO...
         //m_vsis_noref->Resize();
 
-        // TODO: Handle engine thread termination
-        if (!m_sd->thread_is_alive.load(std::memory_order_relaxed)) {
+        // Handle engine thread termination
+        if (m_sd->thread_state.load(std::memory_order_relaxed) == EngineThreadState::Died) {
             VisualStateManager::GoToState(*this, L"ExecutionEnded", true);
-
-            // TODO: Handle engine thread exception
             if (m_sd->thread_exception) {
                 EmitUnhandledExceptionEvent(m_sd->thread_exception);
             }
@@ -1232,6 +1376,7 @@ namespace winrt::MEraEmuWin::implementation {
         if (!input_req) {
             // TODO: Is this unreachable?
             m_input_countdown_timer.Stop();
+            return;
         }
 
         // Check remaining time

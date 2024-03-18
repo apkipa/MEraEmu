@@ -4,9 +4,12 @@
 
 #include "MEraEngine.hpp"
 
+#include "Tenkai.hpp"
+
 //#pragma comment(lib, "MEraEmuCore.dll.lib")
 
 #define STR_VIEW(rust_str) (std::string_view{ (const char*)(rust_str).ptr, (rust_str).len })
+#define TO_SPAN(slice_like) (std::span{ (slice_like).ptr, (slice_like).len })
 #define TO_RUST_SLICE(span) { .ptr = (span).data(), .len = (span).size() }
 #define TO_RUST_OPTION(opt) { .has_value = (bool)(opt), .value = (opt) ? std::move(*(opt)) : {} }
 
@@ -281,4 +284,33 @@ void MEraEngine::finialize_load_srcs() {
 }
 bool MEraEngine::do_execution(_Atomic(bool)*stop_flag, uint64_t max_inst_cnt) {
     return unwrap_rust_result(engine_do_execution(m_engine, reinterpret_cast<bool*>(stop_flag), max_inst_cnt));
+}
+bool MEraEngine::get_is_halted() {
+    return engine_get_is_halted(m_engine);
+}
+void MEraEngine::reset_exec_to_ip(EraExecIpInfo ip) {
+    unwrap_rust_result(engine_reset_exec_to_ip(m_engine, ip));
+}
+EraFuncInfo MEraEngine::get_func_info(const char* name) {
+    return unwrap_rust_result(engine_get_func_info(m_engine, name));
+}
+MEraEngineStackTrace MEraEngine::get_stack_trace() {
+    auto rust_stack_trace = unwrap_rust_result(engine_get_stack_trace(m_engine));
+    tenkai::cpp_utils::ScopeExit([&] {
+        delete_engine_stack_trace(rust_stack_trace);
+    });
+    MEraEngineStackTrace stack_trace;
+    for (auto const& rust_frame : TO_SPAN(rust_stack_trace.frames)) {
+        MEraEngineStackTraceFrame frame{
+            .file_name = STR_VIEW(rust_frame.file_name),
+            .func_name = STR_VIEW(rust_frame.func_name),
+            .ip = rust_frame.ip,
+            .src_info = { rust_frame.src_info.line, rust_frame.src_info.column },
+        };
+        stack_trace.frames.push_back(std::move(frame));
+    }
+    return stack_trace;
+}
+std::string_view MEraEngine::get_version() {
+    return STR_VIEW(engine_get_version());
 }

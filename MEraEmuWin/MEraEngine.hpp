@@ -50,6 +50,16 @@ struct EraScriptErrorInfo {
     std::string_view msg;
 };
 
+struct MEraEngineStackTraceFrame {
+    std::string_view file_name;
+    std::string_view func_name;
+    EraExecIpInfo ip;
+    EraExecSourceInfo src_info;
+};
+struct MEraEngineStackTrace {
+    std::vector<MEraEngineStackTraceFrame> frames;
+};
+
 struct MEraEngineSysCallback {
     MEraEngineSysCallback() {}
     virtual ~MEraEngineSysCallback() {}
@@ -127,6 +137,11 @@ struct MEraEngine {
     void register_global_var(const char* name, bool is_string, uint32_t dimension, bool watch);
     void finialize_load_srcs();
     bool do_execution(_Atomic(bool)* stop_flag, uint64_t max_inst_cnt);
+    bool get_is_halted();
+    void reset_exec_to_ip(EraExecIpInfo ip);
+    EraFuncInfo get_func_info(const char* name);
+    MEraEngineStackTrace get_stack_trace();
+    static std::string_view get_version();
 
 private:
     MEraEngineInterop* m_engine;

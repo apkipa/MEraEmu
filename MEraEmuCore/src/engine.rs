@@ -61,6 +61,11 @@ impl From<anyhow::Error> for MEraEngineError {
         Self::new(value.to_string())
     }
 }
+impl From<String> for MEraEngineError {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
 
 #[derive(Clone)]
 pub struct MEraEngineConfig {
@@ -218,7 +223,9 @@ pub trait MEraEngineSysCallback {
     fn on_get_key_state(&mut self, key_code: i64) -> i64;
 }
 
-#[derive(Debug, Clone)]
+// #[derive_ReprC]
+// #[repr(C)]
+#[derive(Default, Debug, Clone)]
 pub struct ExecSourceInfo {
     pub line: u32,
     pub column: u32,
@@ -233,17 +240,34 @@ impl From<SourcePosInfo> for ExecSourceInfo {
     }
 }
 
-pub struct ExecIpInfo {
-    filename: String,
-    offset: u64,
+#[safer_ffi::derive_ReprC]
+#[repr(C)]
+#[derive(Default, Debug, Clone)]
+pub struct EraExecIpInfo {
+    chunk: u32,
+    offset: u32,
 }
 
-struct EraFuncInfo {
-    entry: ExecIpInfo,
+#[safer_ffi::derive_ReprC]
+#[repr(C)]
+#[derive(Default, Debug, Clone)]
+pub struct EraFuncInfo {
+    pub entry: EraExecIpInfo,
+    pub args_cnt: u32,
 }
 
 struct ReplExprResult {
     value: crate::bytecode::Value,
+}
+
+pub struct EngineStackTraceFrame<'a> {
+    pub file_name: &'a str,
+    pub func_name: &'a str,
+    pub ip: EraExecIpInfo,
+    pub src_info: ExecSourceInfo,
+}
+pub struct EngineStackTrace<'a> {
+    pub frames: Vec<EngineStackTraceFrame<'a>>,
 }
 
 #[safer_ffi::derive_ReprC]
@@ -1419,6 +1443,7 @@ impl<'a> MEraEngine<'a> {
                 ));
             }
         };
+        // Set start of execution
         let entry_info = match compilation
             .func_names
             .get(CaselessStr::new("SYSPROC_BEGIN_TITLE"))
@@ -1754,16 +1779,80 @@ impl<'a> MEraEngine<'a> {
     // }
     /// Set execution to start from the specified function. All previous execution
     /// stacks are discarded.
-    pub fn set_exec_to_func(&mut self, name: &str) -> Result<(), MEraEngineError> {
+    pub fn reset_exec_to_ip(&mut self, ip: EraExecIpInfo) -> Result<(), MEraEngineError> {
+        use crate::vm::EraExecIp;
+
+        let vm = match self.vm.as_mut() {
+            Some(x) => x,
+            None => {
+                return Err("virtual machine not created yet".to_owned().into());
+            }
+        };
+
+        let ip = EraExecIp {
+            chunk: ip.chunk as _,
+            offset: ip.offset as _,
+        };
+        vm.reset_exec_and_ip(ip);
+        Ok(())
+    }
+    pub fn get_func_info(&self, name: &str) -> Result<EraFuncInfo, MEraEngineError> {
+        let vm = match self.vm.as_ref() {
+            Some(x) => x,
+            None => {
+                return Err("virtual machine not created yet".to_owned().into());
+            }
+        };
+        let Some(func_info) = vm.get_func_info(name) else {
+            return Err("function not found".to_owned().into());
+        };
+        Ok(EraFuncInfo {
+            entry: EraExecIpInfo {
+                chunk: func_info.chunk_idx,
+                offset: func_info.offset,
+            },
+            args_cnt: func_info.args.len() as _,
+        })
+    }
+    pub fn get_stack_trace(&self) -> Result<EngineStackTrace, MEraEngineError> {
+        let vm = match self.vm.as_ref() {
+            Some(x) => x,
+            None => {
+                return Err(MEraEngineError::new(
+                    "virtual machine not created yet".to_owned(),
+                ));
+            }
+        };
+
+        let frames = vm
+            .get_stack_trace()
+            .frames
+            .into_iter()
+            .map(|x| {
+                let func_info = vm.func_info_from_ip(x.ip).unwrap();
+                let chunk = vm.get_chunk(x.ip.chunk).unwrap();
+                EngineStackTraceFrame {
+                    file_name: &chunk.name,
+                    func_name: func_info.name.as_str(),
+                    ip: EraExecIpInfo {
+                        chunk: x.ip.chunk as _,
+                        offset: x.ip.offset as _,
+                    },
+                    src_info: chunk.source_info_at(x.ip.offset).unwrap().into(),
+                }
+            })
+            .collect();
+        Ok(EngineStackTrace { frames })
+    }
+    pub fn get_file_source(&self, todo: ()) -> Result<(), MEraEngineError> {
+        // NOTE: We don't return user-provided sources, only those which
+        //       are built into engine or generated on the fly
+
         // TODO...
         unimplemented!()
     }
-    pub fn get_func_info(&self, func: &str) -> Option<EraFuncInfo> {
-        // TODO...
-        unimplemented!()
-    }
-    pub fn get_version(&self) -> String {
-        "MEraEngine in MEraEmuCore v0.1.0".to_owned()
+    pub fn get_version() -> &'static str {
+        "MEraEngine in MEraEmuCore v0.1.0"
     }
     fn load_builtin_srcs(&mut self) -> Result<(), MEraEngineError> {
         // TODO: Expose builtin source code to user for debugging

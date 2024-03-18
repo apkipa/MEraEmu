@@ -29,13 +29,13 @@
             </Grid.ColumnDefinitions>
             <muxc:MenuBar Grid.Column="1" Background="{x:Null}">
                 <muxc:MenuBarItem Title="文件">
-                    <MenuFlyoutItem Text="重置引擎"/>
-                    <MenuFlyoutItem Text="回到标题页面"/>
+                    <MenuFlyoutItem Text="重置引擎" Click="MenuFile_ResetEngine_Click"/>
+                    <MenuFlyoutItem Text="回到标题页面" Click="MenuFile_ReturnToTitle_Click"/>
                     <MenuFlyoutSeparator/>
-                    <MenuFlyoutItem Text="退出"/>
+                    <MenuFlyoutItem Text="退出" Click="MenuFile_Exit_Click"/>
                 </muxc:MenuBarItem>
                 <muxc:MenuBarItem Title="帮助">
-                    <MenuFlyoutItem Text="关于..."/>
+                    <MenuFlyoutItem Text="关于..." Click="MenuHelp_About_Click"/>
                 </muxc:MenuBarItem>
             </muxc:MenuBar>
             <TextBlock x:Name="TitleTextBlock" Grid.Column="2" IsHitTestVisible="False"

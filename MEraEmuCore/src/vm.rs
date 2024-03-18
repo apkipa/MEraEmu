@@ -870,16 +870,41 @@ impl EraVirtualMachine {
         }
         Fut {}
     }
+    // Dumps current stack trace, in most recent first order
     pub fn get_stack_trace(&self) -> EraVirtualMachineStackTrace {
         let frames = self
             .frames
             .iter()
+            .rev()
             .map(|x| EraVirtualMachineStackTraceFrame { ip: x.ip })
             .collect();
         EraVirtualMachineStackTrace { frames }
     }
     pub fn get_chunk(&self, index: usize) -> Option<&EraBytecodeChunk> {
         self.chunks.get(index)
+    }
+    pub fn get_func_info(&self, name: &str) -> Option<&EraFuncBytecodeInfo> {
+        self.func_names
+            .get(CaselessStr::new(name))
+            .map(|&x| &self.funcs[x])
+    }
+    pub fn func_info_from_ip(&self, ip: EraExecIp) -> Option<&EraFuncBytecodeInfo> {
+        let chunk = self.chunks.get(ip.chunk)?;
+        if ip.offset >= chunk.bytecode.len() {
+            return None;
+        }
+        // TODO: Cache partition information
+        // Determine chunk partition
+        let mut idxs = Vec::from_iter(
+            self.funcs
+                .iter()
+                .filter(|x| x.chunk_idx as usize == ip.chunk),
+        );
+        idxs.sort_by(|a, b| a.offset.cmp(&b.offset));
+        let idx = idxs
+            .partition_point(|x| (x.offset as usize) <= ip.offset)
+            .saturating_sub(1);
+        Some(idxs[idx])
     }
     fn execute_inner(
         &mut self,
@@ -1005,15 +1030,19 @@ impl EraVirtualMachine {
                 }
                 ReturnVoid => {
                     ctx.stack.drain(ctx.cur_frame.stack_start..);
+                    let ret_ip = ctx.cur_frame.ret_ip;
                     self.frames.pop();
                     make_ctx!(self, ctx);
+                    ctx.cur_frame.ip = ret_ip;
                     ip_offset_delta = 0;
                 }
                 ReturnInteger | ReturnString => {
                     let [ret_val] = ctx.pop_stack()?;
                     ctx.stack.drain(ctx.cur_frame.stack_start..);
+                    let ret_ip = ctx.cur_frame.ret_ip;
                     let ignore_return_value = self.frames.pop().unwrap().ignore_return_value;
                     make_ctx!(self, ctx);
+                    ctx.cur_frame.ip = ret_ip;
                     if !ignore_return_value {
                         ctx.stack.push(ret_val);
                     }
@@ -1109,8 +1138,6 @@ impl EraVirtualMachine {
                         chunk: ctx.cur_frame.ip.chunk,
                         offset: ctx.cur_frame.ip.offset.wrapping_add_signed(ip_offset_delta),
                     };
-                    // HACK: Apply ret_ip immediately
-                    ctx.cur_frame.ip = ret_ip;
                     ip_offset_delta = 0;
 
                     // Check call stack depth
@@ -1220,8 +1247,6 @@ impl EraVirtualMachine {
                             chunk: ctx.cur_frame.ip.chunk,
                             offset: ctx.cur_frame.ip.offset.wrapping_add_signed(ip_offset_delta),
                         };
-                        // HACK: Apply ret_ip immediately
-                        ctx.cur_frame.ip = ret_ip;
                         ip_offset_delta = 0;
 
                         // Check call stack depth

@@ -27,7 +27,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         auto engine_ctrl = MainEngineControl();
         engine_ctrl.UnhandledException([this](auto&&, MEraEmuWin::EngineUnhandledExceptionEventArgs const& e) {
-            ShowErrorDialog(L"运行引擎时出错", hstring(
+            ShowSimpleContentDialog(L"运行引擎时出错", hstring(
                 std::format(L"引擎汇报了无法处理的错误:\n0x{:08x}\n{}",
                     static_cast<uint32_t>(e.Code()), e.Message()
                 ))
@@ -40,24 +40,44 @@ namespace winrt::MEraEmuWin::implementation {
             Tenkai::UI::Xaml::Window::GetCurrentMain().Title(title);
         });
 
+        // Automatically start the game engine
         Dispatcher().RunAsync(CoreDispatcherPriority::Low, [self = get_strong()]() {
-            hstring game_base_dir{ L".\\" };
-            try {
-                self->MainEngineControl().as<EngineControl>()->Bootstrap(game_base_dir);
-            }
-            catch (hresult_error const& e) {
-                self->ShowErrorDialog(L"启动引擎时出错", hstring(
-                    std::format(L"引擎汇报了无法处理的错误:\n0x{:08x}\n{}",
-                        static_cast<uint32_t>(e.code()), e.message()
-                    ))
-                );
-            }
-            catch (...) {
-                std::abort();
-            }
+            self->BootstrapEngine();
         });
     }
 
+    void MainPage::MenuFile_ResetEngine_Click(IInspectable const&, RoutedEventArgs const&) {
+        BootstrapEngine();
+    }
+    void MainPage::MenuFile_ReturnToTitle_Click(IInspectable const&, RoutedEventArgs const&) {
+        MainEngineControl().ReturnToTitle();
+    }
+    void MainPage::MenuFile_Exit_Click(IInspectable const&, RoutedEventArgs const&) {
+        Tenkai::AppService::Quit();
+    }
+    void MainPage::MenuHelp_About_Click(IInspectable const&, RoutedEventArgs const&) {
+        ShowSimpleContentDialog(L"关于 MEraEmu", hstring(std::format(
+            L"UI 版本: {}\n"
+            L"引擎版本: {}\n"
+            L"作者: apkipa",
+            L"v0.1.0",
+            to_hstring(MEraEngine::get_version())
+        )));
+    }
+    void MainPage::BootstrapEngine() {
+        hstring game_base_dir{ L".\\" };
+        try {
+            MainEngineControl().as<EngineControl>()->Bootstrap(game_base_dir);
+        }
+        catch (hresult_error const& e) {
+            ShowSimpleContentDialog(L"启动引擎时出错", hstring(
+                std::format(L"引擎汇报了无法处理的错误:\n0x{:08x}\n{}",
+                    static_cast<uint32_t>(e.code()), e.message()
+                ))
+            );
+        }
+        catch (...) { std::abort(); }
+    }
     void MainPage::SwitchTitleBar(bool enable) {
         auto wnd = Tenkai::Window::GetCurrentMain();
         wnd.ExtendsContentIntoTitleBar(enable);
@@ -75,7 +95,7 @@ namespace winrt::MEraEmuWin::implementation {
             TopElasticRightSpace().Width(GridLengthHelper::FromPixels(0));
         }
     }
-    void MainPage::ShowErrorDialog(hstring const& title, hstring const& content) {
+    void MainPage::ShowSimpleContentDialog(hstring const& title, hstring const& content) {
         ContentDialog cd;
         cd.XamlRoot(XamlRoot());
         cd.Title(box_value(title));

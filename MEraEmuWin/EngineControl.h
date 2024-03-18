@@ -51,6 +51,7 @@ namespace winrt::MEraEmuWin::implementation {
     struct MEraEmuWinEngineSysCallback;
     struct EngineUIPrintLineData;
     struct InputRequest;
+    struct EngineThreadTask;
 
     struct EngineUnhandledExceptionEventArgs : EngineUnhandledExceptionEventArgsT<EngineUnhandledExceptionEventArgs> {
         EngineUnhandledExceptionEventArgs(hresult code, hstring const& msg) :
@@ -68,6 +69,9 @@ namespace winrt::MEraEmuWin::implementation {
         EngineControl();
         ~EngineControl();
         void InitializeComponent();
+
+        void ReturnToTitle();
+        bool IsStarted();
 
         event_token UnhandledException(Windows::Foundation::EventHandler<MEraEmuWin::EngineUnhandledExceptionEventArgs> h) {
             return m_ev_UnhandledException.add(h);
@@ -152,6 +156,8 @@ namespace winrt::MEraEmuWin::implementation {
         hstring m_input_last_prompt;
         Windows::UI::Xaml::DispatcherTimer m_input_countdown_timer;
         // TODO: Button style data
+
+        //std::unique_ptr<EngineThreadTask> m_engine_thread_task;
     };
 }
 

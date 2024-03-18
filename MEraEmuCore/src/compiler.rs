@@ -2608,9 +2608,14 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 ctx.results()?;
                 let [] = ctx.unpack_some_args(args)?;
                 //ctx.this.arr_get_int("@ALIGN", vec![], src_info)?;
-                let args = vec![Some(EraExpr::new_var("@ALIGN".to_owned(), vec![], src_info))];
+                let args = vec![Some(EraExpr::new_var(
+                    "@ALIGN".to_owned(),
+                    vec![],
+                    src_info,
+                ))];
                 // TODO: Assert return type of SYSFUNC_ALIGN_INT_TO_STR
-                ctx.this.static_fun_call("SYSFUNC_ALIGN_INT_TO_STR", args, src_info)?;
+                ctx.this
+                    .static_fun_call("SYSFUNC_ALIGN_INT_TO_STR", args, src_info)?;
             }
             b"MAX" => {
                 ctx.result()?;
