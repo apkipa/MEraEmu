@@ -1092,8 +1092,8 @@ namespace winrt::MEraEmuWin::implementation {
                         for (const auto& frame : stack_trace.frames) {
                             print_msg += std::format(L"  {}({},{}):{}\n",
                                 to_hstring(frame.file_name),
-                                to_hstring(frame.src_info.line),
-                                to_hstring(frame.src_info.column),
+                                frame.src_info.line,
+                                frame.src_info.column,
                                 to_hstring(frame.func_name)
                             );
                         }

@@ -1294,6 +1294,19 @@ impl EraVirtualMachine {
                     ip_offset_delta = 0;
                     make_ctx!(self, ctx);
                 }
+                GetCallerFuncName => {
+                    // TODO: Optimize performance of GetCallerFuncName
+                    let frame = self.frames.pop().unwrap();
+                    let caller_name = self
+                        .frames
+                        .last()
+                        .and_then(|x| self.func_info_from_ip(x.ip).map(|x| x.name.as_str()))
+                        .unwrap_or_default()
+                        .to_owned();
+                    self.stack.push(Value::new_str(caller_name).into());
+                    self.frames.push(frame);
+                    make_ctx!(self, ctx);
+                }
                 LoadConst | LoadConstW | LoadConstWW => {
                     let imm_ip = ctx.cur_frame.ip.offset + 1;
                     let offset_delta;

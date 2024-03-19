@@ -30,6 +30,7 @@ pub enum EraBytecodePrimaryType {
     TryFunCallForce,
     FunExists,
     RestartExecAtFun, // Function must not accept arguments
+    GetCallerFuncName,
     // LoadString,
     // LoadStringW,
     // LoadStringWW,

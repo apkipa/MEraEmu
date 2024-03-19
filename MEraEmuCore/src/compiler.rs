@@ -550,6 +550,7 @@ pub struct EraCompilerImplFunctionSite<'p, 'a, ErrReportFn> {
 enum EraPseudoVarKind {
     Rand,
     CharaNum,
+    CallerFuncName,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5022,6 +5023,8 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 return Some(Pseudo(EraPseudoVarKind::Rand));
             } else if var_name.eq_ignore_ascii_case("CHARANUM") {
                 return Some(Pseudo(EraPseudoVarKind::CharaNum));
+            } else if var_name.eq_ignore_ascii_case("CALLERFUNCNAME") {
+                return Some(Pseudo(EraPseudoVarKind::CallerFuncName));
             } else {
                 let vars: Vec<_> = self
                     .func_info
@@ -5104,6 +5107,8 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 return Some(Pseudo(EraPseudoVarKind::Rand));
             } else if var_name.eq_ignore_ascii_case("CHARANUM") {
                 return Some(Pseudo(EraPseudoVarKind::CharaNum));
+            } else if var_name.eq_ignore_ascii_case("CALLERFUNCNAME") {
+                return Some(Pseudo(EraPseudoVarKind::CallerFuncName));
             } else {
                 let vars: Vec<_> = self
                     .func_info
@@ -5253,6 +5258,11 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 EraPseudoVarKind::CharaNum => {
                     if idxs.len() != 0 {
                         bail_opt!(self, src_info, true, "`CHARANUM` cannot be indexed");
+                    }
+                }
+                EraPseudoVarKind::CallerFuncName => {
+                    if idxs.len() != 0 {
+                        bail_opt!(self, src_info, true, "`CALLERFUNCNAME` cannot be indexed");
                     }
                 }
             },
@@ -5408,6 +5418,10 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 EraPseudoVarKind::CharaNum => {
                     self.chunk.emit_bytecode(GetCharaNum, src_info);
                     TInteger
+                }
+                EraPseudoVarKind::CallerFuncName => {
+                    self.chunk.emit_bytecode(GetCallerFuncName, src_info);
+                    TString
                 }
             },
             Normal(var_kind, idxs_len) => {

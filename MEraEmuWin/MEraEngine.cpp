@@ -296,7 +296,7 @@ EraFuncInfo MEraEngine::get_func_info(const char* name) {
 }
 MEraEngineStackTrace MEraEngine::get_stack_trace() {
     auto rust_stack_trace = unwrap_rust_result(engine_get_stack_trace(m_engine));
-    tenkai::cpp_utils::ScopeExit([&] {
+    tenkai::cpp_utils::ScopeExit se_rust([&] {
         delete_engine_stack_trace(rust_stack_trace);
     });
     MEraEngineStackTrace stack_trace;
