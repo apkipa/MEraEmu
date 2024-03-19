@@ -7,6 +7,7 @@
 namespace winrt::MEraEmuWin::implementation {
     struct MainPage : MainPageT<MainPage> {
         MainPage();
+        ~MainPage();
         void InitializeComponent();
 
         void MenuFile_ResetEngine_Click(Windows::Foundation::IInspectable const&, Windows::UI::Xaml::RoutedEventArgs const&);

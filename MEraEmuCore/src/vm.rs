@@ -1181,7 +1181,11 @@ impl EraVirtualMachine {
                     };
                     if let Some(func_info) = func_info {
                         if func_info.args.len() != args_cnt {
-                            bail_opt!(ctx, true, "runtime function argument mismatch");
+                            bail_opt!(
+                                ctx,
+                                true,
+                                format!("runtime function argument mismatch: {}", func_info.name)
+                            );
                         }
                         // TODO: Check whether stack_start exceeds bounds of current frame
                         // Transform args pack into ordinary forms
@@ -2199,10 +2203,10 @@ impl EraVirtualMachine {
                     ctx.stack.push(Value::new_int(a1.val.min(a2.val)).into());
                 }
                 ClampInt => {
-                    let [a, amax, amin] = ctx.pop_stack()?;
+                    let [a, amin, amax] = ctx.pop_stack()?;
                     let a = ctx.unpack_int(a.into())?;
-                    let amax = ctx.unpack_int(amax.into())?;
                     let amin = ctx.unpack_int(amin.into())?;
+                    let amax = ctx.unpack_int(amax.into())?;
                     if amin.val > amax.val {
                         bail_opt!(ctx, true, "precondition min <= max was not satisfied");
                     }
@@ -2210,10 +2214,10 @@ impl EraVirtualMachine {
                         .push(Value::new_int(a.val.clamp(amin.val, amax.val)).into());
                 }
                 InRangeInt => {
-                    let [a, amax, amin] = ctx.pop_stack()?;
+                    let [a, amin, amax] = ctx.pop_stack()?;
                     let a = ctx.unpack_int(a.into())?;
-                    let amax = ctx.unpack_int(amax.into())?;
                     let amin = ctx.unpack_int(amin.into())?;
+                    let amax = ctx.unpack_int(amax.into())?;
                     if amin.val > amax.val {
                         bail_opt!(ctx, true, "precondition min <= max was not satisfied");
                     }
@@ -3873,6 +3877,9 @@ impl EraVirtualMachine {
                     // TODO: Fully reset data according to Emuera
                     self.charas_count = 0;
                     for var in &ctx.global_vars.vars {
+                        if var.is_const {
+                            continue;
+                        }
                         match var.val.clone().into_unpacked() {
                             FlatValue::ArrInt(x) => {
                                 let mut x = x.borrow_mut();

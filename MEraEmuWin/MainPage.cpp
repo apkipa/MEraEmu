@@ -7,24 +7,58 @@
 
 #include <Tenkai.hpp>
 
+#include <CommCtrl.h>
+
+#pragma comment(lib, "Comctl32.lib")
+
 using namespace winrt;
+using namespace Windows::System;
 using namespace Windows::UI::Xaml;
 using namespace Windows::UI::Xaml::Controls;
+using namespace Windows::UI::Xaml::Input;
 using namespace Windows::UI::Core;
 
 namespace winrt::Tenkai {
     using UI::Xaml::Window;
 }
 
+LRESULT CALLBACK SubclassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    auto main_page = (MEraEmuWin::implementation::MainPage*)dwRefData;
+    try {
+        if (msg == WM_SYSKEYUP && wParam == VK_MENU) {
+            //Microsoft::UI::Xaml::Controls::MenuBarItem mbi{ nullptr };
+            //auto menu_bar = main_page->MainMenuBar();
+            //// Focus on menu
+            //for (auto&& item : menu_bar.Items()) {
+            //    if (!mbi) { mbi = item; }
+            //    item.IsTabStop(true);
+            //}
+            //mbi.Focus(FocusState::Keyboard);
+            //return 0;
+        }
+        else if (msg == WM_SYSCOMMAND && wParam == SC_KEYMENU && lParam == 0) {
+            return 0;
+        }
+    }
+    catch (...) {}
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 namespace winrt::MEraEmuWin::implementation {
     MainPage::MainPage() {
         // TODO...
+    }
+    MainPage::~MainPage() {
+        // Remove WndProc hook
+        auto hwnd = (HWND)Tenkai::UI::Xaml::Window::GetCurrentMain().View().Id().Value;
+        RemoveWindowSubclass(hwnd, SubclassWndProc, 1);
     }
     void MainPage::InitializeComponent() {
         MainPageT::InitializeComponent();
 
         SwitchTitleBar(true);
 
+        auto dispatcher = Dispatcher();
         auto engine_ctrl = MainEngineControl();
         engine_ctrl.UnhandledException([this](auto&&, MEraEmuWin::EngineUnhandledExceptionEventArgs const& e) {
             ShowSimpleContentDialog(L"运行引擎时出错", hstring(
@@ -40,8 +74,54 @@ namespace winrt::MEraEmuWin::implementation {
             Tenkai::UI::Xaml::Window::GetCurrentMain().Title(title);
         });
 
+        // Handle Alt key for menu
+        LayoutRoot().KeyDown([this](auto&&, KeyRoutedEventArgs const& e) {
+            auto key = e.Key();
+            if (key == VirtualKey::Menu) {
+                e.Handled(true);
+            }
+            else if (key == VirtualKey::Escape) {
+                e.Handled(true);
+                MainEngineControl().Focus(FocusState::Keyboard);
+            }
+        });
+        // TODO: Maybe fix the Alt key issue by adding new APIs to Tenkai.UWP?
+        LayoutRoot().KeyUp([this](auto&&, KeyRoutedEventArgs const& e) {
+            auto key = e.Key();
+            if (key == VirtualKey::Menu || key == VirtualKey::F10) {
+                e.Handled(true);
+                Microsoft::UI::Xaml::Controls::MenuBarItem mbi{ nullptr };
+                auto menu_bar = MainMenuBar();
+                bool need_unfocus{};
+                for (auto&& item : menu_bar.Items()) {
+                    // Try focus
+                    if (!mbi) { mbi = item; }
+                    if (item.FocusState() != FocusState::Unfocused) {
+                        need_unfocus = true;
+                        break;
+                    }
+                    item.IsTabStop(true);
+                }
+                if (!need_unfocus) {
+                    mbi.Focus(FocusState::Keyboard);
+                }
+                else {
+                    // Unfocus
+                    MainEngineControl().Focus(FocusState::Keyboard);
+                }
+            }
+        });
+        auto hwnd = (HWND)Tenkai::UI::Xaml::Window::GetCurrentMain().View().Id().Value;
+        // NOTE: Deliberately ignores errors
+        SetWindowSubclass(hwnd, SubclassWndProc, 1, (DWORD_PTR)this);
+        MainMenuBar().LostFocus([this](auto&&, auto&&) {
+            for (auto&& item : MainMenuBar().Items()) {
+                item.IsTabStop(false);
+            }
+        });
+
         // Automatically start the game engine
-        Dispatcher().RunAsync(CoreDispatcherPriority::Low, [self = get_strong()]() {
+        dispatcher.RunAsync(CoreDispatcherPriority::Low, [self = get_strong()]() {
             self->BootstrapEngine();
         });
     }

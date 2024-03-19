@@ -8,7 +8,7 @@
     xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
     mc:Ignorable="d">
 
-    <Grid>
+    <Grid x:Name="LayoutRoot">
         <Grid.RowDefinitions>
             <RowDefinition Height="40"/>
             <RowDefinition Height="*"/>
@@ -27,14 +27,14 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition x:Name="TopElasticRightSpace" Width="0"/>
             </Grid.ColumnDefinitions>
-            <muxc:MenuBar Grid.Column="1" Background="{x:Null}">
-                <muxc:MenuBarItem Title="文件">
+            <muxc:MenuBar x:Name="MainMenuBar" Grid.Column="1" Background="{x:Null}">
+                <muxc:MenuBarItem Title="文件" IsTabStop="False">
                     <MenuFlyoutItem Text="重置引擎" Click="MenuFile_ResetEngine_Click"/>
                     <MenuFlyoutItem Text="回到标题页面" Click="MenuFile_ReturnToTitle_Click"/>
                     <MenuFlyoutSeparator/>
                     <MenuFlyoutItem Text="退出" Click="MenuFile_Exit_Click"/>
                 </muxc:MenuBarItem>
-                <muxc:MenuBarItem Title="帮助">
+                <muxc:MenuBarItem Title="帮助" IsTabStop="False">
                     <MenuFlyoutItem Text="关于..." Click="MenuHelp_About_Click"/>
                 </muxc:MenuBarItem>
             </muxc:MenuBar>

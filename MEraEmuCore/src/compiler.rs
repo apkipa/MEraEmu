@@ -2662,18 +2662,18 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             }
             b"LIMIT" => {
                 ctx.result()?;
-                let [a, amax, amin] = ctx.unpack_some_args(args)?;
+                let [a, amin, amax] = ctx.unpack_some_args(args)?;
                 ctx.this.expr_int(a)?;
-                ctx.this.expr_int(amax)?;
                 ctx.this.expr_int(amin)?;
+                ctx.this.expr_int(amax)?;
                 ctx.this.chunk.emit_bytecode(ClampInt, src_info);
             }
             b"INRANGE" => {
                 ctx.result()?;
-                let [a, amax, amin] = ctx.unpack_some_args(args)?;
+                let [a, amin, amax] = ctx.unpack_some_args(args)?;
                 ctx.this.expr_int(a)?;
-                ctx.this.expr_int(amax)?;
                 ctx.this.expr_int(amin)?;
+                ctx.this.expr_int(amax)?;
                 ctx.this.chunk.emit_bytecode(InRangeInt, src_info);
             }
             b"CHKCHARADATA" => {
