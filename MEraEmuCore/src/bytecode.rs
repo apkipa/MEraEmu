@@ -449,9 +449,7 @@ pub struct IntValue {
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StrValue {
-    pub val: String,
-    // TODO: Use Arc/Rc and string interning
-    // val2: Rc<str>,
+    pub val: arcstr::ArcStr,
 }
 
 // NOTE: Arr*Value are used as variable references
@@ -463,7 +461,7 @@ pub struct ArrIntValue {
 }
 #[derive(Debug, Clone)]
 pub struct ArrStrValue {
-    pub vals: Vec<Rc<StrValue>>,
+    pub vals: Vec<StrValue>,
     pub dims: smallvec::SmallVec<[u32; 3]>,
     // immutable: bool,
 }
@@ -472,6 +470,7 @@ pub struct ArrStrValue {
 //     slot: u16,
 // }
 
+// TODO: Compressed array values (extend on demand)?
 impl ArrIntValue {
     #[inline(always)]
     pub fn flat_get(&self, idx: usize) -> Option<&IntValue> {
@@ -516,23 +515,23 @@ impl ArrIntValue {
 impl ArrStrValue {
     #[must_use]
     #[inline(always)]
-    pub fn flat_get(&self, idx: usize) -> Option<&Rc<StrValue>> {
+    pub fn flat_get(&self, idx: usize) -> Option<&StrValue> {
         self.vals.get(idx)
     }
     #[must_use]
     #[inline(always)]
-    pub fn flat_get_mut(&mut self, idx: usize) -> Option<&mut Rc<StrValue>> {
+    pub fn flat_get_mut(&mut self, idx: usize) -> Option<&mut StrValue> {
         self.vals.get_mut(idx)
     }
     #[must_use]
     #[inline(always)]
-    pub fn get(&self, idxs: &[u32]) -> Option<&Rc<StrValue>> {
+    pub fn get(&self, idxs: &[u32]) -> Option<&StrValue> {
         let index = self.calc_idx(idxs)?;
         self.vals.get(index)
     }
     #[must_use]
     #[inline(always)]
-    pub fn get_mut(&mut self, idxs: &[u32]) -> Option<&mut Rc<StrValue>> {
+    pub fn get_mut(&mut self, idxs: &[u32]) -> Option<&mut StrValue> {
         let index = self.calc_idx(idxs)?;
         self.vals.get_mut(index)
     }
@@ -606,7 +605,7 @@ pub struct Value(ValueInner);
 #[derive(Debug, Clone)]
 pub enum FlatValue {
     Int(IntValue),
-    Str(Rc<StrValue>),
+    Str(StrValue),
     ArrInt(Rc<RefCell<ArrIntValue>>),
     ArrStr(Rc<RefCell<ArrStrValue>>),
 }
@@ -678,16 +677,19 @@ impl Value {
     pub fn new_int(val: i64) -> Self {
         Value(ValueInner::Int(IntValue { val }))
     }
-    pub fn new_str(val: String) -> Self {
-        Value(ValueInner::Str(Rc::new(StrValue { val })))
+    pub fn new_str(val: arcstr::ArcStr) -> Self {
+        Value(ValueInner::Str(StrValue { val }))
     }
-    pub fn new_int_rc(val: Rc<IntValue>) -> Self {
-        Value(ValueInner::Int(val.deref().clone()))
-    }
+    // pub fn new_int_rc(val: Rc<IntValue>) -> Self {
+    //     Value(ValueInner::Int(val.deref().clone()))
+    // }
     pub fn new_int_obj(val: IntValue) -> Self {
         Value(ValueInner::Int(val))
     }
-    pub fn new_str_rc(val: Rc<StrValue>) -> Self {
+    // pub fn new_str_rc(val: Rc<StrValue>) -> Self {
+    //     Value(ValueInner::Str(val.deref().clone()))
+    // }
+    pub fn new_str_obj(val: StrValue) -> Self {
         Value(ValueInner::Str(val))
     }
     pub fn new_int_arr(mut dims: smallvec::SmallVec<[u32; 3]>, mut vals: Vec<IntValue>) -> Self {
@@ -702,16 +704,18 @@ impl Value {
             dims,
         }))))
     }
-    pub fn new_str_arr(
-        mut dims: smallvec::SmallVec<[u32; 3]>,
-        mut vals: Vec<Rc<StrValue>>,
-    ) -> Self {
+    pub fn new_str_arr(mut dims: smallvec::SmallVec<[u32; 3]>, mut vals: Vec<StrValue>) -> Self {
         if dims.is_empty() {
             dims.push(1);
         }
         let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
         //assert_ne!(size, 0, "dimension must not contain zero");
-        vals.resize(size, Rc::new(StrValue { val: String::new() }));
+        vals.resize(
+            size,
+            StrValue {
+                val: arcstr::ArcStr::new(),
+            },
+        );
         Value(ValueInner::ArrStr(Rc::new(RefCell::new(ArrStrValue {
             vals,
             dims,
@@ -720,8 +724,8 @@ impl Value {
     pub fn new_int_0darr(val: i64) -> Self {
         Self::new_int_arr(smallvec::smallvec![1], vec![IntValue { val }])
     }
-    pub fn new_str_0darr(val: String) -> Self {
-        Self::new_str_arr(smallvec::smallvec![1], vec![Rc::new(StrValue { val })])
+    pub fn new_str_0darr(val: arcstr::ArcStr) -> Self {
+        Self::new_str_arr(smallvec::smallvec![1], vec![StrValue { val }])
     }
     pub fn into_unpacked(self) -> FlatValue {
         use ptr_union::Enum4::*;
@@ -811,10 +815,10 @@ impl SourcePosLenInfo {
 pub struct EraCharaInitTemplate {
     pub no: u32,
     pub csv_no: u32,
-    pub name: String,
-    pub callname: String,
-    pub nickname: String,
-    pub mastername: String,
+    pub name: arcstr::ArcStr,
+    pub callname: arcstr::ArcStr,
+    pub nickname: arcstr::ArcStr,
+    pub mastername: arcstr::ArcStr,
     pub maxbase: BTreeMap<u32, i64>,
     pub mark: BTreeMap<u32, i64>,
     pub exp: BTreeMap<u32, i64>,
@@ -824,5 +828,5 @@ pub struct EraCharaInitTemplate {
     pub cflag: BTreeMap<u32, i64>,
     pub equip: BTreeMap<u32, i64>,
     pub juel: BTreeMap<u32, i64>,
-    pub cstr: BTreeMap<u32, String>,
+    pub cstr: BTreeMap<u32, arcstr::ArcStr>,
 }

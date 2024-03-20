@@ -109,7 +109,8 @@ namespace winrt::MEraEmuWin::implementation {
         void InitEngineUI();
         void UpdateEngineUI();
         void EmitUnhandledExceptionEvent(std::exception_ptr ex);
-        void UpdateEngineImageOutput();
+        void RedrawDirtyEngineImageOutput();
+        void FlushEngineImageOutputLayout();
         void InitD2DDevice(bool force_software);
         void UpdateUIWidth(uint64_t new_width);
         uint64_t GetCalculatedUIHeight();
@@ -125,6 +126,15 @@ namespace winrt::MEraEmuWin::implementation {
         void RoutineReuseLastLine(hstring const& content);
         void RoutineClearLine(uint64_t count);
         void RoutinePrintButton(hstring const& content, hstring const& value, PrintExtendedFlags flags);
+
+        void SetCurrentLineAlignment(int64_t value);
+        int64_t GetCurrentLineAlignment();
+        void SetCurrentFontStyle(int64_t value);
+        int64_t GetCurrentFontStyle();
+        void SetCurrentFontName(hstring const& value);
+        hstring GetCurrentFontName();
+        void SetRedrawState(int64_t value);
+        int64_t GetRedrawState();
 
         DP_DECLARE(EngineForeColor);
         DP_DECLARE(EngineBackColor);
@@ -143,7 +153,11 @@ namespace winrt::MEraEmuWin::implementation {
         uint32_t m_focus_color{ D2D1::ColorF::Yellow };
         std::vector<EngineUIPrintLineData> m_ui_lines;
         bool m_reused_last_line{ false };
-        int64_t m_cur_line_alignment{};
+        uint32_t m_cur_line_alignment{};
+        uint32_t m_cur_font_style{};
+        hstring m_cur_font_name{};
+        bool m_auto_redraw{};
+        uint64_t m_last_redraw_dirty_height{};
         struct ComposingLineData {
             struct ComposingLineDataPart {
                 hstring str;
@@ -157,8 +171,6 @@ namespace winrt::MEraEmuWin::implementation {
         hstring m_input_last_prompt;
         Windows::UI::Xaml::DispatcherTimer m_input_countdown_timer;
         // TODO: Button style data
-
-        //std::unique_ptr<EngineThreadTask> m_engine_thread_task;
     };
 }
 

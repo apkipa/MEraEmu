@@ -29,6 +29,13 @@ impl<S: AsRef<str> + ?Sized> AsRef<str> for Ascii<S> {
     }
 }
 
+impl<S: AsRef<str> + ?Sized> Ascii<S> {
+    #[inline]
+    pub fn as_ascii_ref(&self) -> &Ascii<str> {
+        Ascii::new_str(self.0.as_ref())
+    }
+}
+
 impl<S: AsRef<str> + ?Sized> Hash for Ascii<S> {
     #[inline]
     fn hash<H: Hasher>(&self, hasher: &mut H) {

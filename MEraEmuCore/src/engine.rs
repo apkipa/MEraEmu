@@ -27,7 +27,7 @@ struct InitialVarDesc {
     pub is_const: bool,
     pub is_charadata: bool,
     pub is_global: bool,
-    pub initial_sval: Option<Vec<Rc<StrValue>>>,
+    pub initial_sval: Option<Vec<StrValue>>,
     pub initial_ival: Option<Vec<IntValue>>,
 }
 
@@ -37,12 +37,12 @@ pub struct MEraEngine<'a> {
     callback: Box<dyn MEraEngineSysCallback + 'a>,
     config: MEraEngineConfig,
     global_vars: EraVarPool,
-    watching_vars: HashSet<Rc<CaselessStr>>,
+    watching_vars: HashSet<Ascii<arcstr::ArcStr>>,
     replace_list: HashMap<Box<[u8]>, Box<[u8]>>,
     define_list: HashMap<Box<[u8]>, Box<[u8]>>,
     chara_list: BTreeMap<u32, EraCharaInitTemplate>,
     initial_vars: Option<hashbrown::HashMap<Ascii<String>, InitialVarDesc>>,
-    contextual_indices: HashMap<Ascii<String>, Vec<(EraCsvVarKind, u32)>>,
+    contextual_indices: HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
 }
 
 pub const MAX_CHARA_COUNT: u32 = 768;
@@ -677,10 +677,10 @@ impl<'a> MEraEngine<'a> {
         // ………………………………………………
         // 特殊一時変数・一時文字列変数
         // ………………………………………………
-        // LOCAL,500
-        // LOCALS,100
-        // ARG,200
-        // ARGS,100
+        iv.add_int("LOCAL", smallvec::smallvec![1]);
+        iv.add_str("LOCALS", smallvec::smallvec![1]);
+        iv.add_int("ARG", smallvec::smallvec![1]);
+        iv.add_str("ARGS", smallvec::smallvec![1]);
         iv.add_int("GLOBAL", smallvec::smallvec![1]);
         iv.add_str("GLOBALS", smallvec::smallvec![1]);
         // ………………………………………………
@@ -752,8 +752,12 @@ impl<'a> MEraEngine<'a> {
                     return Err(MEraEngineError::new("invalid csv input".to_owned()));
                 }
             };
-            let mut initial_sval =
-                vec![Rc::new(StrValue { val: String::new() }); var_desc.dims[0] as _];
+            let mut initial_sval = vec![
+                StrValue {
+                    val: arcstr::ArcStr::new()
+                };
+                var_desc.dims[0] as _
+            ];
             for item in items {
                 let [index, name] = item;
                 // Add to *NAME array
@@ -761,8 +765,8 @@ impl<'a> MEraEngine<'a> {
                     Ok(x) => x,
                     Err(e) => return Err(MEraEngineError::new(format!("{e}"))),
                 };
-                let name = String::from_utf8_lossy(&name).into_owned();
-                initial_sval[index as usize] = Rc::new(StrValue { val: name.clone() });
+                let name: arcstr::ArcStr = String::from_utf8_lossy(&name).into();
+                initial_sval[index as usize] = StrValue { val: name.clone() };
                 // Add to define list
                 if let Some(kind) = kind {
                     self.contextual_indices
@@ -1019,16 +1023,16 @@ impl<'a> MEraEngine<'a> {
                             chara_template.no = parse_u32(self, &cols[1])?;
                         }
                         "NAME" | "名前" => {
-                            chara_template.name = std::mem::take(&mut cols[1]);
+                            chara_template.name = (&cols[1]).into();
                         }
                         "CALLNAME" | "呼び名" => {
-                            chara_template.callname = std::mem::take(&mut cols[1]);
+                            chara_template.callname = (&cols[1]).into();
                         }
                         "NICKNAME" | "あだ名" => {
-                            chara_template.nickname = std::mem::take(&mut cols[1]);
+                            chara_template.nickname = (&cols[1]).into();
                         }
                         "MASTERNAME" | "主人の呼び方" => {
-                            chara_template.mastername = std::mem::take(&mut cols[1]);
+                            chara_template.mastername = (&cols[1]).into();
                         }
                         "MARK" | "刻印" => {
                             let idx = get_contextual_idx(self, CsvMark, &cols[1])?;
@@ -1078,7 +1082,7 @@ impl<'a> MEraEngine<'a> {
                         "CSTR" => {
                             let idx = get_contextual_idx(self, CsvCStr, &cols[1])?;
                             let val = get_col_2_str(self, &mut cols)?;
-                            chara_template.cstr.insert(idx, val);
+                            chara_template.cstr.insert(idx, val.into());
                         }
                         "ISASSI" | "助手" => continue,
                         _ => todo!(),
@@ -1116,8 +1120,12 @@ impl<'a> MEraEngine<'a> {
                     Ok(x) => x,
                     Err(_) => unreachable!(),
                 };
-                let mut initial_nameval =
-                    vec![Rc::new(StrValue { val: String::new() }); name_vd.dims[0] as _];
+                let mut initial_nameval = vec![
+                    StrValue {
+                        val: arcstr::ArcStr::new()
+                    };
+                    name_vd.dims[0] as _
+                ];
                 let mut initial_priceval = vec![IntValue { val: 0 }; price_vd.dims[0] as _];
                 for (line_num, mut item) in items {
                     let src_info = SourcePosInfo {
@@ -1145,11 +1153,12 @@ impl<'a> MEraEngine<'a> {
                         Ok(x) => x,
                         Err(e) => return Err(MEraEngineError::new(format!("{e}"))),
                     };
+                    let name: arcstr::ArcStr = name.into();
                     let price: u32 = match atoi_simd::parse_pos(price.as_bytes()) {
                         Ok(x) => x,
                         Err(e) => return Err(MEraEngineError::new(format!("{e}"))),
                     };
-                    initial_nameval[index as usize] = Rc::new(StrValue { val: name.clone() });
+                    initial_nameval[index as usize] = StrValue { val: name.clone() };
                     initial_priceval[index as usize] = IntValue { val: price as _ };
                     // Add to define list
                     self.contextual_indices
@@ -1234,7 +1243,7 @@ impl<'a> MEraEngine<'a> {
                     fn add_var_str(
                         &mut self,
                         name: &str,
-                        value: String,
+                        value: arcstr::ArcStr,
                     ) -> Result<(), MEraEngineError> {
                         _ = self.global_vars.add_var_ex(
                             name,
@@ -1271,18 +1280,18 @@ impl<'a> MEraEngine<'a> {
                             ctx.add_var_i64("GAMEBASE_NOITEM", &value)?;
                         }
                         "タイトル" => {
-                            ctx.add_var_str("GAMEBASE_TITLE", value.into_owned())?;
+                            ctx.add_var_str("GAMEBASE_TITLE", value.into())?;
                         }
                         "作者" => {
-                            let value = value.into_owned();
+                            let value: arcstr::ArcStr = value.into();
                             ctx.add_var_str("GAMEBASE_AUTHER", value.clone())?;
                             ctx.add_var_str("GAMEBASE_AUTHOR", value)?;
                         }
                         "製作年" => {
-                            ctx.add_var_str("GAMEBASE_YEAR", value.into_owned())?;
+                            ctx.add_var_str("GAMEBASE_YEAR", value.into())?;
                         }
                         "追加情報" => {
-                            ctx.add_var_str("GAMEBASE_INFO", value.into_owned())?;
+                            ctx.add_var_str("GAMEBASE_INFO", value.into())?;
                         }
                         "ウィンドウタイトル" => {
                             // TODO...
@@ -1465,7 +1474,7 @@ impl<'a> MEraEngine<'a> {
         // Set start of execution
         let entry_info = match compilation
             .func_names
-            .get(CaselessStr::new("SYSPROC_BEGIN_TITLE"))
+            .get(Ascii::new_str("SYSPROC_BEGIN_TITLE"))
         {
             Some(x) => *x,
             None => {
@@ -1482,7 +1491,7 @@ impl<'a> MEraEngine<'a> {
             crate::vm::EraVirtualMachine::new(compilation, std::mem::take(&mut self.chara_list));
         vm.reset_exec_and_ip(entry_ip);
         for var in std::mem::take(&mut self.watching_vars) {
-            vm.register_var_callback(var.as_str()).ok_or_else(|| {
+            vm.register_var_callback(var.as_ref()).ok_or_else(|| {
                 MEraEngineError::new("cannot register variable callback".to_owned())
             })?;
         }
@@ -1505,7 +1514,7 @@ impl<'a> MEraEngine<'a> {
 
         struct AdhocCallback<'a> {
             callback: &'a mut dyn MEraEngineSysCallback,
-            contextual_indices: &'a mut HashMap<Ascii<String>, Vec<(EraCsvVarKind, u32)>>,
+            contextual_indices: &'a mut HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
         }
         impl crate::vm::EraVirtualMachineCallback for AdhocCallback<'_> {
             fn on_execution_error(&mut self, error: crate::vm::EraRuntimeErrorInfo) {
@@ -1855,7 +1864,7 @@ impl<'a> MEraEngine<'a> {
                 let chunk = vm.get_chunk(x.ip.chunk).unwrap();
                 EngineStackTraceFrame {
                     file_name: &chunk.name,
-                    func_name: func_info.name.as_str(),
+                    func_name: func_info.name.as_ref(),
                     ip: EraExecIpInfo {
                         chunk: x.ip.chunk as _,
                         offset: x.ip.offset as _,

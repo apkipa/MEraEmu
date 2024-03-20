@@ -79,7 +79,7 @@ pub struct EraEventKindDecl {
 
 #[derive(Debug, Clone)]
 pub struct EraVarExpr {
-    pub name: String,
+    pub name: arcstr::ArcStr,
     // Array indices. May be empty or smaller than actual array dimensions.
     pub idxs: Vec<EraExpr>,
     pub src_info: SourcePosInfo,
@@ -181,10 +181,10 @@ impl EraExpr {
     pub fn new_int(val: i64, src_info: SourcePosInfo) -> Self {
         EraExpr::Term(EraTermExpr::Literal(EraLiteral::Integer(val, src_info)))
     }
-    pub fn new_str(val: String, src_info: SourcePosInfo) -> Self {
+    pub fn new_str(val: arcstr::ArcStr, src_info: SourcePosInfo) -> Self {
         EraExpr::Term(EraTermExpr::Literal(EraLiteral::String(val, src_info)))
     }
-    pub fn new_var(name: String, idxs: Vec<EraExpr>, src_info: SourcePosInfo) -> Self {
+    pub fn new_var(name: arcstr::ArcStr, idxs: Vec<EraExpr>, src_info: SourcePosInfo) -> Self {
         EraExpr::Term(EraTermExpr::Var(EraVarExpr {
             name,
             idxs,
@@ -210,7 +210,7 @@ impl EraExpr {
             }),
         }
     }
-    pub fn unwrap_str_constant(lit: EraLiteral) -> Result<String, EraParseErrorInfo> {
+    pub fn unwrap_str_constant(lit: EraLiteral) -> Result<arcstr::ArcStr, EraParseErrorInfo> {
         match lit {
             EraLiteral::String(x, _) => Ok(x),
             EraLiteral::Integer(_, src_info) => Err(EraParseErrorInfo {
@@ -280,7 +280,7 @@ impl EraExpr {
                                     val_stack.push(EL::Integer(x, a_si));
                                 }
                                 (EL::String(a, a_si), EL::String(b, b_si)) => {
-                                    let x = a + &b;
+                                    let x = arcstr::format!("{a}{b}");
                                     val_stack.push(EL::String(x, a_si));
                                 }
                                 _ => {
@@ -439,7 +439,7 @@ impl EraExpr {
                                 }
                             }
                         }
-                        EraLiteral::String(result, x.src_info)
+                        EraLiteral::String(result.into(), x.src_info)
                     }
                     EraTermExpr::Literal(x) => match x {
                         EraLiteral::Integer(x, _) => EraLiteral::Integer(x, src_info),
@@ -479,16 +479,16 @@ impl EraExpr {
                 },
                 EraExpr::FunCall(fun, args) => {
                     let fun_si = fun.source_pos_info();
-                    let EraExpr::Term(EraTermExpr::Var(mut fun)) = *fun else {
+                    let EraExpr::Term(EraTermExpr::Var(fun)) = *fun else {
                         return Err(make_err(
                             fun_si,
                             true,
                             "invalid function call during constant expression evaluation",
                         ));
                     };
-                    fun.name.make_ascii_uppercase();
+                    let upper_fun_name = fun.name.to_ascii_uppercase();
                     // HACK: Whitelist specific functions
-                    match fun.name.as_str() {
+                    match upper_fun_name.as_str() {
                         "UNICODE" => {
                             if args.len() != 1 {
                                 return Err(make_err(
@@ -507,7 +507,7 @@ impl EraExpr {
                             result.push(
                                 char::from_u32(arg as _).unwrap_or(char::REPLACEMENT_CHARACTER),
                             );
-                            EraLiteral::String(result, fun_si)
+                            EraLiteral::String(result.into(), fun_si)
                         }
                         "VARSIZE" => {
                             if args.len() != 1 {
@@ -522,7 +522,7 @@ impl EraExpr {
                             let arg = if let Some(arg) = arg {
                                 Self::unwrap_str_constant(arg.try_evaluate_constant(vars)?)?
                             } else {
-                                String::new()
+                                arcstr::ArcStr::new()
                             };
                             let Some(value) = vars.get_var(&arg) else {
                                 return Err(make_err(
@@ -675,7 +675,7 @@ impl EraExpr {
 #[derive(Debug, Clone)]
 pub enum EraLiteral {
     Integer(i64, SourcePosInfo),
-    String(String, SourcePosInfo),
+    String(arcstr::ArcStr, SourcePosInfo),
 }
 impl EraLiteral {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -1627,7 +1627,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                             None
                         }
                         // TODO: Perform interning
-                        EraLiteral::String(val, _) => Some(Rc::new(StrValue { val })),
+                        EraLiteral::String(val, _) => Some(StrValue { val }),
                     })
                     .collect::<Option<Vec<_>>>()?;
                 Value::new_str_arr(decl.dims, inits)
@@ -1954,7 +1954,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             self.consume_newline()?;
         }
         Some(EraVarDecl {
-            name: String::from_utf8_lossy(name.lexeme).into_owned(),
+            name: String::from_utf8_lossy(name.lexeme).into(),
             dims,
             inits,
             is_string,
@@ -2384,7 +2384,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 let token = self.consume(EraLexerMode::Normal, EraTokenKind::Identifier)?;
                 self.consume_newline()?;
                 EraStmt::Label(EraLabelStmt {
-                    name: String::from_utf8_lossy(token.lexeme).into_owned(),
+                    name: String::from_utf8_lossy(token.lexeme).into(),
                     src_info: token.src_info,
                 })
             }
@@ -2521,10 +2521,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         "unnecessary escape in string literal",
                     );
                 }
-                EraExpr::new_str(
-                    String::from_utf8_lossy(&unescaped).into_owned(),
-                    first.src_info,
-                )
+                EraExpr::new_str(String::from_utf8_lossy(&unescaped).into(), first.src_info)
             }
             EraTokenKind::StringFormStart => {
                 // TODO: Handle escape characters for StringForm (both expression and raw)
@@ -2537,7 +2534,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 lhs
             }
             EraTokenKind::Identifier => EraExpr::Term(EraTermExpr::Var(EraVarExpr {
-                name: String::from_utf8_lossy(first.lexeme).into_owned(),
+                name: String::from_utf8_lossy(first.lexeme).into(),
                 idxs: Vec::new(),
                 src_info: first.src_info,
             })),
@@ -2671,8 +2668,11 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                             // HACK: Add `@` as part of variable name
                             let rhs =
                                 self.consume(EraLexerMode::Normal, EraTokenKind::Identifier)?;
-                            let rhs = format!("@{}", String::from_utf8_lossy(rhs.lexeme));
-                            x.name.push_str(&rhs);
+                            x.name = arcstr::format!(
+                                "{}@{}",
+                                x.name,
+                                String::from_utf8_lossy(rhs.lexeme)
+                            );
                             EraExpr::Term(EraTermExpr::Var(x))
                         }
                         _ => {
@@ -2702,7 +2702,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         loop {
             match token.kind {
                 EraTokenKind::PlainStringLiteral => parts.push(EraStrFormExprPart::Literal(
-                    String::from_utf8_lossy(token.lexeme).into_owned(),
+                    String::from_utf8_lossy(token.lexeme).into(),
                     token.src_info,
                 )),
                 // TODO: String interpolation type-check
@@ -2762,7 +2762,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         }
                     }
                     then_parts.push(EraStrFormExprPart::Literal(
-                        String::from_utf8_lossy(lexeme).into_owned(),
+                        String::from_utf8_lossy(lexeme).into(),
                         token.src_info,
                     ));
                 }
@@ -2813,7 +2813,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         }
                     }
                     else_parts.push(EraStrFormExprPart::Literal(
-                        String::from_utf8_lossy(lexeme).into_owned(),
+                        String::from_utf8_lossy(lexeme).into(),
                         token.src_info,
                     ));
                 }
@@ -2876,7 +2876,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         }
                     }
                     parts.push(EraStrFormExprPart::Literal(
-                        String::from_utf8_lossy(lexeme).into_owned(),
+                        String::from_utf8_lossy(lexeme).into(),
                         token.src_info,
                     ))
                 }
@@ -2944,7 +2944,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             }
             token = self.lexer.read(EraLexerMode::RawStr);
         }
-        Some(EraExpr::new_str(cont, src_info))
+        Some(EraExpr::new_str(cont.into(), src_info))
     }
     fn generic_rawstr(
         &mut self,
@@ -2975,7 +2975,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             }
             token = self.lexer.read(mode);
         }
-        Some((EraExpr::new_str(cont, src_info), token))
+        Some((EraExpr::new_str(cont.into(), src_info), token))
     }
     fn strform_expr_part_expr(
         &mut self,
@@ -3414,10 +3414,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn stmt_call(&mut self) -> Option<EraCallStmt> {
         let src_info = self.src_info;
         let func = self.consume(EraLexerMode::Normal, EraTokenKind::Identifier)?;
-        let func = EraExpr::new_str(
-            String::from_utf8_lossy(func.lexeme).into_owned(),
-            func.src_info,
-        );
+        let func = EraExpr::new_str(String::from_utf8_lossy(func.lexeme).into(), func.src_info);
         let token = self.read_token(EraLexerMode::Normal);
         let args = self.stmt_call_args(token)?;
         Some(EraCallStmt {
@@ -3447,7 +3444,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         }
                     }
                     parts.push(EraStrFormExprPart::Literal(
-                        String::from_utf8_lossy(lexeme).into_owned(),
+                        String::from_utf8_lossy(lexeme).into(),
                         token.src_info,
                     ))
                 }
@@ -3579,7 +3576,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn stmt_goto(&mut self) -> Option<EraGotoStmt> {
         let src_info = self.src_info;
         let target = self.consume(EraLexerMode::Normal, EraTokenKind::Identifier)?;
-        let target = String::from_utf8_lossy(target.lexeme).into_owned();
+        let target = String::from_utf8_lossy(target.lexeme).into();
         self.consume_newline()?;
         Some(EraGotoStmt { target, src_info })
     }
@@ -3673,7 +3670,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             self.var_expression()?
         } else {
             EraVarExpr {
-                name: "RESULT".to_owned(),
+                name: arcstr::literal!("RESULT"),
                 idxs: Vec::new(),
                 src_info,
             }
@@ -3690,7 +3687,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn stmt_result_cmd_call(&mut self) -> Option<EraResultCmdCallStmt> {
         let name = self.lexer.read(EraLexerMode::Normal);
         let src_info = name.src_info;
-        let name = String::from_utf8_lossy(name.lexeme).into_owned();
+        let name = String::from_utf8_lossy(name.lexeme).into();
         let mut args = Vec::new();
         if self.matches_newline().is_some() {
             return Some(EraResultCmdCallStmt {
@@ -4063,7 +4060,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.consume_comma()?;
         let default_value = self.expression(true)?;
         let mut show_prompt = EraExpr::new_int(1, src_info);
-        let mut expiry_msg = EraExpr::new_str(String::new(), src_info);
+        let mut expiry_msg = EraExpr::new_str(arcstr::ArcStr::new(), src_info);
         let mut can_click = EraExpr::new_int(0, src_info);
         if self.matches_comma().is_some() {
             show_prompt = self.expression(true)?;
@@ -4102,7 +4099,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.consume_comma()?;
         let default_value = self.expression(true)?;
         let mut show_prompt = EraExpr::new_int(1, src_info);
-        let mut expiry_msg = EraExpr::new_str(String::new(), src_info);
+        let mut expiry_msg = EraExpr::new_str(arcstr::ArcStr::new(), src_info);
         let mut can_click = EraExpr::new_int(0, src_info);
         if self.matches_comma().is_some() {
             show_prompt = self.expression(true)?;
@@ -4169,7 +4166,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn stmt_setfont(&mut self) -> Option<EraSetFontStmt> {
         let src_info = self.src_info;
         let font_name = if self.matches_newline().is_some() {
-            EraExpr::new_str(String::new(), src_info)
+            EraExpr::new_str(arcstr::ArcStr::new(), src_info)
         } else {
             let r = self.expression(true)?;
             self.consume_newline()?;
@@ -4184,7 +4181,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         let src_info = self.src_info;
         let target = if self.matches_newline().is_some() {
             EraVarExpr {
-                name: "RESULTS".to_owned(),
+                name: arcstr::literal!("RESULTS"),
                 idxs: Vec::new(),
                 src_info,
             }
@@ -4405,7 +4402,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             self.var_expression()?
         } else {
             EraVarExpr {
-                name: "RESULTS".to_owned(),
+                name: arcstr::literal!("RESULTS"),
                 idxs: Vec::new(),
                 src_info,
             }
@@ -4414,7 +4411,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             self.var_expression()?
         } else {
             EraVarExpr {
-                name: "RESULT".to_owned(),
+                name: arcstr::literal!("RESULT"),
                 idxs: Vec::new(),
                 src_info,
             }
@@ -4524,7 +4521,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
     }
     #[must_use]
-    fn unwrap_str_literal(&mut self, lit: EraLiteral) -> Option<String> {
+    fn unwrap_str_literal(&mut self, lit: EraLiteral) -> Option<arcstr::ArcStr> {
         match lit {
             EraLiteral::Integer(_, cur_si) => {
                 self.synchronize();
@@ -4550,7 +4547,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.unwrap_int_literal(lit)
     }
     #[must_use]
-    fn unwrap_str_from_expression(&mut self, expr: EraExpr) -> Option<String> {
+    fn unwrap_str_from_expression(&mut self, expr: EraExpr) -> Option<arcstr::ArcStr> {
         let lit = self.unwrap_literal_from_expression(expr)?;
         self.unwrap_str_literal(lit)
     }

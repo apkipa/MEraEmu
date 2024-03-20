@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    borrow::Cow,
     collections::{HashMap, HashSet},
     ops::Deref,
     rc::Rc,
@@ -107,7 +108,7 @@ impl EraConstantPoolBuilder {
         // TODO: Should we intern simple strings?
         let key = match val.clone().into_unpacked() {
             FlatValue::Int(x) => either::Either::Left(x.val),
-            FlatValue::Str(x) => either::Either::Right(Rc::as_ptr(&x) as _),
+            FlatValue::Str(x) => either::Either::Right(x.val.as_ptr() as _),
             FlatValue::ArrInt(x) => either::Either::Right(Rc::as_ptr(&x) as _),
             FlatValue::ArrStr(x) => either::Either::Right(Rc::as_ptr(&x) as _),
         };
@@ -120,7 +121,7 @@ impl EraConstantPoolBuilder {
 }
 
 pub struct EraFuncBytecodeInfo {
-    pub name: Rc<CaselessStr>,
+    pub name: Ascii<arcstr::ArcStr>,
     pub chunk_idx: u32,
     pub offset: u32,
     pub args: Vec<Value>,
@@ -130,16 +131,16 @@ pub struct EraFuncBytecodeInfo {
 #[derive(Default)]
 struct EraFuncPool {
     // Mapping from names to indices.
-    func_names: HashMap<Rc<CaselessStr>, usize>,
+    func_names: HashMap<Ascii<arcstr::ArcStr>, usize>,
     funcs: Vec<EraFuncInfo>,
 }
 
 #[derive(Debug)]
 struct EraFuncInfo {
-    name: Rc<CaselessStr>,
+    name: Ascii<arcstr::ArcStr>,
     kind: EraFunKind,
     params: Vec<EraFuncArgInfo>,
-    local_var_idxs: HashMap<Rc<CaselessStr>, usize>,
+    local_var_idxs: HashMap<Ascii<arcstr::ArcStr>, usize>,
     local_vars: Vec<EraFuncLocalVarInfo>,
     local_frame_size: usize,
     local_size: Option<u32>,
@@ -149,14 +150,14 @@ struct EraFuncInfo {
 #[derive(Debug)]
 struct EraFuncArgInfo {
     // Default ArrInt / ArrStr value indicates ref argument
-    target_var: (Rc<CaselessStr>, Vec<u32>),
+    target_var: (Ascii<arcstr::ArcStr>, Vec<u32>),
     default_val: Value, // @FUN(value = <default_val>)
     src_info: SourcePosInfo,
 }
 
 #[derive(Debug)]
 struct EraFuncLocalVarInfo {
-    name: Rc<CaselessStr>,
+    name: Ascii<arcstr::ArcStr>,
     init_val: Value, // #DIM value = <init_val>
     has_init: bool,  // Is <init_val> present?
     idx_in_frame: usize,
@@ -492,7 +493,7 @@ impl EraLoopStructCodeMetadata {
 }
 
 pub struct EraBytecodeCompilation {
-    pub func_names: HashMap<Rc<CaselessStr>, usize>,
+    pub func_names: HashMap<Ascii<arcstr::ArcStr>, usize>,
     pub funcs: Vec<EraFuncBytecodeInfo>,
     pub chunks: Vec<EraBytecodeChunk>,
     pub global_vars: EraVarPool,
@@ -530,7 +531,7 @@ pub struct EraCompilerImpl<'a, ErrReportFn> {
     file_name: Rc<str>,
     vars: EraVarPool,
     // intern_vals: HashMap<either::Either<IntValue, Rc<StrValue>>, ()>,
-    contextual_indices: &'a HashMap<Ascii<String>, Vec<(EraCsvVarKind, u32)>>,
+    contextual_indices: &'a HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
 }
 
 pub struct EraCompilerImplFunctionSite<'p, 'a, ErrReportFn> {
@@ -590,7 +591,7 @@ impl<T: FnMut(&EraCompileErrorInfo)> EraCompiler<T> {
         &mut self,
         inputs: Vec<EraCompilerFileInput>,
         global_vars: EraVarPool,
-        contextual_indices: &HashMap<Ascii<String>, Vec<(EraCsvVarKind, u32)>>,
+        contextual_indices: &HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
     ) -> Option<EraBytecodeCompilation> {
         EraCompilerImpl::new(self, contextual_indices).compile_all(inputs, global_vars)
     }
@@ -599,7 +600,7 @@ impl<T: FnMut(&EraCompileErrorInfo)> EraCompiler<T> {
 impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
     fn new(
         parser: &'a mut EraCompiler<T>,
-        contextual_indices: &'a HashMap<Ascii<String>, Vec<(EraCsvVarKind, u32)>>,
+        contextual_indices: &'a HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
     ) -> Self {
         EraCompilerImpl {
             err_report_fn: &mut parser.err_report_fn,
@@ -685,6 +686,39 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         // Clear cache
         self.file_name = empty_str;
 
+        let local_dim = self
+            .vars
+            .get_var("LOCAL")
+            .and_then(|x| match x.clone().into_unpacked() {
+                FlatValue::ArrInt(x) => Some(x.borrow().dims.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let locals_dim = self
+            .vars
+            .get_var("LOCALS")
+            .and_then(|x| match x.clone().into_unpacked() {
+                FlatValue::ArrStr(x) => Some(x.borrow().dims.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let arg_dim = self
+            .vars
+            .get_var("ARG")
+            .and_then(|x| match x.clone().into_unpacked() {
+                FlatValue::ArrInt(x) => Some(x.borrow().dims.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let args_dim = self
+            .vars
+            .get_var("ARGS")
+            .and_then(|x| match x.clone().into_unpacked() {
+                FlatValue::ArrStr(x) => Some(x.borrow().dims.clone()),
+                _ => None,
+            })
+            .unwrap();
+
         // Parse function signatures
         for (file_name, fun) in fun_decls.iter_mut() {
             // std::mem::swap(&mut self.file_name, file_name);
@@ -701,12 +735,12 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 };
             }
 
-            let func_name = CaselessStr::new(fun.name.deref()).into();
+            let func_name = Ascii::new((&fun.name).into());
             let fun_idx = global_funcs.funcs.len();
             let mut local_var_idxs = HashMap::new();
             let mut local_vars = Vec::new();
             let mut params = Vec::new();
-            match global_funcs.func_names.entry(Rc::clone(&func_name)) {
+            match global_funcs.func_names.entry(func_name.clone()) {
                 std::collections::hash_map::Entry::Occupied(e) => {
                     let old_func = *e.get();
                     let old_func = &global_funcs.funcs[old_func];
@@ -736,19 +770,19 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             }
             self.vars.add_var(
                 &format!("LOCAL@{}", func_name),
-                Value::new_int_arr(smallvec::smallvec![16], Vec::new()),
+                Value::new_int_arr(local_dim.clone(), Vec::new()),
             );
             self.vars.add_var(
                 &format!("LOCALS@{}", func_name),
-                Value::new_str_arr(smallvec::smallvec![16], Vec::new()),
+                Value::new_str_arr(locals_dim.clone(), Vec::new()),
             );
             self.vars.add_var(
                 &format!("ARG@{}", func_name),
-                Value::new_int_arr(smallvec::smallvec![16], Vec::new()),
+                Value::new_int_arr(arg_dim.clone(), Vec::new()),
             );
             self.vars.add_var(
                 &format!("ARGS@{}", func_name),
-                Value::new_str_arr(smallvec::smallvec![16], Vec::new()),
+                Value::new_str_arr(args_dim.clone(), Vec::new()),
             );
 
             // Local variables
@@ -807,7 +841,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                         self.evaluate_constant(x)
                                             .and_then(|x| self.unwrap_str_constant(x))
                                             // TODO: Perform interning
-                                            .map(|val| Rc::new(StrValue { val }))
+                                            .map(|val| StrValue { val })
                                     })
                                     .collect::<Option<Vec<_>>>()?;
                                 Value::new_str_arr(x.dims, inits)
@@ -825,7 +859,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             }
                         };
                         EraFuncLocalVarInfo {
-                            name: CaselessStr::new(x.name.as_str()).into(),
+                            name: Ascii::new(x.name.into()),
                             init_val,
                             has_init,
                             idx_in_frame: usize::MAX, //Stub
@@ -840,7 +874,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     _ => continue,
                 };
                 // Insert into global / local var pool
-                if self.vars.get_var(local_decl.name.as_str()).is_some() {
+                if self.vars.get_var(local_decl.name.as_ref()).is_some() {
                     self.report_err(
                         local_decl.src_info,
                         false,
@@ -849,7 +883,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 }
                 if self
                     .contextual_indices
-                    .contains_key(Ascii::new_str(local_decl.name.as_str()))
+                    .contains_key(local_decl.name.as_ascii_ref())
                 {
                     self.report_err(
                         local_decl.src_info,
@@ -859,8 +893,8 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                 }
                 if !local_decl.is_dynamic && !local_decl.is_ref {
                     let var_name = Self::decorate_as_func_local_name(
-                        local_decl.name.as_str(),
-                        func_name.as_str(),
+                        local_decl.name.as_ref(),
+                        func_name.as_ref(),
                     );
                     local_decl.idx_in_frame = match self
                         .vars
@@ -914,16 +948,16 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     ) => match *lhs {
                         EraExpr::Term(EraTermExpr::Var(lhs)) => {
                             // Check parameter type
-                            let lhs_name = CaselessStr::new(&lhs.name);
+                            let lhs_name = lhs.name;
                             let kind = local_var_idxs
-                                .get(lhs_name)
+                                .get(Ascii::new_str(&lhs_name))
                                 .map(|&x| &local_vars[x])
                                 .map(|x| match x.is_ref {
                                     true => x.init_val.kind().with_arr(),
                                     false => x.init_val.kind().without_arr(),
                                 })
                                 .or_else(|| {
-                                    self.vars.get_var(&lhs.name).map(|x| x.kind().without_arr())
+                                    self.vars.get_var(&lhs_name).map(|x| x.kind().without_arr())
                                 })
                                 .or_else(|| {
                                     self.vars
@@ -936,7 +970,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                     self.report_err(
                                         lhs.src_info,
                                         true,
-                                        format!("undefined variable `{}`", lhs.name),
+                                        format!("undefined variable `{}`", lhs_name),
                                     );
                                     return None;
                                 }
@@ -972,7 +1006,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             };
 
                             EraFuncArgInfo {
-                                target_var: (lhs_name.into(), idxs),
+                                target_var: (Ascii::new(lhs_name), idxs),
                                 default_val: rhs,
                                 src_info: lhs.src_info,
                             }
@@ -987,9 +1021,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                         }
                     },
                     EraExpr::Term(EraTermExpr::Var(lhs)) => {
-                        let lhs_name = CaselessStr::new(&lhs.name);
+                        let lhs_name = lhs.name;
                         let kind = local_var_idxs
-                            .get(CaselessStr::new(&lhs.name))
+                            .get(Ascii::new_str(&lhs_name))
                             .map(|&x| &mut local_vars[x])
                             .map(|x| match x.is_ref {
                                 true => {
@@ -1000,7 +1034,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                 false => x.init_val.kind().without_arr(),
                             })
                             .or_else(|| {
-                                self.vars.get_var(&lhs.name).map(|x| x.kind().without_arr())
+                                self.vars.get_var(&lhs_name).map(|x| x.kind().without_arr())
                             })
                             .or_else(|| {
                                 self.vars
@@ -1013,7 +1047,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                 self.report_err(
                                     lhs.src_info,
                                     true,
-                                    format!("undefined variable `{}`", lhs.name),
+                                    format!("undefined variable `{}`", lhs_name),
                                 );
                                 return None;
                             }
@@ -1036,11 +1070,11 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                 Value::new_str_arr(smallvec::smallvec![0], Vec::new())
                             }
                             ValueKind::Int => self.new_value_int(0),
-                            ValueKind::Str => self.new_value_str(String::new()),
+                            ValueKind::Str => self.new_value_str(arcstr::ArcStr::new()),
                         };
 
                         EraFuncArgInfo {
-                            target_var: (lhs_name.into(), idxs),
+                            target_var: (Ascii::new(lhs_name), idxs),
                             default_val: rhs,
                             src_info: lhs.src_info,
                         }
@@ -1163,7 +1197,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             }
         }
     }
-    fn unwrap_str_constant(&mut self, literal: EraLiteral) -> Option<String> {
+    fn unwrap_str_constant(&mut self, literal: EraLiteral) -> Option<arcstr::ArcStr> {
         match literal {
             EraLiteral::Integer(_, src_info) => {
                 self.report_err(src_info, true, "expected string value, found integer");
@@ -1196,7 +1230,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                             None
                         }
                         // TODO: Perform interning
-                        EraLiteral::String(val, _) => Some(Rc::new(StrValue { val })),
+                        EraLiteral::String(val, _) => Some(StrValue { val }),
                     })
                     .collect::<Option<Vec<_>>>()?;
                 Value::new_str_arr(decl.dims, inits)
@@ -1257,7 +1291,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         // }
         Value::new_int(value)
     }
-    fn new_value_str(&mut self, value: String) -> Value {
+    fn new_value_str(&mut self, value: arcstr::ArcStr) -> Value {
         // use std::collections::hash_map::Entry::*;
         // let value = StrValue { val: value };
         // match self
@@ -1300,7 +1334,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         use EraBytecodePrimaryType::*;
 
         let bytecode_info = EraFuncBytecodeInfo {
-            name: CaselessStr::new(&func_decl.name).into(),
+            name: Ascii::new(func_decl.name.into()),
             chunk_idx: u32::MAX, // Stub
             offset: self.chunk.cur_bytes_cnt() as _,
             args: self
@@ -1355,7 +1389,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
 
             let src_info = param_info.src_info;
             let lhs = EraVarExpr {
-                name: param_info.target_var.0.to_string(),
+                name: param_info.target_var.0.clone().into_inner(),
                 idxs: param_info
                     .target_var
                     .1
@@ -1392,7 +1426,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.chunk.emit_bytecode(ReturnInteger, func_decl.src_info);
             }
             EraFunKind::FunctionS => {
-                let val = self.p.new_value_str(String::new());
+                let val = self.p.new_value_str(arcstr::ArcStr::new());
                 self.chunk.emit_load_const(val, func_decl.src_info);
                 self.chunk.emit_bytecode(ReturnString, func_decl.src_info);
             }
@@ -1844,7 +1878,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                                 }
                             }
                             crate::parser::EraStrFormExprPart::Literal(x, src_info) => {
-                                let x = self.p.new_value_str(x);
+                                let x = self.p.new_value_str(x.into());
                                 self.chunk.emit_load_const(x, src_info);
                             }
                         }
@@ -2000,7 +2034,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         // TODO: Use a better way to convey SourcePosInfo
         let mut emitted_bc = false;
 
-        let Some(&target_idx) = self.funcs.func_names.get(CaselessStr::new(&target)) else {
+        let Some(&target_idx) = self.funcs.func_names.get(Ascii::new_str(target)) else {
             // Check for built-in functions as fallback
             return Some(self.builtin_fun_call(target, args, target_src_info, false)?);
         };
@@ -2618,7 +2652,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let [] = ctx.unpack_some_args(args)?;
                 //ctx.this.arr_get_int("@ALIGN", vec![], src_info)?;
                 let args = vec![Some(EraExpr::new_var(
-                    "@ALIGN".to_owned(),
+                    arcstr::literal!("@ALIGN"),
                     vec![],
                     src_info,
                 ))];
@@ -3282,7 +3316,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 if is_money {
                     ctx.this
                         .chunk
-                        .emit_load_const(ctx.this.p.new_value_str("$".to_owned()), src_info);
+                        .emit_load_const(ctx.this.p.new_value_str(arcstr::literal!("$")), src_info);
                 }
                 match args.len() {
                     1 => {
@@ -3626,7 +3660,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             }
             EraStmt::Invalid(src_info) => {
                 self.chunk.emit_load_const(
-                    self.p.new_value_str("invalid statement".to_owned()),
+                    self.p.new_value_str(arcstr::literal!("invalid statement")),
                     src_info,
                 );
                 self.chunk.emit_bytecode(InvalidWithMessage, src_info);
@@ -3930,7 +3964,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                                 match func_kind {
                                     EraFunKind::Function => EraExpr::new_int(0, src_info),
                                     EraFunKind::FunctionS => {
-                                        EraExpr::new_str(String::new(), src_info)
+                                        EraExpr::new_str(arcstr::ArcStr::new(), src_info)
                                     }
                                     _ => unreachable!(),
                                 }
@@ -4634,8 +4668,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     Shop => ("SYSPROC_BEGIN_SHOP", false),
                 };
                 if reset_exec {
-                    let Some(&func) = self.funcs.func_names.get(CaselessStr::new(&func_name))
-                    else {
+                    let Some(&func) = self.funcs.func_names.get(Ascii::new_str(func_name)) else {
                         bail_opt!(
                             self,
                             x.src_info,
@@ -4942,10 +4975,10 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             let first_data = if let Some(data) = data_it.next() {
                 data
             } else {
-                EraExpr::new_str(String::new(), src_info)
+                EraExpr::new_str(arcstr::ArcStr::new(), src_info)
             };
             self.expr_str(first_data)?;
-            let newline_value = self.p.new_value_str("\n".to_owned());
+            let newline_value = self.p.new_value_str(arcstr::literal!("\n"));
             for rest_data in data_it {
                 self.chunk.emit_load_const(newline_value.clone(), src_info);
                 self.expr_str(rest_data)?;
@@ -5013,7 +5046,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         if let Some(var) = self
             .func_info
             .local_var_idxs
-            .get(CaselessStr::new(&var_name))
+            .get(Ascii::new_str(var_name))
             .map(|&x| &self.func_info.local_vars[x])
         {
             (var_kind, var_dims_cnt) = match var.init_val.clone().into_unpacked() {
@@ -5023,11 +5056,15 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             };
             is_in_global_frame = var.is_in_global_frame;
             var_idx = var.idx_in_frame;
-        } else if let Some(var) = self.p.vars.get_var_idx(&var_name).or_else(|| {
+        } else if let Some(var) =
             self.p
                 .vars
-                .get_var_idx(&format!("{}@{}", &var_name, self.func_info.name.as_str()))
-        }) {
+                .get_var_idx(&if routine::is_local_or_arg_var(var_name) {
+                    Cow::Owned(format!("{}@{}", var_name, self.func_info.name.as_ref()))
+                } else {
+                    Cow::Borrowed(var_name)
+                })
+        {
             (var_kind, var_dims_cnt) = match self
                 .p
                 .vars
@@ -5056,7 +5093,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     .func_info
                     .local_vars
                     .iter()
-                    .map(|x| x.name.as_str())
+                    .map(|x| x.name.as_ref())
                     .collect();
                 let mut vars = vars.join(", ");
                 if vars.is_empty() {
@@ -5103,7 +5140,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         if let Some(var) = self
             .func_info
             .local_var_idxs
-            .get(CaselessStr::new(&var_name))
+            .get(Ascii::new_str(var_name))
             .map(|&x| &self.func_info.local_vars[x])
         {
             (var_kind, var_dims) = match var.init_val.clone().into_unpacked() {
@@ -5115,11 +5152,15 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             var_idx = var.idx_in_frame;
             is_charadata = var.is_charadata;
             is_ref = var.is_ref;
-        } else if let Some(glob_var_idx) = self.p.vars.get_var_idx(&var_name).or_else(|| {
+        } else if let Some(glob_var_idx) =
             self.p
                 .vars
-                .get_var_idx(&format!("{}@{}", &var_name, self.func_info.name.as_str()))
-        }) {
+                .get_var_idx(&if routine::is_local_or_arg_var(var_name) {
+                    Cow::Owned(format!("{}@{}", var_name, self.func_info.name.as_ref()))
+                } else {
+                    Cow::Borrowed(var_name)
+                })
+        {
             let var_info = self.p.vars.get_var_info(glob_var_idx).unwrap();
             (var_kind, var_dims) = match var_info.val.clone().into_unpacked() {
                 FlatValue::ArrInt(x) => (TInteger, SmallVec::from_slice(&x.borrow().dims)),
@@ -5143,7 +5184,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     .func_info
                     .local_vars
                     .iter()
-                    .map(|x| x.name.as_str())
+                    .map(|x| x.name.as_ref())
                     .collect();
                 let mut vars = vars.join(", ");
                 if vars.is_empty() {
@@ -5327,7 +5368,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         if fix_chara_idxs {
                             // Push implicit TARGET as first index, then try again
                             let target_var = EraVarExpr {
-                                name: "TARGET".to_owned(),
+                                name: arcstr::literal!("TARGET"),
                                 idxs: vec![],
                                 src_info,
                             };
@@ -5654,7 +5695,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
 fn default_expr(expr_kind: EraExpressionValueKind, src_info: SourcePosInfo) -> EraExpr {
     use EraExpressionValueKind::*;
     match expr_kind {
-        TString => EraExpr::new_str(String::new(), src_info),
+        TString => EraExpr::new_str(arcstr::ArcStr::new(), src_info),
         TInteger => EraExpr::new_int(0, src_info),
         TVoid => panic!("no default EraExpr for void type"),
     }

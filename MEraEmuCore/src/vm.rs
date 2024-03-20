@@ -8,6 +8,7 @@ use crate::{
         PadStringFlags, PrintExtendedFlags, SourcePosInfo, StrValue, Value, ValueKind,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
+    routine,
     util::*,
 };
 use std::{
@@ -160,7 +161,7 @@ impl EraVirtualMachineContext<'_> {
     }
     #[must_use]
     #[inline(always)]
-    fn unpack_str(&mut self, value: Value) -> Option<Rc<crate::bytecode::StrValue>> {
+    fn unpack_str(&mut self, value: Value) -> Option<crate::bytecode::StrValue> {
         match value.into_unpacked() {
             FlatValue::Str(x) => Some(x),
             _ => {
@@ -397,14 +398,14 @@ macro_rules! pop_stack {
 #[derive(Default)]
 pub struct EraVarPool {
     // Mapping from names to indices.
-    var_names: HashMap<Rc<CaselessStr>, usize>,
+    var_names: HashMap<Ascii<arcstr::ArcStr>, usize>,
     chara_var_idxs: Vec<usize>,
     global_var_idxs: Vec<usize>,
     vars: Vec<EraVarInfo>,
 }
 
 pub struct EraVarInfo {
-    pub name: Rc<CaselessStr>,
+    pub name: Ascii<arcstr::ArcStr>,
     pub val: Value,
     pub is_const: bool,
     pub is_charadata: bool,
@@ -433,7 +434,7 @@ impl EraVarPool {
         is_charadata: bool,
         is_global: bool,
     ) -> Option<usize> {
-        let name: Rc<CaselessStr> = CaselessStr::new(name).into();
+        let name: Ascii<arcstr::ArcStr> = Ascii::new(name.into());
         let var_idx = self.vars.len();
         match self.var_names.entry(name.clone()) {
             std::collections::hash_map::Entry::Occupied(e) => return None,
@@ -459,13 +460,13 @@ impl EraVarPool {
     #[must_use]
     pub fn get_var(&self, name: &str) -> Option<&Value> {
         self.var_names
-            .get(CaselessStr::new(name))
+            .get(Ascii::new_str(name))
             .map(|x| &self.vars[*x].val)
     }
     #[must_use]
     pub fn get_var_mut(&mut self, name: &str) -> Option<&mut Value> {
         self.var_names
-            .get_mut(CaselessStr::new(name))
+            .get_mut(Ascii::new_str(name))
             .map(|x| &mut self.vars[*x].val)
     }
     #[must_use]
@@ -478,7 +479,7 @@ impl EraVarPool {
     }
     #[must_use]
     pub fn get_var_idx(&self, name: &str) -> Option<usize> {
-        self.var_names.get(CaselessStr::new(name)).copied()
+        self.var_names.get(Ascii::new_str(name)).copied()
     }
     #[must_use]
     pub fn get_var_info(&self, idx: usize) -> Option<&EraVarInfo> {
@@ -529,7 +530,7 @@ struct EraFuncExecFrame {
 }
 
 pub struct EraVirtualMachine {
-    func_names: HashMap<Rc<CaselessStr>, usize>,
+    func_names: HashMap<Ascii<arcstr::ArcStr>, usize>,
     funcs: Vec<EraFuncBytecodeInfo>,
     chunks: Vec<EraBytecodeChunk>,
     global_vars: EraVarPool,
@@ -896,7 +897,7 @@ impl EraVirtualMachine {
     }
     pub fn get_func_info(&self, name: &str) -> Option<&EraFuncBytecodeInfo> {
         self.func_names
-            .get(CaselessStr::new(name))
+            .get(Ascii::new_str(name))
             .map(|&x| &self.funcs[x])
     }
     pub fn func_info_from_ip(&self, ip: EraExecIp) -> Option<&EraFuncBytecodeInfo> {
@@ -1009,14 +1010,12 @@ impl EraVirtualMachine {
                 Quit => return None,
                 InvalidWithMessage => {
                     let msg = ctx.stack.pop().and_then(|x| match x.val.into_unpacked() {
-                        FlatValue::Int(x) => Some(Rc::new(StrValue {
-                            val: x.val.to_string(),
-                        })),
+                        FlatValue::Int(x) => Some(StrValue {
+                            val: arcstr::format!("{}", x.val),
+                        }),
                         FlatValue::Str(x) => Some(x.clone()),
-                        FlatValue::ArrInt(x) => x.borrow().vals.first().map(|x| {
-                            Rc::new(StrValue {
-                                val: x.val.to_string(),
-                            })
+                        FlatValue::ArrInt(x) => x.borrow().vals.first().map(|x| StrValue {
+                            val: arcstr::format!("{}", x.val),
                         }),
                         FlatValue::ArrStr(x) => x.borrow().vals.first().map(|x| x.clone()),
                     });
@@ -1025,14 +1024,12 @@ impl EraVirtualMachine {
                 }
                 Throw => {
                     let msg = ctx.stack.pop().and_then(|x| match x.val.into_unpacked() {
-                        FlatValue::Int(x) => Some(Rc::new(StrValue {
-                            val: x.val.to_string(),
-                        })),
+                        FlatValue::Int(x) => Some(StrValue {
+                            val: arcstr::format!("{}", x.val),
+                        }),
                         FlatValue::Str(x) => Some(x.clone()),
-                        FlatValue::ArrInt(x) => x.borrow().vals.first().map(|x| {
-                            Rc::new(StrValue {
-                                val: x.val.to_string(),
-                            })
+                        FlatValue::ArrInt(x) => x.borrow().vals.first().map(|x| StrValue {
+                            val: arcstr::format!("{}", x.val),
                         }),
                         FlatValue::ArrStr(x) => x.borrow().vals.first().map(|x| x.clone()),
                     });
@@ -1119,7 +1116,7 @@ impl EraVirtualMachine {
                             ignore_return_value = true;
                             let func_info = self
                                 .func_names
-                                .get(CaselessStr::new(&x.val))
+                                .get(Ascii::new_str(&x.val))
                                 .map(|&x| &self.funcs[x]);
                             let Some(x) = func_info else {
                                 bail_opt!(ctx, true, format!("function `{}` not found", x.val));
@@ -1187,7 +1184,7 @@ impl EraVirtualMachine {
                         Either::Left(x) => self.funcs.get(x.val as usize),
                         Either::Right(x) => self
                             .func_names
-                            .get(CaselessStr::new(&x.val))
+                            .get(Ascii::new_str(&x.val))
                             .map(|&x| &self.funcs[x]),
                     };
                     if let Some(func_info) = func_info {
@@ -1240,13 +1237,13 @@ impl EraVirtualMachine {
                                             let Some(val) = x.flat_get(y.val as _) else {
                                                 bail_opt!(ctx, true, "wrong arg pack");
                                             };
-                                            ctx.stack.push(Value::new_str_rc(val.clone()).into());
+                                            ctx.stack.push(Value::new_str_obj(val.clone()).into());
                                         }
                                         (_, FlatValue::Int(y)) if param_kind == ValueKind::Int => {
                                             ctx.stack.push(Value::new_int_obj(y.clone()).into());
                                         }
                                         (_, FlatValue::Str(y)) if param_kind == ValueKind::Str => {
-                                            ctx.stack.push(Value::new_str_rc(y.clone()).into());
+                                            ctx.stack.push(Value::new_str_obj(y.clone()).into());
                                         }
                                         _ => bail_opt!(ctx, true, "wrong arg pack"),
                                     }
@@ -1328,9 +1325,11 @@ impl EraVirtualMachine {
                     let caller_name = self
                         .frames
                         .last()
-                        .and_then(|x| self.func_info_from_ip(x.ip).map(|x| x.name.as_str()))
-                        .unwrap_or_default()
-                        .to_owned();
+                        .and_then(|x| {
+                            self.func_info_from_ip(x.ip)
+                                .map(|x| x.name.clone().into_inner())
+                        })
+                        .unwrap_or_default();
                     self.stack.push(Value::new_str(caller_name).into());
                     self.frames.push(frame);
                     make_ctx!(self, ctx);
@@ -1376,8 +1375,8 @@ impl EraVirtualMachine {
                 ConvertToString => {
                     let [value] = ctx.pop_stack()?;
                     let value = match value.val.into_unpacked() {
-                        FlatValue::Int(x) => Value::new_str(x.val.to_string()),
-                        FlatValue::Str(x) => Value::new_str_rc(x),
+                        FlatValue::Int(x) => Value::new_str(arcstr::format!("{}", x.val)),
+                        FlatValue::Str(x) => Value::new_str_obj(x),
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
                     };
                     ctx.stack.push(value.into());
@@ -1387,16 +1386,15 @@ impl EraVirtualMachine {
                     let value = match value.val.into_unpacked() {
                         FlatValue::Int(x) => Value::new_int_obj(x),
                         FlatValue::Str(x) => {
-                            let x = match x.val.parse() {
-                                Ok(x) => x,
-                                Err(_) => bail_opt!(
+                            let Some(x) = routine::parse_era_int(&x.val) else {
+                                bail_opt!(
                                     ctx,
                                     true,
                                     format!(
                                         "string `{}` cannot be converted to a valid integer",
                                         x.val
                                     )
-                                ),
+                                );
                             };
                             Value::new_int(x)
                         }
@@ -1421,7 +1419,7 @@ impl EraVirtualMachine {
                     if !err_msg.is_empty() {
                         bail_opt!(ctx, true, err_msg);
                     }
-                    let new_str = Value::new_str(new_str);
+                    let new_str = Value::new_str(new_str.into());
                     ctx.stack.push(new_str.into());
                 }
                 PadString => {
@@ -1437,13 +1435,16 @@ impl EraVirtualMachine {
                     };
                     let value = match value.val.into_unpacked() {
                         FlatValue::Str(x) => {
-                            if x.val.width() >= width {
-                                Value::new_str_rc(x)
+                            let val_width = x.val.width();
+                            if val_width >= width {
+                                Value::new_str_obj(x)
                             } else {
                                 let x = &x.val;
+                                let spaces = " ".repeat(width - val_width);
+                                // left_pad means: pad to left (spaces on the right side)
                                 Value::new_str(match (flags.left_pad(), flags.right_pad()) {
-                                    (true, false) => format!("{x:<width$}"),
-                                    (false, true) | _ => format!("{x:>width$}"),
+                                    (true, false) => arcstr::format!("{x}{spaces}"),
+                                    (false, true) | _ => arcstr::format!("{spaces}{x}"),
                                 })
                             }
                         }
@@ -1595,7 +1596,7 @@ impl EraVirtualMachine {
                                     .unwrap();
                                 if let Some(xi) = x.get_mut(&idxs) {
                                     let v = match ctx.callback.on_var_get_int(
-                                        trap_var_info.name.as_str(),
+                                        trap_var_info.name.as_ref(),
                                         idxs.last().copied().unwrap_or_default() as _,
                                     ) {
                                         Ok(v) => v,
@@ -1630,7 +1631,7 @@ impl EraVirtualMachine {
                                     .unwrap();
                                 if let Some(xi) = x.get_mut(&idxs) {
                                     let v = match ctx.callback.on_var_get_str(
-                                        trap_var_info.name.as_str(),
+                                        trap_var_info.name.as_ref(),
                                         idxs.last().copied().unwrap_or_default() as _,
                                     ) {
                                         Ok(v) => v,
@@ -1640,13 +1641,13 @@ impl EraVirtualMachine {
                                             format!("trap handler failed: {e}")
                                         ),
                                     };
-                                    *xi = Rc::new(StrValue { val: v });
-                                    Some(Value::new_str_rc(xi.clone()))
+                                    *xi = StrValue { val: v.into() };
+                                    Some(Value::new_str_obj(xi.clone()))
                                 } else {
                                     None
                                 }
                             } else {
-                                x.get(&idxs).map(|x| Value::new_str_rc(x.clone()))
+                                x.get(&idxs).map(|x| Value::new_str_obj(x.clone()))
                             }
                             //x.borrow().get(&idxs).map(|x| Value::new_str_rc(x.clone()))
                         }
@@ -1704,7 +1705,7 @@ impl EraVirtualMachine {
                                     .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
                                     .unwrap();
                                 match ctx.callback.on_var_set_int(
-                                    trap_var_info.name.as_str(),
+                                    trap_var_info.name.as_ref(),
                                     *idxs.last().unwrap() as _,
                                     src.val,
                                 ) {
@@ -1733,7 +1734,7 @@ impl EraVirtualMachine {
                                     .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
                                     .unwrap();
                                 match ctx.callback.on_var_set_str(
-                                    trap_var_info.name.as_str(),
+                                    trap_var_info.name.as_ref(),
                                     *idxs.last().unwrap() as _,
                                     &src.val,
                                 ) {
@@ -1786,7 +1787,7 @@ impl EraVirtualMachine {
                                 if let Some(xi) = x.flat_get_mut(idx) {
                                     let v = match ctx
                                         .callback
-                                        .on_var_get_int(trap_var_info.name.as_str(), idx as _)
+                                        .on_var_get_int(trap_var_info.name.as_ref(), idx as _)
                                     {
                                         Ok(v) => v,
                                         Err(e) => bail_opt!(
@@ -1820,7 +1821,7 @@ impl EraVirtualMachine {
                                 if let Some(xi) = x.flat_get_mut(idx) {
                                     let v = match ctx
                                         .callback
-                                        .on_var_get_str(trap_var_info.name.as_str(), idx as _)
+                                        .on_var_get_str(trap_var_info.name.as_ref(), idx as _)
                                     {
                                         Ok(v) => v,
                                         Err(e) => bail_opt!(
@@ -1829,13 +1830,13 @@ impl EraVirtualMachine {
                                             format!("trap handler failed: {e}")
                                         ),
                                     };
-                                    *xi = Rc::new(StrValue { val: v });
-                                    Some(Value::new_str_rc(xi.clone()))
+                                    *xi = StrValue { val: v.into() };
+                                    Some(Value::new_str_obj(xi.clone()))
                                 } else {
                                     None
                                 }
                             } else {
-                                x.flat_get(idx).map(|x| Value::new_str_rc(x.clone()))
+                                x.flat_get(idx).map(|x| Value::new_str_obj(x.clone()))
                             }
                         }
                         _ => bail_opt!(ctx, true, "expected arrays as operands"),
@@ -1874,7 +1875,7 @@ impl EraVirtualMachine {
                                     .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
                                     .unwrap();
                                 match ctx.callback.on_var_set_int(
-                                    trap_var_info.name.as_str(),
+                                    trap_var_info.name.as_ref(),
                                     idx,
                                     src.val,
                                 ) {
@@ -1905,7 +1906,7 @@ impl EraVirtualMachine {
                                     .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
                                     .unwrap();
                                 match ctx.callback.on_var_set_str(
-                                    trap_var_info.name.as_str(),
+                                    trap_var_info.name.as_ref(),
                                     idx,
                                     &src.val,
                                 ) {
@@ -2005,7 +2006,7 @@ impl EraVirtualMachine {
                             Value::new_int(lhs.val.wrapping_add(rhs.val))
                         }
                         (FlatValue::Str(lhs), FlatValue::Str(rhs)) => {
-                            Value::new_str(lhs.val.clone() + &rhs.val)
+                            Value::new_str(arcstr::format!("{}{}", lhs.val, rhs.val))
                         }
                         x => {
                             bail_opt!(ctx,
@@ -2205,11 +2206,9 @@ impl EraVirtualMachine {
                     unpack_arrstr_mut!(ctx, dest);
                     unpack_arrint_idx_mut!(ctx, dest_count, dest_count_i.val);
                     let mut count = 0;
-                    for part in input.val.split(&separator.val) {
+                    for part in input.val.split(separator.val.as_str()) {
                         arr_idx_mut!(ctx, dest, count);
-                        *dest = Rc::new(StrValue {
-                            val: part.to_owned(),
-                        });
+                        *dest = StrValue { val: part.into() };
                         count += 1;
                     }
                     dest_count.val = count;
@@ -2285,8 +2284,8 @@ impl EraVirtualMachine {
                         Err(e) => bail_opt!(ctx, true, format!("failed to compile regex: {e}")),
                     };
                     let result = re
-                        .replace_all(&haystack.val, &replace_with.val)
-                        .into_owned();
+                        .replace_all(&haystack.val, replace_with.val.as_str())
+                        .into();
                     ctx.stack.push(Value::new_str(result).into());
                 }
                 RepeatString => {
@@ -2296,7 +2295,8 @@ impl EraVirtualMachine {
                         (FlatValue::Str(haystack), FlatValue::Int(count)) => (haystack, count),
                         _ => bail_opt!(ctx, true, "operands must be (int, str)"),
                     };
-                    let result = haystack.val.repeat(count.val.max(0) as _);
+                    let result =
+                        arcstr::ArcStr::try_repeat(&haystack.val, count.val.max(0) as _).unwrap();
                     ctx.stack.push(Value::new_str(result).into());
                 }
                 SubString | SubStringU => {
@@ -2312,7 +2312,7 @@ impl EraVirtualMachine {
                         length.val as _
                     };
                     let result = if length <= 0 {
-                        String::new()
+                        arcstr::ArcStr::new()
                     } else {
                         let haystack_len = haystack.len();
                         let idx_fn = |(index, _)| index;
@@ -2320,11 +2320,7 @@ impl EraVirtualMachine {
                         let start_byte_pos = it.nth(start_pos).map_or(haystack_len, &idx_fn);
                         let end_byte_pos = it.nth(length - 1).map_or(haystack_len, &idx_fn);
                         // TODO: SAFETY
-                        unsafe {
-                            haystack
-                                .get_unchecked(start_byte_pos..end_byte_pos)
-                                .to_owned()
-                        }
+                        unsafe { haystack.get_unchecked(start_byte_pos..end_byte_pos).into() }
                     };
                     ctx.stack.push(Value::new_str(result).into());
                 }
@@ -2344,7 +2340,7 @@ impl EraVirtualMachine {
                     // TODO: SAFETY
                     let result = unsafe {
                         let haystack = haystack.get_unchecked(start_byte_pos..haystack_len);
-                        haystack.find(needle).map_or(-1, |pos| {
+                        haystack.find(needle.as_str()).map_or(-1, |pos| {
                             haystack
                                 .char_indices()
                                 .position(|x| x.0 == pos)
@@ -2363,7 +2359,7 @@ impl EraVirtualMachine {
                     let [haystack, needle] = ctx.pop_stack()?;
                     unpack_str!(ctx, haystack);
                     unpack_str!(ctx, needle);
-                    let result = haystack.val.matches(&needle.val).count() as _;
+                    let result = haystack.val.matches(needle.val.as_str()).count() as _;
                     ctx.stack.push(Value::new_int(result).into());
                 }
                 StrCharAtU => {
@@ -2373,13 +2369,13 @@ impl EraVirtualMachine {
                     let haystack = &haystack.val;
                     let pos = pos.val;
                     let result = if pos < 0 {
-                        String::new()
+                        arcstr::ArcStr::new()
                     } else {
                         let pos = pos as _;
                         haystack
                             .chars()
                             .nth(pos)
-                            .map_or(String::new(), |x| x.to_string())
+                            .map_or(arcstr::ArcStr::new(), |x| arcstr::format!("{x}"))
                     };
                     ctx.stack.push(Value::new_str(result).into());
                 }
@@ -2393,13 +2389,13 @@ impl EraVirtualMachine {
                         Ok(x) => x,
                         Err(e) => bail_opt!(ctx, true, format!("failed to format integer: {e}")),
                     };
-                    ctx.stack.push(Value::new_str(result).into());
+                    ctx.stack.push(Value::new_str(result.into()).into());
                 }
                 StringIsValidInteger => {
                     let [value] = ctx.pop_stack()?;
                     unpack_str!(ctx, value);
-                    let result = value.val.parse::<i64>().is_ok().into();
-                    ctx.stack.push(Value::new_int(result).into());
+                    let result = routine::parse_era_int(&value.val).is_some();
+                    ctx.stack.push(Value::new_int(result.into()).into());
                 }
                 StringToUpper | StringToLower | StringToHalf | StringToFull => {
                     use full2half::CharacterWidth;
@@ -2413,7 +2409,7 @@ impl EraVirtualMachine {
                         StringToFull => value.val.to_full_width(),
                         _ => unreachable!(),
                     };
-                    ctx.stack.push(Value::new_str(result).into());
+                    ctx.stack.push(Value::new_str(result.into()).into());
                 }
                 BuildBarString => {
                     use muldiv::MulDiv;
@@ -2442,13 +2438,13 @@ impl EraVirtualMachine {
                     result += &"*".repeat(fill_cnt as _);
                     result += &".".repeat(rest_cnt as _);
                     result.push(']');
-                    ctx.stack.push(Value::new_str(result).into());
+                    ctx.stack.push(Value::new_str(result.into()).into());
                 }
                 EscapeRegexStr => {
                     let [value] = ctx.pop_stack()?;
                     unpack_str!(ctx, value);
                     let result = regex::escape(&value.val);
-                    ctx.stack.push(Value::new_str(result).into());
+                    ctx.stack.push(Value::new_str(result.into()).into());
                 }
                 EncodeToUnicode => {
                     let [haystack, pos] = ctx.pop_stack()?;
@@ -2469,7 +2465,8 @@ impl EraVirtualMachine {
                     else {
                         bail_opt!(ctx, true, "value is not a valid Unicode scalar value");
                     };
-                    ctx.stack.push(Value::new_str(result.to_string()).into());
+                    ctx.stack
+                        .push(Value::new_str(arcstr::format!("{result}")).into());
                 }
                 IntToStrWithBase => {
                     let [value, base] = ctx.pop_stack()?;
@@ -2478,10 +2475,10 @@ impl EraVirtualMachine {
                     let value = value.val;
                     let base = base.val;
                     let result = match base {
-                        2 => format!("{value:b}"),
-                        8 => format!("{value:o}"),
-                        10 => format!("{value}"),
-                        16 => format!("{value:x}"),
+                        2 => arcstr::format!("{value:b}"),
+                        8 => arcstr::format!("{value:o}"),
+                        10 => arcstr::format!("{value}"),
+                        16 => arcstr::format!("{value:x}"),
                         _ => bail_opt!(ctx, true, format!("{} is not a valid base", base)),
                     };
                     ctx.stack.push(Value::new_str(result).into());
@@ -2498,9 +2495,7 @@ impl EraVirtualMachine {
                             bail_opt!(ctx, true, "found invalid html tag while parsing");
                         };
                         arr_idx_mut!(ctx, tags, parts_count);
-                        *tags = Rc::new(StrValue {
-                            val: part.to_owned(),
-                        });
+                        *tags = StrValue { val: part.into() };
                         parts_count += 1;
                     }
                     count.val = parts_count as _;
@@ -2509,7 +2504,7 @@ impl EraVirtualMachine {
                     let [html] = ctx.pop_stack()?;
                     unpack_str!(ctx, html);
                     let result = nanohtml2text::html2text(&html.val);
-                    ctx.stack.push(Value::new_str(result).into());
+                    ctx.stack.push(Value::new_str(result.into()).into());
                 }
                 PowerInt => {
                     let [base, exponent] = ctx.pop_stack()?;
@@ -3440,7 +3435,8 @@ impl EraVirtualMachine {
                     let t = DateTime::from_timestamp_millis(result as _).unwrap();
                     let t: DateTime<Local> = t.into();
                     let result = t.format("%Y/%m/%d %H:%M:%S");
-                    ctx.stack.push(Value::new_str(result.to_string()).into());
+                    ctx.stack
+                        .push(Value::new_str(arcstr::format!("{result}")).into());
                 }
                 Input => {
                     let sub_bc = EraInputSubBytecodeType::from(
@@ -3474,7 +3470,7 @@ impl EraVirtualMachine {
                         };
                         ($vresult:ident:s, $result:expr) => {
                             if let Some(r) = $result {
-                                $vresult.borrow_mut().vals[0] = Rc::new(StrValue { val: r });
+                                $vresult.borrow_mut().vals[0] = StrValue { val: r.into() };
                             }
                         };
                     }
@@ -3674,13 +3670,13 @@ impl EraVirtualMachine {
                                     x.dims.iter().skip(1).map(|x| *x as usize).product();
                                 let start_idx = chara_idx * stride;
                                 let end_idx = (chara_idx + 1) * stride;
-                                match chara_var.name.as_str() {
+                                match chara_var.name.as_ref() {
                                     "NO" => {
                                         x.vals[start_idx] = chara_no.clone();
                                     }
                                     _ => {
                                         let empty_map = Default::default();
-                                        let src = match chara_var.name.as_str() {
+                                        let src = match chara_var.name.as_ref() {
                                             "MAXBASE" => &chara_template.maxbase,
                                             "MARK" => &chara_template.mark,
                                             "EXP" => &chara_template.exp,
@@ -3705,29 +3701,27 @@ impl EraVirtualMachine {
                                     x.dims.iter().skip(1).map(|x| *x as usize).product();
                                 let start_idx = chara_idx * stride;
                                 let end_idx = (chara_idx + 1) * stride;
-                                match chara_var.name.as_str() {
+                                match chara_var.name.as_ref() {
                                     "NAME" | "CALLNAME" | "NICKNAME" | "MASTERNAME" => {
-                                        let src = match chara_var.name.as_str() {
+                                        let src = match chara_var.name.as_ref() {
                                             "NAME" => &chara_template.name,
                                             "CALLNAME" => &chara_template.callname,
                                             "NICKNAME" => &chara_template.nickname,
                                             "MASTERNAME" => &chara_template.mastername,
                                             _ => unreachable!(),
                                         };
-                                        x.vals[start_idx] = Rc::new(StrValue {
-                                            val: src.to_owned(),
-                                        });
+                                        x.vals[start_idx] = StrValue { val: src.clone() };
                                     }
                                     _ => {
                                         let empty_map = Default::default();
-                                        let src = match chara_var.name.as_str() {
+                                        let src = match chara_var.name.as_ref() {
                                             "CSTR" => &chara_template.cstr,
                                             _ => &empty_map,
                                         };
                                         x.vals[start_idx..end_idx].fill(Default::default());
                                         for (&sk, sv) in src {
                                             x.vals[start_idx + sk as usize] =
-                                                Rc::new(StrValue { val: sv.to_owned() });
+                                                StrValue { val: sv.clone() };
                                         }
                                     }
                                 }
@@ -3933,7 +3927,7 @@ impl EraVirtualMachine {
                             FlatValue::ArrInt(x) => {
                                 let mut x = x.borrow_mut();
                                 let should_reset = var.is_charadata
-                                    || !matches!(var.name.as_str(), "GLOBAL" | "ITEMPRICE");
+                                    || !matches!(var.name.as_ref(), "GLOBAL" | "ITEMPRICE");
                                 if should_reset {
                                     x.vals.fill(Default::default());
                                 }
@@ -3941,7 +3935,7 @@ impl EraVirtualMachine {
                             FlatValue::ArrStr(x) => {
                                 let mut x = x.borrow_mut();
                                 let should_reset = var.is_charadata
-                                    || !matches!(var.name.as_str(), "GLOBALS" | "STR");
+                                    || !matches!(var.name.as_ref(), "GLOBALS" | "STR");
                                 if should_reset {
                                     x.vals.fill(Default::default());
                                 }
@@ -4025,7 +4019,7 @@ impl EraVirtualMachine {
                             );
                         }
                     };
-                    ctx.stack.push(Value::new_str(val).into());
+                    ctx.stack.push(Value::new_str(val.into()).into());
                 }
                 KbGetKeyState => {
                     pop_stack!(ctx, keycode:i);
@@ -4250,7 +4244,7 @@ impl<'a> EraArrayExtendAccess<'a> for ArrIntValue {
 }
 
 impl<'a> EraArrayExtendAccess<'a> for ArrStrValue {
-    type Item = &'a Rc<StrValue>;
+    type Item = &'a StrValue;
     fn stride_iter(
         &'a self,
         idx: usize,
@@ -4265,7 +4259,7 @@ impl<'a> EraArrayExtendAccess<'a> for ArrStrValue {
             count: usize,
         }
         impl<'a> Iterator for Iter<'a> {
-            type Item = &'a Rc<StrValue>;
+            type Item = &'a StrValue;
             fn next(&mut self) -> Option<Self::Item> {
                 if self.count == 0 {
                     return None;

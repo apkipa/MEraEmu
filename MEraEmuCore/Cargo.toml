@@ -57,6 +57,7 @@ chrono = "0.4.35"
 itertools = "0.12.1"
 # cpp = "0.5.9"
 safer-ffi = { version = "0.1.5", features = ["dyn-traits"] }
+arcstr = "1.1.5"
 
 [features]
 headers = ["safer-ffi/headers"]

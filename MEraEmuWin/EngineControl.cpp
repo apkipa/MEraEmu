@@ -584,15 +584,66 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@FOCUSCOLOR") {
                 return D2D1::ColorF::Yellow;
             }
+            if (name == "@STYLE") {
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->GetCurrentFontStyle());
+                });
+                return future.get();
+            }
             if (name == "@REDRAW") {
-                // TODO: @REDRAW
-                return 0;
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->GetRedrawState());
+                });
+                return future.get();
             }
             if (name == "@ALIGN") {
-                // TODO: @ALIGN
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->GetCurrentLineAlignment());
+                });
+                return future.get();
+            }
+            if (name == "@TOOLTIP_DELAY") {
+                // TODO: @TOOLTIP_DELAY
                 return 0;
             }
-            // TODO...
+            if (name == "@TOOLTIP_DURATION") {
+                // TODO: @TOOLTIP_DURATION
+                return 0;
+            }
+            if (name == "@SKIPDISP") {
+                // TODO: @SKIPDISP
+                return 0;
+            }
+            if (name == "@MESSKIP") {
+                // TODO: @MESSKIP
+                return 0;
+            }
+            if (name == "@ANIMETIMER") {
+                // TODO: @ANIMETIMER
+                return 0;
+            }
+            if (name == "@PRINTCPERLINE") {
+                // TODO: @PRINTCPERLINE
+                return 5;
+            }
+            if (name == "@PRINTCLENGTH") {
+                // TODO: @PRINTCLENGTH
+                return 25;
+            }
+            if (name == "@LINEISEMPTY") {
+                std::promise<bool> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->m_cur_composing_line.parts.empty());
+                });
+                return future.get();
+            }
             if (name == "SCREENWIDTH") {
                 // TODO: SCREENWIDTH
                 std::promise<int64_t> promise;
@@ -613,6 +664,15 @@ namespace winrt::MEraEmuWin::implementation {
             throw std::exception("no such variable");
         }
         const char* on_var_get_str(std::string_view name, uint32_t idx) override {
+            if (name == "@FONT") {
+                std::promise<hstring> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->GetCurrentFontName());
+                });
+                m_str_cache = to_string(future.get());
+                return m_str_cache.c_str();
+            }
             if (name == "WINDOW_TITLE") {
                 std::promise<hstring> promise;
                 auto future = promise.get_future();
@@ -622,27 +682,51 @@ namespace winrt::MEraEmuWin::implementation {
                 m_str_cache = to_string(future.get());
                 return m_str_cache.c_str();
             }
+            if (name == "DRAWLINESTR") {
+                std::promise<std::string> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    auto screen_width = sd->ui_ctrl->m_ui_width / 20;
+                    promise.set_value(std::string(screen_width, '-'));
+                });
+                m_str_cache = future.get();
+                return m_str_cache.c_str();
+            }
+            if (name == "SAVEDATA_TEXT") {
+                // TODO: SAVEDATA_TEXT
+                return nullptr;
+            }
             throw std::exception("no such variable");
         }
         void on_var_set_int(std::string_view name, uint32_t idx, int64_t val) override {
             if (name == "@COLOR") {
-                m_sd->queue_ui_work([sd = m_sd, val]() mutable {
+                m_sd->queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->EngineForeColor(to_winrt_color((uint32_t)val | 0xff000000));
                 });
                 return;
             }
             if (name == "@BGCOLOR") {
-                m_sd->queue_ui_work([sd = m_sd, val]() mutable {
+                m_sd->queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->EngineBackColor(to_winrt_color((uint32_t)val | 0xff000000));
                 });
                 return;
             }
+            if (name == "@STYLE") {
+                m_sd->queue_ui_work([sd = m_sd, val]() {
+                    sd->ui_ctrl->SetCurrentFontStyle(val);
+                });
+                return;
+            }
             if (name == "@REDRAW") {
-                // TODO: @REDRAW
+                m_sd->queue_ui_work([sd = m_sd, val]() {
+                    sd->ui_ctrl->SetRedrawState(val);
+                });
                 return;
             }
             if (name == "@ALIGN") {
-                // TODO: @ALIGN
+                m_sd->queue_ui_work([sd = m_sd, val]() {
+                    sd->ui_ctrl->SetCurrentLineAlignment(val);
+                });
                 return;
             }
             // TODO: Prohibit setting variables @DEF*COLOR?
@@ -650,8 +734,14 @@ namespace winrt::MEraEmuWin::implementation {
             throw std::exception("no such variable");
         }
         void on_var_set_str(std::string_view name, uint32_t idx, std::string_view val) override {
+            if (name == "@FONT") {
+                m_sd->queue_ui_work([sd = m_sd, val = to_hstring(val)]() {
+                    sd->ui_ctrl->SetCurrentFontName(val);
+                });
+                return;
+            }
             if (name == "WINDOW_TITLE") {
-                m_sd->queue_ui_work([sd = m_sd, val = to_hstring(val)]() mutable {
+                m_sd->queue_ui_work([sd = m_sd, val = to_hstring(val)]() {
                     sd->ui_ctrl->EngineTitle(val);
                 });
                 return;
@@ -762,6 +852,7 @@ namespace winrt::MEraEmuWin::implementation {
     struct EngineUIPrintLineDataEffect {
         uint32_t starti, len;
         uint32_t color;
+        uint32_t style;
     };
     struct EngineUIPrintLineData {
         hstring txt;
@@ -1105,6 +1196,7 @@ namespace winrt::MEraEmuWin::implementation {
                         }
                         sd->queue_ui_work([sd, msg = hstring(print_msg)] {
                             sd->ui_ctrl->RoutinePrint(msg, 0);
+                            sd->ui_ctrl->SetRedrawState(2);
                         });
                     }
                     sd->engine_stop_flag.wait(false, std::memory_order_acquire);
@@ -1159,6 +1251,9 @@ namespace winrt::MEraEmuWin::implementation {
         m_cur_composing_line = {};
         m_reused_last_line = false;
         m_cur_line_alignment = {};
+        m_cur_font_style = {};
+        m_cur_font_name = m_default_font_name;
+        m_auto_redraw = true;
         m_brush_map.clear();
         m_font_map.clear();
         ClearValue(m_EngineForeColorProperty);
@@ -1180,7 +1275,7 @@ namespace winrt::MEraEmuWin::implementation {
             STDMETHOD(UpdatesNeeded)() {
                 return tenkai::winrt::ExceptionBoundary([&] {
                     // TODO: SAFETY
-                    m_ui_ctrl->UpdateEngineImageOutput();
+                    m_ui_ctrl->RedrawDirtyEngineImageOutput();
                 });
             }
 
@@ -1226,7 +1321,7 @@ namespace winrt::MEraEmuWin::implementation {
         }
         m_ev_UnhandledException(*this, make<EngineUnhandledExceptionEventArgs>(code, ex_msg));
     }
-    void EngineControl::UpdateEngineImageOutput() {
+    void EngineControl::RedrawDirtyEngineImageOutput() {
         int height = 0;
         if (!m_ui_lines.empty()) {
             height = m_ui_lines.back().acc_height;
@@ -1287,6 +1382,14 @@ namespace winrt::MEraEmuWin::implementation {
             }
         }
     }
+    void EngineControl::FlushEngineImageOutputLayout() {
+        auto height = GetCalculatedUIHeight();
+        check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, m_last_redraw_dirty_height * m_yscale));
+        m_last_redraw_dirty_height = height;
+        check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, height * m_yscale));
+        // TODO: Is this an XAML bug?
+        EngineOutputImage().InvalidateMeasure();
+    }
     void EngineControl::InitD2DDevice(bool force_software) {
         D3D_FEATURE_LEVEL feature_levels[]{
             D3D_FEATURE_LEVEL_11_1,
@@ -1336,10 +1439,7 @@ namespace winrt::MEraEmuWin::implementation {
         }
 
         if (m_vsis_noref) {
-            int height = 0;
-            if (!m_ui_lines.empty()) {
-                height = m_ui_lines.back().acc_height;
-            }
+            int height = GetCalculatedUIHeight();
             auto new_w = static_cast<int>(m_ui_width * m_xscale);
             auto new_h = static_cast<int>(height * m_yscale);
             check_hresult(m_vsis_noref->Resize(new_w, new_h));
@@ -1413,6 +1513,7 @@ namespace winrt::MEraEmuWin::implementation {
                 if (m_input_last_prompt != prompt) {
                     m_input_last_prompt = prompt;
                     RoutineReuseLastLine(prompt);
+                    FlushEngineImageOutputLayout();
                 }
             }
         }
@@ -1434,9 +1535,15 @@ namespace winrt::MEraEmuWin::implementation {
 
             auto height = GetCalculatedUIHeight();
 
-            // TODO: Support different fonts
             com_ptr<IDWriteTextFormat> txt_fmt;
-            txt_fmt.copy_from(GetOrCreateTextFormat(m_default_font_name));
+            try {
+                txt_fmt.copy_from(GetOrCreateTextFormat(m_cur_font_name));
+            }
+            catch (...) {
+                // Font does not exist, fallback
+                m_cur_font_name = m_default_font_name;
+                txt_fmt.copy_from(GetOrCreateTextFormat(m_default_font_name));
+            }
 
             // TODO: Improve string concatenation performance
             m_ui_lines.emplace_back(hstring{}, txt_fmt);
@@ -1445,7 +1552,7 @@ namespace winrt::MEraEmuWin::implementation {
                 auto starti = cur_line.txt.size();
                 cur_line.txt = cur_line.txt + part.str;
                 cur_line.effects.push_back({ .starti = starti, .len = part.str.size(),
-                    .color = part.color });
+                    .color = part.color, .style = m_cur_font_style });
             }
             m_cur_composing_line = {};
 
@@ -1478,11 +1585,8 @@ namespace winrt::MEraEmuWin::implementation {
         }
 
         // Resize to trigger updates
-        if (updated) {
-            auto height = GetCalculatedUIHeight();
-            check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, height * m_yscale));
-            // TODO: Is this an XMAL bug?
-            EngineOutputImage().InvalidateMeasure();
+        if (updated && m_auto_redraw) {
+            FlushEngineImageOutputLayout();
         }
     }
     void EngineControl::RoutineHtmlPrint(hstring const& content) {
@@ -1494,6 +1598,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         // Flush intermediate print contents first
         FlushCurPrintLine();
+        FlushEngineImageOutputLayout();
 
         m_input_start_t = winrt::clock::now();
         m_input_last_prompt = {};
@@ -1516,6 +1621,7 @@ namespace winrt::MEraEmuWin::implementation {
         if (input_req->time_limit >= 0) {
             // TODO: More precise countdown handling
             m_input_countdown_timer.Start();
+            OnInputCountDownTick(nullptr, nullptr);
         }
         // TODO: Check if user is skipping
     }
@@ -1541,13 +1647,51 @@ namespace winrt::MEraEmuWin::implementation {
             auto ie = end(m_ui_lines);
             m_ui_lines.erase(ie - count, ie);
         }
-        auto height = GetCalculatedUIHeight();
-        check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, height * m_yscale));
-        EngineOutputImage().InvalidateMeasure();
+        if (m_auto_redraw) {
+            FlushEngineImageOutputLayout();
+        }
+        else {
+            m_last_redraw_dirty_height = std::min(m_last_redraw_dirty_height, GetCalculatedUIHeight());
+        }
     }
     void EngineControl::RoutinePrintButton(hstring const& content, hstring const& value, PrintExtendedFlags flags) {
         // TODO: RoutinePrintButton
         RoutinePrint(format(L"[{}] {}", value, content), flags);
+    }
+
+    void EngineControl::SetCurrentLineAlignment(int64_t value) {
+        m_cur_line_alignment = (uint32_t)value;
+    }
+    int64_t EngineControl::GetCurrentLineAlignment() {
+        return m_cur_line_alignment;
+    }
+    void EngineControl::SetCurrentFontStyle(int64_t value) {
+        m_cur_font_style = (uint32_t)value;
+    }
+    int64_t EngineControl::GetCurrentFontStyle() {
+        return m_cur_font_style;
+    }
+    void EngineControl::SetCurrentFontName(hstring const& value) {
+        // TODO: Verify font name?
+        m_cur_font_name = value.empty() ? m_default_font_name : value;
+    }
+    hstring EngineControl::GetCurrentFontName() {
+        return m_cur_font_name;
+    }
+    void EngineControl::SetRedrawState(int64_t value) {
+        if (value == 0) {
+            m_auto_redraw = false;
+        }
+        else if (value == 1) {
+            m_auto_redraw = true;
+        }
+        else {
+            m_auto_redraw = true;
+            FlushEngineImageOutputLayout();
+        }
+    }
+    int64_t EngineControl::GetRedrawState() {
+        return m_auto_redraw;
     }
 
 #define DP_CLASS EngineControl

@@ -90,3 +90,18 @@ pub fn builtin_var_props(name: &str) -> Option<VarProps> {
     // VariableSize.csv?
     todo!()
 }
+
+pub fn is_local_or_arg_var(name: &str) -> bool {
+    name.eq_ignore_ascii_case("LOCAL")
+        || name.eq_ignore_ascii_case("LOCALS")
+        || name.eq_ignore_ascii_case("ARG")
+        || name.eq_ignore_ascii_case("ARGS")
+}
+
+pub fn parse_era_int(val: &str) -> Option<i64> {
+    if let Some(x) = val.strip_prefix("0x").or_else(|| val.strip_prefix("0X")) {
+        i64::from_str_radix(x, 16).ok()
+    } else {
+        val.parse::<i64>().ok()
+    }
+}
