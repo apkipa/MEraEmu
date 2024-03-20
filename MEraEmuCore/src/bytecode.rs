@@ -184,6 +184,7 @@ pub enum EraBytecodePrimaryType {
     FindLastChara,
     VarSet,
     CVarSet,
+    GetVarSize,
     GetCharaNum,
     GetHostTimeRaw,
     GetHostTime,
@@ -246,8 +247,8 @@ pub struct EraInputSubBytecodeType {
     __: modular_bitfield::specifiers::B4,
 }
 #[repr(u8)]
-#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
-pub enum EraCsvGetProp2SubBytecodeType {
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraCharaCsvPropType {
     CsvName,
     CsvCallName,
     CsvNickName,
@@ -263,7 +264,7 @@ pub enum EraCsvGetProp2SubBytecodeType {
     CsvEquip,
     CsvCFlag,
 }
-impl EraCsvGetProp2SubBytecodeType {
+impl EraCharaCsvPropType {
     // pub fn from_i(value: u8) -> Self {
     //     num_traits::FromPrimitive::from_u8(value).unwrap_or(Self::Invalid)
     // }
@@ -273,7 +274,134 @@ impl EraCsvGetProp2SubBytecodeType {
     pub fn to_i(self) -> u8 {
         num_traits::ToPrimitive::to_u8(&self).unwrap()
     }
+    pub fn try_from_var(var: &str) -> Option<Self> {
+        use EraCharaCsvPropType::*;
+        let is = |x| var.eq_ignore_ascii_case(x);
+        Some(if is("BASE") || is("MAXBASE") {
+            CsvBase
+        } else if is("CSTR") {
+            CsvCStr
+        } else if is("ABL") {
+            CsvAbl
+        } else if is("TALENT") {
+            CsvTalent
+        } else if is("MARK") {
+            CsvMark
+        } else if is("EXP") {
+            CsvExp
+        } else if is("RELATION") {
+            CsvRelation
+        } else if is("JUEL") {
+            CsvJuel
+        } else if is("EQUIP") {
+            CsvEquip
+        } else if is("CFLAG") {
+            CsvCFlag
+        } else {
+            return None;
+        })
+    }
 }
+#[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraCsvVarKind {
+    CsvAbl,
+    CsvExp,
+    CsvTalent,
+    CsvPalam,
+    CsvTrain,
+    CsvMark,
+    CsvItem,
+    CsvBase,
+    CsvSource,
+    CsvEx,
+    CsvStr,
+    CsvEquip,
+    CsvTEquip,
+    CsvFlag,
+    CsvTFlag,
+    CsvCFlag,
+    CsvTCVar,
+    CsvCStr,
+    CsvStain,
+    //CsvStrName,
+    CsvTStr,
+    CsvSaveStr,
+    CsvGlobal,
+    CsvGlobals,
+}
+impl EraCsvVarKind {
+    // pub fn from_i(value: u8) -> Self {
+    //     num_traits::FromPrimitive::from_u8(value).unwrap_or(Self::Invalid)
+    // }
+    pub fn try_from_i(value: u8) -> Option<Self> {
+        num_traits::FromPrimitive::from_u8(value)
+    }
+    pub fn to_i(self) -> u8 {
+        num_traits::ToPrimitive::to_u8(&self).unwrap()
+    }
+    pub fn try_from_var(var: &str) -> Option<Self> {
+        use EraCsvVarKind::*;
+        let is = |x| var.eq_ignore_ascii_case(x);
+        Some(if is("ABL") {
+            CsvAbl
+        } else if is("EXP") {
+            CsvExp
+        } else if is("TALENT") {
+            CsvTalent
+        } else if is("PALAM")
+            || is("JUEL")
+            || is("GOTJUEL")
+            || is("UP")
+            || is("DOWN")
+            || is("CUP")
+            || is("CDOWN")
+        {
+            CsvPalam
+        } else if is("TRAIN") {
+            CsvTrain
+        } else if is("MARK") {
+            CsvMark
+        } else if is("ITEM") || is("ITEMPRICE") || is("ITEMSALES") {
+            CsvItem
+        } else if is("BASE") || is("MAXBASE") || is("DOWNBASE") || is("LOSEBASE") {
+            CsvBase
+        } else if is("SOURCE") {
+            CsvSource
+        } else if is("EX") || is("NOWEX") {
+            CsvEx
+        } else if is("STR") {
+            CsvStr
+        } else if is("EQUIP") {
+            CsvEquip
+        } else if is("TEQUIP") {
+            CsvTEquip
+        } else if is("FLAG") {
+            CsvFlag
+        } else if is("TFLAG") {
+            CsvTFlag
+        } else if is("CFLAG") {
+            CsvCFlag
+        } else if is("TCVAR") {
+            CsvTCVar
+        } else if is("CSTR") {
+            CsvCStr
+        } else if is("STAIN") {
+            CsvStain
+        } else if is("TSTR") {
+            CsvTStr
+        } else if is("SAVESTR") {
+            CsvSaveStr
+        } else if is("GLOBAL") {
+            CsvGlobal
+        } else if is("GLOBALS") {
+            CsvGlobals
+        } else {
+            return None;
+        })
+    }
+}
+
 #[repr(u8)]
 #[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone)]
 pub enum EraBeginSystemProcedureKind {

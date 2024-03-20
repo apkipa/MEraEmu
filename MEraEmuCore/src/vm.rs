@@ -3,8 +3,8 @@ use itertools::Itertools;
 
 use crate::{
     bytecode::{
-        ArrIntValue, ArrStrValue, EraBytecodePrimaryType, EraCharaInitTemplate,
-        EraCsvGetProp2SubBytecodeType, EraInputSubBytecodeType, FlatValue, IntValue,
+        ArrIntValue, ArrStrValue, EraBytecodePrimaryType, EraCharaCsvPropType,
+        EraCharaInitTemplate, EraCsvVarKind, EraInputSubBytecodeType, FlatValue, IntValue,
         PadStringFlags, PrintExtendedFlags, SourcePosInfo, StrValue, Value, ValueKind,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
@@ -251,6 +251,17 @@ macro_rules! bail_opt {
     ($ctx:expr, $is_error:expr, $msg:expr) => {{
         vm_report_err!($ctx, $ctx.cur_frame, $is_error, $msg);
         return None;
+    }};
+}
+macro_rules! warn_opt {
+    ($ctx:expr, None, $is_error:expr, $msg:expr) => {{
+        vm_report_err!($ctx, None, $is_error, $msg);
+    }};
+    ($ctx:expr, $frame:expr, $is_error:expr, $msg:expr) => {{
+        vm_report_err!($ctx, $frame, $is_error, $msg);
+    }};
+    ($ctx:expr, $is_error:expr, $msg:expr) => {{
+        vm_report_err!($ctx, $ctx.cur_frame, $is_error, $msg);
     }};
 }
 macro_rules! vm_read_chunk_u8 {
@@ -764,7 +775,7 @@ pub trait EraVirtualMachineCallback {
     fn on_get_key_state(&mut self, key_code: i64) -> i64;
     // Private
     /// Translates strings to indices.
-    fn on_csv_get_num(&mut self, name: &str) -> Option<u32>;
+    fn on_csv_get_num(&mut self, kind: EraCsvVarKind, name: &str) -> Option<u32>;
 }
 
 impl EraVirtualMachine {
@@ -1180,7 +1191,7 @@ impl EraVirtualMachine {
                             .map(|&x| &self.funcs[x]),
                     };
                     if let Some(func_info) = func_info {
-                        if func_info.args.len() != args_cnt {
+                        if args_cnt > func_info.args.len() {
                             bail_opt!(
                                 ctx,
                                 true,
@@ -1239,6 +1250,19 @@ impl EraVirtualMachine {
                                         }
                                         _ => bail_opt!(ctx, true, "wrong arg pack"),
                                     }
+                                }
+                            }
+                        }
+                        // Fill remaining omitted arguments
+                        for param in &func_info.args[args_cnt..] {
+                            let param_kind = param.kind();
+                            match param_kind {
+                                ValueKind::ArrInt | ValueKind::ArrStr => {
+                                    bail_opt!(ctx, true, "cannot omit reference parameter");
+                                }
+                                ValueKind::Int | ValueKind::Str => {
+                                    // Pass in default value
+                                    ctx.stack.push(param.clone().into());
                                 }
                             }
                         }
@@ -3368,6 +3392,24 @@ impl EraVirtualMachine {
                         _ => bail_opt!(ctx, true, "value must be arrays"),
                     }
                 }
+                GetVarSize => {
+                    let [arr, dim] = ctx.pop_stack()?;
+                    unpack_int!(ctx, dim);
+                    let dims = match arr.val.into_unpacked() {
+                        FlatValue::ArrInt(x) => x.borrow().dims.clone(),
+                        FlatValue::ArrStr(x) => x.borrow().dims.clone(),
+                        _ => bail_opt!(ctx, true, "value must be arrays"),
+                    };
+                    let size = if dim.val < 0 {
+                        dims.last().copied()
+                    } else {
+                        dims.get(dim.val as usize).copied()
+                    };
+                    let Some(result) = size else {
+                        bail_opt!(ctx, true, "VARSIZE on invalid variable dimension");
+                    };
+                    ctx.stack.push(Value::new_int(result as _).into());
+                }
                 GetCharaNum => {
                     ctx.stack
                         .push(Value::new_int(self.charas_count as _).into());
@@ -3518,8 +3560,8 @@ impl EraVirtualMachine {
                     ctx.callback.on_clearline(count.val);
                 }
                 CsvGetProp2 => {
-                    use EraCsvGetProp2SubBytecodeType::*;
-                    let Some(sub_bc) = EraCsvGetProp2SubBytecodeType::try_from_i(
+                    use EraCharaCsvPropType::*;
+                    let Some(sub_bc) = EraCharaCsvPropType::try_from_i(
                         ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?,
                     ) else {
                         bail_opt!(
@@ -3569,11 +3611,17 @@ impl EraVirtualMachine {
                     }
                 }
                 CsvGetNum => {
+                    let Some(kind) =
+                        EraCsvVarKind::try_from_i(ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?)
+                    else {
+                        bail_opt!(ctx, true, "invalid EraCsvVarKind (memory corrupted?)");
+                    };
+                    ip_offset_delta += 1;
                     let [name] = ctx.pop_stack()?;
                     let name = ctx.unpack_str(name.into())?;
                     let result = ctx
                         .callback
-                        .on_csv_get_num(&name.val)
+                        .on_csv_get_num(kind, &name.val)
                         .map(|x| x as _)
                         .unwrap_or(-1);
                     ctx.stack.push(Value::new_int(result).into());
@@ -3636,6 +3684,7 @@ impl EraVirtualMachine {
                                             "MAXBASE" => &chara_template.maxbase,
                                             "MARK" => &chara_template.mark,
                                             "EXP" => &chara_template.exp,
+                                            "ABL" => &chara_template.abl,
                                             "TALENT" => &chara_template.talent,
                                             "RELATION" => &chara_template.relation,
                                             "CFLAG" => &chara_template.cflag,
@@ -3672,7 +3721,7 @@ impl EraVirtualMachine {
                                     _ => {
                                         let empty_map = Default::default();
                                         let src = match chara_var.name.as_str() {
-                                            "CFLAG" => &chara_template.cstr,
+                                            "CSTR" => &chara_template.cstr,
                                             _ => &empty_map,
                                         };
                                         x.vals[start_idx..end_idx].fill(Default::default());

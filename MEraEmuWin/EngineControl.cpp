@@ -423,7 +423,9 @@ namespace winrt::MEraEmuWin::implementation {
                 sd->ui_ctrl->EngineForeColor(old_clr);
             });
             // SAFETY: Engine and callback are on the same thread
-            m_sd->has_execution_error = true;
+            if (is_error) {
+                m_sd->has_execution_error = true;
+            }
             //m_sd->engine_stop_flag.store(true, std::memory_order_relaxed);
         }
         uint64_t on_get_rand() override {
@@ -433,7 +435,9 @@ namespace winrt::MEraEmuWin::implementation {
             m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content), flags] {
                 sd->ui_ctrl->RoutinePrint(content, flags);
             });
-            // TODO: on_print() wait flag
+            if (flags & ERA_PEF_IS_WAIT) {
+                on_wait(true, false);
+            }
         }
         void on_html_print(std::string_view content) override {
             m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content)] {
@@ -654,8 +658,10 @@ namespace winrt::MEraEmuWin::implementation {
             }
             throw std::exception("no such variable");
         }
-        void on_print_button(std::string_view content, std::string_view value, PrintExtendedFlags flags) override
-        {
+        void on_print_button(std::string_view content, std::string_view value, PrintExtendedFlags flags) override {
+            m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content), value = to_hstring(value), flags] {
+                sd->ui_ctrl->RoutinePrintButton(content, value, flags);
+            });
         }
         int64_t on_gcreate(int64_t gid, int64_t width, int64_t height) override
         {
@@ -1538,6 +1544,10 @@ namespace winrt::MEraEmuWin::implementation {
         auto height = GetCalculatedUIHeight();
         check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, height * m_yscale));
         EngineOutputImage().InvalidateMeasure();
+    }
+    void EngineControl::RoutinePrintButton(hstring const& content, hstring const& value, PrintExtendedFlags flags) {
+        // TODO: RoutinePrintButton
+        RoutinePrint(format(L"[{}] {}", value, content), flags);
     }
 
 #define DP_CLASS EngineControl

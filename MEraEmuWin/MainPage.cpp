@@ -50,8 +50,11 @@ namespace winrt::MEraEmuWin::implementation {
     }
     MainPage::~MainPage() {
         // Remove WndProc hook
-        auto hwnd = (HWND)Tenkai::UI::Xaml::Window::GetCurrentMain().View().Id().Value;
-        RemoveWindowSubclass(hwnd, SubclassWndProc, 1);
+        auto wnd = Tenkai::UI::Xaml::Window::GetCurrentMain();
+        if (wnd) {
+            auto hwnd = (HWND)wnd.View().Id().Value;
+            RemoveWindowSubclass(hwnd, SubclassWndProc, 1);
+        }
     }
     void MainPage::InitializeComponent() {
         MainPageT::InitializeComponent();

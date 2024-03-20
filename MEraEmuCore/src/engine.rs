@@ -11,7 +11,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::{
-    bytecode::{EraCharaInitTemplate, IntValue, SourcePosInfo, StrValue, Value},
+    bytecode::{EraCharaInitTemplate, EraCsvVarKind, IntValue, SourcePosInfo, StrValue, Value},
     compiler::{EraBytecodeCompilation, EraCompilerFileInput},
     lexer::EraLexerTempStorage,
     parser::EraParserSlimVarTypeInfo,
@@ -20,6 +20,7 @@ use crate::{
 
 use crate::util::*;
 
+#[derive(Debug)]
 struct InitialVarDesc {
     pub is_string: bool,
     pub dims: smallvec::SmallVec<[u32; 3]>,
@@ -41,7 +42,7 @@ pub struct MEraEngine<'a> {
     define_list: HashMap<Box<[u8]>, Box<[u8]>>,
     chara_list: BTreeMap<u32, EraCharaInitTemplate>,
     initial_vars: Option<hashbrown::HashMap<Ascii<String>, InitialVarDesc>>,
-    contextual_indices: HashMap<Ascii<String>, u32>,
+    contextual_indices: HashMap<Ascii<String>, Vec<(EraCsvVarKind, u32)>>,
 }
 
 pub const MAX_CHARA_COUNT: u32 = 768;
@@ -611,7 +612,7 @@ impl<'a> MEraEngine<'a> {
         iv.add_int("X", smallvec::smallvec![1]);
         iv.add_int("Y", smallvec::smallvec![1]);
         iv.add_int("Z", smallvec::smallvec![1]);
-        iv.add_int("ITEMPRICE", smallvec::smallvec![1]);
+        iv.add_const_int("ITEMPRICE", smallvec::smallvec![1]);
         // ………………………………………………
         // 文字列配列型変数
         // ………………………………………………
@@ -620,27 +621,27 @@ impl<'a> MEraEngine<'a> {
         iv.add_str("TSTR", smallvec::smallvec![1]);
         iv.add_str("STR", smallvec::smallvec![1]);
         // ITEMNAMEとITEMPRICEは片方を変更すると他方も同じ値に変更されます
-        iv.add_str("ITEMNAME", smallvec::smallvec![1]);
-        iv.add_str("ABLNAME", smallvec::smallvec![1]);
-        iv.add_str("EXPNAME", smallvec::smallvec![1]);
-        iv.add_str("TALENTNAME", smallvec::smallvec![1]);
-        iv.add_str("PALAMNAME", smallvec::smallvec![1]);
-        iv.add_str("TRAINNAME", smallvec::smallvec![1]);
-        iv.add_str("MARKNAME", smallvec::smallvec![1]);
-        iv.add_str("BASENAME", smallvec::smallvec![1]);
-        iv.add_str("SOURCENAME", smallvec::smallvec![1]);
-        iv.add_str("EXNAME", smallvec::smallvec![1]);
-        iv.add_str("EQUIPNAME", smallvec::smallvec![1]);
-        iv.add_str("TEQUIPNAME", smallvec::smallvec![1]);
-        iv.add_str("FLAGNAME", smallvec::smallvec![1]);
-        iv.add_str("CFLAGNAME", smallvec::smallvec![1]);
-        iv.add_str("TFLAGNAME", smallvec::smallvec![1]);
-        iv.add_str("TCVARNAME", smallvec::smallvec![1]);
-        iv.add_str("CSTRNAME", smallvec::smallvec![1]);
-        iv.add_str("STAINNAME", smallvec::smallvec![1]);
-        iv.add_str("STRNAME", smallvec::smallvec![1]);
-        iv.add_str("TSTRNAME", smallvec::smallvec![1]);
-        iv.add_str("SAVESTRNAME", smallvec::smallvec![1]);
+        iv.add_const_str("ITEMNAME", smallvec::smallvec![1]);
+        iv.add_const_str("ABLNAME", smallvec::smallvec![1]);
+        iv.add_const_str("EXPNAME", smallvec::smallvec![1]);
+        iv.add_const_str("TALENTNAME", smallvec::smallvec![1]);
+        iv.add_const_str("PALAMNAME", smallvec::smallvec![1]);
+        iv.add_const_str("TRAINNAME", smallvec::smallvec![1]);
+        iv.add_const_str("MARKNAME", smallvec::smallvec![1]);
+        iv.add_const_str("BASENAME", smallvec::smallvec![1]);
+        iv.add_const_str("SOURCENAME", smallvec::smallvec![1]);
+        iv.add_const_str("EXNAME", smallvec::smallvec![1]);
+        iv.add_const_str("EQUIPNAME", smallvec::smallvec![1]);
+        iv.add_const_str("TEQUIPNAME", smallvec::smallvec![1]);
+        iv.add_const_str("FLAGNAME", smallvec::smallvec![1]);
+        iv.add_const_str("CFLAGNAME", smallvec::smallvec![1]);
+        iv.add_const_str("TFLAGNAME", smallvec::smallvec![1]);
+        iv.add_const_str("TCVARNAME", smallvec::smallvec![1]);
+        iv.add_const_str("CSTRNAME", smallvec::smallvec![1]);
+        iv.add_const_str("STAINNAME", smallvec::smallvec![1]);
+        iv.add_const_str("STRNAME", smallvec::smallvec![1]);
+        iv.add_const_str("TSTRNAME", smallvec::smallvec![1]);
+        iv.add_const_str("SAVESTRNAME", smallvec::smallvec![1]);
         // ………………………………………………
         // 角色変数
         // ………………………………………………
@@ -727,7 +728,7 @@ impl<'a> MEraEngine<'a> {
         content: &[u8],
         kind: EraCsvLoadKind,
     ) -> Result<(), MEraEngineError> {
-        let mut load_2_fn = |target_name: &str, no_define: bool| {
+        let mut load_2_fn = |target_name: &str, kind: Option<EraCsvVarKind>| {
             let Some(iv) = &mut self.initial_vars else {
                 return Err(MEraEngineError::new("csv loaded too late".to_owned()));
             };
@@ -763,8 +764,11 @@ impl<'a> MEraEngine<'a> {
                 let name = String::from_utf8_lossy(&name).into_owned();
                 initial_sval[index as usize] = Rc::new(StrValue { val: name.clone() });
                 // Add to define list
-                if !no_define {
-                    self.contextual_indices.insert(Ascii::new(name), index);
+                if let Some(kind) = kind {
+                    self.contextual_indices
+                        .entry(Ascii::new(name))
+                        .or_default()
+                        .push((kind, index));
                 }
             }
             var_desc.initial_sval = Some(initial_sval);
@@ -877,6 +881,8 @@ impl<'a> MEraEngine<'a> {
                 }
             }
             EraCsvLoadKind::Chara_ => {
+                use EraCsvVarKind::*;
+
                 static RE: Lazy<Regex> =
                     Lazy::new(|| Regex::new(r"^(?:|.*[/\\])Chara(\d+).*\.(?i:csv)$").unwrap());
                 let Some(csv_no) = RE.captures(filename) else {
@@ -952,9 +958,13 @@ impl<'a> MEraEngine<'a> {
                         }
                     };
                     let get_contextual_idx =
-                        |this: &mut Self, val: &str| -> Result<u32, _> {
+                        |this: &mut Self, csv_kind, val: &str| -> Result<u32, _> {
                             let Some(idx) = val.parse().ok().or_else(|| {
-                                this.contextual_indices.get(Ascii::new_str(val)).copied()
+                                // Not an integer, parse as CSV index name instead
+                                this.contextual_indices
+                                    .get(Ascii::new_str(val))
+                                    .and_then(|x| x.iter().find(|x| x.0 == csv_kind))
+                                    .map(|x| x.1)
                             }) else {
                                 let msg = format!("invalid CSV variable index `{val}`");
                                 this.callback.on_compile_error(&EraScriptErrorInfo {
@@ -983,20 +993,26 @@ impl<'a> MEraEngine<'a> {
                             }
                         }
                     };
+                    let get_col_i64 = |this: &mut Self,
+                                       index: usize,
+                                       cols: &[String]|
+                     -> Result<i64, MEraEngineError> {
+                        match cols.get(index) {
+                            Some(x) if !x.is_empty() => Ok(parse_i64(this, x)?),
+                            _ => {
+                                this.callback.on_compile_error(&EraScriptErrorInfo {
+                                    filename,
+                                    src_info: src_info.into(),
+                                    is_error: true,
+                                    msg: "the 3rd column is missing; assuming 1 was given",
+                                });
+                                Ok(1)
+                            }
+                        }
+                    };
                     let get_col_2_i64 =
                         |this: &mut Self, cols: &[String]| -> Result<i64, MEraEngineError> {
-                            match cols.get(2) {
-                                Some(x) if !x.is_empty() => Ok(parse_i64(this, x)?),
-                                _ => {
-                                    this.callback.on_compile_error(&EraScriptErrorInfo {
-                                        filename,
-                                        src_info: src_info.into(),
-                                        is_error: true,
-                                        msg: "the 3rd column is missing; assuming 1 was given",
-                                    });
-                                    Ok(1)
-                                }
-                            }
+                            get_col_i64(this, 2, cols)
                         };
                     match cols[0].as_str() {
                         "NO" | "番号" => {
@@ -1015,52 +1031,52 @@ impl<'a> MEraEngine<'a> {
                             chara_template.mastername = std::mem::take(&mut cols[1]);
                         }
                         "MARK" | "刻印" => {
-                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let idx = get_contextual_idx(self, CsvMark, &cols[1])?;
                             let val = get_col_2_i64(self, &mut cols)?;
                             chara_template.mark.insert(idx, val);
                         }
                         "EXP" | "経験" => {
-                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let idx = get_contextual_idx(self, CsvExp, &cols[1])?;
                             let val = get_col_2_i64(self, &mut cols)?;
                             chara_template.exp.insert(idx, val);
                         }
                         "ABL" | "能力" => {
-                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let idx = get_contextual_idx(self, CsvAbl, &cols[1])?;
                             let val = get_col_2_i64(self, &mut cols)?;
                             chara_template.abl.insert(idx, val);
                         }
                         "BASE" | "基礎" => {
-                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let idx = get_contextual_idx(self, CsvBase, &cols[1])?;
                             let val = get_col_2_i64(self, &mut cols)?;
                             chara_template.maxbase.insert(idx, val);
                         }
                         "TALENT" | "素質" => {
-                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let idx = get_contextual_idx(self, CsvTalent, &cols[1])?;
                             let val = get_col_2_i64(self, &mut cols)?;
                             chara_template.talent.insert(idx, val);
                         }
                         "RELATION" | "相性" => {
-                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let idx = get_col_i64(self, 1, &cols)?;
                             let val = get_col_2_i64(self, &mut cols)?;
-                            chara_template.relation.insert(idx, val);
+                            chara_template.relation.insert(idx as _, val);
                         }
                         "CFLAG" | "フラグ" => {
-                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let idx = get_contextual_idx(self, CsvCFlag, &cols[1])?;
                             let val = get_col_2_i64(self, &mut cols)?;
                             chara_template.cflag.insert(idx, val);
                         }
                         "EQUIP" | "装着物" => {
-                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let idx = get_contextual_idx(self, CsvEquip, &cols[1])?;
                             let val = get_col_2_i64(self, &mut cols)?;
                             chara_template.equip.insert(idx, val);
                         }
                         "JUEL" | "珠" => {
-                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let idx = get_contextual_idx(self, CsvPalam, &cols[1])?;
                             let val = get_col_2_i64(self, &mut cols)?;
                             chara_template.juel.insert(idx, val);
                         }
                         "CSTR" => {
-                            let idx = get_contextual_idx(self, &cols[1])?;
+                            let idx = get_contextual_idx(self, CsvCStr, &cols[1])?;
                             let val = get_col_2_str(self, &mut cols)?;
                             chara_template.cstr.insert(idx, val);
                         }
@@ -1081,12 +1097,12 @@ impl<'a> MEraEngine<'a> {
                     }
                 }
             }
-            EraCsvLoadKind::Abl => load_2_fn("ABLNAME", false)?,
-            EraCsvLoadKind::Exp => load_2_fn("EXPNAME", false)?,
-            EraCsvLoadKind::Talent => load_2_fn("TALENTNAME", false)?,
-            EraCsvLoadKind::Palam => load_2_fn("PALAMNAME", false)?,
-            EraCsvLoadKind::Train => load_2_fn("TRAINNAME", false)?,
-            EraCsvLoadKind::Mark => load_2_fn("MARKNAME", false)?,
+            EraCsvLoadKind::Abl => load_2_fn("ABLNAME", Some(EraCsvVarKind::CsvAbl))?,
+            EraCsvLoadKind::Exp => load_2_fn("EXPNAME", Some(EraCsvVarKind::CsvExp))?,
+            EraCsvLoadKind::Talent => load_2_fn("TALENTNAME", Some(EraCsvVarKind::CsvTalent))?,
+            EraCsvLoadKind::Palam => load_2_fn("PALAMNAME", Some(EraCsvVarKind::CsvPalam))?,
+            EraCsvLoadKind::Train => load_2_fn("TRAINNAME", Some(EraCsvVarKind::CsvTrain))?,
+            EraCsvLoadKind::Mark => load_2_fn("MARKNAME", Some(EraCsvVarKind::CsvMark))?,
             EraCsvLoadKind::Item => {
                 let target_name = "ITEMNAME";
                 let target2_name = "ITEMPRICE";
@@ -1136,30 +1152,33 @@ impl<'a> MEraEngine<'a> {
                     initial_nameval[index as usize] = Rc::new(StrValue { val: name.clone() });
                     initial_priceval[index as usize] = IntValue { val: price as _ };
                     // Add to define list
-                    self.contextual_indices.insert(Ascii::new(name), index);
+                    self.contextual_indices
+                        .entry(Ascii::new(name))
+                        .or_default()
+                        .push((EraCsvVarKind::CsvItem, index));
                 }
                 name_vd.initial_sval = Some(initial_nameval);
                 price_vd.initial_ival = Some(initial_priceval);
             }
-            EraCsvLoadKind::Base => load_2_fn("BASENAME", false)?,
-            EraCsvLoadKind::Source => load_2_fn("SOURCENAME", false)?,
-            EraCsvLoadKind::Ex => load_2_fn("EXNAME", false)?,
-            EraCsvLoadKind::Str => load_2_fn("STR", true)?,
-            EraCsvLoadKind::Equip => load_2_fn("EQUIPNAME", false)?,
-            EraCsvLoadKind::TEquip => load_2_fn("TEQUIPNAME", false)?,
-            EraCsvLoadKind::Flag => load_2_fn("FLAGNAME", false)?,
-            EraCsvLoadKind::TFlag => load_2_fn("TFLAGNAME", false)?,
-            EraCsvLoadKind::CFlag => load_2_fn("CFLAGNAME", false)?,
-            EraCsvLoadKind::TCVar => load_2_fn("TCVARNAME", false)?,
-            EraCsvLoadKind::CStr => load_2_fn("CSTRNAME", false)?,
-            EraCsvLoadKind::Stain => load_2_fn("STAINNAME", false)?,
+            EraCsvLoadKind::Base => load_2_fn("BASENAME", Some(EraCsvVarKind::CsvBase))?,
+            EraCsvLoadKind::Source => load_2_fn("SOURCENAME", Some(EraCsvVarKind::CsvSource))?,
+            EraCsvLoadKind::Ex => load_2_fn("EXNAME", Some(EraCsvVarKind::CsvEx))?,
+            EraCsvLoadKind::Str => load_2_fn("STR", Some(EraCsvVarKind::CsvStr))?,
+            EraCsvLoadKind::Equip => load_2_fn("EQUIPNAME", Some(EraCsvVarKind::CsvEquip))?,
+            EraCsvLoadKind::TEquip => load_2_fn("TEQUIPNAME", Some(EraCsvVarKind::CsvTEquip))?,
+            EraCsvLoadKind::Flag => load_2_fn("FLAGNAME", Some(EraCsvVarKind::CsvFlag))?,
+            EraCsvLoadKind::TFlag => load_2_fn("TFLAGNAME", Some(EraCsvVarKind::CsvTFlag))?,
+            EraCsvLoadKind::CFlag => load_2_fn("CFLAGNAME", Some(EraCsvVarKind::CsvCFlag))?,
+            EraCsvLoadKind::TCVar => load_2_fn("TCVARNAME", Some(EraCsvVarKind::CsvTCVar))?,
+            EraCsvLoadKind::CStr => load_2_fn("CSTRNAME", Some(EraCsvVarKind::CsvCStr))?,
+            EraCsvLoadKind::Stain => load_2_fn("STAINNAME", Some(EraCsvVarKind::CsvStain))?,
             // EraCsvLoadKind::CDFlag1 => load_2_fn("CDFLAGNAME1", false)?,
             // EraCsvLoadKind::CDFlag2 => load_2_fn("CDFLAGNAME2", false)?,
-            EraCsvLoadKind::StrName => load_2_fn("STRNAME", false)?,
-            EraCsvLoadKind::TStr => load_2_fn("TSTRNAME", false)?,
-            EraCsvLoadKind::SaveStr => load_2_fn("SAVESTRNAME", false)?,
-            EraCsvLoadKind::Global => load_2_fn("GLOBALNAME", false)?,
-            EraCsvLoadKind::Globals => load_2_fn("GLOBALSNAME", false)?,
+            EraCsvLoadKind::StrName => load_2_fn("STRNAME", Some(EraCsvVarKind::CsvStr))?,
+            EraCsvLoadKind::TStr => load_2_fn("TSTRNAME", Some(EraCsvVarKind::CsvTStr))?,
+            EraCsvLoadKind::SaveStr => load_2_fn("SAVESTRNAME", Some(EraCsvVarKind::CsvSaveStr))?,
+            EraCsvLoadKind::Global => load_2_fn("GLOBALNAME", Some(EraCsvVarKind::CsvGlobal))?,
+            EraCsvLoadKind::Globals => load_2_fn("GLOBALSNAME", Some(EraCsvVarKind::CsvGlobals))?,
             EraCsvLoadKind::ImageResources => {
                 let dir_prefix = filename
                     .rsplit_once(&['\\', '/'])
@@ -1434,7 +1453,7 @@ impl<'a> MEraEngine<'a> {
         let compilation = match compiler.compile_all(
             std::mem::take(&mut self.file_inputs),
             std::mem::take(&mut self.global_vars),
-            std::mem::take(&mut self.contextual_indices),
+            &self.contextual_indices,
         ) {
             Some(x) => x,
             None => {
@@ -1486,7 +1505,7 @@ impl<'a> MEraEngine<'a> {
 
         struct AdhocCallback<'a> {
             callback: &'a mut dyn MEraEngineSysCallback,
-            contextual_indices: &'a mut HashMap<Ascii<String>, u32>,
+            contextual_indices: &'a mut HashMap<Ascii<String>, Vec<(EraCsvVarKind, u32)>>,
         }
         impl crate::vm::EraVirtualMachineCallback for AdhocCallback<'_> {
             fn on_execution_error(&mut self, error: crate::vm::EraRuntimeErrorInfo) {
@@ -1746,8 +1765,11 @@ impl<'a> MEraEngine<'a> {
                 self.callback.on_get_key_state(key_code)
             }
             // Private
-            fn on_csv_get_num(&mut self, name: &str) -> Option<u32> {
-                self.contextual_indices.get(Ascii::new_str(name)).copied()
+            fn on_csv_get_num(&mut self, kind: EraCsvVarKind, name: &str) -> Option<u32> {
+                self.contextual_indices
+                    .get(Ascii::new_str(name))
+                    .and_then(|x| x.iter().find(|x| x.0 == kind))
+                    .map(|x| x.1)
             }
         }
 

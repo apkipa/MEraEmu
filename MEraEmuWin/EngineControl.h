@@ -124,6 +124,7 @@ namespace winrt::MEraEmuWin::implementation {
         void RoutineInput(std::unique_ptr<InputRequest> request);
         void RoutineReuseLastLine(hstring const& content);
         void RoutineClearLine(uint64_t count);
+        void RoutinePrintButton(hstring const& content, hstring const& value, PrintExtendedFlags flags);
 
         DP_DECLARE(EngineForeColor);
         DP_DECLARE(EngineBackColor);

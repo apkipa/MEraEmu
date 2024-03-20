@@ -7,9 +7,15 @@ using namespace winrt;
 
 int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
     init_apartment(apartment_type::single_threaded);
-    Tenkai::AppService::InitializeForApplication([](auto&&) {
-        make<MEraEmuWin::implementation::App>();
+    Tenkai::AppService::InitializeForApplication([&](auto&&) {
+        // HACK: Keep application alive FOREVER to prevent crashes on
+        //       application shutdown
+        make_self<MEraEmuWin::implementation::App>().detach();
     });
     Tenkai::AppService::RunLoop();
+
+    // Remove reference to threadpoolwinrt.dll to prevent crashes
+    clear_factory_cache();
+
     return 0;
 }

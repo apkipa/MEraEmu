@@ -10,7 +10,8 @@ use smallvec::SmallVec;
 
 use crate::{
     bytecode::{
-        EraBytecodePrimaryType, EraInputSubBytecodeType, FlatValue, PrintExtendedFlags, ValueKind,
+        EraBytecodePrimaryType, EraCharaCsvPropType, EraCsvVarKind, EraInputSubBytecodeType,
+        FlatValue, PrintExtendedFlags, ValueKind,
     },
     lexer::{EraTokenKind, EraTokenLite},
     parser::{EraCommandStmt, EraFunDecl, EraFunKind, EraStmt, EraTermExpr, EraVarExpr},
@@ -529,7 +530,7 @@ pub struct EraCompilerImpl<'a, ErrReportFn> {
     file_name: Rc<str>,
     vars: EraVarPool,
     // intern_vals: HashMap<either::Either<IntValue, Rc<StrValue>>, ()>,
-    contextual_indices: HashMap<Ascii<String>, u32>,
+    contextual_indices: &'a HashMap<Ascii<String>, Vec<(EraCsvVarKind, u32)>>,
 }
 
 pub struct EraCompilerImplFunctionSite<'p, 'a, ErrReportFn> {
@@ -553,6 +554,14 @@ enum EraPseudoVarKind {
     CallerFuncName,
 }
 
+#[derive(Debug, Clone)]
+struct EraNormalVarArrCompileInfoWithDims {
+    kind: EraExpressionValueKind,
+    dims: smallvec::SmallVec<[u32; 3]>,
+    is_charadata: bool,
+    is_ref: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum EraVarArrCompileInfo {
     Pseudo(EraPseudoVarKind),
@@ -561,15 +570,14 @@ enum EraVarArrCompileInfo {
 #[derive(Debug, Clone)]
 enum EraVarArrCompileInfoWithDims {
     Pseudo(EraPseudoVarKind),
-    // (kind, dims, is_charadata)
-    Normal(EraExpressionValueKind, smallvec::SmallVec<[u32; 3]>, bool),
+    Normal(EraNormalVarArrCompileInfoWithDims),
 }
 impl EraVarArrCompileInfo {
     fn from_fat(value: &EraVarArrCompileInfoWithDims) -> Self {
         use EraVarArrCompileInfoWithDims::*;
         match value {
             Pseudo(kind) => Self::Pseudo(*kind),
-            Normal(kind, dims, _) => Self::Normal(*kind, dims.len().try_into().unwrap()),
+            Normal(x) => Self::Normal(x.kind, x.dims.len().try_into().unwrap()),
         }
     }
 }
@@ -582,7 +590,7 @@ impl<T: FnMut(&EraCompileErrorInfo)> EraCompiler<T> {
         &mut self,
         inputs: Vec<EraCompilerFileInput>,
         global_vars: EraVarPool,
-        contextual_indices: HashMap<Ascii<String>, u32>,
+        contextual_indices: &HashMap<Ascii<String>, Vec<(EraCsvVarKind, u32)>>,
     ) -> Option<EraBytecodeCompilation> {
         EraCompilerImpl::new(self, contextual_indices).compile_all(inputs, global_vars)
     }
@@ -591,7 +599,7 @@ impl<T: FnMut(&EraCompileErrorInfo)> EraCompiler<T> {
 impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
     fn new(
         parser: &'a mut EraCompiler<T>,
-        contextual_indices: HashMap<Ascii<String>, u32>,
+        contextual_indices: &'a HashMap<Ascii<String>, Vec<(EraCsvVarKind, u32)>>,
     ) -> Self {
         EraCompilerImpl {
             err_report_fn: &mut parser.err_report_fn,
@@ -3060,8 +3068,12 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 // }
                 let [target, index] = ctx.unpack_some_args(args)?;
                 let target = ctx.this.unpack_var_expr_from_expr(target)?;
+                let Some(csv_kind) = EraCsvVarKind::try_from_var(&target.name) else {
+                    bail_opt!(ctx.this, target.src_info, "unknown CSV var type");
+                };
                 ctx.this.expr_str(index)?;
                 ctx.this.chunk.emit_bytecode(CsvGetNum, src_info);
+                ctx.this.chunk.append_u8(csv_kind.to_i(), src_info);
             }
             b"GROUPMATCH" | b"NOSAMES" | b"ALLSAMES" => {
                 ctx.result()?;
@@ -3160,7 +3172,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             b"CSVNAME" | b"CSVCALLNAME" | b"CSVNICKNAME" | b"CSVMASTERNAME" | b"CSVBASE"
             | b"CSVCSTR" | b"CSVABL" | b"CSVTALENT" | b"CSVMARK" | b"CSVEXP" | b"CSVRELATION"
             | b"CSVJUEL" | b"CSVEQUIP" | b"CSVCFLAG" => {
-                use crate::bytecode::EraCsvGetProp2SubBytecodeType::*;
+                use crate::bytecode::EraCharaCsvPropType::*;
                 let (is_string, sub_bytecode) = match upper_target.as_bytes() {
                     b"CSVNAME" => (true, CsvName),
                     b"CSVCALLNAME" => (true, CsvCallName),
@@ -3337,30 +3349,38 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let dimension = ctx.this.p.evaluate_constant(dimension)?;
                 let dimension = ctx.this.p.unwrap_int_constant(dimension)?;
                 let info = ctx.this.var_arr_with_dims(&var, src_info)?;
-                ctx.this.chunk.emit_bytecode(Pop, src_info);
-                let EraVarArrCompileInfoWithDims::Normal(kind, mut dims, is_charadata) = info
-                else {
+                let EraVarArrCompileInfoWithDims::Normal(mut info) = info else {
                     bail_opt!(
                         ctx.this,
                         src_info,
                         "`VARSIZE` cannot be used on pseudo variables"
                     );
                 };
-                // HACK: VARSIZE ignores chara_no dimension
-                if is_charadata {
-                    dims.remove(0);
-                }
-                let dimension = if dimension < 0 {
-                    dims.last().copied()
+                if info.is_ref {
+                    // Must postpone calculation to runtime
+                    ctx.this
+                        .chunk
+                        .emit_load_const(Value::new_int(dimension), src_info);
+                    ctx.this.chunk.emit_bytecode(GetVarSize, src_info);
                 } else {
-                    dims.get(dimension as usize).copied()
-                };
-                let Some(result) = dimension else {
-                    bail_opt!(ctx.this, src_info, "invalid VARSIZE dimension");
-                };
-                ctx.this
-                    .chunk
-                    .emit_load_const(ctx.this.p.new_value_int(result.into()), src_info);
+                    // Pop compiled var
+                    ctx.this.chunk.emit_pop(src_info);
+                    // HACK: VARSIZE ignores chara_no dimension
+                    if info.is_charadata {
+                        info.dims.remove(0);
+                    }
+                    let dimension = if dimension < 0 {
+                        info.dims.last().copied()
+                    } else {
+                        info.dims.get(dimension as usize).copied()
+                    };
+                    let Some(result) = dimension else {
+                        bail_opt!(ctx.this, src_info, "invalid VARSIZE dimension");
+                    };
+                    ctx.this
+                        .chunk
+                        .emit_load_const(ctx.this.p.new_value_int(result.into()), src_info);
+                }
             }
             b"TOUPPER" | b"TOLOWER" | b"TOHALF" | b"TOFULL" => {
                 ctx.results()?;
@@ -3704,16 +3724,14 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                                 self.chunk.emit_bytecode(CompareEq, x_si);
                             }
                             Range(lhs, rhs) => {
-                                // No short-circuit within single range?
+                                // No short-circuit within single range (always evaluate two sides)?
                                 let lhs_si = lhs.source_pos_info();
                                 if cond_k != self.expression(lhs)? {
                                     bail_opt!(self, lhs_si, "case expression type mismatch");
                                 }
                                 self.chunk.emit_bytecode(CompareL, lhs_si);
                                 self.chunk.emit_bytecode(LogicalNot, lhs_si);
-                                self.chunk.emit_bytecode(DuplicateN, lhs_si);
-                                self.chunk.append_u8(2, lhs_si);
-                                self.chunk.emit_bytecode(Pop, lhs_si);
+                                self.chunk.emit_duplicate_one_n(2, lhs_si);
                                 let rhs_si = rhs.source_pos_info();
                                 if cond_k != self.expression(rhs)? {
                                     bail_opt!(self, rhs_si, "case expression type mismatch");
@@ -3762,8 +3780,8 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     for bt in bt_bodies {
                         bt.complete(self.chunk).unwrap();
                     }
-                    // HACK: Pop stack early to prevent unbalanced stack
-                    self.chunk.emit_bytecode(Pop, x.src_info);
+                    // Pop stack early to prevent unbalanced stack
+                    self.chunk.emit_pop(x.src_info);
                     for stmt in case_body {
                         self.statement(func_kind, stmt)?;
                     }
@@ -3772,6 +3790,8 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 if let Some(bt) = bt_else {
                     bt.complete(self.chunk).unwrap();
                 }
+                // Pop stack early to prevent unbalanced stack
+                self.chunk.emit_pop(x.src_info);
                 for stmt in x.case_else {
                     self.statement(func_kind, stmt)?;
                 }
@@ -4279,26 +4299,32 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 // TODO: Optimize command VARSIZE performance
                 let info = self.var_arr_with_dims(&x.var.name, x.var.src_info)?;
                 self.chunk.emit_bytecode(Pop, x.src_info);
-                let EraVarArrCompileInfoWithDims::Normal(kind, mut dims, is_charadata) = info
-                else {
+                let EraVarArrCompileInfoWithDims::Normal(mut info) = info else {
                     bail_opt!(
                         self,
                         x.src_info,
                         "`VARSIZE` cannot be used on pseudo variables"
                     );
                 };
-                // HACK: VARSIZE ignores chara_no dimension
-                if is_charadata {
-                    dims.remove(0);
+                if info.is_ref {
+                    bail_opt!(
+                        self,
+                        x.src_info,
+                        "VARSIZE on ref variables not yet implemented"
+                    );
                 }
-                for (idx, dim) in dims.into_iter().enumerate() {
+                // HACK: VARSIZE ignores chara_no dimension
+                if info.is_charadata {
+                    info.dims.remove(0);
+                }
+                for (idx, dim) in info.dims.into_iter().enumerate() {
                     let idx = EraExpr::new_int(idx as _, x.src_info);
                     self.arr_set("RESULT", vec![idx], x.src_info, |this| {
                         this.chunk
                             .emit_load_const(this.p.new_value_int(dim as _), x.var.src_info);
                         Some(TInteger)
                     })?;
-                    self.chunk.emit_bytecode(Pop, x.src_info);
+                    self.chunk.emit_pop(x.src_info);
                 }
             }
             Cmd::Swap(x) => {
@@ -5073,6 +5099,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         let var_kind;
         let var_dims;
         let is_charadata;
+        let is_ref;
         if let Some(var) = self
             .func_info
             .local_var_idxs
@@ -5087,6 +5114,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             is_in_global_frame = var.is_in_global_frame;
             var_idx = var.idx_in_frame;
             is_charadata = var.is_charadata;
+            is_ref = var.is_ref;
         } else if let Some(glob_var_idx) = self.p.vars.get_var_idx(&var_name).or_else(|| {
             self.p
                 .vars
@@ -5101,6 +5129,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             is_in_global_frame = true;
             var_idx = glob_var_idx;
             is_charadata = var_info.is_charadata;
+            is_ref = false;
         } else {
             // HACK: For undefined identifiers, do special handling (such as RAND pesudo-array access)
             if var_name.eq_ignore_ascii_case("RAND") {
@@ -5140,7 +5169,12 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             self.chunk.emit_bytecode(GetLocal, src_info);
         }
 
-        Some(Normal(var_kind, var_dims, is_charadata))
+        Some(Normal(EraNormalVarArrCompileInfoWithDims {
+            kind: var_kind,
+            dims: var_dims,
+            is_charadata,
+            is_ref,
+        }))
     }
     fn arr_mdidx(
         &mut self,
@@ -5162,23 +5196,29 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             let src_info = idx.source_pos_info();
             let idx_kind = match idx {
                 // HACK: Contextual indices replacing
-                EraExpr::Term(EraTermExpr::Var(x))
-                    if x.idxs.is_empty()
-                        && routine::is_csv_var(&var_name)
-                        && self
+                EraExpr::Term(EraTermExpr::Var(x)) if x.idxs.is_empty() => {
+                    let handled = (|| {
+                        let Some(var_kind) = EraCsvVarKind::try_from_var(var_name) else {
+                            return false;
+                        };
+                        let Some(idx) = self
                             .p
                             .contextual_indices
-                            .contains_key(Ascii::new_str(&x.name)) =>
-                {
-                    let idx = self
-                        .p
-                        .contextual_indices
-                        .get(Ascii::new_str(&x.name))
-                        .copied()
-                        .unwrap();
-                    self.chunk
-                        .emit_load_const(self.p.new_value_int(idx as _), x.src_info);
-                    TInteger
+                            .get(Ascii::new_str(&x.name))
+                            .and_then(|x| x.iter().find(|x| x.0 == var_kind))
+                            .map(|x| x.1)
+                        else {
+                            return false;
+                        };
+                        self.chunk
+                            .emit_load_const(self.p.new_value_int(idx as _), x.src_info);
+                        true
+                    })();
+                    if handled {
+                        TInteger
+                    } else {
+                        self.expression(EraExpr::Term(EraTermExpr::Var(x)))?
+                    }
                 }
                 _ => self.expression(idx)?,
             };
@@ -5266,7 +5306,13 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     }
                 }
             },
-            Normal(var_kind, var_dims, is_charadata) => {
+            Normal(info) => {
+                let EraNormalVarArrCompileInfoWithDims {
+                    kind: var_kind,
+                    dims: var_dims,
+                    is_charadata,
+                    ..
+                } = info;
                 // TODO: Check array size & type
                 if routine::is_chara_nodim(var_name) {
                     // HACK: Push implicit 0 as last index
@@ -5325,23 +5371,29 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 for idx in idxs {
                     let idx_kind = match idx {
                         // HACK: Contextual indices replacing
-                        EraExpr::Term(EraTermExpr::Var(x))
-                            if x.idxs.is_empty()
-                                && is_csv_var
-                                && self
+                        EraExpr::Term(EraTermExpr::Var(x)) if x.idxs.is_empty() => {
+                            let handled = (|| {
+                                let Some(var_kind) = EraCsvVarKind::try_from_var(var_name) else {
+                                    return false;
+                                };
+                                let Some(idx) = self
                                     .p
                                     .contextual_indices
-                                    .contains_key(Ascii::new_str(&x.name)) =>
-                        {
-                            let idx = self
-                                .p
-                                .contextual_indices
-                                .get(Ascii::new_str(&x.name))
-                                .copied()
-                                .unwrap();
-                            self.chunk
-                                .emit_load_const(self.p.new_value_int(idx as _), x.src_info);
-                            TInteger
+                                    .get(Ascii::new_str(&x.name))
+                                    .and_then(|x| x.iter().find(|x| x.0 == var_kind))
+                                    .map(|x| x.1)
+                                else {
+                                    return false;
+                                };
+                                self.chunk
+                                    .emit_load_const(self.p.new_value_int(idx as _), x.src_info);
+                                true
+                            })();
+                            if handled {
+                                TInteger
+                            } else {
+                                self.expression(EraExpr::Term(EraTermExpr::Var(x)))?
+                            }
                         }
                         _ => self.expression(idx)?,
                     };
