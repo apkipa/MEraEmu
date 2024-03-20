@@ -297,6 +297,7 @@ namespace winrt::MEraEmuWin::implementation {
         EngineControl* ui_ctrl{};
         IAsyncAction thread_task_op{ nullptr };
         std::atomic_bool ui_is_alive{ false };
+        std::atomic_bool ui_redraw_block_engine{ false };
         // Also used as an event queue indicator (?)
         std::atomic_bool engine_stop_flag{ true };
         //std::atomic_bool thread_is_alive{ false };
@@ -323,6 +324,8 @@ namespace winrt::MEraEmuWin::implementation {
                 std::scoped_lock guard(ui_mutex);
                 return std::exchange(ui_works, {});
             }();
+            ui_redraw_block_engine.store(false, std::memory_order_relaxed);
+            ui_redraw_block_engine.notify_one();
             queue_thread_work(EngineThreadTaskKind::None);
         }
         // NOTE: Called by engine (background) thread
@@ -352,6 +355,7 @@ namespace winrt::MEraEmuWin::implementation {
             }
             if (has_no_work) {
                 // Wake up UI thread
+                ui_redraw_block_engine.wait(true, std::memory_order_relaxed);
                 ui_dispatcher.RunAsync(CoreDispatcherPriority::Low, [self = shared_from_this()] {
                     if (!self->ui_is_alive.load(std::memory_order_relaxed)) { return; }
                     // SAFETY: We are in the UI thread; no one could be destructing
@@ -894,7 +898,7 @@ namespace winrt::MEraEmuWin::implementation {
             for (auto const& effect : effects) {
                 txt_layout->SetDrawingEffect(
                     ctrl->GetOrCreateSolidColorBrush(effect.color),
-                    {effect.starti, effect.len});
+                    { effect.starti, effect.len });
             }
         }
 
@@ -1173,6 +1177,11 @@ namespace winrt::MEraEmuWin::implementation {
                 if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
                 engine.finialize_load_srcs();
 
+                // Disable auto redraw before running VM
+                sd->queue_ui_work([sd] {
+                    sd->ui_ctrl->SetRedrawState(0);
+                });
+
                 // Main loop
                 while (sd->ui_is_alive.load(std::memory_order_relaxed)) {
                     while (!engine.get_is_halted()) {
@@ -1322,10 +1331,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_ev_UnhandledException(*this, make<EngineUnhandledExceptionEventArgs>(code, ex_msg));
     }
     void EngineControl::RedrawDirtyEngineImageOutput() {
-        int height = 0;
-        if (!m_ui_lines.empty()) {
-            height = m_ui_lines.back().acc_height;
-        }
+        int height = GetCalculatedUIHeight();
         //check_hresult(m_vsis_noref->Resize(m_ui_width, height));
         DWORD update_rt_cnt{};
         check_hresult(m_vsis_noref->GetUpdateRectCount(&update_rt_cnt));
@@ -1381,12 +1387,19 @@ namespace winrt::MEraEmuWin::implementation {
                     brush);
             }
         }
+
+        if (m_sd->ui_redraw_block_engine.exchange(false, std::memory_order_relaxed)) {
+            m_sd->ui_redraw_block_engine.notify_one();
+        }
     }
     void EngineControl::FlushEngineImageOutputLayout() {
         auto height = GetCalculatedUIHeight();
-        check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, m_last_redraw_dirty_height * m_yscale));
+        int real_width = m_ui_width * m_xscale;
+        int real_height = height * m_yscale;
+        int old_real_height = m_last_redraw_dirty_height * m_yscale;
+        check_hresult(m_vsis_noref->Resize(real_width, height * m_yscale));
+        check_hresult(m_vsis_noref->Invalidate({ 0, old_real_height, real_width, real_height }));
         m_last_redraw_dirty_height = height;
-        check_hresult(m_vsis_noref->Resize(m_ui_width * m_xscale, height * m_yscale));
         // TODO: Is this an XAML bug?
         EngineOutputImage().InvalidateMeasure();
     }
@@ -1497,11 +1510,14 @@ namespace winrt::MEraEmuWin::implementation {
             m_input_countdown_timer.Stop();
             if (input_req->show_expiry_msg) {
                 auto expire_msg = input_req->expiry_msg;
-                if (expire_msg.empty()) {
-                    //expire_msg = L"已超时";
-                    expire_msg = L"時間切れ";
+                if (!expire_msg.empty()) {
+                    RoutinePrint(expire_msg, ERA_PEF_IS_LINE);
+                    // HACK: Enforce a redraw so that we won't lose texts because of
+                    //       engine-thread-queued UI work running early
+                    if (m_auto_redraw) {
+                        m_sd->ui_redraw_block_engine.store(true, std::memory_order_relaxed);
+                    }
                 }
-                RoutinePrint(expire_msg, ERA_PEF_IS_LINE);
             }
         }
         else {

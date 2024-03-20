@@ -4060,7 +4060,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.consume_comma()?;
         let default_value = self.expression(true)?;
         let mut show_prompt = EraExpr::new_int(1, src_info);
-        let mut expiry_msg = EraExpr::new_str(arcstr::ArcStr::new(), src_info);
+        let mut expiry_msg = EraExpr::new_str(arcstr::literal!("時間切れ"), src_info);
         let mut can_click = EraExpr::new_int(0, src_info);
         if self.matches_comma().is_some() {
             show_prompt = self.expression(true)?;
