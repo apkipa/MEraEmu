@@ -293,6 +293,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         hstring game_base_dir;
         CoreDispatcher ui_dispatcher{ nullptr };
+        DispatcherQueue ui_dispatcher_queue{ nullptr };
         //weak_ref<EngineControl> ui_ctrl{ nullptr };
         EngineControl* ui_ctrl{};
         IAsyncAction thread_task_op{ nullptr };
@@ -356,7 +357,9 @@ namespace winrt::MEraEmuWin::implementation {
             if (has_no_work) {
                 // Wake up UI thread
                 ui_redraw_block_engine.wait(true, std::memory_order_relaxed);
-                ui_dispatcher.RunAsync(CoreDispatcherPriority::Low, [self = shared_from_this()] {
+                // NOTE: CoreDispatcher.RunAsync will cause memory leak, so use
+                //       DispatcherQueue.TryEnqueue instead
+                ui_dispatcher_queue.TryEnqueue(DispatcherQueuePriority::Low, [self = shared_from_this()] {
                     if (!self->ui_is_alive.load(std::memory_order_relaxed)) { return; }
                     // SAFETY: We are in the UI thread; no one could be destructing
                     //         EngineControl.
@@ -984,6 +987,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_sd = std::make_shared<EngineSharedData>();
         m_sd->game_base_dir = game_base_dir;
         m_sd->ui_dispatcher = Dispatcher();
+        m_sd->ui_dispatcher_queue = DispatcherQueue::GetForCurrentThread();
         //m_sd->ui_ctrl = get_weak();
         m_sd->ui_ctrl = this;
         // Start a dedicated background thread
