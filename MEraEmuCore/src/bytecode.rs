@@ -624,9 +624,9 @@ pub enum FlatValue {
     ArrStr(Rc<RefCell<ArrStrValue>>),
 }
 #[derive(Debug, Clone)]
-pub enum BorrowedFlatValue<'a> {
-    Int(&'a Rc<IntValue>),
-    Str(&'a Rc<StrValue>),
+pub enum RefFlatValue<'a> {
+    Int(&'a IntValue),
+    Str(&'a StrValue),
     ArrInt(&'a Rc<RefCell<ArrIntValue>>),
     ArrStr(&'a Rc<RefCell<ArrStrValue>>),
 }
@@ -748,6 +748,15 @@ impl Value {
             Str(x) => Str(x),
             ArrInt(x) => ArrInt(x),
             ArrStr(x) => ArrStr(x),
+        }
+    }
+    pub fn as_unpacked(&self) -> RefFlatValue {
+        use FlatValue::*;
+        match &self.0 {
+            Int(x) => RefFlatValue::Int(x),
+            Str(x) => RefFlatValue::Str(x),
+            ArrInt(x) => RefFlatValue::ArrInt(x),
+            ArrStr(x) => RefFlatValue::ArrStr(x),
         }
     }
     pub fn deep_clone(&self) -> Self {

@@ -5,7 +5,8 @@ use crate::{
     bytecode::{
         ArrIntValue, ArrStrValue, EraBytecodePrimaryType, EraCharaCsvPropType,
         EraCharaInitTemplate, EraCsvVarKind, EraInputSubBytecodeType, FlatValue, IntValue,
-        PadStringFlags, PrintExtendedFlags, SourcePosInfo, StrValue, Value, ValueKind,
+        PadStringFlags, PrintExtendedFlags, RefFlatValue, SourcePosInfo, StrValue, Value,
+        ValueKind,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
     routine,
@@ -146,6 +147,43 @@ impl EraVirtualMachineContext<'_> {
                 self.report_err(true, "too few elements in stack");
                 None
             }
+        }
+    }
+    #[must_use]
+    #[inline(always)]
+    fn view_stack<const N: usize>(&mut self) -> Option<&mut [EraTrappableValue; N]> {
+        match self.stack.len().checked_sub(N) {
+            Some(new_len) => {
+                // TODO: SAFETY
+                let res = unsafe {
+                    self.stack
+                        .get_unchecked_mut(new_len..)
+                        .try_into()
+                        .unwrap_unchecked()
+                };
+                Some(res)
+            }
+            None => {
+                self.report_err(true, "too few elements in stack");
+                None
+            }
+        }
+    }
+    #[must_use]
+    #[inline(always)]
+    fn static_view_stack_helper<const N: usize>(
+        stack: &mut Vec<EraTrappableValue>,
+    ) -> Option<(&mut [EraTrappableValue], &mut [EraTrappableValue; N])> {
+        match stack.len().checked_sub(N) {
+            Some(new_len) => {
+                // TODO: SAFETY
+                let res = unsafe {
+                    let (l, r) = stack.split_at_mut(new_len);
+                    (l, r.try_into().unwrap_unchecked())
+                };
+                Some(res)
+            }
+            None => None,
         }
     }
     #[must_use]
@@ -392,6 +430,27 @@ macro_rules! pop_stack {
         $(
             pop_stack_inner_unpack!($ctx, $var_name:$type);
         )+
+    };
+}
+
+macro_rules! view_stack {
+    ($ctx:expr) => {
+        match EraVirtualMachineContext::static_view_stack_helper(&mut $ctx.stack) {
+            Some(x) => Some(x.1),
+            None => {
+                $ctx.report_err(true, "too few elements in stack");
+                None
+            }
+        }
+    };
+    ($ctx:expr, rest) => {
+        match EraVirtualMachineContext::static_view_stack_helper(&mut $ctx.stack) {
+            Some(x) => Some(x),
+            None => {
+                $ctx.report_err(true, "too few elements in stack");
+                None
+            }
+        }
     };
 }
 
@@ -1483,21 +1542,19 @@ impl EraVirtualMachine {
                     ctx.stack.push(value.val.deep_clone().into());
                 }
                 GetGlobal => {
-                    let [value] = ctx.pop_stack()?;
-                    let value = match value.val.into_unpacked() {
-                        // TODO: Check if index is in function frame
-                        FlatValue::Int(x) => ctx.global_vars.get_var_by_idx(x.val as _),
-                        FlatValue::Str(x) => ctx.global_vars.get_var(&x.val),
+                    let [value] = view_stack!(ctx)?;
+                    let var_value = match value.val.as_unpacked() {
+                        RefFlatValue::Int(x) => ctx.global_vars.get_var_by_idx(x.val as _),
+                        RefFlatValue::Str(x) => ctx.global_vars.get_var(&x.val),
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
                     };
-                    let value = match value {
-                        Some(x) => x,
-                        None => bail_opt!(ctx, true, "invalid index into global variable pool"),
+                    let Some(var_value) = var_value else {
+                        bail_opt!(ctx, true, "invalid index into global variable pool");
                     };
-                    ctx.stack.push(EraTrappableValue {
-                        is_trap: Self::check_trap_var(&self.trap_vars, value).is_some(),
-                        val: value.clone(),
-                    });
+                    *value = EraTrappableValue {
+                        is_trap: Self::check_trap_var(&self.trap_vars, var_value).is_some(),
+                        val: var_value.clone(),
+                    };
                 }
                 SetGlobal => {
                     let [index, src_value] = ctx.pop_stack()?;
@@ -1514,13 +1571,12 @@ impl EraVirtualMachine {
                     *value = src_value.into();
                 }
                 GetLocal => {
-                    let [index] = ctx.pop_stack()?;
-                    let value = match index.val.into_unpacked() {
-                        FlatValue::Int(x) => {
+                    let cur_frame_stack_start = ctx.cur_frame.stack_start;
+                    let (rest, [index]) = view_stack!(ctx, rest)?;
+                    let value = match index.val.as_unpacked() {
+                        RefFlatValue::Int(x) => {
                             // TODO: Check if index is in bounds
-                            match ctx
-                                .stack
-                                .get(ctx.cur_frame.stack_start.saturating_add_signed(x.val as _))
+                            match rest.get(cur_frame_stack_start.saturating_add_signed(x.val as _))
                             {
                                 Some(x) => x,
                                 None => bail_opt!(
@@ -1532,7 +1588,7 @@ impl EraVirtualMachine {
                         }
                         _ => bail_opt!(ctx, true, "expected integer values as operands"),
                     };
-                    ctx.stack.push(value.clone());
+                    *index = value.clone();
                 }
                 SetLocal => {
                     let [index, src_value] = ctx.pop_stack()?;

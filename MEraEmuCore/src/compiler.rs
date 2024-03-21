@@ -4026,63 +4026,20 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.chunk.emit_bytecode(Throw, x.src_info);
             }
             Cmd::Repeat(x) => {
-                // for (loopCount = ?, COUNT = 0; COUNT < loopCount; COUNT++) {}
-                // Use stack to store temporary loopCount
-                self.stack_balance += 1;
-
-                match self.expression(x.loop_cnt)? {
-                    TInteger => (),
-                    TString | TVoid => {
-                        bail_opt!(self, x.src_info, "invalid expression for REPEAT condition")
-                    }
-                }
-                self.arr_set("COUNT", vec![], x.src_info, |this| {
-                    this.chunk
-                        .emit_load_const(this.p.new_value_int(0), x.src_info);
-                    Some(TInteger)
-                })?;
-                self.chunk.emit_bytecode(Pop, x.src_info);
-                let bt_body = self.chunk.emit_jump_hold(x.src_info);
-                let start_pos = self.chunk.cur_bytes_cnt();
-                self.loop_structs
-                    .push(EraLoopStructCodeMetadata::new(self.stack_balance));
-                let step_fn = |this: &mut Self| {
-                    this.arr_set("COUNT", vec![], x.src_info, |this| {
-                        this.arr_get_int("COUNT", vec![], x.src_info)?;
-                        this.chunk
-                            .emit_load_const(this.p.new_value_int(1), x.src_info);
-                        this.chunk.emit_bytecode(Add, x.src_info);
-                        Some(TInteger)
-                    })?;
-                    this.chunk.emit_bytecode(Pop, x.src_info);
-                    Some(())
+                // Simply redirect to FOR statement
+                let for_stmt = crate::parser::EraForStmt {
+                    var: EraVarExpr {
+                        name: arcstr::literal!("COUNT"),
+                        idxs: vec![],
+                        src_info: x.src_info,
+                    },
+                    start: EraExpr::new_int(0, x.src_info),
+                    end: x.loop_cnt,
+                    step: EraExpr::new_int(1, x.src_info),
+                    body: x.body,
+                    src_info: x.src_info,
                 };
-                step_fn(self)?;
-                bt_body.complete(self.chunk).unwrap();
-                self.chunk.emit_bytecode(Duplicate, x.src_info);
-                self.arr_get_int("COUNT", vec![], x.src_info)?;
-                self.chunk.emit_bytecode(CompareLEq, x.src_info);
-                let bt_done = self.chunk.emit_jump_cond_hold(x.src_info);
-                for stmt in x.body {
-                    self.statement(func_kind, stmt)?;
-                }
-                {
-                    let offset = -((self.chunk.cur_bytes_cnt() - start_pos) as isize);
-                    self.chunk.emit_jump(offset, x.src_info);
-                }
-                let loop_struct = self.loop_structs.pop().unwrap();
-                for bt in loop_struct.continue_queue {
-                    bt.complete_at(self.chunk, start_pos).unwrap();
-                }
-                for bt in loop_struct.done_queue {
-                    bt.complete(self.chunk).unwrap();
-                }
-                // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
-                step_fn(self)?;
-                bt_done.complete(self.chunk).unwrap();
-                self.chunk.emit_bytecode(Pop, x.src_info);
-
-                self.stack_balance -= 1;
+                self.statement_raw(func_kind, EraStmt::Command(Cmd::For(for_stmt)))?;
             }
             Cmd::Goto(x) => {
                 let backtrack = self.chunk.emit_jump_hold(x.src_info);
@@ -4093,9 +4050,6 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 });
             }
             Cmd::For(x) => {
-                // var(2) + end(1) + step(1)
-                self.stack_balance += 4;
-
                 match self.arr_idx(&x.var.name, x.var.idxs, x.var.src_info)? {
                     TInteger => (),
                     TString | TVoid => {
@@ -4110,96 +4064,34 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                     }
                 }
                 self.chunk.emit_bytecode(SetArrayVal, x.src_info);
-                self.chunk.emit_bytecode(Pop, x.src_info);
+                self.chunk.emit_pop(x.src_info);
                 match self.expression(x.end)? {
                     TInteger => (),
                     TString | TVoid => {
                         bail_opt!(self, x.src_info, "invalid expression for FOR statement")
                     }
                 }
-                match self.expression(x.step)? {
-                    TInteger => (),
-                    TString | TVoid => {
-                        bail_opt!(self, x.src_info, "invalid expression for FOR statement")
-                    }
-                }
-                let emit_ternary_fn =
-                    |this: &mut Self,
-                     src_info,
-                     then_fn: &mut dyn Fn(&mut Self, SourcePosInfo),
-                     else_fn: &mut dyn Fn(&mut Self, SourcePosInfo)| {
-                        // Assuming stack has condition pushed
-                        let bt_then = this.chunk.emit_jump_cond_hold(src_info);
-                        else_fn(this, src_info);
-                        let bt_else = this.chunk.emit_jump_hold(src_info);
-                        bt_then.complete(this.chunk);
-                        then_fn(this, src_info);
-                        bt_else.complete(this.chunk);
-                    };
-                let zero_val = self.p.new_value_int(0);
-                let emit_cond_fn = |this: &mut Self, src_info| {
-                    this.chunk.emit_duplicate_n(2, src_info);
-                    this.chunk.emit_load_const(zero_val.clone(), src_info);
-                    this.chunk.emit_bytecode(CompareL, src_info);
-                    emit_ternary_fn(
-                        this,
-                        x.src_info,
-                        &mut |this, src_info| {
-                            this.chunk.emit_duplicate_one_n(5, src_info);
-                            this.chunk.emit_duplicate_one_n(5, src_info);
-                            this.chunk.emit_bytecode(GetArrayVal, src_info);
-                            this.chunk.emit_bytecode(CompareL, src_info);
-                            this.chunk.emit_bytecode(LogicalNot, src_info);
-                        },
-                        &mut |this, src_info| {
-                            this.chunk.emit_duplicate_one_n(5, src_info);
-                            this.chunk.emit_duplicate_one_n(5, src_info);
-                            this.chunk.emit_bytecode(GetArrayVal, src_info);
-                            this.chunk.emit_bytecode(CompareLEq, src_info);
-                        },
-                    );
-                };
-                let emit_step_fn = |this: &mut Self, src_info| {
-                    this.chunk.emit_duplicate_one_n(4, src_info);
-                    this.chunk.emit_duplicate_one_n(4, src_info);
-                    this.chunk.emit_duplicate_n(2, src_info);
-                    this.chunk.emit_bytecode(GetArrayVal, src_info);
-                    this.chunk.emit_duplicate_one_n(4, src_info);
-                    this.chunk.emit_bytecode(Add, src_info);
-                    this.chunk.emit_bytecode(SetArrayVal, src_info);
-                    this.chunk.emit_bytecode(Pop, src_info);
-                };
-                let bt_body = self.chunk.emit_jump_hold(x.src_info);
-                let start_pos = self.chunk.cur_bytes_cnt();
-                self.loop_structs
-                    .push(EraLoopStructCodeMetadata::new(self.stack_balance));
-                emit_step_fn(self, x.src_info);
-                bt_body.complete(self.chunk).unwrap();
-                emit_cond_fn(self, x.src_info);
-                let bt_done = self.chunk.emit_jump_cond_hold(x.src_info);
-                for stmt in x.body {
-                    self.statement(func_kind, stmt)?;
-                }
-                {
-                    let offset = -((self.chunk.cur_bytes_cnt() - start_pos) as isize);
-                    self.chunk.emit_jump(offset, x.src_info);
-                }
-                let loop_struct = self.loop_structs.pop().unwrap();
-                for bt in loop_struct.continue_queue {
-                    bt.complete_at(self.chunk, start_pos).unwrap();
-                }
-                for bt in loop_struct.done_queue {
-                    bt.complete(self.chunk).unwrap();
-                }
-                // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
-                emit_step_fn(self, x.src_info);
-                bt_done.complete(self.chunk).unwrap();
-                self.chunk.emit_bytecode(Pop, x.src_info);
-                self.chunk.emit_bytecode(Pop, x.src_info);
-                self.chunk.emit_bytecode(Pop, x.src_info);
-                self.chunk.emit_bytecode(Pop, x.src_info);
 
-                self.stack_balance -= 4;
+                // Try to optimize step
+                if let EraExpr::Term(EraTermExpr::Literal(EraLiteral::Integer(step, step_si))) =
+                    x.step
+                {
+                    // var(2) + end(1)
+                    self.stack_balance += 3;
+                    self.cmd_for_stmt_const_step(func_kind, step, step_si, x.src_info, x.body)?;
+                    self.stack_balance -= 3;
+                } else {
+                    // var(2) + end(1) + step(1)
+                    self.stack_balance += 4;
+                    match self.expression(x.step)? {
+                        TInteger => (),
+                        TString | TVoid => {
+                            bail_opt!(self, x.src_info, "invalid expression for FOR statement")
+                        }
+                    }
+                    self.cmd_for_stmt_variable_step(func_kind, x.src_info, x.body);
+                    self.stack_balance -= 4;
+                }
             }
             Cmd::DoLoop(x) => {
                 let si = x.src_info;
@@ -5040,6 +4932,160 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         }
         Some(())
     }
+    // PRECONDITION: var(2) + end(1) + step(1)
+    // POSTCONDITION: empty stack
+    fn cmd_for_stmt_variable_step(
+        &mut self,
+        func_kind: EraFunKind,
+        si: SourcePosInfo,
+        body: Vec<EraStmt>,
+    ) -> Option<()> {
+        // var(2) + end(1) + step(1)
+        use EraBytecodePrimaryType::*;
+
+        let emit_ternary_fn =
+            |this: &mut Self,
+             src_info,
+             then_fn: &mut dyn Fn(&mut Self, SourcePosInfo),
+             else_fn: &mut dyn Fn(&mut Self, SourcePosInfo)| {
+                // Assuming stack has condition pushed
+                let bt_then = this.chunk.emit_jump_cond_hold(src_info);
+                else_fn(this, src_info);
+                let bt_else = this.chunk.emit_jump_hold(src_info);
+                bt_then.complete(this.chunk);
+                then_fn(this, src_info);
+                bt_else.complete(this.chunk);
+            };
+        let zero_val = self.p.new_value_int(0);
+        let emit_cond_fn = |this: &mut Self, src_info| {
+            this.chunk.emit_duplicate_n(2, src_info);
+            this.chunk.emit_load_const(zero_val.clone(), src_info);
+            this.chunk.emit_bytecode(CompareL, src_info);
+            emit_ternary_fn(
+                this,
+                si,
+                &mut |this, src_info| {
+                    this.chunk.emit_duplicate_one_n(5, src_info);
+                    this.chunk.emit_duplicate_one_n(5, src_info);
+                    this.chunk.emit_bytecode(GetArrayVal, src_info);
+                    this.chunk.emit_bytecode(CompareL, src_info);
+                    this.chunk.emit_bytecode(LogicalNot, src_info);
+                },
+                &mut |this, src_info| {
+                    this.chunk.emit_duplicate_one_n(5, src_info);
+                    this.chunk.emit_duplicate_one_n(5, src_info);
+                    this.chunk.emit_bytecode(GetArrayVal, src_info);
+                    this.chunk.emit_bytecode(CompareLEq, src_info);
+                },
+            );
+        };
+        let emit_step_fn = |this: &mut Self, src_info| {
+            this.chunk.emit_duplicate_one_n(4, src_info);
+            this.chunk.emit_duplicate_one_n(4, src_info);
+            this.chunk.emit_duplicate_n(2, src_info);
+            this.chunk.emit_bytecode(GetArrayVal, src_info);
+            this.chunk.emit_duplicate_one_n(4, src_info);
+            this.chunk.emit_bytecode(Add, src_info);
+            this.chunk.emit_bytecode(SetArrayVal, src_info);
+            this.chunk.emit_pop(src_info);
+        };
+        let bt_body = self.chunk.emit_jump_hold(si);
+        let start_pos = self.chunk.cur_bytes_cnt();
+        self.loop_structs
+            .push(EraLoopStructCodeMetadata::new(self.stack_balance));
+        emit_step_fn(self, si);
+        bt_body.complete(self.chunk).unwrap();
+        emit_cond_fn(self, si);
+        let bt_done = self.chunk.emit_jump_cond_hold(si);
+        for stmt in body {
+            self.statement(func_kind, stmt)?;
+        }
+        {
+            let offset = -((self.chunk.cur_bytes_cnt() - start_pos) as isize);
+            self.chunk.emit_jump(offset, si);
+        }
+        let loop_struct = self.loop_structs.pop().unwrap();
+        for bt in loop_struct.continue_queue {
+            bt.complete_at(self.chunk, start_pos).unwrap();
+        }
+        for bt in loop_struct.done_queue {
+            bt.complete(self.chunk).unwrap();
+        }
+        // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
+        emit_step_fn(self, si);
+        bt_done.complete(self.chunk).unwrap();
+        self.chunk.emit_pop_n(4, si);
+
+        Some(())
+    }
+    // PRECONDITION: var(2) + end(1)
+    // POSTCONDITION: empty stack
+    fn cmd_for_stmt_const_step(
+        &mut self,
+        func_kind: EraFunKind,
+        step: i64,
+        step_si: SourcePosInfo,
+        si: SourcePosInfo,
+        body: Vec<EraStmt>,
+    ) -> Option<()> {
+        // var(2) + end(1)
+        use EraBytecodePrimaryType::*;
+
+        let emit_cond_fn = |this: &mut Self, src_info| {
+            this.chunk.emit_duplicate_n(1, src_info);
+            if step < 0 {
+                this.chunk.emit_duplicate_one_n(4, src_info);
+                this.chunk.emit_duplicate_one_n(4, src_info);
+                this.chunk.emit_bytecode(GetArrayVal, src_info);
+                this.chunk.emit_bytecode(CompareL, src_info);
+                this.chunk.emit_bytecode(LogicalNot, src_info);
+            } else {
+                this.chunk.emit_duplicate_one_n(4, src_info);
+                this.chunk.emit_duplicate_one_n(4, src_info);
+                this.chunk.emit_bytecode(GetArrayVal, src_info);
+                this.chunk.emit_bytecode(CompareLEq, src_info);
+            }
+        };
+        let emit_step_fn = |this: &mut Self, src_info| {
+            this.chunk.emit_duplicate_one_n(3, src_info);
+            this.chunk.emit_duplicate_one_n(3, src_info);
+            this.chunk.emit_duplicate_n(2, src_info);
+            this.chunk.emit_bytecode(GetArrayVal, src_info);
+            this.chunk
+                .emit_load_const(this.p.new_value_int(step), src_info);
+            this.chunk.emit_bytecode(Add, src_info);
+            this.chunk.emit_bytecode(SetArrayVal, src_info);
+            this.chunk.emit_pop(src_info);
+        };
+        let bt_body = self.chunk.emit_jump_hold(si);
+        let start_pos = self.chunk.cur_bytes_cnt();
+        self.loop_structs
+            .push(EraLoopStructCodeMetadata::new(self.stack_balance));
+        emit_step_fn(self, si);
+        bt_body.complete(self.chunk).unwrap();
+        emit_cond_fn(self, si);
+        let bt_done = self.chunk.emit_jump_cond_hold(si);
+        for stmt in body {
+            self.statement(func_kind, stmt)?;
+        }
+        {
+            let offset = -((self.chunk.cur_bytes_cnt() - start_pos) as isize);
+            self.chunk.emit_jump(offset, si);
+        }
+        let loop_struct = self.loop_structs.pop().unwrap();
+        for bt in loop_struct.continue_queue {
+            bt.complete_at(self.chunk, start_pos).unwrap();
+        }
+        for bt in loop_struct.done_queue {
+            bt.complete(self.chunk).unwrap();
+        }
+        // NOTE: Emulates Eramaker behavior (inc COUNT even when break'ing)
+        emit_step_fn(self, si);
+        bt_done.complete(self.chunk).unwrap();
+        self.chunk.emit_pop_n(3, si);
+
+        Some(())
+    }
     #[must_use]
     fn var_arr(&mut self, var_name: &str, src_info: SourcePosInfo) -> Option<EraVarArrCompileInfo> {
         use EraBytecodePrimaryType::*;
@@ -5447,6 +5493,11 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let is_csv_var = routine::is_csv_var(&var_name);
 
                 // TODO: Optimize access for 0d / 1d arrays
+                if idxs.is_empty() {
+                    self.chunk
+                        .emit_load_const(self.p.new_value_int(0), src_info);
+                    return Some(slim_info);
+                }
 
                 for idx in idxs {
                     let idx_kind = match idx {
