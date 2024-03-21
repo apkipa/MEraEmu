@@ -825,7 +825,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                 x.dims = smallvec::smallvec![(x.inits.len() as u32).max(1)];
                             }
                             let arr_len = x.dims.iter().fold(1, |acc, &x| acc * x);
-                            // NOTE: We need to reject zero-sized arrays (they can only be REF arrays)
+                            // NOTE: We need to reject zero-sized arrays here (they can only be REF arrays)
                             if (arr_len as usize) < x.inits.len().max(1) {
                                 self.report_err(
                                     src_info,
@@ -834,7 +834,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                 );
                             }
                             if x.is_string {
-                                let inits = x
+                                let mut inits = x
                                     .inits
                                     .into_iter()
                                     .map(|x| {
@@ -844,9 +844,12 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                             .map(|val| StrValue { val })
                                     })
                                     .collect::<Option<Vec<_>>>()?;
+                                if inits.is_empty() {
+                                    inits.push(Default::default());
+                                }
                                 Value::new_str_arr(x.dims, inits)
                             } else {
-                                let inits = x
+                                let mut inits = x
                                     .inits
                                     .into_iter()
                                     .map(|x| {
@@ -855,6 +858,9 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                             .map(|val| IntValue { val })
                                     })
                                     .collect::<Option<Vec<_>>>()?;
+                                if inits.is_empty() {
+                                    inits.push(Default::default());
+                                }
                                 Value::new_int_arr(x.dims, inits)
                             }
                         };
@@ -5050,8 +5056,16 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             .map(|&x| &self.func_info.local_vars[x])
         {
             (var_kind, var_dims_cnt) = match var.init_val.clone().into_unpacked() {
-                FlatValue::ArrInt(x) => (TInteger, x.borrow().dims.len()),
-                FlatValue::ArrStr(x) => (TString, x.borrow().dims.len()),
+                FlatValue::ArrInt(x) => {
+                    let mut x = x.borrow_mut();
+                    // x.ensure_alloc();
+                    (TInteger, x.dims.len())
+                }
+                FlatValue::ArrStr(x) => {
+                    let mut x = x.borrow_mut();
+                    // x.ensure_alloc();
+                    (TString, x.dims.len())
+                }
                 _ => unreachable!(),
             };
             is_in_global_frame = var.is_in_global_frame;
@@ -5074,8 +5088,16 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 .clone()
                 .into_unpacked()
             {
-                FlatValue::ArrInt(x) => (TInteger, x.borrow().dims.len()),
-                FlatValue::ArrStr(x) => (TString, x.borrow().dims.len()),
+                FlatValue::ArrInt(x) => {
+                    let mut x = x.borrow_mut();
+                    x.ensure_alloc();
+                    (TInteger, x.dims.len())
+                }
+                FlatValue::ArrStr(x) => {
+                    let mut x = x.borrow_mut();
+                    x.ensure_alloc();
+                    (TString, x.dims.len())
+                }
                 _ => unreachable!(),
             };
             is_in_global_frame = true;
@@ -5144,8 +5166,16 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             .map(|&x| &self.func_info.local_vars[x])
         {
             (var_kind, var_dims) = match var.init_val.clone().into_unpacked() {
-                FlatValue::ArrInt(x) => (TInteger, SmallVec::from_slice(&x.borrow().dims)),
-                FlatValue::ArrStr(x) => (TString, SmallVec::from_slice(&x.borrow().dims)),
+                FlatValue::ArrInt(x) => {
+                    let mut x = x.borrow_mut();
+                    // x.ensure_alloc();
+                    (TInteger, x.dims.clone())
+                }
+                FlatValue::ArrStr(x) => {
+                    let mut x = x.borrow_mut();
+                    // x.ensure_alloc();
+                    (TString, x.dims.clone())
+                }
                 _ => unreachable!(),
             };
             is_in_global_frame = var.is_in_global_frame;
@@ -5163,8 +5193,16 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         {
             let var_info = self.p.vars.get_var_info(glob_var_idx).unwrap();
             (var_kind, var_dims) = match var_info.val.clone().into_unpacked() {
-                FlatValue::ArrInt(x) => (TInteger, SmallVec::from_slice(&x.borrow().dims)),
-                FlatValue::ArrStr(x) => (TString, SmallVec::from_slice(&x.borrow().dims)),
+                FlatValue::ArrInt(x) => {
+                    let mut x = x.borrow_mut();
+                    x.ensure_alloc();
+                    (TInteger, x.dims.clone())
+                }
+                FlatValue::ArrStr(x) => {
+                    let mut x = x.borrow_mut();
+                    x.ensure_alloc();
+                    (TString, x.dims.clone())
+                }
                 _ => unreachable!(),
             };
             is_in_global_frame = true;

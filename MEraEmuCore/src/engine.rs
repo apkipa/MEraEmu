@@ -1333,9 +1333,19 @@ impl<'a> MEraEngine<'a> {
                     var_desc.dims.insert(0, MAX_CHARA_COUNT);
                 }
                 let val = if var_desc.is_string {
-                    Value::new_str_arr(var_desc.dims, var_desc.initial_sval.unwrap_or_default())
+                    Value::new_str_arr(
+                        var_desc.dims,
+                        var_desc
+                            .initial_sval
+                            .unwrap_or_else(|| vec![Default::default()]),
+                    )
                 } else {
-                    Value::new_int_arr(var_desc.dims, var_desc.initial_ival.unwrap_or_default())
+                    Value::new_int_arr(
+                        var_desc.dims,
+                        var_desc
+                            .initial_ival
+                            .unwrap_or_else(|| vec![Default::default()]),
+                    )
                 };
                 if self
                     .global_vars

@@ -511,6 +511,13 @@ impl ArrIntValue {
                 });
         Some(idx)
     }
+    #[inline(always)]
+    pub fn ensure_alloc(&mut self) {
+        if self.vals.is_empty() {
+            let size = self.dims.iter().fold(1, |acc, x| acc * (*x as usize));
+            self.vals.resize(size, Default::default());
+        }
+    }
 }
 impl ArrStrValue {
     #[must_use]
@@ -556,6 +563,13 @@ impl ArrStrValue {
                     )
                 });
         Some(idx)
+    }
+    #[inline(always)]
+    pub fn ensure_alloc(&mut self) {
+        if self.vals.is_empty() {
+            let size = self.dims.iter().fold(1, |acc, x| acc * (*x as usize));
+            self.vals.resize(size, Default::default());
+        }
     }
 }
 
@@ -698,7 +712,9 @@ impl Value {
         }
         let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
         //assert_ne!(size, 0, "dimension must not contain zero");
-        vals.resize(size, IntValue { val: 0 });
+        if !vals.is_empty() {
+            vals.resize(size, Default::default());
+        }
         Value(ValueInner::ArrInt(Rc::new(RefCell::new(ArrIntValue {
             vals,
             dims,
@@ -710,12 +726,9 @@ impl Value {
         }
         let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
         //assert_ne!(size, 0, "dimension must not contain zero");
-        vals.resize(
-            size,
-            StrValue {
-                val: arcstr::ArcStr::new(),
-            },
-        );
+        if !vals.is_empty() {
+            vals.resize(size, Default::default());
+        }
         Value(ValueInner::ArrStr(Rc::new(RefCell::new(ArrStrValue {
             vals,
             dims,
