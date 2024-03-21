@@ -736,6 +736,18 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 return;
             }
+            if (name == "@TOOLTIP_DELAY") {
+                // TODO: @TOOLTIP_DELAY
+                return;
+            }
+            if (name == "@TOOLTIP_DURATION") {
+                // TODO: @TOOLTIP_DURATION
+                return;
+            }
+            if (name == "@ANIMETIMER") {
+                // TODO: @ANIMETIMER
+                return;
+            }
             // TODO: Prohibit setting variables @DEF*COLOR?
             // TODO...
             throw std::exception("no such variable");
@@ -820,13 +832,28 @@ namespace winrt::MEraEmuWin::implementation {
             auto t = std::chrono::system_clock::now().time_since_epoch();
             return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(t).count();
         }
-        int64_t on_get_config_int(std::string_view name) override
-        {
-            return 0;
+        int64_t on_get_config_int(std::string_view name) override {
+            if (name == "一行の高さ") {
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->m_cfg.line_height);
+                });
+                return future.get();
+            }
+            if (name == "フォントサイズ") {
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->m_cfg.font_size);
+                });
+                return future.get();
+            }
+            throw std::runtime_error(std::format("no such int config: {}", name));
         }
-        const char* on_get_config_str(std::string_view name) override
-        {
-            return nullptr;
+        const char* on_get_config_str(std::string_view name) override {
+            // TODO: on_get_config_str
+            throw std::runtime_error(std::format("no such str config: {}", name));
         }
         int64_t on_get_key_state(int64_t key_code) override
         {

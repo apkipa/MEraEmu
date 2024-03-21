@@ -38,6 +38,7 @@
     ; TODO: SYSPROC_SAVEGAME
     PRINTFORM Warning: SYSPROC_SAVEGAME not yet implemented
 @SYSPROC_BEGIN_FIRST
+    LOCAL@SYSPROC_STORE_MANAGER = -1
     SYSPROC_INVOKE_USER_EVENT_NORETURN("EVENTFIRST")
 @SYSPROC_BEGIN_TITLE
     ; Init storage
@@ -154,7 +155,7 @@
     #DIM CONST MaxShopItemCount = 100
     SYSPROC_INVOKE_USER_FUNC_FORCE("SHOW_SHOP")
     INPUT
-    IF INRANGE(RESULT, 0, MaxShopItemCount)
+    IF INRANGE(RESULT, 0, MaxShopItemCount - 1)
         ; TODO: Default shopping procedure
         PRINTFORML Warning: Default shopping not yet implemented
     ELSE
@@ -179,7 +180,7 @@
     ;     THROW Cannot invoke @SHOW_ABLUP_SELECT
     ; ENDCATCH
     INPUT
-    IF INRANGE(RESULT, 0, MaxCount)
+    IF INRANGE(RESULT, 0, MaxCount - 1)
         ; TODO: Default ablup procedure
         PRINTFORML Warning: Default ablup not yet implemented
     ELSE
@@ -197,7 +198,7 @@
     #DIM CONST IsCTrain = 0
 
     ; Handle DOTRAIN
-    IF INRANGE(DoTrainComNo, VARSIZE("TRAINNAME"), 0)
+    IF INRANGE(DoTrainComNo, 0, VARSIZE("TRAINNAME") - 1)
         SELECTCOM = DoTrainComNo
         DoTrainComNo = -1
         GOTO DOTRAIN_START
@@ -252,7 +253,7 @@
     ; Pick COM by number
     select_com = -1
     IF !IsCTrain
-        SIF INRANGE(RESULT, VARSIZE("TRAINNAME"), 0)
+        SIF INRANGE(RESULT, 0, VARSIZE("TRAINNAME") - 1)
             select_com = comable:RESULT
     ELSE
         select_com = FINDELEMENT(comable, RESULT)

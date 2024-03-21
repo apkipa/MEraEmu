@@ -2546,6 +2546,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             b"CHKFONT" => {
                 ctx.result()?;
                 let [font_name] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_str(font_name)?;
                 ctx.this.chunk.emit_bytecode(CheckFont, src_info);
             }
             b"GETFONT" => {
@@ -3877,7 +3878,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 // Try to optimize into a static call
                 EraExpr::Term(EraTermExpr::Literal(EraLiteral::String(func, si))) => {
                     match self.static_fun_call(&func, x.args, si)? {
-                        TInteger | TString => self.chunk.emit_bytecode(Pop, x.src_info),
+                        TInteger | TString => self.chunk.emit_pop(x.src_info),
                         TVoid => (),
                     }
                 }
@@ -3889,7 +3890,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             Cmd::TryCall(x) => {
                 // Enforce dynamic call
                 self.dynamic_fun_call(x.func, x.args, false)?;
-                self.chunk.emit_bytecode(Pop, x.src_info);
+                self.chunk.emit_pop(x.src_info);
             }
             Cmd::TryCCall(x) => {
                 // Enforce dynamic call
@@ -5485,7 +5486,11 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                                 false,
                                 "using strings as array indices is discouraged",
                             );
+                            let Some(csv_kind) = EraCsvVarKind::try_from_var(&var_name) else {
+                                bail_opt!(self, src_info, "unknown CSV var type");
+                            };
                             self.chunk.emit_bytecode(CsvGetNum, src_info);
+                            self.chunk.append_u8(csv_kind.to_i(), src_info);
                         }
                         _ => bail_opt!(self, src_info, true, "array indices must be integers"),
                     }

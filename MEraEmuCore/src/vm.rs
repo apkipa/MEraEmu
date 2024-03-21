@@ -1187,6 +1187,7 @@ impl EraVirtualMachine {
                             .get(Ascii::new_str(&x.val))
                             .map(|&x| &self.funcs[x]),
                     };
+                    let args_pack = ctx.pop_stack_dyn(args_cnt * 2)?.collect::<Vec<_>>();
                     if let Some(func_info) = func_info {
                         if args_cnt > func_info.args.len() {
                             bail_opt!(
@@ -1197,7 +1198,6 @@ impl EraVirtualMachine {
                         }
                         // TODO: Check whether stack_start exceeds bounds of current frame
                         // Transform args pack into ordinary forms
-                        let args_pack = ctx.pop_stack_dyn(args_cnt * 2)?.collect::<Vec<_>>();
 
                         // Function exists
                         if !is_force {
@@ -1386,16 +1386,7 @@ impl EraVirtualMachine {
                     let value = match value.val.into_unpacked() {
                         FlatValue::Int(x) => Value::new_int_obj(x),
                         FlatValue::Str(x) => {
-                            let Some(x) = routine::parse_era_int(&x.val) else {
-                                bail_opt!(
-                                    ctx,
-                                    true,
-                                    format!(
-                                        "string `{}` cannot be converted to a valid integer",
-                                        x.val
-                                    )
-                                );
-                            };
+                            let x = routine::parse_era_int(&x.val).unwrap_or(0);
                             Value::new_int(x)
                         }
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
@@ -3677,6 +3668,7 @@ impl EraVirtualMachine {
                                     _ => {
                                         let empty_map = Default::default();
                                         let src = match chara_var.name.as_ref() {
+                                            "BASE" => &chara_template.maxbase,
                                             "MAXBASE" => &chara_template.maxbase,
                                             "MARK" => &chara_template.mark,
                                             "EXP" => &chara_template.exp,

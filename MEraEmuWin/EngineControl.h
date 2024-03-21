@@ -170,6 +170,10 @@ namespace winrt::MEraEmuWin::implementation {
         winrt::clock::time_point m_input_start_t;
         hstring m_input_last_prompt;
         Windows::UI::Xaml::DispatcherTimer m_input_countdown_timer;
+        struct EngineConfig {
+            int64_t line_height = 16;
+            int64_t font_size = 16;
+        } m_cfg;
         // TODO: Button style data
     };
 }
