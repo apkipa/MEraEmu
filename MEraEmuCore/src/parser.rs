@@ -1547,6 +1547,7 @@ struct EraParserImpl<'a, 'b, ErrReportFn, LexErrReportFn> {
     curly_brackets_cnt: u32,
     last_ate_newline: bool,
     src_info: SourcePosInfo,
+    is_expression_s_mode: bool,
 }
 
 impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorInfo)>
@@ -1565,6 +1566,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             curly_brackets_cnt: 0,
             last_ate_newline: false,
             src_info: SourcePosInfo { line: 1, column: 1 },
+            is_expression_s_mode: false,
         }
     }
     fn report_token_err(&mut self, token: EraTokenLite, is_error: bool, msg: &str) {
@@ -2434,7 +2436,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.expression_bp(0, pure, EraTokenKind::Eof)
     }
     fn expression_bp(&mut self, min_bp: u8, pure: bool, break_at: EraTokenKind) -> Option<EraExpr> {
-        let first = self.read_token(EraLexerMode::Normal);
+        let lexer_mode = if self.is_expression_s_mode {
+            EraLexerMode::ExpressionS
+        } else {
+            EraLexerMode::Normal
+        };
+        let first = self.read_token(lexer_mode);
         let mut lhs = match first.kind {
             EraTokenKind::IntLiteral => {
                 // TODO: use atoi_simd?
@@ -2490,47 +2497,14 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                 }
                 EraExpr::new_int(val, first.src_info)
             }
-            // TODO: Handle escape characters for StringLiteral
             EraTokenKind::StringLiteral => {
                 let raw_literal = &first.lexeme[1..(first.lexeme.len() - 1)];
-                let mut unescaped = Vec::with_capacity(raw_literal.len());
-                let mut it = raw_literal.into_iter();
-                let mut has_redundant_escape = false;
-                while let Some(&ch) = it.next() {
-                    if ch != b'\\' {
-                        unescaped.push(ch);
-                        continue;
-                    }
-                    // Handle escape
-                    let Some(&next_ch) = it.next() else {
-                        self.report_token_err(
-                            first.into(),
-                            true,
-                            "invalid escape in string literal",
-                        );
-                        unescaped.push(ch);
-                        break;
-                    };
-                    match next_ch {
-                        b'n' => unescaped.push(b'\n'),
-                        b'\\' => unescaped.push(b'\\'),
-                        b'"' => unescaped.push(b'"'),
-                        _ => {
-                            has_redundant_escape = true;
-                            unescaped.push(next_ch);
-                        }
-                    }
-                }
-                if has_redundant_escape {
-                    self.report_token_err(
-                        first.into(),
-                        false,
-                        "unnecessary escape in string literal",
-                    );
-                }
-                EraExpr::new_str(String::from_utf8_lossy(&unescaped).into(), first.src_info)
+                EraExpr::new_str(
+                    self.str_with_escape(raw_literal, first.src_info).into(),
+                    first.src_info,
+                )
             }
-            EraTokenKind::StringFormStart => {
+            EraTokenKind::StringFormStart | EraTokenKind::DoubleQuote => {
                 // TODO: Handle escape characters for StringForm (both expression and raw)
                 EraExpr::Term(EraTermExpr::StrForm(self.expression_strform(first)?))
             }
@@ -2709,7 +2683,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         loop {
             match token.kind {
                 EraTokenKind::PlainStringLiteral => parts.push(EraStrFormExprPart::Literal(
-                    String::from_utf8_lossy(token.lexeme).into(),
+                    self.str_with_escape(token.lexeme, token.src_info),
                     token.src_info,
                 )),
                 // TODO: String interpolation type-check
@@ -2769,7 +2743,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         }
                     }
                     then_parts.push(EraStrFormExprPart::Literal(
-                        String::from_utf8_lossy(lexeme).into(),
+                        self.str_with_escape(lexeme, token.src_info),
                         token.src_info,
                     ));
                 }
@@ -2820,7 +2794,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         }
                     }
                     else_parts.push(EraStrFormExprPart::Literal(
-                        String::from_utf8_lossy(lexeme).into(),
+                        self.str_with_escape(lexeme, token.src_info),
                         token.src_info,
                     ));
                 }
@@ -2883,7 +2857,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         }
                     }
                     parts.push(EraStrFormExprPart::Literal(
-                        String::from_utf8_lossy(lexeme).into(),
+                        self.str_with_escape(lexeme, token.src_info),
                         token.src_info,
                     ))
                 }
@@ -2934,7 +2908,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         loop {
             match token.kind {
                 EraTokenKind::PlainStringLiteral => {
-                    cont.push_str(&String::from_utf8_lossy(token.lexeme))
+                    cont.push_str(&self.str_with_escape(token.lexeme, token.src_info))
                 }
                 EraTokenKind::LineBreak => {
                     if !self.is_ignoring_newline() {
@@ -2964,7 +2938,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         loop {
             match token.kind {
                 EraTokenKind::PlainStringLiteral => {
-                    cont.push_str(&String::from_utf8_lossy(token.lexeme))
+                    cont.push_str(&self.str_with_escape(token.lexeme, token.src_info))
                 }
                 EraTokenKind::LineBreak => {
                     if !self.is_ignoring_newline() {
@@ -3072,6 +3046,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         let mut vals = Vec::new();
         match arg_fmt {
             // TODO: PRINT statement type-check
+            // TODO: Fix EraCommandArgFmt::ExpressionS
             EraCommandArgFmt::Expression | EraCommandArgFmt::ExpressionS => loop {
                 if self
                     .try_consume(EraLexerMode::Normal, EraTokenKind::SingleQuote)
@@ -3087,7 +3062,10 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         _ => unreachable!(),
                     }
                 }
-                vals.push(self.expression(true)?);
+                self.is_expression_s_mode = true;
+                let r = self.expression(true);
+                self.is_expression_s_mode = false;
+                vals.push(r?);
                 if self.matches_comma().is_some() {
                     continue;
                 }
@@ -4807,23 +4785,43 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
         false
     }
-    // TODO: Remove is_builtin_command()
-    fn is_builtin_command(cmd: &[u8]) -> bool {
-        const BUILTIN_COMMANDS: &'static [&'static [u8]] = &[b"PRINT", b"PRINTFORM", b"WAIT"];
-        BUILTIN_COMMANDS.iter().any(|x| x.eq_ignore_ascii_case(cmd))
-    }
-    // TODO: Remove get_command_arg_fmt()
-    // Gets information about how to parse command arguments.
-    fn get_command_arg_fmt(cmd: &[u8]) -> Option<EraCommandArgFmt> {
-        use EraCommandArgFmt::*;
-        let cmd = cmd.to_ascii_uppercase();
-        // TODO...
-        Some(match cmd.as_slice() {
-            b"PRINT" => RawString,
-            b"PRINTV" => Expression,
-            b"PRINTFORM" => RawStringForm,
-            _ => return None,
-        })
+    fn str_with_escape(&mut self, raw_str: &[u8], src_info: SourcePosInfo) -> String {
+        let mut unescaped = Vec::with_capacity(raw_str.len());
+        let mut it = raw_str.into_iter();
+        let mut has_redundant_escape = false;
+        while let Some(&ch) = it.next() {
+            if ch != b'\\' {
+                unescaped.push(ch);
+                continue;
+            }
+            // Handle escape
+            let Some(&next_ch) = it.next() else {
+                self.report_err(src_info, true, "invalid escape in string literal");
+                unescaped.push(ch);
+                break;
+            };
+            match next_ch {
+                b'n' => unescaped.push(b'\n'),
+                b'\\' => unescaped.push(b'\\'),
+                b'"' => unescaped.push(b'"'),
+                _ => {
+                    has_redundant_escape = true;
+                    unescaped.push(next_ch);
+                }
+            }
+        }
+        if has_redundant_escape {
+            // self.report_token_err(
+            //     first.into(),
+            //     false,
+            //     "unnecessary escape in string literal",
+            // );
+        }
+        match String::from_utf8_lossy(&unescaped) {
+            // SAFETY: We just checked that the string is valid UTF-8
+            std::borrow::Cow::Borrowed(x) => unsafe { String::from_utf8_unchecked(unescaped) },
+            std::borrow::Cow::Owned(x) => x,
+        }
     }
 }
 
@@ -4833,10 +4831,6 @@ enum EraCommandArgFmt {
     RawString,
     RawStringForm,
 }
-
-// pub struct EraPrintCommandFlags {
-//     is_form: bool,
-// }
 
 #[derive(Debug, Clone, Copy)]
 pub struct EraParserSlimVarTypeInfo {

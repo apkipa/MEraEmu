@@ -244,6 +244,7 @@ pub enum EraLexerMode {
     TernaryStrForm,
     CallForm,
     CommaRawStr,
+    ExpressionS,
 }
 
 pub struct EraLexErrorInfo {
@@ -356,7 +357,11 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
     /// Retrieves the next token without lexeme field set.
     fn next_token(&mut self, mode: EraLexerMode) -> EraToken<'static> {
         // Normal mode should have leading whitespaces removed
-        if let EraLexerMode::Normal | EraLexerMode::SharpDecl | EraLexerMode::InlineNormal = mode {
+        if let EraLexerMode::Normal
+        | EraLexerMode::SharpDecl
+        | EraLexerMode::InlineNormal
+        | EraLexerMode::ExpressionS = mode
+        {
             self.skip_whitespace();
         }
 
@@ -381,7 +386,10 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
             };
 
         let token = match mode {
-            EraLexerMode::Normal | EraLexerMode::SharpDecl | EraLexerMode::InlineNormal => {
+            EraLexerMode::Normal
+            | EraLexerMode::SharpDecl
+            | EraLexerMode::InlineNormal
+            | EraLexerMode::ExpressionS => {
                 //use EraTokenKind as TKind;
                 use EraTokenKind::*;
 
@@ -570,17 +578,21 @@ impl<'a, 'b, T: FnMut(&EraLexErrorInfo)> EraLexerInnerStateSite<'a, 'b, T> {
                         make_token_fn(self, IntLiteral)
                     }
                     b'"' => {
-                        // Normal string literal
-                        while let Some(ch) = self.advance_char() {
-                            // TODO: Properly handle raw newline in string literal?
-                            if ch == b'"' {
-                                break;
+                        if matches!(mode, EraLexerMode::ExpressionS) {
+                            make_token_fn(self, DoubleQuote)
+                        } else {
+                            // Normal string literal
+                            while let Some(ch) = self.advance_char() {
+                                // TODO: Properly handle raw newline in string literal?
+                                if ch == b'"' {
+                                    break;
+                                }
+                                if ch == b'\\' {
+                                    self.advance_char();
+                                }
                             }
-                            if ch == b'\\' {
-                                self.advance_char();
-                            }
+                            make_token_fn(self, StringLiteral)
                         }
-                        make_token_fn(self, StringLiteral)
                     }
                     b'[' if last_is_newline => {
                         // Special preprocessing (macro?)
