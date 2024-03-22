@@ -66,6 +66,7 @@ pub enum EraBytecodePrimaryType {
     SetMDArrayVal,
     GetArrayVal,
     SetArrayVal,
+    SetArrayValNoRet,
     // HACK: Special bytecode for handling increments & decrements
     IncMDArrayVal,
     DecMDArrayVal,
@@ -630,6 +631,17 @@ pub enum RefFlatValue<'a> {
     ArrInt(&'a Rc<RefCell<ArrIntValue>>),
     ArrStr(&'a Rc<RefCell<ArrStrValue>>),
 }
+impl RefFlatValue<'_> {
+    pub fn kind(&self) -> ValueKind {
+        use RefFlatValue::*;
+        match self {
+            Int(_) => ValueKind::Int,
+            Str(_) => ValueKind::Str,
+            ArrInt(_) => ValueKind::ArrInt,
+            ArrStr(_) => ValueKind::ArrStr,
+        }
+    }
+}
 
 // impl Value {
 //     pub fn new_int(val: i64) -> Self {
@@ -688,21 +700,25 @@ pub enum RefFlatValue<'a> {
 //     }
 // }
 impl Value {
+    #[inline(always)]
     pub fn new_int(val: i64) -> Self {
         Value(ValueInner::Int(IntValue { val }))
     }
+    #[inline(always)]
     pub fn new_str(val: arcstr::ArcStr) -> Self {
         Value(ValueInner::Str(StrValue { val }))
     }
     // pub fn new_int_rc(val: Rc<IntValue>) -> Self {
     //     Value(ValueInner::Int(val.deref().clone()))
     // }
+    #[inline(always)]
     pub fn new_int_obj(val: IntValue) -> Self {
         Value(ValueInner::Int(val))
     }
     // pub fn new_str_rc(val: Rc<StrValue>) -> Self {
     //     Value(ValueInner::Str(val.deref().clone()))
     // }
+    #[inline(always)]
     pub fn new_str_obj(val: StrValue) -> Self {
         Value(ValueInner::Str(val))
     }
@@ -771,7 +787,8 @@ impl Value {
     }
     pub fn kind(&self) -> ValueKind {
         // TODO: Optimize performance
-        self.clone().into_unpacked().kind()
+        //self.clone().into_unpacked().kind()
+        self.as_unpacked().kind()
     }
 }
 impl FlatValue {

@@ -407,6 +407,10 @@ impl EraBytecodeChunkBuilder {
             len: self.bytecode.len(),
         }
     }
+    fn truncate_bytecode(&mut self, len: usize) {
+        self.bytecode.truncate(len);
+        self.src_infos.truncate(len);
+    }
 }
 impl EraBytecodeChunkBacktrackHolder {
     fn source_pos_info(&self, chunk: &EraBytecodeChunkBuilder) -> Option<SourcePosInfo> {
@@ -426,8 +430,7 @@ impl EraBytecodeChunkBacktrackHolder {
 }
 impl EraBytecodeChunkSnapshot {
     fn regret(self, chunk: &mut EraBytecodeChunkBuilder) {
-        chunk.bytecode.truncate(self.len);
-        chunk.src_infos.truncate(self.len);
+        chunk.truncate_bytecode(self.len);
     }
 }
 
@@ -1889,9 +1892,11 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                             }
                         }
                     }
-                    self.chunk.emit_bytecode(BuildString, src_info);
-                    // TODO: BuildString check overflow
-                    self.chunk.append_u8(parts_cnt as _, src_info);
+                    if parts_cnt != 1 {
+                        self.chunk.emit_bytecode(BuildString, src_info);
+                        // TODO: BuildString check overflow
+                        self.chunk.append_u8(parts_cnt as _, src_info);
+                    }
                     TString
                 }
                 EraTermExpr::Var(x) => self.arr_get(&x.name, x.idxs, x.src_info)?,
@@ -3607,10 +3612,11 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         let stmt = match stmt {
             EraStmt::Expr(x) => {
                 // Evaluate and discard values
+                let bc_start_pos = self.chunk.cur_bytes_cnt();
                 let src_info = x.source_pos_info();
                 match self.expression(x)? {
                     TInteger | TString => {
-                        self.chunk.emit_bytecode(Pop, src_info);
+                        self.peephole_optimization_pop(bc_start_pos, src_info);
                     }
                     TVoid => (),
                 }
@@ -3642,8 +3648,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         for src in x.srcs {
                             self.chunk.emit_duplicate_n(2, x.src_info);
                             self.expr_int(src)?;
-                            self.chunk.emit_bytecode(SetArrayVal, x.src_info);
-                            self.chunk.emit_pop(x.src_info);
+                            self.chunk.emit_bytecode(SetArrayValNoRet, x.src_info);
                             self.chunk
                                 .emit_load_const(self.p.new_value_int(1), x.src_info);
                             self.chunk.emit_bytecode(Add, x.src_info);
@@ -3653,8 +3658,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         for src in x.srcs {
                             self.chunk.emit_duplicate_n(2, x.src_info);
                             self.expr_str(src)?;
-                            self.chunk.emit_bytecode(SetArrayVal, x.src_info);
-                            self.chunk.emit_pop(x.src_info);
+                            self.chunk.emit_bytecode(SetArrayValNoRet, x.src_info);
                             self.chunk
                                 .emit_load_const(self.p.new_value_int(1), x.src_info);
                             self.chunk.emit_bytecode(Add, x.src_info);
@@ -4063,8 +4067,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         bail_opt!(self, x.src_info, "invalid expression for FOR statement")
                     }
                 }
-                self.chunk.emit_bytecode(SetArrayVal, x.src_info);
-                self.chunk.emit_pop(x.src_info);
+                self.chunk.emit_bytecode(SetArrayValNoRet, x.src_info);
                 match self.expression(x.end)? {
                     TInteger => (),
                     TString | TVoid => {
@@ -4986,8 +4989,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             this.chunk.emit_bytecode(GetArrayVal, src_info);
             this.chunk.emit_duplicate_one_n(4, src_info);
             this.chunk.emit_bytecode(Add, src_info);
-            this.chunk.emit_bytecode(SetArrayVal, src_info);
-            this.chunk.emit_pop(src_info);
+            this.chunk.emit_bytecode(SetArrayValNoRet, src_info);
         };
         let bt_body = self.chunk.emit_jump_hold(si);
         let start_pos = self.chunk.cur_bytes_cnt();
@@ -5054,8 +5056,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             this.chunk
                 .emit_load_const(this.p.new_value_int(step), src_info);
             this.chunk.emit_bytecode(Add, src_info);
-            this.chunk.emit_bytecode(SetArrayVal, src_info);
-            this.chunk.emit_pop(src_info);
+            this.chunk.emit_bytecode(SetArrayValNoRet, src_info);
         };
         let bt_body = self.chunk.emit_jump_hold(si);
         let start_pos = self.chunk.cur_bytes_cnt();
@@ -5085,6 +5086,120 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         self.chunk.emit_pop_n(3, si);
 
         Some(())
+    }
+    fn peephole_optimization_pop(&mut self, start_pos: usize, src_info: SourcePosInfo) {
+        // TODO: peephole_optimization_pop
+
+        // (len, stack_delta, has_side_effect)
+        let check_bytecode = |bc: &[u8]| -> (usize, isize, bool) {
+            use EraBytecodePrimaryType::*;
+            match EraBytecodePrimaryType::try_from_i(bc[0]) {
+                Some(Pop) => (1, -1, false),
+                Some(
+                    Add | Subtract | Multiply | Divide | Modulo | BitAnd | BitOr | BitXor
+                    | BitShiftL | BitShiftR | CompareL | CompareEq | CompareLEq | MaximumInt
+                    | MinimumInt | GetBit | SetBit | ClearBit | InvertBit,
+                ) => (1, -1, false),
+                Some(ClampInt | InRangeInt) => (1, -2, false),
+                Some(Negate | BitNot | LogicalNot) => (1, 0, false),
+                Some(LoadConst) => (2, 1, false),
+                Some(LoadConstW) => (3, 1, false),
+                Some(LoadConstWW) => (5, 1, false),
+                Some(Jump) => (2, 0, true),
+                Some(JumpW) => (3, 0, true),
+                Some(JumpWW) => (5, 0, true),
+                Some(JumpCond) => (2, -1, true),
+                Some(JumpCondW) => (3, -1, true),
+                Some(JumpCondWW) => (5, -1, true),
+                Some(GetGlobal | GetLocal) => (1, 0, false),
+                Some(Duplicate) => (1, 1, false),
+                Some(DuplicateN) => (2, bc[1] as isize, false),
+                Some(DuplicateOneN) => (2, 1, false),
+                Some(GetArrayVal) => (1, -1, true),
+                Some(SetArrayVal) => (1, -2, true),
+                Some(SetArrayValNoRet) => (1, -3, true),
+                Some(BuildArrayIndexFromMD | BuildString) => (2, 1 - (bc[1] as isize), false),
+                // HACK: Assuming function always return values
+                Some(FunCall) => (2, 1 - (bc[1] as isize), true),
+                // ----- Builtin functions
+                Some(GetRandomMax) => (1, 0, true),
+                Some(GetRandomRange) => (1, -1, true),
+                Some(GetCharaNum) => (1, 1, false),
+                Some(FindElement | FindLastElement | FindChara | FindLastChara) => {
+                    (1, 1 - 5, false)
+                }
+                Some(CsvGetProp2) => (2, 1 - 2, false),
+                Some(PowerInt) => (1, 1 - 2, false),
+                Some(SqrtInt | CbrtInt | LogInt | Log10Int | ExponentInt | AbsInt) => (1, 0, false),
+                Some(ArrayCountMatches | CArrayCountMatches) => (1, 1 - 5, false),
+                Some(ReplaceString | SubString | SubStringU | StrFind | StrFindU) => {
+                    (1, 1 - 3, false)
+                }
+                Some(PadString) => (2, 1 - 2, false),
+                Some(
+                    RepeatString | EncodeToUnicode | IntToStrWithBase | CountSubString | StrCharAtU
+                    | FormatIntToStr,
+                ) => (1, 1 - 2, false),
+                Some(
+                    UnicodeToStr | StrLen | StrLenU | StringIsValidInteger | StringToUpper
+                    | StringToLower | StringToHalf | StringToFull | ConvertToInteger
+                    | ConvertToString | EscapeRegexStr | HtmlToPlainText,
+                ) => (1, 0, false),
+                Some(GetHostTimeRaw | GetHostTime) => (1, 1, true),
+                Some(CsvGetNum) => (2, 0, false),
+                Some(CharaCsvExists) => (1, 0, false),
+                Some(GetPalamLv | GetExpLv) => (1, 1 - 2, false),
+                Some(SumArray | SumCArray | MaxArray | MaxCArray | MinArray | MinCArray) => {
+                    (1, 1 - 4, false)
+                }
+                Some(GCreated | SpriteCreated | SpriteWidth | SpriteHeight) => (1, 0, true),
+                Some(GetConfig | GetConfigS) => (1, 0, true),
+                Some(GroupMatch) => (2, -(bc[1] as isize), false),
+                // ----- Unknowns
+                x => panic!(
+                    "not yet implemented: {x:?}, at {} {src_info:?}",
+                    self.p.file_name
+                ),
+                //_ => (1, 0, true),
+            }
+        };
+        let mut chunk = &self.chunk.bytecode[start_pos..];
+        let mut last_side_effect_pos = start_pos;
+        let mut cur_pos = start_pos;
+        let mut last_bc = EraBytecodePrimaryType::Invalid as u8;
+        let mut last_side_effect_bc = last_bc;
+        while !chunk.is_empty() {
+            last_bc = chunk[0];
+            let (len, stack_delta, has_side_effect) = check_bytecode(chunk);
+            chunk = &chunk[len..];
+            cur_pos += len;
+            if has_side_effect {
+                last_side_effect_pos = cur_pos;
+                last_side_effect_bc = last_bc;
+            }
+        }
+        // Actually eliminate instructions
+        chunk = &self.chunk.bytecode[last_side_effect_pos..];
+        // Initial state (without optimization, one pop is required)
+        let mut stack_balance = 1;
+        while !chunk.is_empty() {
+            let (len, stack_delta, _) = check_bytecode(chunk);
+            chunk = &chunk[len..];
+            stack_balance -= stack_delta;
+        }
+        if last_side_effect_bc == EraBytecodePrimaryType::SetArrayVal as u8 {
+            // Modify bytecode kind
+            self.chunk.overwrite_u8(
+                EraBytecodePrimaryType::SetArrayValNoRet as _,
+                last_side_effect_pos - 1,
+            );
+            stack_balance -= 1;
+        }
+        if stack_balance < 0 {
+            panic!("wrong stack balance after peephole optimization");
+        }
+        self.chunk.truncate_bytecode(last_side_effect_pos);
+        self.chunk.emit_pop_n(stack_balance as _, src_info);
     }
     #[must_use]
     fn var_arr(&mut self, var_name: &str, src_info: SourcePosInfo) -> Option<EraVarArrCompileInfo> {

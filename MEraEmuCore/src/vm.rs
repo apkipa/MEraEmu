@@ -466,9 +466,11 @@ pub struct EraVarPool {
 pub struct EraVarInfo {
     pub name: Ascii<arcstr::ArcStr>,
     pub val: Value,
+    // TODO: Compress with modular-bitfield
     pub is_const: bool,
     pub is_charadata: bool,
     pub is_global: bool,
+    pub never_trap: bool,
 }
 
 impl EraVarPool {
@@ -482,7 +484,7 @@ impl EraVarPool {
     }
     #[must_use]
     pub fn add_var(&mut self, name: &str, val: Value) -> Option<usize> {
-        self.add_var_ex(name, val, false, false, false)
+        self.add_var_ex(name, val, false, false, false, false)
     }
     #[must_use]
     pub fn add_var_ex(
@@ -492,6 +494,7 @@ impl EraVarPool {
         is_const: bool,
         is_charadata: bool,
         is_global: bool,
+        never_trap: bool,
     ) -> Option<usize> {
         let name: Ascii<arcstr::ArcStr> = Ascii::new(name.into());
         let var_idx = self.vars.len();
@@ -507,6 +510,7 @@ impl EraVarPool {
             is_const,
             is_charadata,
             is_global,
+            never_trap,
         });
         if is_charadata {
             self.chara_var_idxs.push(var_idx);
@@ -517,34 +521,41 @@ impl EraVarPool {
         Some(var_idx)
     }
     #[must_use]
+    #[inline(always)]
     pub fn get_var(&self, name: &str) -> Option<&Value> {
         self.var_names
             .get(Ascii::new_str(name))
             .map(|x| &self.vars[*x].val)
     }
     #[must_use]
+    #[inline(always)]
     pub fn get_var_mut(&mut self, name: &str) -> Option<&mut Value> {
         self.var_names
             .get_mut(Ascii::new_str(name))
             .map(|x| &mut self.vars[*x].val)
     }
     #[must_use]
+    #[inline(always)]
     pub fn get_var_by_idx(&mut self, idx: usize) -> Option<&Value> {
         self.vars.get(idx).map(|x| &x.val)
     }
     #[must_use]
+    #[inline(always)]
     pub fn get_var_by_idx_mut(&mut self, idx: usize) -> Option<&mut Value> {
         self.vars.get_mut(idx).map(|x| &mut x.val)
     }
     #[must_use]
+    #[inline(always)]
     pub fn get_var_idx(&self, name: &str) -> Option<usize> {
         self.var_names.get(Ascii::new_str(name)).copied()
     }
     #[must_use]
+    #[inline(always)]
     pub fn get_var_info(&self, idx: usize) -> Option<&EraVarInfo> {
         self.vars.get(idx)
     }
     #[must_use]
+    #[inline(always)]
     pub fn get_var_info_by_name(&self, name: &str) -> Option<&EraVarInfo> {
         self.get_var_idx(name).and_then(|idx| self.vars.get(idx))
     }
@@ -1096,7 +1107,7 @@ impl EraVirtualMachine {
                     bail_opt!(ctx, true, format!("THROW: {msg}"));
                 }
                 ReturnVoid => {
-                    ctx.stack.drain(ctx.cur_frame.stack_start..);
+                    ctx.stack.truncate(ctx.cur_frame.stack_start);
                     let ret_ip = ctx.cur_frame.ret_ip;
                     self.frames.pop();
                     make_ctx!(self, ctx);
@@ -1105,7 +1116,7 @@ impl EraVirtualMachine {
                 }
                 ReturnInteger | ReturnString => {
                     let [ret_val] = ctx.pop_stack()?;
-                    ctx.stack.drain(ctx.cur_frame.stack_start..);
+                    ctx.stack.truncate(ctx.cur_frame.stack_start);
                     let ret_ip = ctx.cur_frame.ret_ip;
                     let ignore_return_value = self.frames.pop().unwrap().ignore_return_value;
                     make_ctx!(self, ctx);
@@ -1453,24 +1464,35 @@ impl EraVirtualMachine {
                     ctx.stack.push(value.into());
                 }
                 BuildString => {
+                    const ERR_MSG: &str = "BuildString requires string values as operands";
                     let count = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
                     ip_offset_delta += 1;
-                    let mut new_str = String::new();
-                    let mut err_msg = "";
-                    for value in ctx.pop_stack_dyn(count.into())? {
-                        match value.val.into_unpacked() {
-                            FlatValue::Str(x) => new_str += &x.val,
-                            _ => {
-                                err_msg = "BuildString requires string values as operands";
-                                break;
+                    if count == 0 {
+                        ctx.stack.push(Value::new_str(arcstr::ArcStr::new()).into());
+                    } else if count == 1 {
+                        let [value] = view_stack!(ctx)?;
+                        if !matches!(value.val.kind(), ValueKind::Str) {
+                            bail_opt!(ctx, true, ERR_MSG);
+                        }
+                    } else {
+                        // Slow path
+                        let mut new_str = String::new();
+                        let mut err_msg = "";
+                        for value in ctx.pop_stack_dyn(count.into())? {
+                            match value.val.into_unpacked() {
+                                FlatValue::Str(x) => new_str += &x.val,
+                                _ => {
+                                    err_msg = ERR_MSG;
+                                    break;
+                                }
                             }
                         }
+                        if !err_msg.is_empty() {
+                            bail_opt!(ctx, true, err_msg);
+                        }
+                        let new_str = Value::new_str(new_str.into());
+                        ctx.stack.push(new_str.into());
                     }
-                    if !err_msg.is_empty() {
-                        bail_opt!(ctx, true, err_msg);
-                    }
-                    let new_str = Value::new_str(new_str.into());
-                    ctx.stack.push(new_str.into());
                 }
                 PadString => {
                     use unicode_width::UnicodeWidthStr;
@@ -1543,17 +1565,20 @@ impl EraVirtualMachine {
                 }
                 GetGlobal => {
                     let [value] = view_stack!(ctx)?;
-                    let var_value = match value.val.as_unpacked() {
-                        RefFlatValue::Int(x) => ctx.global_vars.get_var_by_idx(x.val as _),
-                        RefFlatValue::Str(x) => ctx.global_vars.get_var(&x.val),
+                    let var_info = match value.val.as_unpacked() {
+                        RefFlatValue::Int(x) => ctx.global_vars.get_var_info(x.val as _),
+                        //RefFlatValue::Str(x) => ctx.global_vars.get_var_info_by_name(&x.val),
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
                     };
-                    let Some(var_value) = var_value else {
+                    let Some(var_info) = var_info else {
                         bail_opt!(ctx, true, "invalid index into global variable pool");
                     };
+                    let is_trap = !var_info.never_trap
+                        && Self::check_trap_var(&self.trap_vars, &var_info.val).is_some();
+                    // let is_trap = Self::check_trap_var(&self.trap_vars, &var_info.val).is_some();
                     *value = EraTrappableValue {
-                        is_trap: Self::check_trap_var(&self.trap_vars, var_value).is_some(),
-                        val: var_value.clone(),
+                        is_trap,
+                        val: var_info.val.clone(),
                     };
                 }
                 SetGlobal => {
@@ -1800,26 +1825,15 @@ impl EraVirtualMachine {
                     ctx.stack.push(src_value);
                 }
                 GetArrayVal => {
-                    let [dst, idx] = ctx.pop_stack()?;
-                    let FlatValue::Int(idx) = idx.val.into_unpacked() else {
+                    let [dst, idx] = view_stack!(ctx)?;
+                    let RefFlatValue::Int(idx) = idx.val.as_unpacked() else {
                         bail_opt!(ctx, true, "invalid indices into array");
                     };
                     // TODO: Check overflow
                     let idx = idx.val as usize;
-                    // let value = match dst.val.into_unpacked() {
-                    //     FlatValue::ArrInt(x) => x
-                    //         .borrow()
-                    //         .flat_get(idx)
-                    //         .map(|x| Value::new_int_obj(x.clone())),
-                    //     FlatValue::ArrStr(x) => x
-                    //         .borrow()
-                    //         .flat_get(idx)
-                    //         .map(|x| Value::new_str_rc(x.clone())),
-                    //     _ => bail_opt!(ctx, cur_frame, true, "expected arrays as operands"),
-                    // };
-                    let value = match dst.val.into_unpacked() {
-                        FlatValue::ArrInt(x) => {
-                            let x_ptr: *const () = Rc::as_ptr(&x) as _;
+                    let value = match dst.val.as_unpacked() {
+                        RefFlatValue::ArrInt(x) => {
+                            let x_ptr: *const () = Rc::as_ptr(x) as _;
                             let mut x = x.borrow_mut();
                             if dst.is_trap {
                                 assert_eq!(
@@ -1852,8 +1866,8 @@ impl EraVirtualMachine {
                                 x.flat_get(idx).map(|x| Value::new_int_obj(x.clone()))
                             }
                         }
-                        FlatValue::ArrStr(x) => {
-                            let x_ptr: *const () = Rc::as_ptr(&x) as _;
+                        RefFlatValue::ArrStr(x) => {
+                            let x_ptr: *const () = Rc::as_ptr(x) as _;
                             let mut x = x.borrow_mut();
                             if dst.is_trap {
                                 assert_eq!(
@@ -1891,9 +1905,11 @@ impl EraVirtualMachine {
                     let Some(value) = value else {
                         bail_opt!(ctx, true, "invalid indices into array");
                     };
-                    ctx.stack.push(value.into());
+                    *dst = value.into();
+                    ctx.stack.pop();
                 }
-                SetArrayVal => {
+                SetArrayVal | SetArrayValNoRet => {
+                    let push_ret_val = matches!(primary_bytecode, SetArrayVal);
                     let [dst, idx, src] = ctx.pop_stack()?;
                     let FlatValue::Int(idx) = idx.val.into_unpacked() else {
                         bail_opt!(ctx, true, "invalid indices into array");
@@ -1979,7 +1995,9 @@ impl EraVirtualMachine {
                         }
                         _ => bail_opt!(ctx, true, "destination is not an array"),
                     }
-                    ctx.stack.push(src);
+                    if push_ret_val {
+                        ctx.stack.push(src);
+                    }
                 }
                 BuildArrayIndexFromMD => {
                     let idxs_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;

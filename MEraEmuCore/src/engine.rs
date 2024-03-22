@@ -1237,6 +1237,7 @@ impl<'a> MEraEngine<'a> {
                             true,
                             false,
                             false,
+                            true,
                         );
                         Ok(())
                     }
@@ -1251,6 +1252,7 @@ impl<'a> MEraEngine<'a> {
                             true,
                             false,
                             false,
+                            true,
                         );
                         Ok(())
                     }
@@ -1355,6 +1357,7 @@ impl<'a> MEraEngine<'a> {
                         var_desc.is_const,
                         var_desc.is_charadata,
                         var_desc.is_global,
+                        true,
                     )
                     .is_none()
                 {
