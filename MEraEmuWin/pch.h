@@ -45,6 +45,8 @@
 #include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.XamlTypeInfo.h>
 
+#include <winrt/WinUIEditor.h>
+
 #include <windows.ui.xaml.media.dxinterop.h>
 
 #include <functional>

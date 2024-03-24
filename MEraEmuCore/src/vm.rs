@@ -17,11 +17,12 @@ use std::{
     collections::{BTreeMap, HashMap},
     future::Future,
     mem::MaybeUninit,
-    rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
 };
 
-struct EraVirtualMachineContext<'a> {
+use rclite::Rc;
+
+pub struct EraVirtualMachineContext<'a> {
     chunks: &'a [EraBytecodeChunk],
     callback: &'a mut dyn EraVirtualMachineCallback,
     stack: &'a mut Vec<EraTrappableValue>,
@@ -256,6 +257,9 @@ impl EraVirtualMachineContext<'_> {
         };
         Some(var)
     }
+    pub fn get_stack_mut(&mut self) -> (&mut Vec<EraTrappableValue>, usize) {
+        (self.stack, self.cur_frame.stack_start)
+    }
 }
 
 // TODO: Use a JIT backend to improve performance
@@ -454,6 +458,11 @@ macro_rules! view_stack {
     };
 }
 
+// A static JIT object for compilers to interface with VM data structures efficiently at run time.
+pub trait EraStaticJitFn {
+    fn invoke(&self, ctx: &mut EraVirtualMachineContext) -> anyhow::Result<()>;
+}
+
 #[derive(Default)]
 pub struct EraVarPool {
     // Mapping from names to indices.
@@ -567,21 +576,15 @@ impl EraVarPool {
 // TODO: Variables requiring callback should be sent to the compiler for better codegen,
 //       avoiding the need for trap representations
 #[derive(Debug, Clone)]
-struct EraTrappableValue {
-    is_trap: bool,
-    val: Value,
-}
+pub struct EraTrappableValue(pub Value);
 impl From<Value> for EraTrappableValue {
     fn from(value: Value) -> Self {
-        EraTrappableValue {
-            is_trap: false,
-            val: value,
-        }
+        EraTrappableValue(value)
     }
 }
 impl From<EraTrappableValue> for Value {
     fn from(value: EraTrappableValue) -> Self {
-        value.val
+        value.0
     }
 }
 
@@ -896,10 +899,22 @@ impl EraVirtualMachine {
         //       does not affect the normal path too much.
         let idx = self.global_vars.get_var_idx(name)?;
         let var = self.global_vars.get_var_by_idx(idx)?;
+        // let ptr = match var.clone().into_unpacked() {
+        //     FlatValue::Int(_) | FlatValue::Str(_) => return None,
+        //     FlatValue::ArrInt(x) => Rc::as_ptr(&x) as _,
+        //     FlatValue::ArrStr(x) => Rc::as_ptr(&x) as _,
+        // };
+        // self.trap_vars.insert(ptr, idx);
         let ptr = match var.clone().into_unpacked() {
             FlatValue::Int(_) | FlatValue::Str(_) => return None,
-            FlatValue::ArrInt(x) => Rc::as_ptr(&x) as _,
-            FlatValue::ArrStr(x) => Rc::as_ptr(&x) as _,
+            FlatValue::ArrInt(x) => {
+                x.borrow_mut().flags.set_is_trap(true);
+                Rc::as_ptr(&x) as _
+            }
+            FlatValue::ArrStr(x) => {
+                x.borrow_mut().flags.set_is_trap(true);
+                Rc::as_ptr(&x) as _
+            }
         };
         self.trap_vars.insert(ptr, idx);
         Some(())
@@ -1040,6 +1055,18 @@ impl EraVirtualMachine {
         let vresult = ctx.get_var_arrint("RESULT")?;
         let vresults = ctx.get_var_arrstr("RESULTS")?;
 
+        // let mut last_t = std::time::Instant::now();
+        // let mut time_counters = [(0, std::time::Duration::default()); 256];
+        // let time_overhead = {
+        //     for i in 0..100000 {
+        //         std::time::Instant::now();
+        //     }
+        //     let cur_t = std::time::Instant::now();
+        //     let dur = (cur_t - last_t) / 100000;
+        //     last_t = cur_t;
+        //     dur
+        // };
+
         for _ in 0..max_inst_cnt {
             if stop_flag.load(Ordering::Relaxed) {
                 break;
@@ -1054,10 +1081,13 @@ impl EraVirtualMachine {
                     format!("execution of one function ran out of stack space. This possibly indicates broken codegen.")
                 );
             }
+            // if ctx.stack.capacity() - ctx.stack.len() < 16 {
+            //     // Try to allocate aggressively, in the hope that compiler will optimize it
+            //     ctx.stack.reserve(16);
+            // }
 
             let mut ip_offset_delta: isize = 1;
             // let primary_bytecode = unsafe { *cur_chunk.bytecode.get_unchecked(cur_frame.ip.offset) };
-            // let primary_bytecode = unsafe { std::mem::transmute(primary_bytecode) };
             let primary_bytecode = ctx.chunk_read_u8(ctx.cur_frame.ip.offset)?;
             let primary_bytecode = match EraBytecodePrimaryType::try_from_i(primary_bytecode) {
                 Some(x) => x,
@@ -1070,6 +1100,7 @@ impl EraVirtualMachine {
                     )
                 ),
             };
+
             // TODO: Remove this
             // println!(
             //     "{primary_bytecode:?}, {:?}",
@@ -1078,8 +1109,9 @@ impl EraVirtualMachine {
             match primary_bytecode {
                 DebugBreak => break,
                 Quit => return None,
+                Nop => (),
                 InvalidWithMessage => {
-                    let msg = ctx.stack.pop().and_then(|x| match x.val.into_unpacked() {
+                    let msg = ctx.stack.pop().and_then(|x| match x.0.into_unpacked() {
                         FlatValue::Int(x) => Some(StrValue {
                             val: arcstr::format!("{}", x.val),
                         }),
@@ -1093,7 +1125,7 @@ impl EraVirtualMachine {
                     bail_opt!(ctx, true, format!("invalid bytecode: {msg}"));
                 }
                 Throw => {
-                    let msg = ctx.stack.pop().and_then(|x| match x.val.into_unpacked() {
+                    let msg = ctx.stack.pop().and_then(|x| match x.0.into_unpacked() {
                         FlatValue::Int(x) => Some(StrValue {
                             val: arcstr::format!("{}", x.val),
                         }),
@@ -1104,6 +1136,28 @@ impl EraVirtualMachine {
                         FlatValue::ArrStr(x) => x.borrow().vals.first().map(|x| x.clone()),
                     });
                     let msg = msg.as_ref().map(|x| x.val.as_str()).unwrap_or("<invalid>");
+
+                    // TODO: Report time usage upon exiting
+                    // {
+                    //     let mut msg = "[DEBUG] Instruction time usage:\n".to_owned();
+                    //     for (i, (cnt, dur)) in time_counters.into_iter().enumerate() {
+                    //         let Some(i) = EraBytecodePrimaryType::try_from_i(i as _) else {
+                    //             continue;
+                    //         };
+                    //         if cnt == 0 {
+                    //             continue;
+                    //         }
+                    //         let ns = dur.as_nanos() * 10 / (cnt as u128);
+                    //         msg += &format!(
+                    //             "{i:?}: {cnt} times, {dur:?} total dur, {}.{:#01} ns/inst\n",
+                    //             ns / 10,
+                    //             ns % 10
+                    //         );
+                    //     }
+                    //     ctx.callback
+                    //         .on_print(&msg, PrintExtendedFlags::new().with_is_line(true));
+                    // }
+
                     bail_opt!(ctx, true, format!("THROW: {msg}"));
                 }
                 ReturnVoid => {
@@ -1156,7 +1210,7 @@ impl EraVirtualMachine {
                     };
                     ip_offset_delta += offset_delta;
                     let [value] = ctx.pop_stack()?;
-                    match value.val.into_unpacked() {
+                    match value.0.into_unpacked() {
                         FlatValue::Int(x) => {
                             if x.val != 0 {
                                 ip_offset_delta = offset;
@@ -1166,6 +1220,36 @@ impl EraVirtualMachine {
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
                     }
                 }
+                // JumpCondKeep | JumpCondKeepW | JumpCondKeepWW => {
+                //     let imm_ip = ctx.cur_frame.ip.offset + 1;
+                //     let offset_delta;
+                //     let offset: isize = match primary_bytecode {
+                //         JumpCondKeep => {
+                //             offset_delta = 1;
+                //             ctx.chunk_read_u8(imm_ip)? as i8 as _
+                //         }
+                //         JumpCondKeepW => {
+                //             offset_delta = 2;
+                //             ctx.chunk_read_u16(imm_ip)? as i16 as _
+                //         }
+                //         JumpCondKeepWW => {
+                //             offset_delta = 4;
+                //             ctx.chunk_read_u32(imm_ip)? as i32 as _
+                //         }
+                //         _ => unreachable!(),
+                //     };
+                //     ip_offset_delta += offset_delta;
+                //     let [value] = view_stack!(ctx)?;
+                //     match value.0.as_unpacked() {
+                //         RefFlatValue::Int(x) => {
+                //             if x.val != 0 {
+                //                 ip_offset_delta = offset;
+                //             }
+                //         }
+                //         RefFlatValue::Str(_) => ip_offset_delta = offset,
+                //         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
+                //     }
+                // }
                 FunCall => {
                     let args_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)? as _;
                     ip_offset_delta += 1;
@@ -1173,7 +1257,7 @@ impl EraVirtualMachine {
                     // NOTE: We ignore the return value if we are looking up the callee
                     //       dynamically (i.e. by string instead of index)
                     let ignore_return_value;
-                    let func_info = match entry.val.into_unpacked() {
+                    let func_info = match entry.0.into_unpacked() {
                         // TODO: Check index overflow
                         FlatValue::Int(x) => {
                             ignore_return_value = false;
@@ -1243,7 +1327,7 @@ impl EraVirtualMachine {
                     ip_offset_delta += 1;
                     let [entry] = ctx.pop_stack()?;
                     // NOTE: We unconditionally ignore return values
-                    let entry = match entry.val.into_unpacked() {
+                    let entry = match entry.0.into_unpacked() {
                         // TODO: Check index overflow
                         FlatValue::Int(x) => Either::Left(x),
                         FlatValue::Str(x) => Either::Right(x),
@@ -1281,15 +1365,15 @@ impl EraVirtualMachine {
                             let param_kind = param.kind();
                             match param_kind {
                                 ValueKind::ArrInt | ValueKind::ArrStr => {
-                                    if arg_pack[0].val.kind() != param_kind {
+                                    if arg_pack[0].0.kind() != param_kind {
                                         bail_opt!(ctx, true, "wrong arg pack");
                                     }
-                                    ctx.stack.push(arg_pack[0].val.clone().into());
+                                    ctx.stack.push(arg_pack[0].0.clone().into());
                                 }
                                 ValueKind::Int | ValueKind::Str => {
                                     match (
-                                        arg_pack[0].val.clone().into_unpacked(),
-                                        arg_pack[1].val.clone().into_unpacked(),
+                                        arg_pack[0].0.clone().into_unpacked(),
+                                        arg_pack[1].0.clone().into_unpacked(),
                                     ) {
                                         (FlatValue::ArrInt(x), FlatValue::Int(y))
                                             if param_kind == ValueKind::Int =>
@@ -1444,7 +1528,7 @@ impl EraVirtualMachine {
                 }
                 ConvertToString => {
                     let [value] = ctx.pop_stack()?;
-                    let value = match value.val.into_unpacked() {
+                    let value = match value.0.into_unpacked() {
                         FlatValue::Int(x) => Value::new_str(arcstr::format!("{}", x.val)),
                         FlatValue::Str(x) => Value::new_str_obj(x),
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
@@ -1453,7 +1537,7 @@ impl EraVirtualMachine {
                 }
                 ConvertToInteger => {
                     let [value] = ctx.pop_stack()?;
-                    let value = match value.val.into_unpacked() {
+                    let value = match value.0.into_unpacked() {
                         FlatValue::Int(x) => Value::new_int_obj(x),
                         FlatValue::Str(x) => {
                             let x = routine::parse_era_int(&x.val).unwrap_or(0);
@@ -1471,7 +1555,7 @@ impl EraVirtualMachine {
                         ctx.stack.push(Value::new_str(arcstr::ArcStr::new()).into());
                     } else if count == 1 {
                         let [value] = view_stack!(ctx)?;
-                        if !matches!(value.val.kind(), ValueKind::Str) {
+                        if !matches!(value.0.kind(), ValueKind::Str) {
                             bail_opt!(ctx, true, ERR_MSG);
                         }
                     } else {
@@ -1479,7 +1563,7 @@ impl EraVirtualMachine {
                         let mut new_str = String::new();
                         let mut err_msg = "";
                         for value in ctx.pop_stack_dyn(count.into())? {
-                            match value.val.into_unpacked() {
+                            match value.0.into_unpacked() {
                                 FlatValue::Str(x) => new_str += &x.val,
                                 _ => {
                                     err_msg = ERR_MSG;
@@ -1501,11 +1585,11 @@ impl EraVirtualMachine {
                         ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?.into();
                     ip_offset_delta += 1;
                     let [value, width] = ctx.pop_stack()?;
-                    let width: usize = match width.val.into_unpacked() {
+                    let width: usize = match width.0.into_unpacked() {
                         FlatValue::Int(x) => x.val.try_into().unwrap_or_default(),
                         _ => bail_opt!(ctx, true, "pad width must be an integer"),
                     };
-                    let value = match value.val.into_unpacked() {
+                    let value = match value.0.into_unpacked() {
                         FlatValue::Str(x) => {
                             let val_width = x.val.width();
                             if val_width >= width {
@@ -1561,11 +1645,11 @@ impl EraVirtualMachine {
                 }
                 DeepClone => {
                     let [value] = ctx.pop_stack()?;
-                    ctx.stack.push(value.val.deep_clone().into());
+                    ctx.stack.push(value.0.deep_clone().into());
                 }
                 GetGlobal => {
                     let [value] = view_stack!(ctx)?;
-                    let var_info = match value.val.as_unpacked() {
+                    let var_info = match value.0.as_unpacked() {
                         RefFlatValue::Int(x) => ctx.global_vars.get_var_info(x.val as _),
                         //RefFlatValue::Str(x) => ctx.global_vars.get_var_info_by_name(&x.val),
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
@@ -1573,17 +1657,33 @@ impl EraVirtualMachine {
                     let Some(var_info) = var_info else {
                         bail_opt!(ctx, true, "invalid index into global variable pool");
                     };
-                    let is_trap = !var_info.never_trap
-                        && Self::check_trap_var(&self.trap_vars, &var_info.val).is_some();
-                    // let is_trap = Self::check_trap_var(&self.trap_vars, &var_info.val).is_some();
-                    *value = EraTrappableValue {
-                        is_trap,
-                        val: var_info.val.clone(),
-                    };
+                    *value = EraTrappableValue(var_info.val.clone());
+                    // let is_trap = !var_info.never_trap
+                    //     && Self::check_trap_var(&self.trap_vars, &var_info.val).is_some();
+                    // // let is_trap = Self::check_trap_var(&self.trap_vars, &var_info.val).is_some();
+                    // *value = EraTrappableValue {
+                    //     is_trap,
+                    //     val: var_info.val.clone(),
+                    // };
                 }
+                // GetGlobalImmWW => {
+                //     let index = ctx.chunk_read_u32(ctx.cur_frame.ip.offset + 1)?;
+                //     ip_offset_delta += 4;
+                //     let var_info = ctx.global_vars.get_var_info(index as _);
+                //     let Some(var_info) = var_info else {
+                //         bail_opt!(ctx, true, "invalid index into global variable pool");
+                //     };
+                //     let is_trap = !var_info.never_trap
+                //         && Self::check_trap_var(&self.trap_vars, &var_info.val).is_some();
+                //     // let is_trap = Self::check_trap_var(&self.trap_vars, &var_info.val).is_some();
+                //     ctx.stack.push(EraTrappableValue {
+                //         is_trap,
+                //         val: var_info.val.clone(),
+                //     });
+                // }
                 SetGlobal => {
                     let [index, src_value] = ctx.pop_stack()?;
-                    let value = match index.val.into_unpacked() {
+                    let value = match index.0.into_unpacked() {
                         // TODO: Check if index is in function frame
                         FlatValue::Int(x) => ctx.global_vars.get_var_by_idx_mut(x.val as _),
                         FlatValue::Str(x) => ctx.global_vars.get_var_mut(&x.val),
@@ -1598,7 +1698,7 @@ impl EraVirtualMachine {
                 GetLocal => {
                     let cur_frame_stack_start = ctx.cur_frame.stack_start;
                     let (rest, [index]) = view_stack!(ctx, rest)?;
-                    let value = match index.val.as_unpacked() {
+                    let value = match index.0.as_unpacked() {
                         RefFlatValue::Int(x) => {
                             // TODO: Check if index is in bounds
                             match rest.get(cur_frame_stack_start.saturating_add_signed(x.val as _))
@@ -1617,7 +1717,7 @@ impl EraVirtualMachine {
                 }
                 SetLocal => {
                     let [index, src_value] = ctx.pop_stack()?;
-                    let value = match index.val.into_unpacked() {
+                    let value = match index.0.into_unpacked() {
                         FlatValue::Int(x) => {
                             // TODO: Check if index is in bounds
                             match ctx.stack.get_mut(
@@ -1642,7 +1742,7 @@ impl EraVirtualMachine {
                     let idxs = ctx
                         .pop_stack_dyn(idxs_cnt as _)?
                         .into_iter()
-                        .map(|x| match x.val.into_unpacked() {
+                        .map(|x| match x.0.into_unpacked() {
                             // TODO: Check overflow
                             FlatValue::Int(x) => Some(x.val as u32),
                             _ => None,
@@ -1652,11 +1752,11 @@ impl EraVirtualMachine {
                         bail_opt!(ctx, true, "expected integers as operands");
                     };
                     let [arr] = ctx.pop_stack()?;
-                    let value = match arr.val.into_unpacked() {
+                    let value = match arr.0.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let x_ptr: *const () = Rc::as_ptr(&x) as _;
                             let mut x = x.borrow_mut();
-                            if arr.is_trap {
+                            if x.flags.is_trap() {
                                 assert_eq!(
                                     x.dims.len(),
                                     1,
@@ -1691,7 +1791,7 @@ impl EraVirtualMachine {
                         FlatValue::ArrStr(x) => {
                             let x_ptr: *const () = Rc::as_ptr(&x) as _;
                             let mut x = x.borrow_mut();
-                            if arr.is_trap {
+                            if x.flags.is_trap() {
                                 assert_eq!(
                                     x.dims.len(),
                                     1,
@@ -1744,7 +1844,7 @@ impl EraVirtualMachine {
                     let idxs = ctx
                         .pop_stack_dyn(idxs_cnt as _)?
                         .into_iter()
-                        .map(|x| match x.val.into_unpacked() {
+                        .map(|x| match x.0.into_unpacked() {
                             // TODO: Check overflow
                             FlatValue::Int(x) => Some(x.val as u32),
                             _ => None,
@@ -1754,10 +1854,9 @@ impl EraVirtualMachine {
                         bail_opt!(ctx, true, "expected integers as operands");
                     };
                     let [dst_value] = ctx.pop_stack()?;
-                    let is_trap = dst_value.is_trap;
                     match (
-                        dst_value.val.into_unpacked(),
-                        src_value.clone().val.into_unpacked(),
+                        dst_value.0.into_unpacked(),
+                        src_value.clone().0.into_unpacked(),
                     ) {
                         (FlatValue::ArrInt(dst), FlatValue::Int(src)) => {
                             let dst_ptr: *const () = Rc::as_ptr(&dst) as _;
@@ -1766,7 +1865,7 @@ impl EraVirtualMachine {
                                 Some(x) => x.val = src.val,
                                 None => bail_opt!(ctx, true, "invalid indices into array"),
                             }
-                            if is_trap {
+                            if dst.flags.is_trap() {
                                 assert_eq!(
                                     dst.dims.len(),
                                     1,
@@ -1795,7 +1894,7 @@ impl EraVirtualMachine {
                                 Some(x) => *x = src.clone(),
                                 None => bail_opt!(ctx, true, "invalid indices into array"),
                             }
-                            if is_trap {
+                            if dst.flags.is_trap() {
                                 assert_eq!(
                                     dst.dims.len(),
                                     1,
@@ -1826,16 +1925,17 @@ impl EraVirtualMachine {
                 }
                 GetArrayVal => {
                     let [dst, idx] = view_stack!(ctx)?;
-                    let RefFlatValue::Int(idx) = idx.val.as_unpacked() else {
+                    let idx_var = idx;
+                    let RefFlatValue::Int(idx) = idx_var.0.as_unpacked() else {
                         bail_opt!(ctx, true, "invalid indices into array");
                     };
                     // TODO: Check overflow
                     let idx = idx.val as usize;
-                    let value = match dst.val.as_unpacked() {
+                    let value = match dst.0.as_unpacked() {
                         RefFlatValue::ArrInt(x) => {
                             let x_ptr: *const () = Rc::as_ptr(x) as _;
                             let mut x = x.borrow_mut();
-                            if dst.is_trap {
+                            if x.flags.is_trap() {
                                 assert_eq!(
                                     x.dims.len(),
                                     1,
@@ -1869,7 +1969,7 @@ impl EraVirtualMachine {
                         RefFlatValue::ArrStr(x) => {
                             let x_ptr: *const () = Rc::as_ptr(x) as _;
                             let mut x = x.borrow_mut();
-                            if dst.is_trap {
+                            if x.flags.is_trap() {
                                 assert_eq!(
                                     x.dims.len(),
                                     1,
@@ -1906,19 +2006,23 @@ impl EraVirtualMachine {
                         bail_opt!(ctx, true, "invalid indices into array");
                     };
                     *dst = value.into();
-                    ctx.stack.pop();
+                    // TODO: SAFETY
+                    unsafe {
+                        std::ptr::drop_in_place(idx_var);
+                        ctx.stack.set_len(ctx.stack.len() - 1);
+                    }
                 }
                 SetArrayVal | SetArrayValNoRet => {
                     let push_ret_val = matches!(primary_bytecode, SetArrayVal);
-                    let [dst, idx, src] = ctx.pop_stack()?;
-                    let FlatValue::Int(idx) = idx.val.into_unpacked() else {
+                    let [dst, idx, src] = view_stack!(ctx)?;
+                    let idx_var = idx;
+                    let RefFlatValue::Int(idx) = idx_var.0.as_unpacked() else {
                         bail_opt!(ctx, true, "invalid indices into array");
                     };
                     // TODO: Check overflow
                     let idx = idx.val as usize;
-                    let is_trap = dst.is_trap;
-                    match (dst.val.into_unpacked(), src.clone().val.into_unpacked()) {
-                        (FlatValue::ArrInt(dst), FlatValue::Int(src)) => {
+                    match (dst.0.as_unpacked(), src.0.as_unpacked()) {
+                        (RefFlatValue::ArrInt(dst), RefFlatValue::Int(src)) => {
                             let dst_ptr: *const () = Rc::as_ptr(&dst) as _;
                             let mut dst = dst.borrow_mut();
                             match dst.flat_get_mut(idx) {
@@ -1927,7 +2031,7 @@ impl EraVirtualMachine {
                                     bail_opt!(ctx, true, "invalid indices into array")
                                 }
                             }
-                            if is_trap {
+                            if dst.flags.is_trap() {
                                 assert_eq!(
                                     dst.dims.len(),
                                     1,
@@ -1949,7 +2053,7 @@ impl EraVirtualMachine {
                                 }
                             }
                         }
-                        (FlatValue::ArrStr(dst), FlatValue::Str(src)) => {
+                        (RefFlatValue::ArrStr(dst), RefFlatValue::Str(src)) => {
                             let dst_ptr: *const () = Rc::as_ptr(&dst) as _;
                             let mut dst = dst.borrow_mut();
                             match dst.flat_get_mut(idx) {
@@ -1958,7 +2062,7 @@ impl EraVirtualMachine {
                                     bail_opt!(ctx, true, "invalid indices into array")
                                 }
                             }
-                            if is_trap {
+                            if dst.flags.is_trap() {
                                 assert_eq!(
                                     dst.dims.len(),
                                     1,
@@ -1980,23 +2084,21 @@ impl EraVirtualMachine {
                                 }
                             }
                         }
-                        // (FlatValue::ArrInt(dst), src) => {
-                        //     // TODO: Remove this branch
-                        //     dbg!(dst, src);
-                        //     bail_opt!(ctx, true, "value type mismatches array element type")
-                        // }
-                        // (FlatValue::ArrStr(dst), src) => {
-                        //     // TODO: Remove this branch
-                        //     dbg!(dst, src);
-                        //     bail_opt!(ctx, true, "value type mismatches array element type")
-                        // }
-                        (FlatValue::ArrInt(_) | FlatValue::ArrStr(_), _) => {
+                        (RefFlatValue::ArrInt(_) | RefFlatValue::ArrStr(_), _) => {
                             bail_opt!(ctx, true, "value type mismatches array element type")
                         }
                         _ => bail_opt!(ctx, true, "destination is not an array"),
                     }
                     if push_ret_val {
-                        ctx.stack.push(src);
+                        // TODO: SAFETY
+                        unsafe {
+                            std::ptr::drop_in_place(dst);
+                            std::ptr::drop_in_place(idx_var);
+                            std::ptr::write(dst, std::ptr::read(src));
+                            ctx.stack.set_len(ctx.stack.len() - 2);
+                        }
+                    } else {
+                        ctx.stack.truncate(ctx.stack.len() - 3);
                     }
                 }
                 BuildArrayIndexFromMD => {
@@ -2005,7 +2107,7 @@ impl EraVirtualMachine {
                     let idxs = ctx
                         .pop_stack_dyn(idxs_cnt as _)?
                         .into_iter()
-                        .map(|x| match x.val.into_unpacked() {
+                        .map(|x| match x.0.into_unpacked() {
                             // TODO: Check overflow
                             FlatValue::Int(x) => Some(x.val as u32),
                             _ => None,
@@ -2015,7 +2117,7 @@ impl EraVirtualMachine {
                         bail_opt!(ctx, true, "expected integers as operands");
                     };
                     let [arr] = ctx.pop_stack()?;
-                    let index = match arr.val.clone().into_unpacked() {
+                    let index = match arr.0.clone().into_unpacked() {
                         FlatValue::ArrInt(x) => x.borrow().calc_idx(&idxs),
                         FlatValue::ArrStr(x) => x.borrow().calc_idx(&idxs),
                         _ => bail_opt!(ctx, true, "expected arrays as operands"),
@@ -2029,7 +2131,7 @@ impl EraVirtualMachine {
                 CopyArrayContent => {
                     // TODO: Support trapped arrays???
                     let [dst, src] = ctx.pop_stack()?;
-                    match (dst.val.into_unpacked(), src.val.into_unpacked()) {
+                    match (dst.0.into_unpacked(), src.0.into_unpacked()) {
                         (FlatValue::ArrInt(dst), FlatValue::ArrInt(src)) => {
                             // We must not borrow the same array twice
                             if !Rc::ptr_eq(&dst, &src) {
@@ -2065,7 +2167,7 @@ impl EraVirtualMachine {
                 }
                 Add => {
                     let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                    let result = match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
                         (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
                             // TODO: Strict integer arithmetic check
                             Value::new_int(lhs.val.wrapping_add(rhs.val))
@@ -2084,7 +2186,7 @@ impl EraVirtualMachine {
                 }
                 Subtract => {
                     let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                    let result = match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
                         (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
                             // TODO: Strict integer arithmetic check
                             Value::new_int(lhs.val.wrapping_sub(rhs.val))
@@ -2099,7 +2201,7 @@ impl EraVirtualMachine {
                 }
                 Multiply => {
                     let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                    let result = match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
                         (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
                             // TODO: Strict integer arithmetic check
                             Value::new_int(lhs.val.wrapping_mul(rhs.val))
@@ -2115,7 +2217,7 @@ impl EraVirtualMachine {
                 }
                 Divide => {
                     let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                    let result = match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
                         (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
                             // TODO: Strict integer arithmetic check
                             if rhs.val == 0 {
@@ -2133,7 +2235,7 @@ impl EraVirtualMachine {
                 }
                 Modulo => {
                     let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                    let result = match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
                         (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
                             // TODO: Strict integer arithmetic check
                             if rhs.val == 0 {
@@ -2152,7 +2254,7 @@ impl EraVirtualMachine {
                 }
                 Negate => {
                     let [value] = ctx.pop_stack()?;
-                    let result = match value.val.into_unpacked() {
+                    let result = match value.0.into_unpacked() {
                         FlatValue::Int(x) => Value::new_int(x.val.wrapping_neg()),
                         _ => bail_opt!(ctx, true, "expected integer values as operands"),
                     };
@@ -2161,7 +2263,7 @@ impl EraVirtualMachine {
                 BitAnd | BitOr | BitXor | BitShiftL | BitShiftR => {
                     let [lhs, rhs] = ctx.pop_stack()?;
                     let result =
-                        Value::new_int(match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                        Value::new_int(match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
                             (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
                                 BitAnd => lhs.val & rhs.val,
                                 BitOr => lhs.val | rhs.val,
@@ -2182,7 +2284,7 @@ impl EraVirtualMachine {
                 CompareL | CompareEq | CompareLEq => {
                     let [lhs, rhs] = ctx.pop_stack()?;
                     let result = Value::new_int(
-                        match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                        match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
                             (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
                                 CompareL => lhs.val < rhs.val,
                                 CompareEq => lhs.val == rhs.val,
@@ -2209,7 +2311,7 @@ impl EraVirtualMachine {
                     // TODO: Remove this
                     todo!()
                     // let [lhs, rhs] = vm_pop_stack!(ctx, cur_frame, &mut self.stack, 2)?;
-                    // let result = Value::new_int(match (lhs.val.into_unpacked(), rhs.val.into_unpacked()) {
+                    // let result = Value::new_int(match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
                     //     (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
                     //         LogicalAnd => lhs.val && rhs.val,
                     //         LogicalOr => lhs.val || rhs.val,
@@ -2229,7 +2331,7 @@ impl EraVirtualMachine {
                 }
                 LogicalNot => {
                     let [value] = ctx.pop_stack()?;
-                    let result = Value::new_int(match value.val.into_unpacked() {
+                    let result = Value::new_int(match value.0.into_unpacked() {
                         FlatValue::Int(x) => (x.val == 0) as _,
                         _ => bail_opt!(ctx, true, "expected integer values as operands"),
                     });
@@ -2251,7 +2353,7 @@ impl EraVirtualMachine {
                 }
                 GetRandomMax => {
                     let [upper] = ctx.pop_stack()?;
-                    let upper = match upper.val.into_unpacked() {
+                    let upper = match upper.0.into_unpacked() {
                         FlatValue::Int(x) if x.val > 0 => x.val as _,
                         _ => bail_opt!(ctx, true, "expected positive integers as operands"),
                     };
@@ -2355,7 +2457,7 @@ impl EraVirtualMachine {
                 }
                 RepeatString => {
                     let [a1, a2] = ctx.pop_stack()?;
-                    let (haystack, count) = match (a1.val.into_unpacked(), a2.val.into_unpacked()) {
+                    let (haystack, count) = match (a1.0.into_unpacked(), a2.0.into_unpacked()) {
                         (FlatValue::Int(count), FlatValue::Str(haystack)) => (haystack, count),
                         (FlatValue::Str(haystack), FlatValue::Int(count)) => (haystack, count),
                         _ => bail_opt!(ctx, true, "operands must be (int, str)"),
@@ -2601,10 +2703,10 @@ impl EraVirtualMachine {
                     ip_offset_delta += 1;
                     let mut it = ctx.pop_stack_dyn(args_cnt as usize + 1)?;
                     let mut count = 0;
-                    match it.next().unwrap().val.into_unpacked() {
+                    match it.next().unwrap().0.into_unpacked() {
                         FlatValue::Int(x) => {
                             for y in it {
-                                let FlatValue::Int(y) = y.val.into_unpacked() else {
+                                let FlatValue::Int(y) = y.0.into_unpacked() else {
                                     count = -1;
                                     break;
                                 };
@@ -2615,7 +2717,7 @@ impl EraVirtualMachine {
                         }
                         FlatValue::Str(x) => {
                             for y in it {
-                                let FlatValue::Str(y) = y.val.into_unpacked() else {
+                                let FlatValue::Str(y) = y.0.into_unpacked() else {
                                     count = -1;
                                     break;
                                 };
@@ -2652,7 +2754,7 @@ impl EraVirtualMachine {
                     } else {
                         (usize::MAX, end_idx)
                     };
-                    let result = match arr.val.into_unpacked() {
+                    let result = match arr.0.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let x = x.borrow();
                             unpack_int!(ctx, val);
@@ -2744,7 +2846,7 @@ impl EraVirtualMachine {
                     } else {
                         count.val as _
                     };
-                    match arr.val.into_unpacked() {
+                    match arr.0.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let mut x = x.borrow_mut();
                             let dim_size = *x.dims.last().unwrap() as usize;
@@ -2779,7 +2881,7 @@ impl EraVirtualMachine {
                         count.val as _
                     };
                     let is_ascending = matches!(primary_bytecode, ArraySortAsc);
-                    match arr.val.into_unpacked() {
+                    match arr.0.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let mut x = x.borrow_mut();
                             let dim_size = *x.dims.last().unwrap() as usize;
@@ -2818,7 +2920,7 @@ impl EraVirtualMachine {
                     let prim_arr = it.next().unwrap();
                     let mut interrupted = false;
                     let mut err_msg = "";
-                    match prim_arr.val.into_unpacked() {
+                    match prim_arr.0.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let mut x = x.borrow_mut();
                             let dim_size = *x.dims.last().unwrap() as usize;
@@ -2839,7 +2941,7 @@ impl EraVirtualMachine {
                             }
                             // Sort sub arrays
                             for sub_arr in it {
-                                let sub_arr = match sub_arr.val.into_unpacked() {
+                                let sub_arr = match sub_arr.0.into_unpacked() {
                                     FlatValue::ArrInt(x) => x,
                                     _ => {
                                         err_msg = "value must be an array of integer";
@@ -2885,7 +2987,7 @@ impl EraVirtualMachine {
                             }
                             // Sort sub arrays
                             for sub_arr in it {
-                                let sub_arr = match sub_arr.val.into_unpacked() {
+                                let sub_arr = match sub_arr.0.into_unpacked() {
                                     FlatValue::ArrStr(x) => x,
                                     _ => {
                                         err_msg = "value must be an array of string";
@@ -2924,7 +3026,7 @@ impl EraVirtualMachine {
                 }
                 ArrayCopy => {
                     let [afrom, ato] = ctx.pop_stack()?;
-                    match afrom.val.into_unpacked() {
+                    match afrom.0.into_unpacked() {
                         FlatValue::ArrInt(afrom) => {
                             let afrom = afrom.borrow();
                             unpack_arrint_mut!(ctx, ato);
@@ -2996,7 +3098,7 @@ impl EraVirtualMachine {
                     } else {
                         target_count.val as _
                     };
-                    match arr.val.into_unpacked() {
+                    match arr.0.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let mut x = x.borrow_mut();
                             unpack_int!(ctx, value);
@@ -3048,7 +3150,7 @@ impl EraVirtualMachine {
                         }
                         _ => unreachable!(),
                     };
-                    match value.val.into_unpacked() {
+                    match value.0.into_unpacked() {
                         FlatValue::Int(x) => ctx.callback.on_print(&x.val.to_string(), flags),
                         FlatValue::Str(x) => ctx.callback.on_print(&x.val, flags),
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
@@ -3285,7 +3387,7 @@ impl EraVirtualMachine {
                         end_idx.val as _
                     };
                     let is_reverse = matches!(primary_bytecode, FindLastElement);
-                    let result = match var.val.into_unpacked() {
+                    let result = match var.0.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let x = x.borrow();
                             unpack_int!(ctx, value);
@@ -3336,7 +3438,7 @@ impl EraVirtualMachine {
                         end_idx.val as _
                     };
                     let is_reverse = matches!(primary_bytecode, FindLastChara);
-                    let result = match var.val.into_unpacked() {
+                    let result = match var.0.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let x = x.borrow();
                             unpack_int!(ctx, value);
@@ -3379,7 +3481,7 @@ impl EraVirtualMachine {
                     } else {
                         end_idx.val as _
                     };
-                    match arr.val.into_unpacked() {
+                    match arr.0.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let mut x = x.borrow_mut();
                             unpack_int!(ctx, value);
@@ -3412,7 +3514,7 @@ impl EraVirtualMachine {
                     } else {
                         end_idx.val as _
                     };
-                    match arr.val.into_unpacked() {
+                    match arr.0.into_unpacked() {
                         FlatValue::ArrInt(x) => {
                             let mut x = x.borrow_mut();
                             unpack_int!(ctx, value);
@@ -3455,7 +3557,7 @@ impl EraVirtualMachine {
                 GetVarSize => {
                     let [arr, dim] = ctx.pop_stack()?;
                     unpack_int!(ctx, dim);
-                    let dims = match arr.val.into_unpacked() {
+                    let dims = match arr.0.into_unpacked() {
                         FlatValue::ArrInt(x) => x.borrow().dims.clone(),
                         FlatValue::ArrStr(x) => x.borrow().dims.clone(),
                         _ => bail_opt!(ctx, true, "value must be arrays"),
@@ -3806,7 +3908,7 @@ impl EraVirtualMachine {
                     // NOTE: We need to deduplicate numbers without changing the order
                     let pickup_charas = ctx
                         .pop_stack_dyn(charas_cnt as _)?
-                        .map(|x| match x.val.into_unpacked() {
+                        .map(|x| match x.0.into_unpacked() {
                             FlatValue::Int(x) if (0..self.charas_count as _).contains(&x.val) => {
                                 Ok(x.val as usize)
                             }
@@ -3860,7 +3962,7 @@ impl EraVirtualMachine {
                     // NOTE: We need to deduplicate numbers
                     let del_charas = ctx
                         .pop_stack_dyn(charas_cnt as _)?
-                        .map(|x| match x.val.into_unpacked() {
+                        .map(|x| match x.0.into_unpacked() {
                             FlatValue::Int(x) if (0..self.charas_count as _).contains(&x.val) => {
                                 Some(x.val as usize)
                             }
@@ -4039,7 +4141,7 @@ impl EraVirtualMachine {
                     // NOTE: We need to deduplicate numbers
                     let del_charas = ctx
                         .pop_stack_dyn(charas_cnt as _)?
-                        .map(|x| match x.val.into_unpacked() {
+                        .map(|x| match x.0.into_unpacked() {
                             FlatValue::Int(x) if (0..self.charas_count as _).contains(&x.val) => {
                                 Some(x.val as usize)
                             }
@@ -4102,6 +4204,17 @@ impl EraVirtualMachine {
                     // TODO: SystemIntrinsics
                     bail_opt!(ctx, true, "SystemIntrinsics not yet implemented");
                 }
+                InvokeStaticJit => {
+                    let jit_idx = ctx.chunk_read_u32(ctx.cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 4;
+                    // Find JIT function with given index
+                    let Some(jit_fn) = ctx.cur_chunk.jit_fns.get(jit_idx as usize) else {
+                        bail_opt!(ctx, true, "invalid JIT function index");
+                    };
+                    if let Err(e) = jit_fn.invoke(&mut ctx) {
+                        bail_opt!(ctx, true, format!("JIT function failed: {e}"));
+                    }
+                }
                 Invalid => bail_opt!(ctx, true, "invalid bytecode"),
                 _ => bail_opt!(
                     ctx,
@@ -4109,6 +4222,16 @@ impl EraVirtualMachine {
                     format!("invalid or unimplemented bytecode `{primary_bytecode:?}`")
                 ),
             }
+
+            // TODO: Time benchmarking
+            // {
+            //     let cur_t = std::time::Instant::now();
+            //     //let duration = (cur_t - last_t).saturating_sub(time_overhead);
+            //     let duration = cur_t - last_t;
+            //     last_t = cur_t;
+            //     let time_counter = &mut time_counters[primary_bytecode as usize];
+            //     *time_counter = (time_counter.0 + 1, time_counter.1 + duration);
+            // }
 
             ctx.cur_frame.ip.offset =
                 match ctx.cur_frame.ip.offset.checked_add_signed(ip_offset_delta) {

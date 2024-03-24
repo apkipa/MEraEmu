@@ -1,4 +1,6 @@
-use std::{cell::RefCell, collections::BTreeMap, ops::Deref, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, ops::Deref};
+
+use rclite::Rc;
 
 #[repr(u8)]
 #[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
@@ -7,6 +9,7 @@ pub enum EraBytecodePrimaryType {
     Invalid = 0,
     InvalidWithMessage, // Introduced to report compilation errors during execution
     DebugBreak,
+    Nop,
     Quit,
     Throw,
     ReturnVoid,
@@ -19,6 +22,9 @@ pub enum EraBytecodePrimaryType {
     JumpCond,
     JumpCondW,
     JumpCondWW,
+    // JumpCondKeep,
+    // JumpCondKeepW,
+    // JumpCondKeepWW,
     //FunJump,
     /*  FunCall:
         Stack should contain <args...> <function>.
@@ -59,6 +65,7 @@ pub enum EraBytecodePrimaryType {
     DuplicateOneN,
     DeepClone, // Replaces current value with a new copy for arrays
     GetGlobal,
+    // GetGlobalImmWW,
     SetGlobal,
     GetLocal,
     SetLocal,
@@ -224,6 +231,7 @@ pub enum EraBytecodePrimaryType {
     // -----
     SystemIntrinsics = 192,
     ExtendedBytecode1, // Values >= ExtendedBytecode should do extended lookup
+    InvokeStaticJit = 251,
 }
 impl EraBytecodePrimaryType {
     pub fn from_i(value: u8) -> Self {
@@ -458,18 +466,27 @@ pub struct StrValue {
 pub struct ArrIntValue {
     pub vals: Vec<IntValue>,
     pub dims: smallvec::SmallVec<[u32; 3]>,
-    // immutable: bool,
+    pub flags: EraValueFlags,
 }
 #[derive(Debug, Clone)]
 pub struct ArrStrValue {
     pub vals: Vec<StrValue>,
     pub dims: smallvec::SmallVec<[u32; 3]>,
-    // immutable: bool,
+    pub flags: EraValueFlags,
 }
 // pub struct ArrValue {
 //     depth: u16,
 //     slot: u16,
 // }
+
+#[modular_bitfield::bitfield]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub struct EraValueFlags {
+    pub is_trap: bool,
+    pub is_const: bool,
+    __: modular_bitfield::specifiers::B6,
+}
 
 // TODO: Compressed array values (extend on demand)?
 impl ArrIntValue {
@@ -734,6 +751,7 @@ impl Value {
         Value(ValueInner::ArrInt(Rc::new(RefCell::new(ArrIntValue {
             vals,
             dims,
+            flags: EraValueFlags::new(),
         }))))
     }
     pub fn new_str_arr(mut dims: smallvec::SmallVec<[u32; 3]>, mut vals: Vec<StrValue>) -> Self {
@@ -748,6 +766,7 @@ impl Value {
         Value(ValueInner::ArrStr(Rc::new(RefCell::new(ArrStrValue {
             vals,
             dims,
+            flags: EraValueFlags::new(),
         }))))
     }
     pub fn new_int_0darr(val: i64) -> Self {

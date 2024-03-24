@@ -199,13 +199,15 @@ namespace winrt::MEraEmuWin::implementation {
 namespace winrt::MEraEmuWin::implementation {
     struct InputRequest {
         //InputRequest(int64_t time_limit, bool show_time_prompt, hstring expiry_msg, bool is_one, bool can_skip) : {}
+        InputRequest(int64_t& time_limit) : time_limit(time_limit) {}
         virtual ~InputRequest() {}
 
         // NOTE: For derived requests, hold a std::promise so that engine
         //       can receive the result or teardown notification.
 
         // Shared parameters
-        int64_t time_limit{ -1 }; // Negatives stand for no limit
+        // NOTE: This is also used by UI to indicate skipped ticks
+        int64_t& time_limit; // Negatives stand for no limit
         bool show_time_prompt{ false };
         hstring expiry_msg{};
         bool show_expiry_msg{ false };
@@ -219,6 +221,8 @@ namespace winrt::MEraEmuWin::implementation {
     struct InputRequestI : InputRequest {
         std::optional<int64_t> default_value;
         std::promise<int64_t> promise;
+
+        using InputRequest::InputRequest;
 
         ~InputRequestI() {
             if (default_value) {
@@ -243,6 +247,8 @@ namespace winrt::MEraEmuWin::implementation {
         std::optional<hstring> default_value;
         std::promise<hstring> promise;
 
+        using InputRequest::InputRequest;
+
         ~InputRequestS() {
             if (default_value) {
                 promise.set_value(*default_value);
@@ -262,6 +268,9 @@ namespace winrt::MEraEmuWin::implementation {
     // Input request which swallows any input; can be used for merely waiting
     struct InputRequestVoid : InputRequest {
         std::promise<void> promise{};
+
+        using InputRequest::InputRequest;
+
         ~InputRequestVoid() {
             promise.set_value();
         }
@@ -452,7 +461,8 @@ namespace winrt::MEraEmuWin::implementation {
             });
         }
         void on_wait(bool any_key, bool is_force) override {
-            auto input_req = std::make_unique<InputRequestVoid>();
+            int64_t time_limit{ -1 };
+            auto input_req = std::make_unique<InputRequestVoid>(time_limit);
             input_req->can_skip = true;
             input_req->break_user_skip = is_force;
             auto future = input_req->promise.get_future();
@@ -462,8 +472,22 @@ namespace winrt::MEraEmuWin::implementation {
             return future.get();
         }
         void on_twait(int64_t duration, bool is_force) override {
-            auto input_req = std::make_unique<InputRequestVoid>();
-            input_req->time_limit = duration;
+            if (duration > 0) {
+                if (duration <= m_tick_compensation) {
+                    m_tick_compensation -= duration;
+                    duration = 0;
+                }
+                else {
+                    duration -= m_tick_compensation;
+                    m_tick_compensation = 0;
+                }
+            }
+            auto input_req = std::make_unique<InputRequestVoid>(duration);
+            tenkai::cpp_utils::ScopeExit se_time_limit([&] {
+                if (duration < 0) {
+                    m_tick_compensation = -duration;
+                }
+            });
             input_req->can_skip = !is_force;
             input_req->break_user_skip = true;
             auto future = input_req->promise.get_future();
@@ -473,8 +497,10 @@ namespace winrt::MEraEmuWin::implementation {
             return future.get();
         }
         std::optional<int64_t> on_input_int(std::optional<int64_t> default_value, bool can_click, bool allow_skip) override {
+            m_tick_compensation = 0;
+            int64_t time_limit{ -1 };
             try {
-                auto input_req = std::make_unique<InputRequestI>();
+                auto input_req = std::make_unique<InputRequestI>(time_limit);
                 input_req->default_value = default_value;
                 input_req->can_skip = allow_skip;
                 input_req->break_user_skip = true;
@@ -487,8 +513,10 @@ namespace winrt::MEraEmuWin::implementation {
             catch (std::future_error const& e) { return std::nullopt; }
         }
         const char* on_input_str(std::optional<std::string_view> default_value, bool can_click, bool allow_skip) override {
+            m_tick_compensation = 0;
+            int64_t time_limit{ -1 };
             try {
-                auto input_req = std::make_unique<InputRequestS>();
+                auto input_req = std::make_unique<InputRequestS>(time_limit);
                 input_req->default_value = default_value.transform([](auto x) { return to_hstring(x); });
                 input_req->can_skip = allow_skip;
                 input_req->break_user_skip = true;
@@ -503,8 +531,22 @@ namespace winrt::MEraEmuWin::implementation {
         }
         std::optional<int64_t> on_tinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
             try {
-                auto input_req = std::make_unique<InputRequestI>();
-                input_req->time_limit = time_limit;
+                if (time_limit > 0) {
+                    if (time_limit <= m_tick_compensation) {
+                        m_tick_compensation -= time_limit;
+                        time_limit = 0;
+                    }
+                    else {
+                        time_limit -= m_tick_compensation;
+                        m_tick_compensation = 0;
+                    }
+                }
+                auto input_req = std::make_unique<InputRequestI>(time_limit);
+                tenkai::cpp_utils::ScopeExit se_time_limit([&] {
+                    if (time_limit < 0) {
+                        m_tick_compensation = -time_limit;
+                    }
+                });
                 input_req->default_value = default_value;
                 input_req->show_time_prompt = show_prompt;
                 input_req->expiry_msg = to_hstring(expiry_msg);
@@ -521,8 +563,22 @@ namespace winrt::MEraEmuWin::implementation {
         }
         const char* on_tinput_str(int64_t time_limit, std::string_view default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
             try {
-                auto input_req = std::make_unique<InputRequestS>();
-                input_req->time_limit = time_limit;
+                if (time_limit > 0) {
+                    if (time_limit <= m_tick_compensation) {
+                        m_tick_compensation -= time_limit;
+                        time_limit = 0;
+                    }
+                    else {
+                        time_limit -= m_tick_compensation;
+                        m_tick_compensation = 0;
+                    }
+                }
+                auto input_req = std::make_unique<InputRequestS>(time_limit);
+                tenkai::cpp_utils::ScopeExit se_time_limit([&] {
+                    if (time_limit < 0) {
+                        m_tick_compensation = -time_limit;
+                    }
+                });
                 input_req->default_value = to_hstring(default_value);
                 input_req->show_time_prompt = show_prompt;
                 input_req->expiry_msg = to_hstring(expiry_msg);
@@ -864,6 +920,9 @@ namespace winrt::MEraEmuWin::implementation {
         EngineSharedData* const m_sd;
         std::string m_str_cache;
         std::mt19937_64 m_rand_gen{ std::random_device{}() };
+
+    public:
+        int64_t m_tick_compensation{};
     };
 
     com_ptr<IDWriteFactory2> g_dwrite_factory;
@@ -975,7 +1034,7 @@ namespace winrt::MEraEmuWin::implementation {
         });
 
         // Initialize input countdown timer
-        m_input_countdown_timer.Interval(std::chrono::milliseconds{ 16 });
+        m_input_countdown_timer.Interval(std::chrono::milliseconds{ 1 });
         m_input_countdown_timer.Tick({ this, &EngineControl::OnInputCountDownTick });
     }
     void EngineControl::ReturnToTitle() {
@@ -1038,7 +1097,12 @@ namespace winrt::MEraEmuWin::implementation {
                 sd->ui_is_alive.wait(false, std::memory_order_acquire);
 
                 MEraEngine engine;
-                engine.install_sys_callback(std::make_unique<MEraEmuWinEngineSysCallback>(sd.get()));
+                MEraEmuWinEngineSysCallback* callback;
+                {
+                    auto callback_box = std::make_unique<MEraEmuWinEngineSysCallback>(sd.get());
+                    callback = callback_box.get();
+                    engine.install_sys_callback(std::move(callback_box));
+                }
 
                 // Register global variables
                 // Engine -- register int
@@ -1221,6 +1285,7 @@ namespace winrt::MEraEmuWin::implementation {
                         }
                         engine.do_execution(&sd->engine_stop_flag, UINT64_MAX);
                     }
+                    callback->m_tick_compensation = 0;
                     if (sd->has_execution_error) {
                         // Dump stack trace when execution error occurs
                         sd->has_execution_error = false;
@@ -1535,6 +1600,7 @@ namespace winrt::MEraEmuWin::implementation {
             (cur_t - m_input_start_t);
         if (remaining_time.count() <= 0) {
             // Expired
+            input_req->time_limit = std::chrono::duration_cast<std::chrono::milliseconds>(remaining_time).count();
             tenkai::cpp_utils::ScopeExit se_input_req([&] {
                 input_req = nullptr;
             });
@@ -1667,7 +1733,9 @@ namespace winrt::MEraEmuWin::implementation {
         // Handle timed input
         if (input_req->time_limit >= 0) {
             // TODO: More precise countdown handling
-            m_input_countdown_timer.Start();
+            if (input_req->time_limit > 0) {
+                m_input_countdown_timer.Start();
+            }
             OnInputCountDownTick(nullptr, nullptr);
         }
         // TODO: Check if user is skipping

@@ -1300,6 +1300,7 @@ impl EraStmt {
 
 #[derive(Debug, Clone)]
 pub enum EraCommandStmt {
+    Nop(EraCmdEmptyStmt),
     DebugPrint(EraPrintStmt),
     Print(EraPrintStmt),
     PrintData(EraPrintDataStmt),
@@ -1404,6 +1405,7 @@ impl EraCommandStmt {
     pub fn source_pos_info(&self) -> SourcePosInfo {
         use EraCommandStmt::*;
         match self {
+            Nop(x) => x.src_info,
             DebugPrint(x) => x.src_info,
             Print(x) => x.src_info,
             PrintData(x) => x.src_info,
@@ -2151,6 +2153,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                     Cmd::PrintData(self.r().stmt_printdata(flags)?)
                 } else {
                     match cmd {
+                        b"NOP" => Cmd::Nop(self.empty()?),
                         b"IF" => Cmd::If(self.r().stmt_if()?),
                         b"SELECTCASE" => Cmd::SelectCase(self.r().stmt_selectcase()?),
                         b"SIF" => Cmd::If(self.r().stmt_sif()?),
