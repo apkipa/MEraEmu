@@ -110,7 +110,7 @@ namespace winrt::MEraEmuWin::implementation {
         void UpdateEngineUI();
         void EmitUnhandledExceptionEvent(std::exception_ptr ex);
         void RedrawDirtyEngineImageOutput();
-        void FlushEngineImageOutputLayout();
+        void FlushEngineImageOutputLayout(bool invalidate_all);
         void InitD2DDevice(bool force_software);
         void UpdateUIWidth(uint64_t new_width);
         uint64_t GetCalculatedUIHeight();

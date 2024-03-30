@@ -8,16 +8,15 @@ mod routine;
 mod util;
 mod vm;
 
-use std::{ffi::c_void, sync::atomic::AtomicBool};
+use std::sync::atomic::AtomicBool;
 
 pub use bytecode::PrintExtendedFlags;
 use engine::ExecSourceInfo;
 pub use engine::{
     EraScriptErrorInfo, MEraEngine, MEraEngineConfig, MEraEngineError, MEraEngineSysCallback,
 };
-use num_traits::FromPrimitive;
-use safer_ffi::{prelude::*, slice::Ref, string};
-pub use vm::EraColorMatrix;
+use safer_ffi::{prelude::*, slice, string};
+pub use vm::{EraColorMatrix, MEraEngineFileSeekMode};
 
 // NOTE: Used by safer_ffi
 #[cfg(feature = "headers")]
@@ -236,12 +235,46 @@ trait MEraEngineSysCallbackInterop {
     ) -> i64;
     fn on_spritewidth(&mut self, name: string::str_ref<'_>) -> i64;
     fn on_spriteheight(&mut self, name: string::str_ref<'_>) -> i64;
-    // TODO: FFI callbacks...
+    fn on_open_host_file(
+        &mut self,
+        path: string::str_ref<'_>,
+        can_write: bool,
+    ) -> MEraEngineFfiResult<VirtualPtr<dyn MEraEngineHostFileInterop>>;
+    fn on_check_host_file_exists(&mut self, path: string::str_ref<'_>)
+        -> MEraEngineFfiResult<bool>;
+    fn on_delete_host_file(&mut self, path: string::str_ref<'_>) -> MEraEngineFfiResult<()>;
+    fn on_list_host_file(
+        &mut self,
+        path: string::str_ref<'_>,
+    ) -> MEraEngineFfiResult<VirtualPtr<dyn MEraEngineHostFileListingInterop>>;
     fn on_check_font(&mut self, font_name: string::str_ref<'_>) -> i64;
     fn on_get_host_time(&mut self) -> u64;
     fn on_get_config_int(&mut self, name: string::str_ref<'_>) -> MEraEngineFfiResult<i64>;
     fn on_get_config_str(&mut self, name: string::str_ref<'_>) -> MEraEngineFfiResult<char_p::Raw>;
     fn on_get_key_state(&mut self, key_code: i64) -> i64;
+}
+
+#[derive_ReprC(dyn)]
+trait MEraEngineHostFileInterop {
+    fn read(&mut self, buf: slice::Mut<'_, u8>) -> MEraEngineFfiResult<u64>;
+    fn write(&mut self, buf: slice::Ref<'_, u8>) -> MEraEngineFfiResult<()>;
+    fn flush(&mut self) -> MEraEngineFfiResult<()>;
+    fn truncate(&mut self) -> MEraEngineFfiResult<()>;
+    fn seek(&mut self, pos: i64, mode: MEraEngineFileSeekMode) -> MEraEngineFfiResult<()>;
+    fn tell(&mut self) -> MEraEngineFfiResult<u64>;
+}
+
+#[derive_ReprC]
+#[repr(C)]
+struct MEraEngineHostFileListingEntryInterop<'a> {
+    name: Option<char_p::Ref<'a>>,
+    is_file: bool,
+    is_dir: bool,
+}
+
+#[derive_ReprC(dyn)]
+trait MEraEngineHostFileListingInterop {
+    fn next(&mut self) -> MEraEngineHostFileListingEntryInterop<'_>;
 }
 
 #[derive_ReprC]
@@ -742,14 +775,41 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
     fn on_spriteheight(&mut self, name: &str) -> i64 {
         <Self as MEraEngineSysCallbackInterop>::on_spriteheight(self, name.into())
     }
-    fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>> {
-        todo!()
+    fn on_open_host_file(
+        &mut self,
+        path: &str,
+        can_write: bool,
+    ) -> anyhow::Result<Box<dyn crate::vm::EraVirtualMachineHostFile>> {
+        <Self as MEraEngineSysCallbackInterop>::on_open_host_file(self, path.into(), can_write)
+            .map(|x| -> Box<dyn crate::vm::EraVirtualMachineHostFile> { Box::new(x) })
     }
-    fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()> {
-        todo!()
+    fn on_check_host_file_exists(&mut self, path: &str) -> anyhow::Result<bool> {
+        <Self as MEraEngineSysCallbackInterop>::on_check_host_file_exists(self, path.into()).into()
     }
-    fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
-        todo!()
+    fn on_delete_host_file(&mut self, path: &str) -> anyhow::Result<()> {
+        <Self as MEraEngineSysCallbackInterop>::on_delete_host_file(self, path.into()).into()
+    }
+    fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
+        let file_listing: anyhow::Result<_> =
+            <Self as MEraEngineSysCallbackInterop>::on_list_host_file(self, path.into()).into();
+        let mut file_listing = file_listing?;
+        let mut files = vec![];
+        loop {
+            let entry = file_listing.next();
+            let MEraEngineHostFileListingEntryInterop {
+                name: Some(name),
+                is_file,
+                is_dir,
+            } = entry
+            else {
+                break;
+            };
+            if !is_file {
+                continue;
+            }
+            files.push(name.to_string());
+        }
+        Ok(files)
     }
     fn on_check_font(&mut self, font_name: &str) -> i64 {
         <Self as MEraEngineSysCallbackInterop>::on_check_font(self, font_name.into())
@@ -766,6 +826,27 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
     }
     fn on_get_key_state(&mut self, key_code: i64) -> i64 {
         <Self as MEraEngineSysCallbackInterop>::on_get_key_state(self, key_code)
+    }
+}
+
+impl crate::vm::EraVirtualMachineHostFile for VirtualPtr<dyn MEraEngineHostFileInterop> {
+    fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<u64> {
+        <Self as MEraEngineHostFileInterop>::read(self, buf.into()).into()
+    }
+    fn write(&mut self, buf: &[u8]) -> anyhow::Result<()> {
+        <Self as MEraEngineHostFileInterop>::write(self, buf.into()).into()
+    }
+    fn flush(&mut self) -> anyhow::Result<()> {
+        <Self as MEraEngineHostFileInterop>::flush(self).into()
+    }
+    fn truncate(&mut self) -> anyhow::Result<()> {
+        <Self as MEraEngineHostFileInterop>::truncate(self).into()
+    }
+    fn seek(&mut self, pos: i64, mode: MEraEngineFileSeekMode) -> anyhow::Result<()> {
+        <Self as MEraEngineHostFileInterop>::seek(self, pos, mode).into()
+    }
+    fn tell(&mut self) -> anyhow::Result<u64> {
+        <Self as MEraEngineHostFileInterop>::tell(self).into()
     }
 }
 
@@ -1030,14 +1111,21 @@ mod tests {
             0
         }
         // Filesystem subsystem
-        fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>> {
+        fn on_open_host_file(
+            &mut self,
+            path: &str,
+            can_write: bool,
+        ) -> anyhow::Result<Box<dyn crate::vm::EraVirtualMachineHostFile>> {
             anyhow::bail!("no file");
         }
-        fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()> {
+        fn on_check_host_file_exists(&mut self, path: &str) -> anyhow::Result<bool> {
             anyhow::bail!("no file");
         }
-        fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
+        fn on_delete_host_file(&mut self, path: &str) -> anyhow::Result<()> {
             anyhow::bail!("no file");
+        }
+        fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
         }
         // Others
         fn on_check_font(&mut self, font_name: &str) -> i64 {

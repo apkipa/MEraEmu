@@ -77,7 +77,7 @@ template<typename T, typename Functor>
 T rust_exception_boundary(Functor&& functor) noexcept {
     try {
         if constexpr (requires(T t) { t.ok.value; }) {
-            return { .ok = { true, functor() } };
+            return { .ok = { .has_value = true, .value = functor() } };
         }
         else {
             functor();
@@ -243,6 +243,78 @@ void MEraEngine::install_sys_callback(std::unique_ptr<MEraEngineSysCallback> cal
             .on_spriteheight = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
                 return ((MEraEngineSysCallback*)self)->on_spriteheight(STR_VIEW(name));
             },
+            .on_open_host_file = [](Erased_t* self, slice_ref_uint8_t path, bool can_write) noexcept {
+                auto r = rust_exception_boundary<MEraEngineFfiResult_VirtualPtr__Erased_ptr_MEraEngineHostFileInteropVTable_t>([&] {
+                    auto r = ((MEraEngineSysCallback*)self)->on_open_host_file(STR_VIEW(path), can_write);
+                    MEraEngineHostFileInteropVTable_t vtable{
+                        .release_vptr = [](Erased_t* self) noexcept {
+                            delete (MEraEngineHostFile*)self;
+                        },
+                        .read = [](Erased_t* self, slice_mut_uint8_t buf) noexcept {
+                            return rust_exception_boundary<MEraEngineFfiResult_uint64_t>([&] {
+                                return ((MEraEngineHostFile*)self)->read(TO_SPAN(buf));
+                            });
+                        },
+                        .write = [](Erased_t* self, slice_ref_uint8_t buf) noexcept {
+                            return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
+                                return ((MEraEngineHostFile*)self)->write(TO_SPAN(buf));
+                            });
+                        },
+                        .flush = [](Erased_t* self) noexcept {
+                            return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
+                                return ((MEraEngineHostFile*)self)->flush();
+                            });
+                        },
+                        .truncate = [](Erased_t* self) noexcept {
+                            return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
+                                return ((MEraEngineHostFile*)self)->truncate();
+                            });
+                        },
+                        .seek = [](Erased_t* self, int64_t pos, MEraEngineFileSeekMode_t mode) noexcept {
+                            return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
+                                return ((MEraEngineHostFile*)self)->seek(pos, (MEraEngineFileSeekMode)mode);
+                            });
+                        },
+                        .tell = [](Erased_t* self) noexcept {
+                            return rust_exception_boundary<MEraEngineFfiResult_uint64_t>([&] {
+                                return ((MEraEngineHostFile*)self)->tell();
+                            });
+                        },
+                    };
+                    return VirtualPtr__Erased_ptr_MEraEngineHostFileInteropVTable_t{
+                        .ptr = (Erased_t*)r.release(),
+                        .vtable = vtable,
+                    };
+                });
+                // Fix vtable on exception
+                if (!r.ok.has_value) {
+                    r.ok.value.vtable.release_vptr = [](Erased_t*) {};
+                }
+                return r;
+            },
+            .on_check_host_file_exists = [](Erased_t* self, slice_ref_uint8_t path) noexcept {
+                return rust_exception_boundary<MEraEngineFfiResult_bool_t>([&] {
+                    return ((MEraEngineSysCallback*)self)->on_check_host_file_exists(STR_VIEW(path));
+                });
+            },
+            .on_delete_host_file = [](Erased_t* self, slice_ref_uint8_t path) noexcept {
+                return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
+                    // TODO: on_delete_host_file
+                    throw std::exception("not yet implemented");
+                });
+            },
+            .on_list_host_file = [](Erased_t* self, slice_ref_uint8_t path) noexcept {
+                auto r = rust_exception_boundary<MEraEngineFfiResult_VirtualPtr__Erased_ptr_MEraEngineHostFileListingInteropVTable_t>([&] {
+                    // TODO: on_list_host_file
+                    throw std::exception("not yet implemented");
+                    return VirtualPtr__Erased_ptr_MEraEngineHostFileListingInteropVTable_t{};
+                });
+                // Fix vtable on exception
+                if (!r.ok.has_value) {
+                    r.ok.value.vtable.release_vptr = [](Erased_t*) {};
+                }
+                return r;
+            },
             // TODO: FFI callbacks...
             .on_check_font = [](Erased_t* self, slice_ref_uint8_t font_name) noexcept {
                 return ((MEraEngineSysCallback*)self)->on_check_font(STR_VIEW(font_name));
@@ -267,13 +339,13 @@ void MEraEngine::install_sys_callback(std::unique_ptr<MEraEngineSysCallback> cal
     };
     engine_install_sys_callback(m_engine, c);
 }
-void MEraEngine::load_csv(const char* filename, std::span<uint8_t> content, EraCsvLoadKind kind) {
+void MEraEngine::load_csv(const char* filename, std::span<const uint8_t> content, EraCsvLoadKind kind) {
     unwrap_rust_result(engine_load_csv(m_engine, filename, TO_RUST_SLICE(content), static_cast<EraCsvLoadKind_t>(kind)));
 }
-void MEraEngine::load_erh(const char* filename, std::span<uint8_t> content) {
+void MEraEngine::load_erh(const char* filename, std::span<const uint8_t> content) {
     unwrap_rust_result(engine_load_erh(m_engine, filename, TO_RUST_SLICE(content)));
 }
-void MEraEngine::load_erb(const char* filename, std::span<uint8_t> content) {
+void MEraEngine::load_erb(const char* filename, std::span<const uint8_t> content) {
     unwrap_rust_result(engine_load_erb(m_engine, filename, TO_RUST_SLICE(content)));
 }
 void MEraEngine::register_global_var(const char* name, bool is_string, uint32_t dimension, bool watch) {

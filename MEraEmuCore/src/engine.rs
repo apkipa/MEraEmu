@@ -7,6 +7,7 @@ use std::{
 };
 
 use indoc::indoc;
+use itertools::Itertools;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -210,9 +211,14 @@ pub trait MEraEngineSysCallback {
     fn on_spritewidth(&mut self, name: &str) -> i64;
     fn on_spriteheight(&mut self, name: &str) -> i64;
     // Filesystem subsystem
-    fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>>;
-    fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()>;
-    fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>>;
+    fn on_open_host_file(
+        &mut self,
+        path: &str,
+        can_write: bool,
+    ) -> anyhow::Result<Box<dyn crate::vm::EraVirtualMachineHostFile>>;
+    fn on_check_host_file_exists(&mut self, path: &str) -> anyhow::Result<bool>;
+    fn on_delete_host_file(&mut self, path: &str) -> anyhow::Result<()>;
+    fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>>;
     // Others
     fn on_check_font(&mut self, font_name: &str) -> i64;
     // NOTE: Returns UTC timestamp (in milliseconds).
@@ -473,13 +479,20 @@ impl MEraEngineSysCallback for EmptyCallback {
         0
     }
     // Filesystem subsystem
-    fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>> {
+    fn on_open_host_file(
+        &mut self,
+        path: &str,
+        can_write: bool,
+    ) -> anyhow::Result<Box<dyn crate::vm::EraVirtualMachineHostFile>> {
         anyhow::bail!("no such file");
     }
-    fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()> {
+    fn on_check_host_file_exists(&mut self, path: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    fn on_delete_host_file(&mut self, path: &str) -> anyhow::Result<()> {
         anyhow::bail!("no such file");
     }
-    fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
+    fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
     }
     // Others
@@ -695,6 +708,15 @@ impl<'a> MEraEngine<'a> {
         // MISC variables
         iv.add_chara_int("NO", smallvec::smallvec![1]);
         iv.add_chara_int("ISASSI", smallvec::smallvec![1]);
+        iv.add_chara_int("CDFLAG", smallvec::smallvec![1, 1]);
+        iv.add_int("DITEMTYPE", smallvec::smallvec![1, 1]);
+        iv.add_int("DA", smallvec::smallvec![1, 1]);
+        iv.add_int("DB", smallvec::smallvec![1, 1]);
+        iv.add_int("DC", smallvec::smallvec![1, 1]);
+        iv.add_int("DD", smallvec::smallvec![1, 1]);
+        iv.add_int("DE", smallvec::smallvec![1, 1]);
+        iv.add_int("TA", smallvec::smallvec![1, 1, 1]);
+        iv.add_int("TB", smallvec::smallvec![1, 1, 1]);
 
         MEraEngine {
             file_inputs: Vec::new(),
@@ -778,6 +800,60 @@ impl<'a> MEraEngine<'a> {
             var_desc.initial_sval = Some(initial_sval);
             Ok(())
         };
+        struct Ctx<'a> {
+            global_vars: &'a mut EraVarPool,
+        }
+        impl<'a> Ctx<'a> {
+            fn new(this: &'a mut MEraEngine) -> Ctx<'a> {
+                Ctx {
+                    global_vars: &mut this.global_vars,
+                }
+            }
+            fn parse_i64(&mut self, value: &str) -> Result<i64, MEraEngineError> {
+                match atoi_simd::parse(value.as_bytes()) {
+                    Ok(x) => Ok(x),
+                    Err(e) => Err(MEraEngineError::new(format!("{e}"))),
+                }
+            }
+            fn add_var_i64(&mut self, name: &str, value: &str) -> Result<(), MEraEngineError> {
+                let value = self.parse_i64(value)?;
+                _ = self.global_vars.add_var_ex(
+                    name,
+                    &Value::new_int_0darr(value),
+                    true,
+                    false,
+                    false,
+                    true,
+                );
+                Ok(())
+            }
+            fn add_var_str(
+                &mut self,
+                name: &str,
+                value: arcstr::ArcStr,
+            ) -> Result<(), MEraEngineError> {
+                _ = self.global_vars.add_var_ex(
+                    name,
+                    &Value::new_str_0darr(value),
+                    true,
+                    false,
+                    false,
+                    true,
+                );
+                Ok(())
+            }
+            fn add_arr_i64(&mut self, name: &str, value: &str) -> Result<(), MEraEngineError> {
+                let value = value
+                    .split('/')
+                    .map(|x| self.parse_i64(x).map(|val| IntValue { val }))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let value = Value::new_int_arr(smallvec::smallvec![value.len() as _], value);
+                _ = self
+                    .global_vars
+                    .add_var_ex(name, &value, true, false, false, true);
+                Ok(())
+            }
+        }
         match kind {
             EraCsvLoadKind::_Rename => {
                 //self.replace_list.clear();
@@ -1210,56 +1286,7 @@ impl<'a> MEraEngine<'a> {
                     }
                 };
 
-                struct Ctx<'a> {
-                    global_vars: &'a mut EraVarPool,
-                }
-                impl<'a> Ctx<'a> {
-                    fn new(this: &'a mut MEraEngine) -> Ctx<'a> {
-                        Ctx {
-                            global_vars: &mut this.global_vars,
-                        }
-                    }
-                    fn parse_i64(&mut self, value: &str) -> Result<i64, MEraEngineError> {
-                        match atoi_simd::parse(value.as_bytes()) {
-                            Ok(x) => Ok(x),
-                            Err(e) => Err(MEraEngineError::new(format!("{e}"))),
-                        }
-                    }
-                    fn add_var_i64(
-                        &mut self,
-                        name: &str,
-                        value: &str,
-                    ) -> Result<(), MEraEngineError> {
-                        let value = self.parse_i64(value)?;
-                        _ = self.global_vars.add_var_ex(
-                            name,
-                            Value::new_int_0darr(value),
-                            true,
-                            false,
-                            false,
-                            true,
-                        );
-                        Ok(())
-                    }
-                    fn add_var_str(
-                        &mut self,
-                        name: &str,
-                        value: arcstr::ArcStr,
-                    ) -> Result<(), MEraEngineError> {
-                        _ = self.global_vars.add_var_ex(
-                            name,
-                            Value::new_str_0darr(value),
-                            true,
-                            false,
-                            false,
-                            true,
-                        );
-                        Ok(())
-                    }
-                }
                 let mut ctx = Ctx::new(self);
-
-                ctx.add_var_i64("GAMEBASE_VERSION", "0")?;
 
                 for [index, value] in rows {
                     let index = String::from_utf8_lossy(&index);
@@ -1268,10 +1295,9 @@ impl<'a> MEraEngine<'a> {
                         "コード" => {
                             ctx.add_var_i64("GAMEBASE_GAMECODE", &value)?;
                         }
-                        "バージョン" => match ctx.add_var_i64("GAMEBASE_VERSION", &value) {
-                            Ok(()) => (),
-                            Err(_) => (),
-                        },
+                        "バージョン" => {
+                            let _ = ctx.add_var_i64("GAMEBASE_VERSION", &value);
+                        }
                         "バージョン違い認める" => {
                             ctx.add_var_i64("GAMEBASE_ALLOWVERSION", &value)?;
                         }
@@ -1312,6 +1338,37 @@ impl<'a> MEraEngine<'a> {
                         }
                     }
                 }
+
+                ctx.add_var_i64("GAMEBASE_VERSION", "0").unwrap();
+            }
+            EraCsvLoadKind::_Replace => {
+                let rows = match crate::csv::parse_csv::<2>(content) {
+                    Ok(x) => x,
+                    Err((src_info, msg)) => {
+                        (self.callback.on_compile_error(&EraScriptErrorInfo {
+                            filename,
+                            src_info: src_info.into(),
+                            is_error: true,
+                            msg: msg.as_str(),
+                        }));
+                        return Err(MEraEngineError::new(msg));
+                    }
+                };
+
+                let mut ctx = Ctx::new(self);
+
+                for [index, value] in rows {
+                    let index = String::from_utf8_lossy(&index);
+                    let value = String::from_utf8_lossy(&value);
+                    match index.as_ref() {
+                        "汚れの初期値" => ctx.add_arr_i64("DEFAULT_STAIN", &value)?,
+                        _ => {
+                            // TODO: Handle unknown _Replace.csv line
+                        }
+                    }
+                }
+
+                ctx.add_arr_i64("DEFAULT_STAIN", "0/0/2/1/8").unwrap();
             }
             _ => {
                 return Err(MEraEngineError::new(
@@ -1353,7 +1410,7 @@ impl<'a> MEraEngine<'a> {
                     .global_vars
                     .add_var_ex(
                         &name,
-                        val,
+                        &val,
                         var_desc.is_const,
                         var_desc.is_charadata,
                         var_desc.is_global,
@@ -1441,7 +1498,7 @@ impl<'a> MEraEngine<'a> {
         };
         let var_idx = self
             .global_vars
-            .add_var(name, val)
+            .add_var(name, &val)
             .ok_or_else(|| MEraEngineError::new("variable already used".to_owned()))?;
         if watch {
             self.watching_vars
@@ -1761,14 +1818,21 @@ impl<'a> MEraEngine<'a> {
                 self.callback.on_spriteheight(name)
             }
             // Filesystem subsystem
-            fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>> {
-                self.callback.on_read_file(path)
+            fn on_open_host_file(
+                &mut self,
+                path: &str,
+                can_write: bool,
+            ) -> anyhow::Result<Box<dyn crate::vm::EraVirtualMachineHostFile>> {
+                self.callback.on_open_host_file(path, can_write)
             }
-            fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()> {
-                self.callback.on_write_file(path, data)
+            fn on_check_host_file_exists(&mut self, path: &str) -> anyhow::Result<bool> {
+                self.callback.on_check_host_file_exists(path)
             }
-            fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
-                self.callback.on_list_file(path)
+            fn on_delete_host_file(&mut self, path: &str) -> anyhow::Result<()> {
+                self.callback.on_delete_host_file(path)
+            }
+            fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
+                self.callback.on_list_host_file(path)
             }
             // Others
             fn on_check_font(&mut self, font_name: &str) -> i64 {

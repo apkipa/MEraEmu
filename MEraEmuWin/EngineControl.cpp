@@ -716,6 +716,15 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 return future.get();
             }
+            if (name == "SCREENPIXELWIDTH") {
+                // NOTE: Returns width in logical pixels
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->m_ui_width);
+                });
+                return future.get();
+            }
             if (name == "LINECOUNT") {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
@@ -880,6 +889,79 @@ namespace winrt::MEraEmuWin::implementation {
         {
             return 0;
         }
+        std::unique_ptr<MEraEngineHostFile> on_open_host_file(std::string_view path, bool can_write) override {
+            file_handle fh(CreateFileW(
+                to_hstring(path).c_str(),
+                GENERIC_READ | (can_write ? GENERIC_WRITE : 0),
+                FILE_SHARE_READ,
+                nullptr,
+                can_write ? OPEN_ALWAYS : OPEN_EXISTING,
+                0,
+                nullptr
+            ));
+            check_bool((bool)fh);
+            
+            struct Win32File : MEraEngineHostFile {
+                Win32File(file_handle fh) : m_fh(std::move(fh)) {}
+                ~Win32File() {
+                    auto pos = tell();
+                    std::format("{}", pos);
+                }
+
+                uint64_t read(std::span<uint8_t> buf) override {
+                    DWORD io_bytes;
+                    check_bool(ReadFile(m_fh.get(), buf.data(), buf.size(), &io_bytes, nullptr));
+                    return io_bytes;
+                }
+                void write(std::span<const uint8_t> buf) override {
+                    DWORD io_bytes;
+                    check_bool(WriteFile(m_fh.get(), buf.data(), buf.size(), &io_bytes, nullptr));
+                    assert(buf.size() == io_bytes);
+                }
+                void flush() override {
+                    check_bool(FlushFileBuffers(m_fh.get()));
+                }
+                void truncate() override {
+                    SetFilePointer(m_fh.get(), 0, nullptr, FILE_BEGIN);
+                    //check_bool(SetFilePointer(m_fh.get(), 0, nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER);
+                    check_bool(SetEndOfFile(m_fh.get()));
+                }
+                void seek(int64_t pos, MEraEngineFileSeekMode mode) override {
+                    int native_mode = 0;
+                    switch (mode) {
+                    case M_ERA_ENGINE_FILE_SEEK_MODE_START:
+                        native_mode = FILE_BEGIN;
+                        break;
+                    case M_ERA_ENGINE_FILE_SEEK_MODE_END:
+                        native_mode = FILE_END;
+                        break;
+                    case M_ERA_ENGINE_FILE_SEEK_MODE_CURRENT:
+                        native_mode = FILE_CURRENT;
+                        break;
+                    default:
+                        std::terminate();
+                    }
+                    LONG high = (LONG)(pos >> 32);
+                    LONG low = (LONG)pos;
+                    auto r = SetFilePointer(m_fh.get(), low, &high, native_mode);
+                    //check_bool(r != INVALID_SET_FILE_POINTER);
+                }
+                uint64_t tell() override {
+                    LONG high{};
+                    auto low = SetFilePointer(m_fh.get(), 0, &high, FILE_CURRENT);
+                    //check_bool(low != INVALID_SET_FILE_POINTER);
+                    return low + (static_cast<uint64_t>(high) << 32);
+                }
+
+            private:
+                file_handle m_fh;
+            };
+
+            return std::make_unique<Win32File>(std::move(fh));
+        }
+        bool on_check_host_file_exists(std::string_view path) override {
+            return std::filesystem::exists(path);
+        }
         int64_t on_check_font(std::string_view font_name) override
         {
             return 0;
@@ -905,10 +987,16 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 return future.get();
             }
+            if (name == "ウィンドウ幅") {
+                return on_var_get_int("SCREENPIXELWIDTH", 0);
+            }
             throw std::runtime_error(std::format("no such int config: {}", name));
         }
         const char* on_get_config_str(std::string_view name) override {
             // TODO: on_get_config_str
+            if (name == "描画インターフェース") {
+                return "Direct2D+VSIS";
+            }
             throw std::runtime_error(std::format("no such str config: {}", name));
         }
         int64_t on_get_key_state(int64_t key_code) override
@@ -1020,6 +1108,9 @@ namespace winrt::MEraEmuWin::implementation {
         bkg_swapchain_panel.CompositionScaleChanged([this](SwapChainPanel const& sender, auto&&) {
             m_xscale = sender.CompositionScaleX();
             m_yscale = sender.CompositionScaleY();
+            if (m_vsis_noref) {
+                FlushEngineImageOutputLayout(true);
+            }
         });
         m_xscale = bkg_swapchain_panel.CompositionScaleX();
         m_yscale = bkg_swapchain_panel.CompositionScaleY();
@@ -1133,8 +1224,10 @@ namespace winrt::MEraEmuWin::implementation {
                 ers("WINDOW_TITLE");
                 ers("DRAWLINESTR");
                 eri("SCREENWIDTH");
+                eri("SCREENPIXELWIDTH");
                 eri("LINECOUNT");
                 ers("SAVEDATA_TEXT");
+                eri("RANDDATA");
 
                 auto run_ui_task = [&](std::unique_ptr<EngineThreadTask> task, bool loaded) {
                     if (!loaded) { return; }
@@ -1167,6 +1260,7 @@ namespace winrt::MEraEmuWin::implementation {
                         auto filename = path.filename();
                         std::wstring_view sv{ filename.c_str() };
                         if (ieq(sv, L"_Rename.csv")) { load_csv(path, ERA_CSV_LOAD_KIND__RENAME); }
+                        else if (ieq(sv, L"_Replace.csv")) { load_csv(path, ERA_CSV_LOAD_KIND__REPLACE); }
                         else if (ieq(sv, L"VariableSize.csv")) { load_csv(path, ERA_CSV_LOAD_KIND_VARIABLE_SIZE); }
                         else {
                             if (!iends_with(sv, L".csv")) { continue; }
@@ -1455,6 +1549,51 @@ namespace winrt::MEraEmuWin::implementation {
                 D2D1_ANTIALIAS_MODE_ALIASED
             );*/
             ctx->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
+            ctx->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+            int dip_rt_top = update_rt.top / m_yscale;
+            int dip_rt_bottom = update_rt.bottom / m_yscale;
+            // Clear stale bitmap area
+            ctx->Clear(D2D1::ColorF(D2D1::ColorF::White, 0));
+            {
+                /*ctx->DrawLine(D2D1::Point2F(0, dip_rt_top), D2D1::Point2F(1e4, dip_rt_top),
+                    GetOrCreateSolidColorBrush(D2D1::ColorF::Green | 0xff000000));
+                ctx->DrawLine(D2D1::Point2F(0, dip_rt_bottom), D2D1::Point2F(1e4, dip_rt_bottom),
+                    GetOrCreateSolidColorBrush(D2D1::ColorF::Yellow | 0xff000000));*/
+                /*ctx->DrawLine(D2D1::Point2F(0, offset.y), D2D1::Point2F(1e4, offset.y),
+                    GetOrCreateSolidColorBrush(D2D1::ColorF::Green | 0xff000000));
+                ctx->DrawLine(D2D1::Point2F(0, offset.y + (update_rt.bottom - update_rt.top)), D2D1::Point2F(1e4, offset.y + (update_rt.bottom - update_rt.top)),
+                    GetOrCreateSolidColorBrush(D2D1::ColorF::Yellow | 0xff000000));*/
+            }
+            // Obtain lines requiring redraws
+            auto ib = begin(m_ui_lines), ie = end(m_ui_lines);
+            int line_start = std::ranges::upper_bound(ib, ie, dip_rt_top,
+                [](auto const& a, auto const& b) { return a < b; },
+                [](auto const& e) { return e.acc_height; }
+            ) - ib;
+            int line_end = std::ranges::upper_bound(ib, ie, dip_rt_bottom,
+                [](auto const& a, auto const& b) { return a < b; },
+                [](auto const& e) { return e.acc_height; }
+            ) - ib;
+            if (line_end < size(m_ui_lines)) { line_end++; }
+
+            // Fallback brush (not actually used in practice, as all texts have
+            // color effects applied)
+            auto brush = GetOrCreateSolidColorBrush(D2D1::ColorF::Silver | 0xff000000);
+
+            for (int line = line_start; line < line_end; line++) {
+                auto& line_data = m_ui_lines[line];
+                int offx = 0;
+                int offy = line_data.acc_height - line_data.line_height;
+                ctx->DrawTextLayout(D2D1::Point2F(offx, offy), line_data.txt_layout.get(),
+                    brush);
+            }
+            /* Stash:
+            // Large transform causes blurry text, so we must manually handle it
+            ctx->SetTransform(
+                D2D1::Matrix3x2F::Scale(m_xscale, m_yscale) *
+                D2D1::Matrix3x2F::Translation(offset.x, offset.y)
+            );
+            ctx->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
             int dip_rt_top = update_rt.top / m_yscale;
             int dip_rt_bottom = update_rt.bottom / m_yscale;
             // Clear stale bitmap area
@@ -1479,22 +1618,30 @@ namespace winrt::MEraEmuWin::implementation {
                 auto& line_data = m_ui_lines[line];
                 int offx = 0;
                 int offy = line_data.acc_height - line_data.line_height;
-                ctx->DrawTextLayout(D2D1::Point2F(offx, offy), line_data.txt_layout.get(),
+                float foffx = offx - update_rt.left / m_xscale;
+                float foffy = offy - update_rt.top / m_yscale + 0.3f;
+                ctx->DrawTextLayout(D2D1::Point2F(foffx, foffy), line_data.txt_layout.get(),
                     brush);
             }
+            */
         }
 
         if (m_sd->ui_redraw_block_engine.exchange(false, std::memory_order_relaxed)) {
             m_sd->ui_redraw_block_engine.notify_one();
         }
     }
-    void EngineControl::FlushEngineImageOutputLayout() {
+    void EngineControl::FlushEngineImageOutputLayout(bool invalidate_all) {
         auto height = GetCalculatedUIHeight();
         int real_width = m_ui_width * m_xscale;
         int real_height = height * m_yscale;
         int old_real_height = m_last_redraw_dirty_height * m_yscale;
         check_hresult(m_vsis_noref->Resize(real_width, height * m_yscale));
-        check_hresult(m_vsis_noref->Invalidate({ 0, old_real_height, real_width, real_height }));
+        if (invalidate_all) {
+            check_hresult(m_vsis_noref->Invalidate({ 0, 0, real_width, real_height }));
+        }
+        else {
+            check_hresult(m_vsis_noref->Invalidate({ 0, old_real_height, real_width, real_height }));
+        }
         m_last_redraw_dirty_height = height;
         // TODO: Is this an XAML bug?
         EngineOutputImage().InvalidateMeasure();
@@ -1626,7 +1773,7 @@ namespace winrt::MEraEmuWin::implementation {
                 if (m_input_last_prompt != prompt) {
                     m_input_last_prompt = prompt;
                     RoutineReuseLastLine(prompt);
-                    FlushEngineImageOutputLayout();
+                    FlushEngineImageOutputLayout(false);
                 }
             }
         }
@@ -1699,7 +1846,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         // Resize to trigger updates
         if (updated && m_auto_redraw) {
-            FlushEngineImageOutputLayout();
+            FlushEngineImageOutputLayout(false);
         }
     }
     void EngineControl::RoutineHtmlPrint(hstring const& content) {
@@ -1711,7 +1858,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         // Flush intermediate print contents first
         FlushCurPrintLine();
-        FlushEngineImageOutputLayout();
+        FlushEngineImageOutputLayout(false);
 
         m_input_start_t = winrt::clock::now();
         m_input_last_prompt = {};
@@ -1763,7 +1910,7 @@ namespace winrt::MEraEmuWin::implementation {
             m_ui_lines.erase(ie - count, ie);
         }
         if (m_auto_redraw) {
-            FlushEngineImageOutputLayout();
+            FlushEngineImageOutputLayout(false);
         }
         else {
             m_last_redraw_dirty_height = std::min(m_last_redraw_dirty_height, GetCalculatedUIHeight());
@@ -1802,7 +1949,7 @@ namespace winrt::MEraEmuWin::implementation {
         }
         else {
             m_auto_redraw = true;
-            FlushEngineImageOutputLayout();
+            FlushEngineImageOutputLayout(false);
         }
     }
     int64_t EngineControl::GetRedrawState() {

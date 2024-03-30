@@ -60,6 +60,18 @@ struct MEraEngineStackTrace {
     std::vector<MEraEngineStackTraceFrame> frames;
 };
 
+struct MEraEngineHostFile {
+    MEraEngineHostFile() {}
+    virtual ~MEraEngineHostFile() {}
+
+    virtual uint64_t read(std::span<uint8_t> buf) = 0;
+    virtual void write(std::span<const uint8_t> buf) = 0;
+    virtual void flush() = 0;
+    virtual void truncate() = 0;
+    virtual void seek(int64_t pos, MEraEngineFileSeekMode mode) = 0;
+    virtual uint64_t tell() = 0;
+};
+
 struct MEraEngineSysCallback {
     MEraEngineSysCallback() {}
     virtual ~MEraEngineSysCallback() {}
@@ -103,7 +115,9 @@ struct MEraEngineSysCallback {
     virtual int64_t on_spriteanimeaddframe(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height, int64_t offset_x, int64_t offset_y, int64_t delay) = 0;
     virtual int64_t on_spritewidth(std::string_view name) = 0;
     virtual int64_t on_spriteheight(std::string_view name) = 0;
-    // TODO: FFI callbacks...
+    virtual std::unique_ptr<MEraEngineHostFile> on_open_host_file(std::string_view path, bool can_write) = 0;
+    virtual bool on_check_host_file_exists(std::string_view path) = 0;
+    // TODO: FFI callbacks: on_delete_host_file, on_list_host_file
     virtual int64_t on_check_font(std::string_view font_name) = 0;
     virtual uint64_t on_get_host_time() = 0;
     // NOTE: Can throw std::exception
@@ -131,9 +145,9 @@ struct MEraEngine {
     }
 
     void install_sys_callback(std::unique_ptr<MEraEngineSysCallback> callback);
-    void load_csv(const char* filename, std::span<uint8_t> content, EraCsvLoadKind kind);
-    void load_erh(const char* filename, std::span<uint8_t> content);
-    void load_erb(const char* filename, std::span<uint8_t> content);
+    void load_csv(const char* filename, std::span<const uint8_t> content, EraCsvLoadKind kind);
+    void load_erh(const char* filename, std::span<const uint8_t> content);
+    void load_erb(const char* filename, std::span<const uint8_t> content);
     void register_global_var(const char* name, bool is_string, uint32_t dimension, bool watch);
     void finialize_load_srcs();
     bool do_execution(_Atomic(bool)* stop_flag, uint64_t max_inst_cnt);

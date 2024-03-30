@@ -1259,11 +1259,23 @@ pub struct EraPowerStmt {
 }
 
 #[derive(Debug, Clone)]
+pub struct EraLoadDataStmt {
+    pub save_id: EraExpr,
+    pub src_info: SourcePosInfo,
+}
+
+#[derive(Debug, Clone)]
 pub struct EraSaveDataStmt {
     pub save_id: EraExpr,
     pub save_info: EraExpr,
     pub src_info: SourcePosInfo,
 }
+
+// #[derive(Debug, Clone)]
+// pub struct EraCheckDataStmt {
+//     pub save_id: EraExpr,
+//     pub src_info: SourcePosInfo,
+// }
 
 #[derive(Debug, Clone)]
 pub struct EraRowAssignStmt {
@@ -1391,7 +1403,9 @@ pub enum EraCommandStmt {
     SetAnimeTimer(EraSetAnimeTimerStmt),
     HtmlTagSplit(EraHtmlTagSplitStmt),
     Power(EraPowerStmt),
+    LoadData(EraLoadDataStmt),
     SaveData(EraSaveDataStmt),
+    // CheckData(EraCheckDataStmt),
     Restart(EraCmdEmptyStmt),
     GetTime(EraCmdEmptyStmt),
     LoadGlobal(EraCmdEmptyStmt),
@@ -1496,7 +1510,9 @@ impl EraCommandStmt {
             SetAnimeTimer(x) => x.src_info,
             HtmlTagSplit(x) => x.src_info,
             Power(x) => x.src_info,
+            LoadData(x) => x.src_info,
             SaveData(x) => x.src_info,
+            // CheckData(x) => x.src_info,
             Restart(x) => x.src_info,
             GetTime(x) => x.src_info,
             LoadGlobal(x) => x.src_info,
@@ -1680,7 +1696,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                             .global_vars
                             .add_var_ex(
                                 &var_name,
-                                var_val,
+                                &var_val,
                                 x.is_const,
                                 x.is_charadata,
                                 x.is_global,
@@ -2269,7 +2285,9 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         b"SETANIMETIMER" => Cmd::SetAnimeTimer(self.r().stmt_setanimetimer()?),
                         b"HTML_TAGSPLIT" => Cmd::HtmlTagSplit(self.r().stmt_html_tagsplit()?),
                         b"POWER" => Cmd::Power(self.r().stmt_power()?),
+                        b"LOADDATA" => Cmd::LoadData(self.r().stmt_loaddata()?),
                         b"SAVEDATA" => Cmd::SaveData(self.r().stmt_savedata()?),
+                        // b"CHKDATA" => Cmd::CheckData(self.r().stmt_chkdata()?),
                         b"RESTART" => Cmd::Restart(self.empty()?),
                         b"GETTIME" => Cmd::GetTime(self.empty()?),
                         b"LOADGLOBAL" => Cmd::LoadGlobal(self.empty()?),
@@ -2384,9 +2402,11 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                         | b"COLOR_FROMNAME"
                         | b"COLOR_FROMRGB"
                         | b"HTML_TOPLAINTEXT"
+                        | b"HTML_ESCAPE"
                         | b"GETKEY"
                         | b"GETKEYTRIGGERED"
-                        | b"FIND_CHARADATA" => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
+                        | b"FIND_CHARADATA"
+                        | b"CHKDATA" => Cmd::ResultCmdCall(self.stmt_result_cmd_call()?),
                         _ => return Some(self.stmt_expression()?),
                     }
                 }
@@ -4427,6 +4447,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             src_info,
         })
     }
+    fn stmt_loaddata(&mut self) -> Option<EraLoadDataStmt> {
+        let src_info = self.src_info;
+        let save_id = self.expression(true)?;
+        self.consume_newline()?;
+        Some(EraLoadDataStmt { save_id, src_info })
+    }
     fn stmt_savedata(&mut self) -> Option<EraSaveDataStmt> {
         let src_info = self.src_info;
         let save_id = self.expression(true)?;
@@ -4439,6 +4465,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             src_info,
         })
     }
+    // fn stmt_chkdata(&mut self) -> Option<EraCheckDataStmt> {
+    //     let src_info = self.src_info;
+    //     let save_id = self.expression(true)?;
+    //     self.consume_newline()?;
+    //     Some(EraCheckDataStmt { save_id, src_info })
+    // }
     #[must_use]
     fn consume(
         &mut self,

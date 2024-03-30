@@ -1,3 +1,4 @@
+use anyhow::Context;
 use either::Either;
 use itertools::Itertools;
 
@@ -5,8 +6,8 @@ use crate::{
     bytecode::{
         ArrIntValue, ArrStrValue, EraBytecodePrimaryType, EraCharaCsvPropType,
         EraCharaInitTemplate, EraCsvVarKind, EraInputSubBytecodeType, FlatValue, IntValue,
-        PadStringFlags, PrintExtendedFlags, RefFlatValue, SourcePosInfo, StrValue, Value,
-        ValueKind,
+        PadStringFlags, PrintExtendedFlags, RefFlatValue, SourcePosInfo, StrValue,
+        SystemIntrinsicsKind, Value, ValueKind,
     },
     compiler::{EraBytecodeChunk, EraBytecodeCompilation, EraFuncBytecodeInfo},
     routine,
@@ -22,6 +23,54 @@ use std::{
 
 use rclite::Rc;
 
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
+#[repr(u8)]
+enum EraSaveFileType {
+    Normal = 0x00,
+    Global = 0x01,
+    Var = 0x02,
+    CharVar = 0x03,
+}
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
+#[repr(u8)]
+enum EraSaveDataType {
+    Int = 0x00,
+    IntArray = 0x01,
+    IntArray2D = 0x02,
+    IntArray3D = 0x03,
+    Str = 0x10,
+    StrArray = 0x11,
+    StrArray2D = 0x12,
+    StrArray3D = 0x13,
+
+    Separator = 0xfd,
+    EOC = 0xfe,
+    EOF = 0xff,
+}
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
+#[repr(u8)]
+enum EraBinaryMark {
+    Byte = 0xcf,
+    Int16 = 0xd0,
+    Int32 = 0xd1,
+    Int64 = 0xd2,
+    String = 0xd8,
+    EoA1 = 0xe0,
+    EoA2 = 0xe1,
+    Zero = 0xf0,
+    ZeroA1 = 0xf1,
+    ZeroA2 = 0xf2,
+    EoD = 0xff,
+}
+
+struct EraSaveFileHeader {
+    version: u32,
+    data: Vec<u32>,
+    file_type: EraSaveFileType,
+    game_version: i64,
+    save_info: String,
+}
+
 pub struct EraVirtualMachineContext<'a> {
     chunks: &'a [EraBytecodeChunk],
     callback: &'a mut dyn EraVirtualMachineCallback,
@@ -29,6 +78,7 @@ pub struct EraVirtualMachineContext<'a> {
     cur_frame: &'a mut EraFuncExecFrame,
     cur_chunk: &'a EraBytecodeChunk,
     global_vars: &'a mut EraVarPool,
+    charas_count: &'a mut usize,
 }
 impl EraVirtualMachineContext<'_> {
     fn report_err<V: Into<String>>(&mut self, is_error: bool, msg: V) {
@@ -260,6 +310,307 @@ impl EraVirtualMachineContext<'_> {
     pub fn get_stack_mut(&mut self) -> (&mut Vec<EraTrappableValue>, usize) {
         (self.stack, self.cur_frame.stack_start)
     }
+
+    // VM methods
+    fn proc_reset_data(&mut self) {
+        // TODO: Fully reset data according to Emuera
+        *self.charas_count = 0;
+        for var in &self.global_vars.vars {
+            if var.is_const {
+                continue;
+            }
+            match var.val.clone().into_unpacked() {
+                FlatValue::ArrInt(x) => {
+                    let mut x = x.borrow_mut();
+                    let should_reset = !x.flags.is_trap()
+                        && (var.is_charadata
+                            || !matches!(var.name.as_ref(), "GLOBAL" | "ITEMPRICE"));
+                    if should_reset {
+                        x.vals.fill(Default::default());
+                    }
+                }
+                FlatValue::ArrStr(x) => {
+                    let mut x = x.borrow_mut();
+                    let should_reset = !x.flags.is_trap()
+                        && (var.is_charadata || !matches!(var.name.as_ref(), "GLOBALS" | "STR"));
+                    if should_reset {
+                        x.vals.fill(Default::default());
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        // Restore variables with initializers
+        for var in &self.global_vars.init_vars {
+            use RefFlatValue::*;
+            let (var, init_val) = (&self.global_vars.vars[var.0], &var.1);
+            // SAFETY: d and s are guaranteed not to point to the same array in
+            //         add_var_ex()
+            match (var.val.as_unpacked(), init_val.as_unpacked()) {
+                (ArrInt(d), ArrInt(s)) => {
+                    let mut d = d.borrow_mut();
+                    let s = s.borrow();
+                    d.vals.clone_from(&s.vals);
+                }
+                (ArrStr(d), ArrStr(s)) => {
+                    let mut d = d.borrow_mut();
+                    let s = s.borrow();
+                    d.vals.clone_from(&s.vals);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+    fn proc_helper_read_save_header(
+        &mut self,
+        file: &mut impl std::io::Read,
+    ) -> anyhow::Result<EraSaveFileHeader> {
+        use crate::util::io::CSharpBinaryReader;
+        use anyhow::bail;
+        use num_traits::FromPrimitive;
+
+        let header = file.read_u64()?;
+        if header != 0x0A1A0A0D41524589 {
+            bail!("invalid or unsupported header signature");
+        }
+        let version = file.read_u32()?;
+        let data_count = file.read_u32()?;
+        let data = (0..data_count)
+            .map(|_| file.read_u32())
+            .collect::<Result<Vec<_>, _>>()?;
+        if version != 1808 {
+            bail!("unsupported version {version}");
+        }
+
+        let Some(save_file_type) = EraSaveFileType::from_u8(file.read_u8()?) else {
+            bail!("invalid save file type");
+        };
+        if !matches!(save_file_type, EraSaveFileType::Normal) {
+            bail!("invalid save file type {save_file_type:?}");
+        }
+        let get_var_i32_0d = |name| {
+            self.global_vars
+                .get_var(name)
+                .and_then(|x| x.as_arrint().map(|x| x.borrow().vals[0].val))
+        };
+        let cur_game_code = get_var_i32_0d("GAMEBASE_GAMECODE").unwrap_or(0);
+        let cur_game_ver = get_var_i32_0d("GAMEBASE_VERSION").unwrap_or(0);
+        let cur_game_min_ver = get_var_i32_0d("GAMEBASE_ALLOWVERSION").unwrap_or(0);
+        // Check game code
+        let game_code = file.read_i64()?;
+        if !(game_code == 0 || game_code == cur_game_code) {
+            bail!("cannot load save from a different game");
+        }
+        // Check game version
+        let game_ver = file.read_i64()?;
+        if !(game_ver >= cur_game_min_ver || game_ver == cur_game_ver) {
+            bail!("cannot load save from a older version of game");
+        }
+        let save_info = file.read_utf16_string()?;
+
+        Ok(EraSaveFileHeader {
+            version,
+            data,
+            file_type: save_file_type,
+            game_version: game_ver,
+            save_info,
+        })
+    }
+    fn proc_load_data(&mut self, save_id: i64) -> anyhow::Result<bool> {
+        use crate::util::io::CSharpBinaryReader;
+        use anyhow::bail;
+        use num_traits::FromPrimitive;
+
+        let file = format!(".\\sav\\save{save_id:02}.sav");
+        if !self.callback.on_check_host_file_exists(&file)? {
+            return Ok(false);
+        }
+        let file = self.callback.on_open_host_file(&file, false)?;
+        let mut file = EraVirtualMachineHostFileWrap(file);
+        let mut file = std::io::BufReader::new(file);
+
+        let save_header = self.proc_helper_read_save_header(&mut file)?;
+
+        self.proc_reset_data();
+
+        // Load character variables
+        let charas_cnt = file
+            .read_i64()?
+            .try_into()
+            .context("invalid character count")?;
+        for chara_i in 0..charas_cnt {
+            use EraSaveDataType::*;
+
+            loop {
+                let var_type =
+                    EraSaveDataType::from_u8(file.read_u8()?).context("invalid save data type")?;
+                match var_type {
+                    Separator => continue,
+                    EOC | EOF => break,
+                    _ => {
+                        let var_name = file.read_utf16_string()?;
+                        let var = self
+                            .global_vars
+                            .get_var_info_by_name(&var_name)
+                            .with_context(|| format!("variable `{var_name}` does not exist"))?;
+                        if !var.is_charadata {
+                            bail!("variable `{var_name}` is not CHARADATA");
+                        }
+                        file.read_var(var_type, var, Some(chara_i as _))
+                            .with_context(|| format!("read variable `{var_name}` failed"))?;
+                    }
+                }
+                // match var_type {
+                //     Separator => continue,
+                //     EOC | EOF => break,
+                //     Int | IntArray | IntArray2D | IntArray3D | Str | StrArray | StrArray2D
+                //     | StrArray3D => {
+                //         let var = self
+                //             .global_vars
+                //             .get_var_info_by_name(&var_name)
+                //             .with_context(|| format!("variable `{var_name}` does not exist"))?;
+                //         if !var.is_charadata {
+                //             bail!("variable `{var_name}` is not CHARADATA");
+                //         }
+                //         match var_type {
+                //             Int | IntArray | IntArray2D | IntArray3D => {
+                //                 let mut var_val = var
+                //                     .val
+                //                     .as_arrint()
+                //                     .with_context(|| {
+                //                         format!("variable `{var_name}` type mismatch")
+                //                     })?
+                //                     .borrow_mut();
+                //                 match var_type {
+                //                     Int => {
+                //                         file.read_int_array_0d(&mut var_val, Some(chara_i as _))?
+                //                     }
+                //                     IntArray => {
+                //                         file.read_int_array_1d(&mut var_val, Some(chara_i as _))?
+                //                     }
+                //                     IntArray2D => {
+                //                         file.read_int_array_2d(&mut var_val, Some(chara_i as _))?
+                //                     }
+                //                     IntArray3D => bail!("IntArray3D unimplemented for now"),
+                //                     _ => unreachable!(),
+                //                 }
+                //             }
+                //             Str | StrArray | StrArray2D | StrArray3D => {
+                //                 let mut var_val = var
+                //                     .val
+                //                     .as_arrstr()
+                //                     .with_context(|| {
+                //                         format!("variable `{var_name}` type mismatch")
+                //                     })?
+                //                     .borrow_mut();
+                //                 match var_type {
+                //                     Str => {
+                //                         file.read_str_array_0d(&mut var_val, Some(chara_i as _))?
+                //                     }
+                //                     StrArray => {
+                //                         file.read_str_array_1d(&mut var_val, Some(chara_i as _))?
+                //                     }
+                //                     StrArray2D => {
+                //                         file.read_str_array_2d(&mut var_val, Some(chara_i as _))?
+                //                     }
+                //                     StrArray3D => bail!("StrArray3D unimplemented for now"),
+                //                     _ => unreachable!(),
+                //                 }
+                //             }
+                //             _ => unreachable!(),
+                //         }
+                //     }
+                // }
+            }
+        }
+        *self.charas_count = charas_cnt;
+        // Load normal variables
+        loop {
+            use EraSaveDataType::*;
+
+            // TODO: Handle trap vars (such as RANDDATA)
+
+            let var_type =
+                EraSaveDataType::from_u8(file.read_u8()?).context("invalid save data type")?;
+            match var_type {
+                EOF => break,
+                _ => {
+                    let var_name = file.read_utf16_string()?;
+                    let var = self
+                        .global_vars
+                        .get_var_info_by_name(&var_name)
+                        .with_context(|| format!("variable `{var_name}` does not exist"))?;
+                    if var.is_charadata {
+                        bail!("variable `{var_name}` is CHARADATA");
+                    }
+                    file.read_var(var_type, var, None)
+                        .with_context(|| format!("read variable `{var_name}` failed"))?;
+                }
+            }
+        }
+
+        Ok(true)
+    }
+    fn proc_save_data(&mut self, save_id: i64, save_info: &str) -> anyhow::Result<()> {
+        todo!()
+    }
+    // (status, timestamp, save_info)
+    fn proc_check_data(&mut self, save_id: i64) -> anyhow::Result<(i64, u64, String)> {
+        use crate::util::io::CSharpBinaryReader;
+        use anyhow::bail;
+        use num_traits::FromPrimitive;
+
+        // TODO: Support timestamp
+
+        let file = format!(".\\sav\\save{save_id:02}.sav");
+        if !self.callback.on_check_host_file_exists(&file)? {
+            return Ok((1, 0, String::new()));
+        }
+        let file = self.callback.on_open_host_file(&file, false)?;
+        let mut file = EraVirtualMachineHostFileWrap(file);
+
+        // Parse save header
+        let header = file.read_u64()?;
+        if header != 0x0A1A0A0D41524589 {
+            bail!("invalid or unsupported header signature");
+        }
+        let version = file.read_u32()?;
+        let data_count = file.read_u32()?;
+        let data = (0..data_count)
+            .map(|_| file.read_u32())
+            .collect::<Result<Vec<_>, _>>()?;
+        if version != 1808 {
+            bail!("unsupported version {version}");
+        }
+        let Some(save_file_type) = EraSaveFileType::from_u8(file.read_u8()?) else {
+            bail!("invalid save file type");
+        };
+        if !matches!(save_file_type, EraSaveFileType::Normal) {
+            bail!("invalid save file type {save_file_type:?}");
+        }
+
+        let get_var_i32_0d = |name| {
+            self.global_vars
+                .get_var(name)
+                .and_then(|x| x.as_arrint().map(|x| x.borrow().vals[0].val))
+        };
+        let cur_game_code = get_var_i32_0d("GAMEBASE_GAMECODE").unwrap_or(0);
+        let cur_game_ver = get_var_i32_0d("GAMEBASE_VERSION").unwrap_or(0);
+        let cur_game_min_ver = get_var_i32_0d("GAMEBASE_ALLOWVERSION").unwrap_or(0);
+        // Check game code
+        let game_code = file.read_i64()?;
+        if !(game_code == 0 || game_code == cur_game_code) {
+            return Ok((2, 0, String::new()));
+        }
+        // Check game version
+        let game_ver = file.read_i64()?;
+        if !(game_ver >= cur_game_min_ver || game_ver == cur_game_ver) {
+            return Ok((3, 0, String::new()));
+        }
+        let save_info = file.read_utf16_string()?;
+
+        Ok((0, 0, save_info))
+    }
 }
 
 // TODO: Use a JIT backend to improve performance
@@ -470,6 +821,7 @@ pub struct EraVarPool {
     chara_var_idxs: Vec<usize>,
     global_var_idxs: Vec<usize>,
     vars: Vec<EraVarInfo>,
+    init_vars: Vec<(usize, Value)>,
 }
 
 pub struct EraVarInfo {
@@ -489,17 +841,18 @@ impl EraVarPool {
             chara_var_idxs: Vec::new(),
             global_var_idxs: Vec::new(),
             vars: Vec::new(),
+            init_vars: Vec::new(),
         }
     }
     #[must_use]
-    pub fn add_var(&mut self, name: &str, val: Value) -> Option<usize> {
+    pub fn add_var(&mut self, name: &str, val: &Value) -> Option<usize> {
         self.add_var_ex(name, val, false, false, false, false)
     }
     #[must_use]
     pub fn add_var_ex(
         &mut self,
         name: &str,
-        val: Value,
+        val: &Value,
         is_const: bool,
         is_charadata: bool,
         is_global: bool,
@@ -513,6 +866,14 @@ impl EraVarPool {
                 e.insert(var_idx);
             }
         }
+        let orig_val = val;
+        let val = if !is_const && !orig_val.is_default() {
+            // When resetting, we need to keep original variable values
+            self.init_vars.push((var_idx, orig_val.clone()));
+            orig_val.deep_clone()
+        } else {
+            orig_val.clone()
+        };
         self.vars.push(EraVarInfo {
             name,
             val,
@@ -835,9 +1196,14 @@ pub trait EraVirtualMachineCallback {
     fn on_spritewidth(&mut self, name: &str) -> i64;
     fn on_spriteheight(&mut self, name: &str) -> i64;
     // Filesystem subsystem
-    fn on_read_file(&mut self, path: &str) -> anyhow::Result<Vec<u8>>;
-    fn on_write_file(&mut self, path: &str, data: Vec<u8>) -> anyhow::Result<()>;
-    fn on_list_file(&mut self, path: &str) -> anyhow::Result<Vec<String>>;
+    fn on_open_host_file(
+        &mut self,
+        path: &str,
+        can_write: bool,
+    ) -> anyhow::Result<Box<dyn EraVirtualMachineHostFile>>;
+    fn on_check_host_file_exists(&mut self, path: &str) -> anyhow::Result<bool>;
+    fn on_delete_host_file(&mut self, path: &str) -> anyhow::Result<()>;
+    fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>>;
     // Others
     fn on_check_font(&mut self, font_name: &str) -> i64;
     // NOTE: Returns UTC timestamp (in milliseconds).
@@ -850,6 +1216,541 @@ pub trait EraVirtualMachineCallback {
     // Private
     /// Translates strings to indices.
     fn on_csv_get_num(&mut self, kind: EraCsvVarKind, name: &str) -> Option<u32>;
+}
+
+pub trait EraVirtualMachineHostFile {
+    fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<u64>;
+    fn write(&mut self, buf: &[u8]) -> anyhow::Result<()>;
+    fn flush(&mut self) -> anyhow::Result<()>;
+    fn truncate(&mut self) -> anyhow::Result<()>;
+    fn seek(&mut self, pos: i64, mode: MEraEngineFileSeekMode) -> anyhow::Result<()>;
+    fn tell(&mut self) -> anyhow::Result<u64>;
+}
+
+struct EraVirtualMachineHostFileWrap<T>(T);
+
+impl<T: EraVirtualMachineHostFile + ?Sized> EraVirtualMachineHostFile for Box<T> {
+    fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<u64> {
+        (**self).read(buf)
+    }
+    fn write(&mut self, buf: &[u8]) -> anyhow::Result<()> {
+        (**self).write(buf)
+    }
+    fn flush(&mut self) -> anyhow::Result<()> {
+        (**self).flush()
+    }
+    fn truncate(&mut self) -> anyhow::Result<()> {
+        (**self).truncate()
+    }
+    fn seek(&mut self, pos: i64, mode: MEraEngineFileSeekMode) -> anyhow::Result<()> {
+        (**self).seek(pos, mode)
+    }
+    fn tell(&mut self) -> anyhow::Result<u64> {
+        (**self).tell()
+    }
+}
+
+impl<T: EraVirtualMachineHostFile> std::io::Read for EraVirtualMachineHostFileWrap<T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0
+            .read(buf)
+            .map(|x| x as _)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+}
+impl<T: EraVirtualMachineHostFile> std::io::Seek for EraVirtualMachineHostFileWrap<T> {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        match pos {
+            std::io::SeekFrom::Start(pos) => {
+                self.0
+                    .seek(pos as _, MEraEngineFileSeekMode::Start)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+            }
+            std::io::SeekFrom::End(pos) => self
+                .0
+                .seek(pos as _, MEraEngineFileSeekMode::End)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+            std::io::SeekFrom::Current(pos) => self
+                .0
+                .seek(pos as _, MEraEngineFileSeekMode::Current)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+        }
+        self.0
+            .tell()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+}
+
+trait EraVirtualMachineHostFileReadExt {
+    fn read_encoded_int(&mut self) -> anyhow::Result<i64>;
+    fn try_read_encoded_int_with_mark(&mut self, mark: u8) -> anyhow::Result<Option<i64>>;
+    fn read_int_array_0d(
+        &mut self,
+        dst: &mut ArrIntValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()>;
+    fn read_int_array_1d(
+        &mut self,
+        dst: &mut ArrIntValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()>;
+    fn read_int_array_2d(
+        &mut self,
+        dst: &mut ArrIntValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()>;
+    fn read_int_array_3d(
+        &mut self,
+        dst: &mut ArrIntValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()>;
+    fn read_str_array_0d(
+        &mut self,
+        dst: &mut ArrStrValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()>;
+    fn read_str_array_1d(
+        &mut self,
+        dst: &mut ArrStrValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()>;
+    fn read_str_array_2d(
+        &mut self,
+        dst: &mut ArrStrValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()>;
+    fn read_str_array_3d(
+        &mut self,
+        dst: &mut ArrStrValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()>;
+    fn read_var(
+        &mut self,
+        var_type: EraSaveDataType,
+        dst: &EraVarInfo,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()>;
+}
+
+impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
+    fn read_encoded_int(&mut self) -> anyhow::Result<i64> {
+        use crate::util::io::CSharpBinaryReader;
+        let b = self.read_u8()?;
+        self.try_read_encoded_int_with_mark(b)?
+            .context("invalid binary data")
+    }
+    fn try_read_encoded_int_with_mark(&mut self, mark: u8) -> anyhow::Result<Option<i64>> {
+        use crate::util::io::CSharpBinaryReader;
+        let b = mark;
+        Ok(if b <= EraBinaryMark::Byte as _ {
+            Some(b.into())
+        } else if b == EraBinaryMark::Int16 as _ {
+            Some(self.read_i16()?.into())
+        } else if b == EraBinaryMark::Int32 as _ {
+            Some(self.read_i32()?.into())
+        } else if b == EraBinaryMark::Int64 as _ {
+            Some(self.read_i64()?)
+        } else {
+            None
+        })
+    }
+    fn read_int_array_0d(
+        &mut self,
+        dst: &mut ArrIntValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()> {
+        let dims = &dst.dims[(chara_i.is_some() as usize)..];
+        let stride = dims.iter().copied().product::<u32>() as usize;
+        if dims.len() != 1 {
+            anyhow::bail!("invalid dimension");
+        }
+        let dst_vals = if let Some(chara_i) = chara_i {
+            &mut dst.vals[(chara_i as usize * stride)..(chara_i as usize * stride + stride)]
+        } else {
+            &mut dst.vals[..]
+        };
+        dst_vals[0] = IntValue {
+            val: self.read_encoded_int()?,
+        };
+        Ok(())
+    }
+    fn read_int_array_1d(
+        &mut self,
+        dst: &mut ArrIntValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryReader;
+        let dims = &dst.dims[(chara_i.is_some() as usize)..];
+        let stride = dims.iter().copied().product::<u32>() as usize;
+        if dims.len() != 1 {
+            anyhow::bail!("invalid dimension");
+        }
+        let dst_vals = if let Some(chara_i) = chara_i {
+            &mut dst.vals[(chara_i as usize * stride)..(chara_i as usize * stride + stride)]
+        } else {
+            &mut dst.vals[..]
+        };
+        let save_len = self.read_i32()?;
+        dst_vals.fill(Default::default());
+        let mut offset = 0;
+        loop {
+            let bin_mark = self.read_u8()?;
+            if let Some(x) = self.try_read_encoded_int_with_mark(bin_mark)? {
+                // Don't handle excessive data, drain them instead
+                if let Some(dst) = dst_vals.get_mut(offset) {
+                    *dst = IntValue { val: x };
+                }
+                offset += 1;
+            } else if bin_mark == EraBinaryMark::EoD as _ {
+                break;
+            } else if bin_mark == EraBinaryMark::Zero as _ {
+                offset += self.read_encoded_int()? as usize;
+            } else {
+                anyhow::bail!("invalid binary data");
+            }
+        }
+        Ok(())
+    }
+    fn read_int_array_2d(
+        &mut self,
+        dst: &mut ArrIntValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryReader;
+        let dims = &dst.dims[(chara_i.is_some() as usize)..];
+        let stride = dims.iter().copied().product::<u32>() as usize;
+        if dims.len() != 2 {
+            anyhow::bail!("invalid dimension");
+        }
+        let dim_0 = dims[0] as usize;
+        let dim_1 = dims[1] as usize;
+        let dst_vals = if let Some(chara_i) = chara_i {
+            &mut dst.vals[(chara_i as usize * stride)..(chara_i as usize * stride + stride)]
+        } else {
+            &mut dst.vals[..]
+        };
+        // Vertical
+        let save_len_0 = self.read_i32()?;
+        // Horizontal
+        let save_len_1 = self.read_i32()?;
+        dst_vals.fill(Default::default());
+        let mut offset_0 = 0;
+        let mut offset_1 = 0;
+        loop {
+            let bin_mark = self.read_u8()?;
+            if let Some(x) = self.try_read_encoded_int_with_mark(bin_mark)? {
+                // Don't handle excessive data, drain them instead
+                if offset_0 < dim_0 && offset_1 < dim_1 {
+                    let dst_idx = offset_0 * dim_1 + offset_1;
+                    let dst = dst_vals.get_mut(dst_idx).unwrap();
+                    *dst = IntValue { val: x };
+                }
+                offset_1 += 1;
+            } else if bin_mark == EraBinaryMark::EoD as _ {
+                break;
+            } else if bin_mark == EraBinaryMark::Zero as _ {
+                offset_1 += self.read_encoded_int()? as usize;
+            } else if bin_mark == EraBinaryMark::ZeroA1 as _ {
+                offset_0 += self.read_encoded_int()? as usize;
+                offset_1 = 0;
+            } else if bin_mark == EraBinaryMark::EoA1 as _ {
+                offset_0 += 1;
+                offset_1 = 0;
+            } else {
+                anyhow::bail!("invalid binary data");
+            }
+        }
+        Ok(())
+    }
+    fn read_int_array_3d(
+        &mut self,
+        dst: &mut ArrIntValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryReader;
+        let dims = &dst.dims[(chara_i.is_some() as usize)..];
+        let stride = dims.iter().copied().product::<u32>() as usize;
+        if dims.len() != 3 {
+            anyhow::bail!("invalid dimension");
+        }
+        let dim_0 = dims[0] as usize;
+        let dim_1 = dims[1] as usize;
+        let dim_2 = dims[2] as usize;
+        let dst_vals = if let Some(chara_i) = chara_i {
+            &mut dst.vals[(chara_i as usize * stride)..(chara_i as usize * stride + stride)]
+        } else {
+            &mut dst.vals[..]
+        };
+        // Vertical
+        let save_len_0 = self.read_i32()?;
+        // Horizontal
+        let save_len_1 = self.read_i32()?;
+        let save_len_2 = self.read_i32()?;
+        dst_vals.fill(Default::default());
+        let mut offset_0 = 0;
+        let mut offset_1 = 0;
+        let mut offset_2 = 0;
+        loop {
+            let bin_mark = self.read_u8()?;
+            if let Some(x) = self.try_read_encoded_int_with_mark(bin_mark)? {
+                // Don't handle excessive data, drain them instead
+                if offset_0 < dim_0 && offset_1 < dim_1 && offset_2 < dim_2 {
+                    let dst_idx = offset_0 * dim_1 * dim_2 + offset_1 * dim_2 + offset_2;
+                    let dst = dst_vals.get_mut(dst_idx).unwrap();
+                    *dst = IntValue { val: x };
+                }
+                offset_2 += 1;
+            } else if bin_mark == EraBinaryMark::EoD as _ {
+                break;
+            } else if bin_mark == EraBinaryMark::Zero as _ {
+                offset_2 += self.read_encoded_int()? as usize;
+            } else if bin_mark == EraBinaryMark::ZeroA1 as _ {
+                offset_1 += self.read_encoded_int()? as usize;
+                offset_2 = 0;
+            } else if bin_mark == EraBinaryMark::EoA1 as _ {
+                offset_1 += 1;
+                offset_2 = 0;
+            } else if bin_mark == EraBinaryMark::ZeroA2 as _ {
+                offset_0 += self.read_encoded_int()? as usize;
+                offset_1 = 0;
+                offset_2 = 0;
+            } else if bin_mark == EraBinaryMark::EoA2 as _ {
+                offset_0 += 1;
+                offset_1 = 0;
+                offset_2 = 0;
+            } else {
+                anyhow::bail!("invalid binary data");
+            }
+        }
+        Ok(())
+    }
+    fn read_str_array_0d(
+        &mut self,
+        dst: &mut ArrStrValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryReader;
+        let dims = &dst.dims[(chara_i.is_some() as usize)..];
+        let stride = dims.iter().copied().product::<u32>() as usize;
+        if dims.len() != 1 {
+            anyhow::bail!("invalid dimension");
+        }
+        let dst_vals = if let Some(chara_i) = chara_i {
+            &mut dst.vals[(chara_i as usize * stride)..(chara_i as usize * stride + stride)]
+        } else {
+            &mut dst.vals[..]
+        };
+        dst_vals[0] = StrValue {
+            val: self.read_utf16_string()?.into(),
+        };
+        Ok(())
+    }
+    fn read_str_array_1d(
+        &mut self,
+        dst: &mut ArrStrValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryReader;
+        let dims = &dst.dims[(chara_i.is_some() as usize)..];
+        let stride = dims.iter().copied().product::<u32>() as usize;
+        if dims.len() != 1 {
+            anyhow::bail!("invalid dimension");
+        }
+        let dst_vals = if let Some(chara_i) = chara_i {
+            &mut dst.vals[(chara_i as usize * stride)..(chara_i as usize * stride + stride)]
+        } else {
+            &mut dst.vals[..]
+        };
+        let save_len = self.read_i32()?;
+        dst_vals.fill(Default::default());
+        let mut offset = 0;
+        loop {
+            let bin_mark = self.read_u8()?;
+            if bin_mark == EraBinaryMark::String as _ {
+                // Don't handle excessive data, drain them instead
+                if let Some(dst) = dst_vals.get_mut(offset) {
+                    *dst = StrValue {
+                        val: self.read_utf16_string()?.into(),
+                    };
+                }
+                offset += 1;
+            } else if bin_mark == EraBinaryMark::EoD as _ {
+                break;
+            } else if bin_mark == EraBinaryMark::Zero as _ {
+                offset += self.read_encoded_int()? as usize;
+            } else {
+                anyhow::bail!("invalid binary data");
+            }
+        }
+        Ok(())
+    }
+    fn read_str_array_2d(
+        &mut self,
+        dst: &mut ArrStrValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryReader;
+        let dims = &dst.dims[(chara_i.is_some() as usize)..];
+        let stride = dims.iter().copied().product::<u32>() as usize;
+        if dims.len() != 2 {
+            anyhow::bail!("invalid dimension");
+        }
+        let dim_0 = dims[0] as usize;
+        let dim_1 = dims[1] as usize;
+        let dst_vals = if let Some(chara_i) = chara_i {
+            &mut dst.vals[(chara_i as usize * stride)..(chara_i as usize * stride + stride)]
+        } else {
+            &mut dst.vals[..]
+        };
+        // Vertical
+        let save_len_0 = self.read_i32()?;
+        // Horizontal
+        let save_len_1 = self.read_i32()?;
+        dst_vals.fill(Default::default());
+        let mut offset_0 = 0;
+        let mut offset_1 = 0;
+        loop {
+            let bin_mark = self.read_u8()?;
+            if bin_mark == EraBinaryMark::String as _ {
+                // Don't handle excessive data, drain them instead
+                if offset_0 < dim_0 && offset_1 < dim_1 {
+                    let dst_idx = offset_0 * dim_1 + offset_1;
+                    let dst = dst_vals.get_mut(dst_idx).unwrap();
+                    *dst = StrValue {
+                        val: self.read_utf16_string()?.into(),
+                    };
+                }
+                offset_1 += 1;
+            } else if bin_mark == EraBinaryMark::EoD as _ {
+                break;
+            } else if bin_mark == EraBinaryMark::Zero as _ {
+                offset_1 += self.read_encoded_int()? as usize;
+            } else if bin_mark == EraBinaryMark::ZeroA1 as _ {
+                offset_0 += self.read_encoded_int()? as usize;
+                offset_1 = 0;
+            } else if bin_mark == EraBinaryMark::EoA1 as _ {
+                offset_0 += 1;
+                offset_1 = 0;
+            } else {
+                anyhow::bail!("invalid binary data");
+            }
+        }
+        Ok(())
+    }
+    fn read_str_array_3d(
+        &mut self,
+        dst: &mut ArrStrValue,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryReader;
+        let dims = &dst.dims[(chara_i.is_some() as usize)..];
+        let stride = dims.iter().copied().product::<u32>() as usize;
+        if dims.len() != 3 {
+            anyhow::bail!("invalid dimension");
+        }
+        let dim_0 = dims[0] as usize;
+        let dim_1 = dims[1] as usize;
+        let dim_2 = dims[2] as usize;
+        let dst_vals = if let Some(chara_i) = chara_i {
+            &mut dst.vals[(chara_i as usize * stride)..(chara_i as usize * stride + stride)]
+        } else {
+            &mut dst.vals[..]
+        };
+        // Vertical
+        let save_len_0 = self.read_i32()?;
+        // Horizontal
+        let save_len_1 = self.read_i32()?;
+        let save_len_2 = self.read_i32()?;
+        dst_vals.fill(Default::default());
+        let mut offset_0 = 0;
+        let mut offset_1 = 0;
+        let mut offset_2 = 0;
+        loop {
+            let bin_mark = self.read_u8()?;
+            if bin_mark == EraBinaryMark::String as _ {
+                // Don't handle excessive data, drain them instead
+                if offset_0 < dim_0 && offset_1 < dim_1 && offset_2 < dim_2 {
+                    let dst_idx = offset_0 * dim_1 * dim_2 + offset_1 * dim_2 + offset_2;
+                    let dst = dst_vals.get_mut(dst_idx).unwrap();
+                    *dst = StrValue {
+                        val: self.read_utf16_string()?.into(),
+                    };
+                }
+                offset_2 += 1;
+            } else if bin_mark == EraBinaryMark::EoD as _ {
+                break;
+            } else if bin_mark == EraBinaryMark::Zero as _ {
+                offset_2 += self.read_encoded_int()? as usize;
+            } else if bin_mark == EraBinaryMark::ZeroA1 as _ {
+                offset_1 += self.read_encoded_int()? as usize;
+                offset_2 = 0;
+            } else if bin_mark == EraBinaryMark::EoA1 as _ {
+                offset_1 += 1;
+                offset_2 = 0;
+            } else if bin_mark == EraBinaryMark::ZeroA2 as _ {
+                offset_0 += self.read_encoded_int()? as usize;
+                offset_1 = 0;
+                offset_2 = 0;
+            } else if bin_mark == EraBinaryMark::EoA2 as _ {
+                offset_0 += 1;
+                offset_1 = 0;
+                offset_2 = 0;
+            } else {
+                anyhow::bail!("invalid binary data");
+            }
+        }
+        Ok(())
+    }
+    fn read_var(
+        &mut self,
+        var_type: EraSaveDataType,
+        var: &EraVarInfo,
+        chara_i: Option<u32>,
+    ) -> anyhow::Result<()> {
+        use EraSaveDataType::*;
+        match var_type {
+            Int | IntArray | IntArray2D | IntArray3D => {
+                let mut var_val = var
+                    .val
+                    .as_arrint()
+                    .context("variable type mismatch")?
+                    .borrow_mut();
+                var_val.ensure_alloc();
+                match var_type {
+                    Int => self.read_int_array_0d(&mut var_val, chara_i)?,
+                    IntArray => self.read_int_array_1d(&mut var_val, chara_i)?,
+                    IntArray2D => self.read_int_array_2d(&mut var_val, chara_i)?,
+                    IntArray3D => self.read_int_array_3d(&mut var_val, chara_i)?,
+                    _ => unreachable!(),
+                }
+            }
+            Str | StrArray | StrArray2D | StrArray3D => {
+                let mut var_val = var
+                    .val
+                    .as_arrstr()
+                    .context("variable type mismatch")?
+                    .borrow_mut();
+                var_val.ensure_alloc();
+                match var_type {
+                    Str => self.read_str_array_0d(&mut var_val, chara_i)?,
+                    StrArray => self.read_str_array_1d(&mut var_val, chara_i)?,
+                    StrArray2D => self.read_str_array_2d(&mut var_val, chara_i)?,
+                    StrArray3D => self.read_str_array_3d(&mut var_val, chara_i)?,
+                    _ => unreachable!(),
+                }
+            }
+            _ => anyhow::bail!("invalid var type {var_type:?}"),
+        }
+        Ok(())
+    }
+}
+
+#[safer_ffi::derive_ReprC]
+#[repr(u8)]
+pub enum MEraEngineFileSeekMode {
+    Start,
+    End,
+    Current,
 }
 
 impl EraVirtualMachine {
@@ -1031,6 +1932,7 @@ impl EraVirtualMachine {
                             }
                         },
                         global_vars: &mut $self.global_vars,
+                        charas_count: &mut $self.charas_count,
                     });
                 } {
                     Ok(ctx) => ctx,
@@ -2673,6 +3575,11 @@ impl EraVirtualMachine {
                     let result = nanohtml2text::html2text(&html.val);
                     ctx.stack.push(Value::new_str(result.into()).into());
                 }
+                HtmlEscape => {
+                    pop_stack!(ctx, val:s);
+                    let result = htmlize::escape_all_quotes(&val.val);
+                    ctx.stack.push(Value::new_str(result.into()).into());
+                }
                 PowerInt => {
                     let [base, exponent] = ctx.pop_stack()?;
                     unpack_int!(ctx, base);
@@ -2750,7 +3657,7 @@ impl EraVirtualMachine {
                     };
                     let is_chara_mode = matches!(primary_bytecode, CArrayCountMatches);
                     let (dim_pos, end_idx) = if is_chara_mode {
-                        (0, end_idx.min(self.charas_count))
+                        (0, end_idx.min(*ctx.charas_count))
                     } else {
                         (usize::MAX, end_idx)
                     };
@@ -2791,7 +3698,7 @@ impl EraVirtualMachine {
                     let is_chara_mode =
                         matches!(primary_bytecode, SumCArray | MaxCArray | MinCArray);
                     let (dim_pos, end_idx) = if is_chara_mode {
-                        (0, end_idx.min(self.charas_count))
+                        (0, end_idx.min(*ctx.charas_count))
                     } else {
                         (usize::MAX, end_idx)
                     };
@@ -2826,7 +3733,7 @@ impl EraVirtualMachine {
                     };
                     let is_chara_mode = matches!(primary_bytecode, InRangeCArray);
                     let (dim_pos, end_idx) = if is_chara_mode {
-                        (0, end_idx.min(self.charas_count))
+                        (0, end_idx.min(*ctx.charas_count))
                     } else {
                         (usize::MAX, end_idx)
                     };
@@ -3442,7 +4349,7 @@ impl EraVirtualMachine {
                         FlatValue::ArrInt(x) => {
                             let x = x.borrow();
                             unpack_int!(ctx, value);
-                            let (dim_pos, end_idx) = (0, end_idx.min(self.charas_count));
+                            let (dim_pos, end_idx) = (0, end_idx.min(*ctx.charas_count));
                             let mut it = x
                                 .stride_iter(var_i, dim_pos, start_idx, end_idx)
                                 .map(|x| x.val);
@@ -3456,7 +4363,7 @@ impl EraVirtualMachine {
                         FlatValue::ArrStr(x) => {
                             let x = x.borrow();
                             unpack_str!(ctx, value);
-                            let (dim_pos, end_idx) = (0, end_idx.min(self.charas_count));
+                            let (dim_pos, end_idx) = (0, end_idx.min(*ctx.charas_count));
                             let mut it = x
                                 .stride_iter(var_i, dim_pos, start_idx, end_idx)
                                 .map(|x| &x.val);
@@ -3523,7 +4430,7 @@ impl EraVirtualMachine {
                                 bail_opt!(ctx, true, "invalid indices into array");
                             }
                             let index = index.val as usize;
-                            let dim_size = self.charas_count;
+                            let dim_size = *ctx.charas_count;
                             let count = dim_size.min(end_idx).saturating_sub(start_idx);
                             let stride: usize =
                                 x.dims.iter().skip(1).map(|x| *x as usize).product();
@@ -3541,7 +4448,7 @@ impl EraVirtualMachine {
                                 bail_opt!(ctx, true, "invalid indices into array");
                             }
                             let index = index.val as usize;
-                            let dim_size = self.charas_count;
+                            let dim_size = *ctx.charas_count;
                             let count = dim_size.min(end_idx).saturating_sub(start_idx);
                             let stride: usize =
                                 x.dims.iter().skip(1).map(|x| *x as usize).product();
@@ -3574,7 +4481,7 @@ impl EraVirtualMachine {
                 }
                 GetCharaNum => {
                     ctx.stack
-                        .push(Value::new_int(self.charas_count as _).into());
+                        .push(Value::new_int(*ctx.charas_count as _).into());
                 }
                 GetHostTimeRaw => {
                     let result = ctx.callback.on_get_host_time();
@@ -3823,16 +4730,17 @@ impl EraVirtualMachine {
                     else {
                         bail_opt!(ctx, true, "no such character template");
                     };
-                    let chara_idx = self.charas_count;
-                    if self.charas_count + 1 >= crate::engine::MAX_CHARA_COUNT as usize {
+                    let chara_idx = *ctx.charas_count;
+                    if *ctx.charas_count + 1 >= crate::engine::MAX_CHARA_COUNT as usize {
                         bail_opt!(ctx, true, "character count exceeds limit");
                     }
-                    self.charas_count += 1;
+                    *ctx.charas_count += 1;
                     for chara_var_idx in ctx.global_vars.chara_var_idxs.iter().copied() {
                         let chara_var = &mut ctx.global_vars.vars[chara_var_idx];
                         match chara_var.val.clone().into_unpacked() {
                             FlatValue::ArrInt(x) => {
                                 let mut x = x.borrow_mut();
+                                x.ensure_alloc();
                                 let stride: usize =
                                     x.dims.iter().skip(1).map(|x| *x as usize).product();
                                 let start_idx = chara_idx * stride;
@@ -3865,6 +4773,7 @@ impl EraVirtualMachine {
                             }
                             FlatValue::ArrStr(x) => {
                                 let mut x = x.borrow_mut();
+                                x.ensure_alloc();
                                 let stride: usize =
                                     x.dims.iter().skip(1).map(|x| *x as usize).product();
                                 let start_idx = chara_idx * stride;
@@ -3906,10 +4815,11 @@ impl EraVirtualMachine {
                     ip_offset_delta += 1;
                     // FIXME: Adjust TARGET:0 & MASTER:0 accordingly
                     // NOTE: We need to deduplicate numbers without changing the order
+                    let cur_charas_cnt = *ctx.charas_count as _;
                     let pickup_charas = ctx
                         .pop_stack_dyn(charas_cnt as _)?
                         .map(|x| match x.0.into_unpacked() {
-                            FlatValue::Int(x) if (0..self.charas_count as _).contains(&x.val) => {
+                            FlatValue::Int(x) if (0..cur_charas_cnt).contains(&x.val) => {
                                 Ok(x.val as usize)
                             }
                             _ => Err(()),
@@ -3919,7 +4829,7 @@ impl EraVirtualMachine {
                     let Some(mut pickup_charas) = pickup_charas else {
                         bail_opt!(ctx, true, "invalid character number");
                     };
-                    self.charas_count = pickup_charas.len();
+                    *ctx.charas_count = pickup_charas.len();
                     for orig_idx in 0..pickup_charas.len() {
                         let pickup_idx = pickup_charas[orig_idx];
                         if orig_idx == pickup_idx {
@@ -3960,10 +4870,11 @@ impl EraVirtualMachine {
                     let charas_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
                     ip_offset_delta += 1;
                     // NOTE: We need to deduplicate numbers
+                    let cur_charas_cnt = *ctx.charas_count as _;
                     let del_charas = ctx
                         .pop_stack_dyn(charas_cnt as _)?
                         .map(|x| match x.0.into_unpacked() {
-                            FlatValue::Int(x) if (0..self.charas_count as _).contains(&x.val) => {
+                            FlatValue::Int(x) if (0..cur_charas_cnt).contains(&x.val) => {
                                 Some(x.val as usize)
                             }
                             _ => None,
@@ -3972,7 +4883,7 @@ impl EraVirtualMachine {
                     let Some(del_charas) = del_charas else {
                         bail_opt!(ctx, true, "invalid character number");
                     };
-                    self.charas_count -= del_charas.len();
+                    *ctx.charas_count -= del_charas.len();
                     for &chara_var_idx in &ctx.global_vars.chara_var_idxs {
                         let chara_var = &mut ctx.global_vars.vars[chara_var_idx];
                         match chara_var.val.clone().into_unpacked() {
@@ -4015,7 +4926,7 @@ impl EraVirtualMachine {
                 SwapChara => {
                     pop_stack!(ctx, chara1:i, chara2:i);
                     for i in [chara1.val, chara2.val] {
-                        if !(0..self.charas_count as i64).contains(&i) {
+                        if !(0..*ctx.charas_count as i64).contains(&i) {
                             bail_opt!(ctx, true, "invalid character number");
                         }
                     }
@@ -4050,12 +4961,50 @@ impl EraVirtualMachine {
                     }
                 }
                 AddCopyChara => {
-                    todo!("AddCopyChara")
+                    // TODO: AddCopyChara
+                    bail_opt!(ctx, true, "AddCopyChara not yet implemented");
+                }
+                LoadData => {
+                    pop_stack!(ctx, save_id:i);
+                    let save_id = save_id.val;
+                    let result = match ctx.proc_load_data(save_id) {
+                        Ok(loaded) => loaded.into(),
+                        Err(e) => {
+                            ctx.report_err(true, format!("load save {save_id} failed: {e:?}"));
+                            -1
+                        }
+                    };
+                    ctx.stack.push(Value::new_int(result).into());
                 }
                 SaveData => {
                     pop_stack!(ctx, save_id:i, save_info:s);
-                    // TODO...
+                    // TODO: SaveData
                     ctx.report_err(true, "SaveData not yet implemented");
+                    ctx.stack.push(Value::new_int(-1).into());
+                }
+                CheckData => {
+                    pop_stack!(ctx, save_id:i);
+                    let save_id = save_id.val;
+                    match ctx
+                        .proc_check_data(save_id)
+                        .unwrap_or((4, 0, String::new()))
+                    {
+                        (0, timestamp, save_info) => {
+                            vresult.borrow_mut().vals[0] = IntValue {
+                                val: timestamp as _,
+                            };
+                            vresults.borrow_mut().vals[0] = StrValue {
+                                val: save_info.into(),
+                            };
+                            ctx.stack.push(Value::new_int(0).into());
+                        }
+                        (status, _, _) => {
+                            vresults.borrow_mut().vals[0] = StrValue {
+                                val: arcstr::literal!("unknown error"),
+                            };
+                            ctx.stack.push(Value::new_int(status).into());
+                        }
+                    }
                 }
                 GetCharaRegNum => {
                     pop_stack!(ctx, chara_no:i);
@@ -4068,7 +5017,7 @@ impl EraVirtualMachine {
                     };
                     let nos = nos.borrow();
                     let result = nos
-                        .stride_iter(0, 0, 0, self.charas_count)
+                        .stride_iter(0, 0, 0, *ctx.charas_count)
                         .position(|x| x.val == chara_no.val)
                         .map(|x| x as _)
                         .unwrap_or(-1);
@@ -4085,36 +5034,11 @@ impl EraVirtualMachine {
                     ctx.stack.push(Value::new_int(0).into());
                 }
                 ResetData => {
-                    // TODO: Fully reset data according to Emuera
-                    self.charas_count = 0;
-                    for var in &ctx.global_vars.vars {
-                        if var.is_const {
-                            continue;
-                        }
-                        match var.val.clone().into_unpacked() {
-                            FlatValue::ArrInt(x) => {
-                                let mut x = x.borrow_mut();
-                                let should_reset = var.is_charadata
-                                    || !matches!(var.name.as_ref(), "GLOBAL" | "ITEMPRICE");
-                                if should_reset {
-                                    x.vals.fill(Default::default());
-                                }
-                            }
-                            FlatValue::ArrStr(x) => {
-                                let mut x = x.borrow_mut();
-                                let should_reset = var.is_charadata
-                                    || !matches!(var.name.as_ref(), "GLOBALS" | "STR");
-                                if should_reset {
-                                    x.vals.fill(Default::default());
-                                }
-                            }
-                            _ => unreachable!(),
-                        }
-                    }
+                    ctx.proc_reset_data();
                 }
                 ResetCharaStain => {
                     pop_stack!(ctx, chara:i);
-                    if !(0..self.charas_count as i64).contains(&chara.val) {
+                    if !(0..*ctx.charas_count as i64).contains(&chara.val) {
                         bail_opt!(ctx, true, "invalid character number");
                     }
                     let chara = chara.val as usize;
@@ -4127,10 +5051,21 @@ impl EraVirtualMachine {
                     };
                     let mut stain = stain.borrow_mut();
                     let stride: usize = stain.dims.iter().skip(1).map(|&x| x as usize).product();
-                    const DEFAULT_STAIN: &[i64] = &[0, 0, 2, 1, 8];
+                    let default_stain = ctx
+                        .global_vars
+                        .get_var("DEFAULT_STAIN")
+                        .and_then(|x| x.as_arrint().map(|x| x.borrow()))
+                        .unwrap();
+                    let default_stain = &default_stain.vals[..];
+                    //const DEFAULT_STAIN: &[i64] = &[0, 0, 2, 1, 8];
                     for (d, s) in stain.vals[(chara * stride)..((chara + 1) * stride)]
                         .iter_mut()
-                        .zip(DEFAULT_STAIN.iter().copied().chain(std::iter::repeat(0)))
+                        .zip(
+                            default_stain
+                                .iter()
+                                .map(|x| x.val)
+                                .chain(std::iter::repeat(0)),
+                        )
                     {
                         *d = IntValue { val: s };
                     }
@@ -4139,10 +5074,11 @@ impl EraVirtualMachine {
                     let charas_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
                     ip_offset_delta += 1;
                     // NOTE: We need to deduplicate numbers
+                    let cur_charas_cnt = *ctx.charas_count as _;
                     let del_charas = ctx
                         .pop_stack_dyn(charas_cnt as _)?
                         .map(|x| match x.0.into_unpacked() {
-                            FlatValue::Int(x) if (0..self.charas_count as _).contains(&x.val) => {
+                            FlatValue::Int(x) if (0..cur_charas_cnt).contains(&x.val) => {
                                 Some(x.val as usize)
                             }
                             _ => None,
@@ -4201,8 +5137,40 @@ impl EraVirtualMachine {
                     ctx.stack.push(Value::new_int(0).into());
                 }
                 SystemIntrinsics => {
-                    // TODO: SystemIntrinsics
-                    bail_opt!(ctx, true, "SystemIntrinsics not yet implemented");
+                    let intrin_no = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
+                    ip_offset_delta += 1;
+                    match SystemIntrinsicsKind::try_from_i(intrin_no) {
+                        Some(SystemIntrinsicsKind::LoadGamePrintText) => {
+                            let print_flag = PrintExtendedFlags::new().with_is_line(true);
+                            ctx.callback.on_print("Load which save?", print_flag);
+                            for i in (0..20).into_iter().chain(Some(99)) {
+                                let path = format!(".\\sav\\save{i:02}.sav");
+                                let save_info = ctx
+                                    .callback
+                                    .on_check_host_file_exists(&path)
+                                    .and_then(|exists| {
+                                        if exists {
+                                            ctx.callback.on_open_host_file(&path, false).and_then(
+                                                |x| {
+                                                    let mut x = EraVirtualMachineHostFileWrap(x);
+                                                    ctx.proc_helper_read_save_header(&mut x)
+                                                        .map(|x| x.save_info)
+                                                },
+                                            )
+                                        } else {
+                                            Ok("----".to_owned())
+                                        }
+                                    });
+                                let save_info = save_info.as_deref().unwrap_or("<invalid>");
+                                let msg = format!("[{i:2}] {save_info}");
+                                ctx.callback.on_print(&msg, print_flag);
+                            }
+                            ctx.callback.on_print("[100] Cancel", print_flag);
+                        }
+                        None => {
+                            bail_opt!(ctx, true, "unknown SystemIntrinsics number");
+                        }
+                    }
                 }
                 InvokeStaticJit => {
                     let jit_idx = ctx.chunk_read_u32(ctx.cur_frame.ip.offset + 1)?;

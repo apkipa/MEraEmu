@@ -12,7 +12,8 @@ use smallvec::SmallVec;
 use crate::{
     bytecode::{
         ArrIntValue, ArrStrValue, EraBytecodePrimaryType, EraCharaCsvPropType, EraCsvVarKind,
-        EraInputSubBytecodeType, FlatValue, PrintExtendedFlags, RefFlatValue, ValueKind,
+        EraInputSubBytecodeType, FlatValue, PrintExtendedFlags, RefFlatValue, SystemIntrinsicsKind,
+        ValueKind,
     },
     lexer::{EraTokenKind, EraTokenLite},
     parser::{EraCommandStmt, EraFunDecl, EraFunKind, EraStmt, EraTermExpr, EraVarExpr},
@@ -783,19 +784,19 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             }
             self.vars.add_var(
                 &format!("LOCAL@{}", func_name),
-                Value::new_int_arr(local_dim.clone(), Vec::new()),
+                &Value::new_int_arr(local_dim.clone(), Vec::new()),
             );
             self.vars.add_var(
                 &format!("LOCALS@{}", func_name),
-                Value::new_str_arr(locals_dim.clone(), Vec::new()),
+                &Value::new_str_arr(locals_dim.clone(), Vec::new()),
             );
             self.vars.add_var(
                 &format!("ARG@{}", func_name),
-                Value::new_int_arr(arg_dim.clone(), Vec::new()),
+                &Value::new_int_arr(arg_dim.clone(), Vec::new()),
             );
             self.vars.add_var(
                 &format!("ARGS@{}", func_name),
-                Value::new_str_arr(args_dim.clone(), Vec::new()),
+                &Value::new_str_arr(args_dim.clone(), Vec::new()),
             );
 
             // Local variables
@@ -917,7 +918,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                     );
                     local_decl.idx_in_frame = match self.vars.add_var_ex(
                         &var_name,
-                        local_decl.init_val.deep_clone(),
+                        &local_decl.init_val,
                         local_decl.is_const,
                         local_decl.is_charadata,
                         false,
@@ -2510,8 +2511,9 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 }
                 match self.ret_kind {
                     TInteger | TString => {
-                        self.this.chunk.emit_bytecode(SetArrayVal, self.src_info);
-                        self.this.chunk.emit_bytecode(Pop, self.src_info);
+                        self.this
+                            .chunk
+                            .emit_bytecode(SetArrayValNoRet, self.src_info);
                     }
                     TVoid => (),
                 }
@@ -3744,6 +3746,12 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 ctx.this.expr_str(html)?;
                 ctx.this.chunk.emit_bytecode(HtmlToPlainText, src_info);
             }
+            b"HTML_ESCAPE" => {
+                ctx.results()?;
+                let [html] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_str(html)?;
+                ctx.this.chunk.emit_bytecode(HtmlEscape, src_info);
+            }
             b"GETKEY" => {
                 ctx.result()?;
                 let [keycode] = ctx.unpack_some_args(args)?;
@@ -3769,6 +3777,30 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let [filename] = ctx.unpack_some_args(args)?;
                 ctx.this.expr_str(filename)?;
                 ctx.this.chunk.emit_bytecode(FindCharaDataFile, src_info);
+            }
+            b"LOADDATA" => {
+                ctx.result()?;
+                let [save_id] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_int(save_id)?;
+                ctx.this.chunk.emit_bytecode(LoadData, src_info);
+            }
+            b"CHKDATA" => {
+                ctx.result()?;
+                let [save_id] = ctx.unpack_some_args(args)?;
+                ctx.this.expr_int(save_id)?;
+                ctx.this.chunk.emit_bytecode(CheckData, src_info);
+            }
+            _ if target.eq_ignore_ascii_case("SYSINTRINSIC_LoadGameInit") => {
+                // Do nothing
+            }
+            _ if target.eq_ignore_ascii_case("SYSINTRINSIC_LoadGameUninit") => {
+                // Do nothing
+            }
+            _ if target.eq_ignore_ascii_case("SYSINTRINSIC_LoadGamePrintText") => {
+                ctx.this.chunk.emit_bytecode(SystemIntrinsics, src_info);
+                ctx.this
+                    .chunk
+                    .append_u8(SystemIntrinsicsKind::LoadGamePrintText as _, src_info);
             }
             _ => bail_opt!(
                 ctx.this,
@@ -4951,13 +4983,39 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 })?;
                 self.peephole_optimization_pop(bc_start_pos, x.src_info);
             }
+            Cmd::LoadData(x) => {
+                // Statement form will also call SYSPROC_LOADDATAEND
+                let load_data_expr = EraExpr::FunCall(
+                    Box::new(EraExpr::new_str(arcstr::literal!("LOADDATA"), x.src_info)),
+                    vec![Some(x.save_id)],
+                );
+                let expr = EraExpr::FunCall(
+                    Box::new(EraExpr::new_str(
+                        arcstr::literal!("SYSPROC_LOADDATAEND"),
+                        x.src_info,
+                    )),
+                    vec![Some(load_data_expr)],
+                );
+                self.expr_int(expr)?;
+                self.chunk.emit_pop(x.src_info);
+            }
             Cmd::SaveData(x) => {
                 self.expr_int(x.save_id)?;
                 self.expr_str(x.save_info)?;
                 self.chunk.emit_bytecode(SaveData, x.src_info);
+                self.chunk.emit_pop(x.src_info);
             }
+            // Cmd::CheckData(x) => {
+            //     self.expr_int(x.save_id)?;
+            //     let bc_start_pos = self.chunk.cur_bytes_cnt();
+            //     self.arr_set("RESULT", vec![], x.src_info, |this| {
+            //         this.chunk.emit_bytecode(CheckData, x.src_info);
+            //         Some(TInteger)
+            //     })?;
+            //     self.peephole_optimization_pop(bc_start_pos, x.src_info);
+            // }
             Cmd::Restart(x) => {
-                // HACK: RESTART is unconditional GOTO start of function body
+                // NOTE: RESTART is unconditional GOTO start of function body
                 self.chunk
                     .emit_jump_hold(x.src_info)
                     .complete_at(self.chunk, self.body_start_pos)
@@ -5370,7 +5428,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 Some(
                     UnicodeToStr | StrLen | StrLenU | StringIsValidInteger | StringToUpper
                     | StringToLower | StringToHalf | StringToFull | ConvertToInteger
-                    | ConvertToString | EscapeRegexStr | HtmlToPlainText,
+                    | ConvertToString | EscapeRegexStr | HtmlToPlainText | HtmlEscape,
                 ) => (1, 0, false),
                 Some(GetHostTimeRaw | GetHostTime | GetHostTimeS | LoadGlobal | SaveGlobal) => {
                     (1, 1, true)
@@ -5384,7 +5442,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 Some(GCreated | SpriteCreated | SpriteWidth | SpriteHeight) => (1, 0, true),
                 Some(GetConfig | GetConfigS) => (1, 0, true),
                 Some(GroupMatch) => (2, -(bc[1] as isize), false),
-                Some(LoadChara | CheckFont) => (1, 0, true),
+                Some(LoadChara | CheckFont | CheckData) => (1, 0, true),
                 Some(SaveChara) => (2, -2 - (bc[1] as isize), true),
                 // ----- Unknowns
                 x => panic!(

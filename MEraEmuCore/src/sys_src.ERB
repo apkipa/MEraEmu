@@ -7,7 +7,9 @@
 ;
 
 @SYSPROC_LOADGAME
+    #DIM DYNAMIC OldResult
     #DIM DYNAMIC LoadSucceeded = 0
+    OldResult = RESULT
     SYSINTRINSIC_LoadGameInit()
     SYSINTRINSIC_LoadGamePrintText()
     $INPUT_LOOP
@@ -18,31 +20,45 @@
         CASE -1
             ; Catastrophic error
             PRINTFORML ERROR: The save is broken. Exiting.
+            WAIT
             GOTO TEARDOWN
         CASE 0
             ; Empty save slot
             PRINTFORML The save is empty.
             GOTO INPUT_LOOP
-        CASEELSE
+        CASE 1
             ; Load save succeeded
             ; NOTE: This path should be unreachable
             LoadSucceeded = 1
+        CASEELSE
+            THROW Unknown LOADDATA result
     ENDSELECT
     $TEARDOWN
     ; Clean up and return to caller
     SYSINTRINSIC_LoadGameUninit()
+    RESULT = OldResult
     SIF LoadSucceeded
-        ; SYSPROC_DATALOADED()
-        THROW Unreachable path; this is a bug.
+        SYSPROC_LOADDATAEND(1)
 @SYSPROC_SAVEGAME
     ; TODO: SYSPROC_SAVEGAME
-    PRINTFORM Warning: SYSPROC_SAVEGAME not yet implemented
+    PRINTFORML Warning: SYSPROC_SAVEGAME not yet implemented
+@SYSPROC_LOADDATAEND(InvokeResult)
+    #FUNCTION
+    #DIM DYNAMIC InvokeResult
+    SYSPROC_STORE_MANAGER()
+    SIF InvokeResult != 1
+        ; Load failed
+        RETURN InvokeResult
+    ; Load succeeded, start LOADDATAEND procedure
+    TRYCALL SYSTEM_LOADEND
+    SYSPROC_TRYINVOKE_USER_EVENT("EVENTLOAD")
+    BEGIN SHOP
 @SYSPROC_BEGIN_FIRST
-    LOCAL@SYSPROC_STORE_MANAGER = -1
+    SYSPROC_STORE_MANAGER()
     SYSPROC_INVOKE_USER_EVENT_NORETURN("EVENTFIRST")
 @SYSPROC_BEGIN_TITLE
     ; Init storage
-    LOCAL@SYSPROC_STORE_MANAGER = -1
+    SYSPROC_STORE_MANAGER()
 
     TRYCCALL SYSTEM_TITLE
         THROW @SYSTEM_TITLE must not return
@@ -107,6 +123,7 @@
 
 @SYSPROC_STORE_MANAGER
     ; A meta function playing the role of storage provider
+    LOCAL = -1
 @SYSPROC_TRYINVOKE_USER_EVENT(func_name)
     #FUNCTION
     #DIMS DYNAMIC func_name
@@ -201,6 +218,7 @@
     IF INRANGE(DoTrainComNo, 0, VARSIZE("TRAINNAME") - 1)
         SELECTCOM = DoTrainComNo
         DoTrainComNo = -1
+        SYSPROC_TRAIN_UPDATE_AFTER_SHOW_USERCOM()
         GOTO DOTRAIN_START
     ENDIF
 
@@ -233,16 +251,7 @@
     NEXT
     SYSPROC_INVOKE_USER_FUNC_FORCE("SHOW_USERCOM")
     ; Reset after SHOW_USERCOM
-    VARSET UP
-    VARSET DOWN
-    VARSET LOSEBASE
-    FOR LOCAL, 0, VARSIZE("BASENAME")
-        CVARSET DOWNBASE, LOCAL
-    NEXT
-    FOR LOCAL, 0, VARSIZE("PALAMNAME")
-        CVARSET CUP, LOCAL
-        CVARSET CDOWN, LOCAL
-    NEXT
+    SYSPROC_TRAIN_UPDATE_AFTER_SHOW_USERCOM()
     IF !IsCTrain
         ; Input COM number
         INPUT
@@ -260,10 +269,10 @@
     ENDIF
     IF select_com >= 0
         SELECTCOM = select_com
+        $DOTRAIN_START
         FOR LOCAL, 0, VARSIZE("EXNAME")
             CVARSET NOWEX, LOCAL
         NEXT
-        $DOTRAIN_START
         SYSPROC_TRYINVOKE_USER_EVENT("EVENTCOM")
         SYSPROC_INVOKE_USER_FUNC_FORCE(@"COM{SELECTCOM}")
         IF RESULT
@@ -289,6 +298,18 @@
     ENDIF
     ; Restart train loop
     RESTART
+
+@SYSPROC_TRAIN_UPDATE_AFTER_SHOW_USERCOM()
+    VARSET UP
+    VARSET DOWN
+    VARSET LOSEBASE
+    FOR LOCAL, 0, VARSIZE("BASENAME")
+        CVARSET DOWNBASE, LOCAL
+    NEXT
+    FOR LOCAL, 0, VARSIZE("PALAMNAME")
+        CVARSET CUP, LOCAL
+        CVARSET CDOWN, LOCAL
+    NEXT
 
 ; --------------------
 

@@ -133,6 +133,7 @@ pub enum EraBytecodePrimaryType {
     IntToStrWithBase,
     HtmlTagSplit,
     HtmlToPlainText,
+    HtmlEscape,
     PowerInt,
     SqrtInt,
     CbrtInt,
@@ -212,7 +213,9 @@ pub enum EraBytecodePrimaryType {
     DeleteChara,
     SwapChara,
     AddCopyChara,
+    LoadData,
     SaveData,
+    CheckData,
     GetCharaRegNum,
     LoadGlobal,
     SaveGlobal,
@@ -426,6 +429,14 @@ pub enum EraBeginSystemProcedureKind {
 #[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
 pub enum SystemIntrinsicsKind {
     LoadGamePrintText,
+}
+impl SystemIntrinsicsKind {
+    pub fn try_from_i(value: u8) -> Option<Self> {
+        num_traits::FromPrimitive::from_u8(value)
+    }
+    pub fn to_i(self) -> u8 {
+        num_traits::ToPrimitive::to_u8(&self).unwrap()
+    }
 }
 
 #[modular_bitfield::bitfield]
@@ -805,9 +816,40 @@ impl Value {
         self.clone().into_unpacked().deep_clone().into_packed()
     }
     pub fn kind(&self) -> ValueKind {
-        // TODO: Optimize performance
-        //self.clone().into_unpacked().kind()
         self.as_unpacked().kind()
+    }
+    pub fn is_default(&self) -> bool {
+        use RefFlatValue::*;
+        match self.as_unpacked() {
+            Int(x) => x.val == 0,
+            Str(x) => x.val.is_empty(),
+            ArrInt(x) => x.borrow().vals.iter().all(|x| x.val == 0),
+            ArrStr(x) => x.borrow().vals.iter().all(|x| x.val.is_empty()),
+        }
+    }
+    pub fn as_int(&self) -> Option<&IntValue> {
+        match self.as_unpacked() {
+            RefFlatValue::Int(x) => Some(x),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> Option<&StrValue> {
+        match self.as_unpacked() {
+            RefFlatValue::Str(x) => Some(x),
+            _ => None,
+        }
+    }
+    pub fn as_arrint(&self) -> Option<&Rc<RefCell<ArrIntValue>>> {
+        match self.as_unpacked() {
+            RefFlatValue::ArrInt(x) => Some(x),
+            _ => None,
+        }
+    }
+    pub fn as_arrstr(&self) -> Option<&Rc<RefCell<ArrStrValue>>> {
+        match self.as_unpacked() {
+            RefFlatValue::ArrStr(x) => Some(x),
+            _ => None,
+        }
     }
 }
 impl FlatValue {

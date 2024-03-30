@@ -21,7 +21,8 @@
         </VisualStateManager.VisualStateGroups>
         
         <ScrollViewer x:Name="RootScrollViewer" HorizontalScrollMode="Auto"
-                      VerticalScrollMode="Enabled" VerticalScrollBarVisibility="Visible">
+                      VerticalScrollMode="Enabled" VerticalScrollBarVisibility="Visible"
+                      ZoomMode="Disabled">
             <Grid>
                 <SwapChainPanel x:Name="BackgroundSwapchainPanel"/>
                 <StackPanel Orientation="Vertical" VerticalAlignment="Bottom" HorizontalAlignment="Left">

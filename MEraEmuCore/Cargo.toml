@@ -59,6 +59,9 @@ itertools = "0.12.1"
 safer-ffi = { version = "0.1.5", features = ["dyn-traits"] }
 arcstr = "1.1.5"
 rclite = "0.2.4"
+byteorder = "1.5.0"
+html-escape = "0.2.13"
+htmlize = "1.0.5"
 
 [features]
 headers = ["safer-ffi/headers"]

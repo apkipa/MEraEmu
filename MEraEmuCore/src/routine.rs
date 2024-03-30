@@ -105,3 +105,14 @@ pub fn parse_era_int(val: &str) -> Option<i64> {
         val.parse::<i64>().ok()
     }
 }
+
+pub fn is_obsolete_var(name: &str) -> bool {
+    name.eq_ignore_ascii_case("DITEMTYPE")
+        || name.eq_ignore_ascii_case("DA")
+        || name.eq_ignore_ascii_case("DB")
+        || name.eq_ignore_ascii_case("DC")
+        || name.eq_ignore_ascii_case("DD")
+        || name.eq_ignore_ascii_case("DE")
+        || name.eq_ignore_ascii_case("TA")
+        || name.eq_ignore_ascii_case("TB")
+}
