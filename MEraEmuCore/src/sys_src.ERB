@@ -249,6 +249,8 @@
             ENDIF
         ENDIF
     NEXT
+    ; Flush output before printing
+    PRINTSINGLE
     SYSPROC_INVOKE_USER_FUNC_FORCE("SHOW_USERCOM")
     ; Reset after SHOW_USERCOM
     SYSPROC_TRAIN_UPDATE_AFTER_SHOW_USERCOM()

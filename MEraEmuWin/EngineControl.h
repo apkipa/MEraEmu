@@ -120,7 +120,7 @@ namespace winrt::MEraEmuWin::implementation {
         // NOTE: Wait flag is ignored deliberately
         void OnInputCountDownTick(IInspectable const&, IInspectable const&);
         void FlushCurPrintLine();
-        void RoutinePrint(hstring const& content, PrintExtendedFlags flags);
+        void RoutinePrint(hstring content, PrintExtendedFlags flags);
         void RoutineHtmlPrint(hstring const& content);
         void RoutineInput(std::unique_ptr<InputRequest> request);
         void RoutineReuseLastLine(hstring const& content);
@@ -171,9 +171,12 @@ namespace winrt::MEraEmuWin::implementation {
         hstring m_input_last_prompt;
         Windows::UI::Xaml::DispatcherTimer m_input_countdown_timer;
         struct EngineConfig {
-            int64_t line_height = 16;
-            int64_t font_size = 16;
+            float line_height = 16;
+            float font_size = 14;
+            int64_t printc_char_count = 25;
+            int64_t printc_per_line = 5;
         } m_cfg;
+        int64_t m_cur_printc_count{};
         // TODO: Button style data
     };
 }

@@ -692,12 +692,20 @@ namespace winrt::MEraEmuWin::implementation {
                 return 0;
             }
             if (name == "@PRINTCPERLINE") {
-                // TODO: @PRINTCPERLINE
-                return 5;
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->m_cfg.printc_per_line);
+                });
+                return future.get();
             }
             if (name == "@PRINTCLENGTH") {
-                // TODO: @PRINTCLENGTH
-                return 25;
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->m_cfg.printc_char_count);
+                });
+                return future.get();
             }
             if (name == "@LINEISEMPTY") {
                 std::promise<bool> promise;
@@ -1047,13 +1055,13 @@ namespace winrt::MEraEmuWin::implementation {
         EngineUIPrintLineData(hstring const& txt, com_ptr<IDWriteTextFormat> const& txt_fmt) :
             txt(txt), txt_fmt(txt_fmt) {}
 
-        void update_width(uint64_t width) {
-            if (!txt_layout) { return ensure_layout(width); }
+        void update_width(EngineControl* ctrl, uint64_t width) {
+            if (!txt_layout) { return ensure_layout(ctrl, width); }
             check_hresult(txt_layout->SetMaxWidth(static_cast<float>(width)));
 
             flush_metrics();
         }
-        void ensure_layout(uint64_t width) {
+        void ensure_layout(EngineControl* ctrl, uint64_t width) {
             if (txt_layout) { return; }
             com_ptr<IDWriteTextLayout> tmp_layout;
             check_hresult(g_dwrite_factory->CreateTextLayout(
@@ -1066,7 +1074,7 @@ namespace winrt::MEraEmuWin::implementation {
             tmp_layout.as(txt_layout);
             // TODO: Follow user font settings in the future
             check_hresult(txt_layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,
-                16, 12));
+                ctrl->m_cfg.line_height, ctrl->m_cfg.line_height * 0.8));
 
             flush_metrics();
         }
@@ -1130,6 +1138,7 @@ namespace winrt::MEraEmuWin::implementation {
     }
     void EngineControl::ReturnToTitle() {
         m_outstanding_input_req = nullptr;
+        m_cur_printc_count = 0;
         m_sd->queue_thread_work(EngineThreadTaskKind::ReturnToTitle);
 
         m_ui_lines.clear();
@@ -1453,6 +1462,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_cur_font_style = {};
         m_cur_font_name = m_default_font_name;
         m_auto_redraw = true;
+        m_cur_printc_count = 0;
         m_brush_map.clear();
         m_font_map.clear();
         ClearValue(m_EngineForeColorProperty);
@@ -1689,7 +1699,7 @@ namespace winrt::MEraEmuWin::implementation {
         EngineOutputImage().Width((double)new_width);
         uint64_t last_height{};
         for (auto& line : m_ui_lines) {
-            line.update_width(new_width);
+            line.update_width(this, new_width);
             line.acc_height = last_height + line.line_height;
             last_height = line.acc_height;
         }
@@ -1718,15 +1728,12 @@ namespace winrt::MEraEmuWin::implementation {
         auto& entry = m_font_map[font_family];
         if (!entry) {
             check_hresult(g_dwrite_factory->CreateTextFormat(
-                //L"Consolas",
-                //L"ＭＳ ゴシック",
-                //L"MS Gothic",
                 font_family.c_str(),
                 nullptr,
                 DWRITE_FONT_WEIGHT_REGULAR,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                13.5,
+                (float)m_cfg.font_size,
                 L"",
                 entry.put()
             ));
@@ -1783,7 +1790,7 @@ namespace winrt::MEraEmuWin::implementation {
             RoutinePrint({}, ERA_PEF_IS_LINE);
         }
     }
-    void EngineControl::RoutinePrint(hstring const& content, PrintExtendedFlags flags) {
+    void EngineControl::RoutinePrint(hstring content, PrintExtendedFlags flags) {
         bool updated = false;
 
         auto push_cur_composing_line_fn = [this, &updated] {
@@ -1816,17 +1823,39 @@ namespace winrt::MEraEmuWin::implementation {
             }
             m_cur_composing_line = {};
 
-            cur_line.ensure_layout(m_ui_width);
+            cur_line.ensure_layout(this, m_ui_width);
             height += cur_line.line_height;
             cur_line.acc_height = height;
             cur_line.flush_effects(this);
 
+            m_cur_printc_count = 0;
+
             updated = true;
         };
 
+        auto color = to_u32(EngineForeColor());
+        if (flags & ERA_PEF_IS_SINGLE) {
+            if (!m_cur_composing_line.parts.empty()) {
+                push_cur_composing_line_fn();
+            }
+        }
+        if (flags & (ERA_PEF_LEFT_PAD | ERA_PEF_RIGHT_PAD)) {
+            // PRINTC / PRINTLC
+            bool align_right = flags & ERA_PEF_RIGHT_PAD;
+            auto str_width = helper_get_string_width(to_string(content).c_str());
+            if (str_width < m_cfg.printc_char_count) {
+                int space_cnt = m_cfg.printc_char_count - str_width;
+                if (align_right) {
+                    content = format(L"{:{}}{}", L"", space_cnt, content);
+                }
+                else {
+                    content = format(L"{}{:{}}", content, L"", space_cnt);
+                }
+            }
+            m_cur_printc_count++;
+        }
         std::wstring_view content_sv{ content };
         size_t newline_pos;
-        auto color = to_u32(EngineForeColor());
         while ((newline_pos = content_sv.find(L'\n')) != content_sv.npos) {
             auto subsv = content_sv.substr(0, newline_pos);
             content_sv = content_sv.substr(newline_pos + 1);
@@ -1840,7 +1869,10 @@ namespace winrt::MEraEmuWin::implementation {
             m_cur_composing_line.parts.push_back(
                 { .str = hstring(content_sv), .color = color });
         }
-        if (flags & ERA_PEF_IS_LINE) {
+        if (flags & ERA_PEF_IS_LINE || m_cur_printc_count >= m_cfg.printc_per_line) {
+            push_cur_composing_line_fn();
+        }
+        else if ((flags & ERA_PEF_IS_SINGLE) && !m_cur_composing_line.parts.empty()) {
             push_cur_composing_line_fn();
         }
 

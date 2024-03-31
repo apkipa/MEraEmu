@@ -324,7 +324,8 @@ impl EraVirtualMachineContext<'_> {
                     let mut x = x.borrow_mut();
                     let should_reset = !x.flags.is_trap()
                         && (var.is_charadata
-                            || !matches!(var.name.as_ref(), "GLOBAL" | "ITEMPRICE"));
+                            || !(var.is_global
+                                || matches!(var.name.as_ref(), "GLOBAL" | "ITEMPRICE")));
                     if should_reset {
                         x.vals.fill(Default::default());
                     }
@@ -332,7 +333,8 @@ impl EraVirtualMachineContext<'_> {
                 FlatValue::ArrStr(x) => {
                     let mut x = x.borrow_mut();
                     let should_reset = !x.flags.is_trap()
-                        && (var.is_charadata || !matches!(var.name.as_ref(), "GLOBALS" | "STR"));
+                        && (var.is_charadata
+                            || !(var.is_global || matches!(var.name.as_ref(), "GLOBALS" | "STR")));
                     if should_reset {
                         x.vals.fill(Default::default());
                     }
@@ -2462,6 +2464,18 @@ impl EraVirtualMachine {
                         if !matches!(value.0.kind(), ValueKind::Str) {
                             bail_opt!(ctx, true, ERR_MSG);
                         }
+                    } else if count == 2 {
+                        let [value1, value2] = view_stack!(ctx)?;
+                        match (value1.0.as_str(), value2.0.as_str()) {
+                            (Some(x1), Some(x2)) => {
+                                let mut result = String::with_capacity(x1.val.len() + x2.val.len());
+                                result.push_str(&x1.val);
+                                result.push_str(&x2.val);
+                                *value1 = Value::new_str(result.into()).into();
+                                ctx.stack.pop();
+                            }
+                            _ => bail_opt!(ctx, true, ERR_MSG),
+                        }
                     } else {
                         // Slow path
                         let mut new_str = String::new();
@@ -3115,14 +3129,17 @@ impl EraVirtualMachine {
                     }
                 }
                 Add => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
+                    let [lhs, rhs] = view_stack!(ctx)?;
+                    match (lhs.0.as_unpacked(), rhs.0.as_unpacked()) {
+                        (RefFlatValue::Int(l), RefFlatValue::Int(r)) => {
                             // TODO: Strict integer arithmetic check
-                            Value::new_int(lhs.val.wrapping_add(rhs.val))
+                            *lhs = Value::new_int(l.val.wrapping_add(r.val)).into();
                         }
-                        (FlatValue::Str(lhs), FlatValue::Str(rhs)) => {
-                            Value::new_str(arcstr::format!("{}{}", lhs.val, rhs.val))
+                        (RefFlatValue::Str(l), RefFlatValue::Str(r)) => {
+                            let mut result = String::with_capacity(l.val.len() + r.val.len());
+                            result += &l.val;
+                            result += &r.val;
+                            *lhs = Value::new_str(result.into()).into();
                         }
                         x => {
                             bail_opt!(ctx,
@@ -3130,30 +3147,30 @@ impl EraVirtualMachine {
                                 format!("expected primitive values of same type as operands, found {x:?}")
                             );
                         }
-                    };
-                    ctx.stack.push(result.into());
+                    }
+                    ctx.stack.pop();
                 }
                 Subtract => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
+                    let [lhs, rhs] = view_stack!(ctx)?;
+                    match (lhs.0.as_unpacked(), rhs.0.as_unpacked()) {
+                        (RefFlatValue::Int(l), RefFlatValue::Int(r)) => {
                             // TODO: Strict integer arithmetic check
-                            Value::new_int(lhs.val.wrapping_sub(rhs.val))
+                            *lhs = Value::new_int(l.val.wrapping_sub(r.val)).into();
                         }
                         x => bail_opt!(
                             ctx,
                             true,
                             format!("expected integer values as operands, found {x:?}")
                         ),
-                    };
-                    ctx.stack.push(result.into());
+                    }
+                    ctx.stack.pop();
                 }
                 Multiply => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
+                    let [lhs, rhs] = view_stack!(ctx)?;
+                    match (lhs.0.as_unpacked(), rhs.0.as_unpacked()) {
+                        (RefFlatValue::Int(l), RefFlatValue::Int(r)) => {
                             // TODO: Strict integer arithmetic check
-                            Value::new_int(lhs.val.wrapping_mul(rhs.val))
+                            *lhs = Value::new_int(l.val.wrapping_mul(r.val)).into();
                         }
                         // TODO: String * Int
                         x => bail_opt!(
@@ -3161,69 +3178,72 @@ impl EraVirtualMachine {
                             true,
                             format!("expected <integer, integer> or <integer, string> as operands, found {x:?}")
                         ),
-                    };
-                    ctx.stack.push(result.into());
+                    }
+                    ctx.stack.pop();
                 }
                 Divide => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
+                    let [lhs, rhs] = view_stack!(ctx)?;
+                    match (lhs.0.as_unpacked(), rhs.0.as_unpacked()) {
+                        (RefFlatValue::Int(l), RefFlatValue::Int(r)) => {
                             // TODO: Strict integer arithmetic check
-                            if rhs.val == 0 {
+                            if r.val == 0 {
                                 bail_opt!(ctx, true, "division by zero");
                             }
-                            Value::new_int(lhs.val.wrapping_div(rhs.val))
+                            *lhs = Value::new_int(l.val.wrapping_div(r.val)).into();
                         }
                         x => bail_opt!(
                             ctx,
                             true,
                             format!("expected integer values as operands, found {x:?}")
                         ),
-                    };
-                    ctx.stack.push(result.into());
+                    }
+                    ctx.stack.pop();
                 }
                 Modulo => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
-                        (FlatValue::Int(lhs), FlatValue::Int(rhs)) => {
+                    let [lhs, rhs] = view_stack!(ctx)?;
+                    match (lhs.0.as_unpacked(), rhs.0.as_unpacked()) {
+                        (RefFlatValue::Int(l), RefFlatValue::Int(r)) => {
                             // TODO: Strict integer arithmetic check
-                            if rhs.val == 0 {
+                            if r.val == 0 {
                                 bail_opt!(ctx, true, "modulus by zero");
                             }
                             // TODO: Determine the proper remainder operation?
-                            Value::new_int(lhs.val.wrapping_rem(rhs.val))
+                            *lhs = Value::new_int(l.val.wrapping_rem(r.val)).into();
                         }
                         x => bail_opt!(
                             ctx,
                             true,
                             format!("expected integer values as operands, found {x:?}")
                         ),
-                    };
-                    ctx.stack.push(result.into());
+                    }
+                    ctx.stack.pop();
                 }
                 Negate => {
-                    let [value] = ctx.pop_stack()?;
-                    let result = match value.0.into_unpacked() {
-                        FlatValue::Int(x) => Value::new_int(x.val.wrapping_neg()),
+                    let [value] = view_stack!(ctx)?;
+                    match value.0.as_unpacked() {
+                        RefFlatValue::Int(x) => {
+                            *value = Value::new_int(x.val.wrapping_neg()).into()
+                        }
                         _ => bail_opt!(ctx, true, "expected integer values as operands"),
                     };
-                    ctx.stack.push(result.into());
                 }
                 BitAnd | BitOr | BitXor | BitShiftL | BitShiftR => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result =
-                        Value::new_int(match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
-                            (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
+                    let [lhs, rhs] = view_stack!(ctx)?;
+                    *lhs = Value::new_int(match (lhs.0.as_unpacked(), rhs.0.as_unpacked()) {
+                        (RefFlatValue::Int(lhs), RefFlatValue::Int(rhs)) => {
+                            match primary_bytecode {
                                 BitAnd => lhs.val & rhs.val,
                                 BitOr => lhs.val | rhs.val,
                                 BitXor => lhs.val ^ rhs.val,
                                 BitShiftL => lhs.val.wrapping_shl(rhs.val as _),
                                 BitShiftR => lhs.val.wrapping_shr(rhs.val as _),
                                 _ => unreachable!(),
-                            },
-                            _ => bail_opt!(ctx, true, "expected integer values as operands"),
-                        });
-                    ctx.stack.push(result.into());
+                            }
+                        }
+                        _ => bail_opt!(ctx, true, "expected integer values as operands"),
+                    })
+                    .into();
+                    ctx.stack.pop();
                 }
                 BitNot => {
                     let [x] = ctx.pop_stack()?;
@@ -3231,21 +3251,25 @@ impl EraVirtualMachine {
                     ctx.stack.push(Value::new_int(!x.val).into());
                 }
                 CompareL | CompareEq | CompareLEq => {
-                    let [lhs, rhs] = ctx.pop_stack()?;
-                    let result = Value::new_int(
-                        match (lhs.0.into_unpacked(), rhs.0.into_unpacked()) {
-                            (FlatValue::Int(lhs), FlatValue::Int(rhs)) => match primary_bytecode {
-                                CompareL => lhs.val < rhs.val,
-                                CompareEq => lhs.val == rhs.val,
-                                CompareLEq => lhs.val <= rhs.val,
-                                _ => unreachable!(),
-                            },
-                            (FlatValue::Str(lhs), FlatValue::Str(rhs)) => match primary_bytecode {
-                                CompareL => lhs.val < rhs.val,
-                                CompareEq => lhs.val == rhs.val,
-                                CompareLEq => lhs.val <= rhs.val,
-                                _ => unreachable!(),
-                            },
+                    let [lhs, rhs] = view_stack!(ctx)?;
+                    *lhs = Value::new_int(
+                        match (lhs.0.as_unpacked(), rhs.0.as_unpacked()) {
+                            (RefFlatValue::Int(lhs), RefFlatValue::Int(rhs)) => {
+                                match primary_bytecode {
+                                    CompareL => lhs.val < rhs.val,
+                                    CompareEq => lhs.val == rhs.val,
+                                    CompareLEq => lhs.val <= rhs.val,
+                                    _ => unreachable!(),
+                                }
+                            }
+                            (RefFlatValue::Str(lhs), RefFlatValue::Str(rhs)) => {
+                                match primary_bytecode {
+                                    CompareL => lhs.val < rhs.val,
+                                    CompareEq => lhs.val == rhs.val,
+                                    CompareLEq => lhs.val <= rhs.val,
+                                    _ => unreachable!(),
+                                }
+                            }
                             _ => bail_opt!(
                                 ctx,
                                 true,
@@ -3253,8 +3277,9 @@ impl EraVirtualMachine {
                             ),
                         }
                         .into(),
-                    );
-                    ctx.stack.push(result.into());
+                    )
+                    .into();
+                    ctx.stack.pop();
                 }
                 LogicalAnd | LogicalOr => {
                     // TODO: Remove this
@@ -3279,12 +3304,12 @@ impl EraVirtualMachine {
                     // ctx.stack.push(result);
                 }
                 LogicalNot => {
-                    let [value] = ctx.pop_stack()?;
-                    let result = Value::new_int(match value.0.into_unpacked() {
-                        FlatValue::Int(x) => (x.val == 0) as _,
+                    let [value] = view_stack!(ctx)?;
+                    *value = Value::new_int(match value.0.as_unpacked() {
+                        RefFlatValue::Int(x) => (x.val == 0) as _,
                         _ => bail_opt!(ctx, true, "expected integer values as operands"),
-                    });
-                    ctx.stack.push(result.into());
+                    })
+                    .into();
                 }
                 GetRandomRange => {
                     let [lower, upper] = ctx.pop_stack()?;

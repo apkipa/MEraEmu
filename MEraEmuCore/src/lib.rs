@@ -364,6 +364,12 @@ struct MEraEngineInterop {
 }
 
 #[ffi_export]
+fn helper_get_string_width(s: char_p::Ref<'_>) -> u64 {
+    use unicode_width::UnicodeWidthStr;
+    s.to_str().width() as _
+}
+
+#[ffi_export]
 fn delete_engine_error(e: MEraEngineErrorInterop) {
     drop(e);
 }

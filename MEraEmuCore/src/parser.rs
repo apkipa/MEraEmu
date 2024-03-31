@@ -2765,10 +2765,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                             lexeme = rest;
                         }
                     }
-                    then_parts.push(EraStrFormExprPart::Literal(
-                        self.str_with_escape(lexeme, token.src_info),
-                        token.src_info,
-                    ));
+                    if !lexeme.is_empty() {
+                        then_parts.push(EraStrFormExprPart::Literal(
+                            self.str_with_escape(lexeme, token.src_info),
+                            token.src_info,
+                        ));
+                    }
                 }
                 // TODO: String interpolation type-check
                 EraTokenKind::LCurlyBracket => {
@@ -2816,10 +2818,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                             lexeme = rest;
                         }
                     }
-                    else_parts.push(EraStrFormExprPart::Literal(
-                        self.str_with_escape(lexeme, token.src_info),
-                        token.src_info,
-                    ));
+                    if !lexeme.is_empty() {
+                        else_parts.push(EraStrFormExprPart::Literal(
+                            self.str_with_escape(lexeme, token.src_info),
+                            token.src_info,
+                        ));
+                    }
                 }
                 // TODO: String interpolation type-check
                 EraTokenKind::LCurlyBracket => {
@@ -2879,10 +2883,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                             lexeme = rest;
                         }
                     }
-                    parts.push(EraStrFormExprPart::Literal(
-                        self.str_with_escape(lexeme, token.src_info),
-                        token.src_info,
-                    ))
+                    if !lexeme.is_empty() {
+                        parts.push(EraStrFormExprPart::Literal(
+                            self.str_with_escape(lexeme, token.src_info),
+                            token.src_info,
+                        ))
+                    }
                 }
                 // TODO: String interpolation type-check
                 EraTokenKind::LCurlyBracket => {
@@ -3451,10 +3457,12 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                             lexeme = rest;
                         }
                     }
-                    parts.push(EraStrFormExprPart::Literal(
-                        String::from_utf8_lossy(lexeme).into(),
-                        token.src_info,
-                    ))
+                    if !lexeme.is_empty() {
+                        parts.push(EraStrFormExprPart::Literal(
+                            String::from_utf8_lossy(lexeme).into(),
+                            token.src_info,
+                        ))
+                    }
                 }
                 // TODO: String interpolation type-check
                 EraTokenKind::LCurlyBracket => {

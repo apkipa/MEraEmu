@@ -702,8 +702,8 @@ impl<'a> MEraEngine<'a> {
         iv.add_str("LOCALS", smallvec::smallvec![1]);
         iv.add_int("ARG", smallvec::smallvec![1]);
         iv.add_str("ARGS", smallvec::smallvec![1]);
-        iv.add_int("GLOBAL", smallvec::smallvec![1]);
-        iv.add_str("GLOBALS", smallvec::smallvec![1]);
+        iv.add_item("GLOBAL", smallvec::smallvec![1], false, false, false, true);
+        iv.add_item("GLOBALS", smallvec::smallvec![1], true, false, false, true);
         // ………………………………………………
         // 二次元配列型変数
         // ………………………………………………
