@@ -44,6 +44,8 @@ pub struct MEraEngine<'a> {
     chara_list: BTreeMap<u32, EraCharaInitTemplate>,
     initial_vars: Option<hashbrown::HashMap<Ascii<String>, InitialVarDesc>>,
     contextual_indices: HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
+    last_repl_val: Option<crate::bytecode::Value>,
+    source_map: HashMap<usize, Box<[u8]>>,
 }
 
 pub const MAX_CHARA_COUNT: u32 = 768;
@@ -263,8 +265,14 @@ pub struct EraFuncInfo {
     pub args_cnt: u32,
 }
 
-struct ReplExprResult {
-    value: crate::bytecode::Value,
+#[derive(Debug, Clone)]
+enum ReplExprResultValue<'a> {
+    Int(i64),
+    Str(&'a str),
+}
+#[derive(Debug, Clone)]
+struct ReplExprResult<'a> {
+    value: Option<ReplExprResultValue<'a>>,
 }
 
 pub struct EngineStackTraceFrame<'a> {
@@ -730,6 +738,8 @@ impl<'a> MEraEngine<'a> {
             chara_list: BTreeMap::new(),
             initial_vars: Some(iv),
             contextual_indices: HashMap::new(),
+            last_repl_val: None,
+            source_map: HashMap::new(),
         }
     }
     pub fn install_sys_callback<'b>(&'b mut self, callback: Box<dyn MEraEngineSysCallback + 'a>)
@@ -1378,10 +1388,10 @@ impl<'a> MEraEngine<'a> {
         }
         Ok(())
     }
-    pub fn load_erh(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
+    pub fn load_erh(&mut self, filename: &str, content: &[u8]) -> Result<usize, MEraEngineError> {
         self.load_erb(filename, content)
     }
-    pub fn load_erb(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
+    pub fn load_erb(&mut self, filename: &str, content: &[u8]) -> Result<usize, MEraEngineError> {
         use crate::parser::{EraDecl, EraSharpDecl};
         // TODO: Handle UTF-8 BOM?
 
@@ -1468,11 +1478,13 @@ impl<'a> MEraEngine<'a> {
                 _ => (),
             }
         }
+        // HACK: Just assume every file is a chunk, and orders are the same
+        let chunk_idx = self.file_inputs.len();
         self.file_inputs.push(EraCompilerFileInput {
             file_name: filename.to_owned(),
             root_node: root_ast,
         });
-        Ok(())
+        Ok(chunk_idx)
     }
     /// Registers a global variable for interop between native and script. Takes over the ownership
     /// of variables by passing get / set operations to callbacks. Note that only simple variables
@@ -1877,7 +1889,14 @@ impl<'a> MEraEngine<'a> {
     //       integrity of the ip no matter whether the execution failed.
     pub fn repl_exec_expr(&mut self, expr: &[u8]) -> Result<ReplExprResult, MEraEngineError> {
         // TODO...
-        unimplemented!()
+        unimplemented!();
+        Ok(ReplExprResult {
+            value: self.last_repl_val.as_ref().map(|x| match x.as_unpacked() {
+                crate::bytecode::RefFlatValue::Int(x) => ReplExprResultValue::Int(x.val),
+                crate::bytecode::RefFlatValue::Str(x) => ReplExprResultValue::Str(&x.val),
+                _ => unreachable!("unexpected repl result type"),
+            }),
+        })
     }
     // pub fn get_exec_ip(&self) -> (ExecIpInfo, ExecSourceInfo) {
     //     // TODO...
@@ -1952,7 +1971,7 @@ impl<'a> MEraEngine<'a> {
             .collect();
         Ok(EngineStackTrace { frames })
     }
-    pub fn get_file_source(&self, todo: ()) -> Result<(), MEraEngineError> {
+    pub fn get_file_source(&self, chunk_idx: usize) -> Result<&[u8], MEraEngineError> {
         // NOTE: We don't return user-provided sources, only those which
         //       are built into engine or generated on the fly
 
@@ -1967,7 +1986,8 @@ impl<'a> MEraEngine<'a> {
 
         const SYS_SRC: &str = include_str!("sys_src.ERB");
 
-        self.load_erb("<builtin>", SYS_SRC.as_bytes())?;
+        let chunk_idx = self.load_erb("<builtin>", SYS_SRC.as_bytes())?;
+        self.source_map.insert(chunk_idx, SYS_SRC.as_bytes().into());
 
         Ok(())
     }

@@ -323,7 +323,6 @@ impl EraBytecodeChunkBuilder {
         self.append_u8(value.to_i(), src_info)
     }
     fn emit_load_const(&mut self, value: Value, src_info: SourcePosInfo) {
-        // TODO: Implement constant deduplication?
         let const_idx = self.add_constant(value);
         if let Ok(idx) = const_idx.try_into() {
             self.emit_bytecode(EraBytecodePrimaryType::LoadConst, src_info);
@@ -412,6 +411,10 @@ impl EraBytecodeChunkBuilder {
         for _ in 0..cnt {
             self.emit_pop(src_info);
         }
+    }
+    fn emit_call_static_jit(&mut self, idx: u32, src_info: SourcePosInfo) {
+        self.emit_bytecode(EraBytecodePrimaryType::InvokeStaticJit, src_info);
+        self.append_u32(idx, src_info);
     }
     fn take_snapshot(&self) -> EraBytecodeChunkSnapshot {
         EraBytecodeChunkSnapshot {
@@ -4294,7 +4297,16 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 {
                     // var(2) + end(1)
                     self.stack_balance += 3;
-                    self.cmd_for_stmt_const_step(func_kind, step, step_si, x.src_info, x.body)?;
+                    // NOTE: Local variables are always never_trap (?)
+                    let never_trap = self
+                        .p
+                        .vars
+                        .get_var_info_by_name(&x.var.name)
+                        .map(|x| x.never_trap)
+                        .unwrap_or(true);
+                    self.cmd_for_stmt_const_step(
+                        func_kind, step, step_si, x.src_info, x.body, never_trap,
+                    )?;
                     self.stack_balance -= 3;
                 } else {
                     // var(2) + end(1) + step(1)
@@ -5294,6 +5306,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         step_si: SourcePosInfo,
         si: SourcePosInfo,
         body: Vec<EraStmt>,
+        never_trap: bool,
     ) -> Option<()> {
         // var(2) + end(1)
         use EraBytecodePrimaryType::*;
@@ -5324,20 +5337,62 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             this.chunk.emit_bytecode(SetArrayValNoRet, src_info);
         };
         let emit_step_cond_fn = |this: &mut Self, src_info| {
-            this.chunk.emit_duplicate_one_n(3, src_info);
-            this.chunk.emit_duplicate_one_n(3, src_info);
-            this.chunk.emit_duplicate_n(2, src_info);
-            this.chunk.emit_bytecode(GetArrayVal, src_info);
-            this.chunk
-                .emit_load_const(this.p.new_value_int(step), src_info);
-            this.chunk.emit_bytecode(Add, src_info);
-            this.chunk.emit_bytecode(SetArrayVal, src_info);
-            this.chunk.emit_duplicate_one_n(2, src_info);
-            if step < 0 {
-                this.chunk.emit_bytecode(CompareLEq, src_info);
+            if never_trap {
+                struct ForStepCondFn {
+                    step: i64,
+                }
+                impl EraStaticJitFn for ForStepCondFn {
+                    fn invoke(
+                        &self,
+                        ctx: &mut crate::vm::EraVirtualMachineContext,
+                    ) -> anyhow::Result<()> {
+                        use anyhow::{bail, Context};
+
+                        let (stack, stack_start) = ctx.get_stack_mut();
+                        let cond = {
+                            let [.., x, x_idx, end_val] = &stack[..] else {
+                                bail!("broken for loop stack");
+                            };
+                            let mut x =
+                                x.0.as_arrint()
+                                    .context("broken for loop stack")?
+                                    .borrow_mut();
+                            let x_idx = x_idx.0.as_int().context("broken for loop stack")?;
+                            let end_val = end_val.0.as_int().context("broken for loop stack")?;
+                            let Some(x) = x.vals.get_mut(x_idx.val as usize) else {
+                                bail!("broken for loop stack");
+                            };
+                            x.val += self.step;
+
+                            if self.step < 0 {
+                                x.val <= end_val.val
+                            } else {
+                                x.val >= end_val.val
+                            }
+                        };
+                        stack.push(Value::new_int(cond.into()).into());
+                        Ok(())
+                    }
+                }
+                let jit_fn_idx = this.chunk.add_jit_fn(ForStepCondFn { step }) as _;
+                this.chunk.emit_bytecode(InvokeStaticJit, src_info);
+                this.chunk.append_u32(jit_fn_idx, src_info);
             } else {
-                this.chunk.emit_bytecode(CompareL, src_info);
-                this.chunk.emit_bytecode(LogicalNot, src_info);
+                this.chunk.emit_duplicate_one_n(3, src_info);
+                this.chunk.emit_duplicate_one_n(3, src_info);
+                this.chunk.emit_duplicate_n(2, src_info);
+                this.chunk.emit_bytecode(GetArrayVal, src_info);
+                this.chunk
+                    .emit_load_const(this.p.new_value_int(step), src_info);
+                this.chunk.emit_bytecode(Add, src_info);
+                this.chunk.emit_bytecode(SetArrayVal, src_info);
+                this.chunk.emit_duplicate_one_n(2, src_info);
+                if step < 0 {
+                    this.chunk.emit_bytecode(CompareLEq, src_info);
+                } else {
+                    this.chunk.emit_bytecode(CompareL, src_info);
+                    this.chunk.emit_bytecode(LogicalNot, src_info);
+                }
             }
         };
         emit_cond_fn(self, si);
@@ -5370,8 +5425,6 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         Some(())
     }
     fn peephole_optimization_pop(&mut self, start_pos: usize, src_info: SourcePosInfo) {
-        // TODO: peephole_optimization_pop
-
         // (len, stack_delta, has_side_effect)
         let check_bytecode = |bc: &[u8]| -> (usize, isize, bool) {
             use EraBytecodePrimaryType::*;
@@ -5401,8 +5454,8 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 Some(DuplicateN) => (2, bc[1] as isize, false),
                 Some(DuplicateOneN) => (2, 1, false),
                 Some(GetArrayVal) => (1, -1, true),
-                Some(SetArrayVal) => (1, -2, true),
-                Some(SetArrayValNoRet) => (1, -3, true),
+                Some(SetArrayVal | SetIntArrayVal) => (1, -2, true),
+                Some(SetArrayValNoRet | SetIntArrayValNoRet) => (1, -3, true),
                 Some(BuildArrayIndexFromMD | BuildString) => (2, 1 - (bc[1] as isize), false),
                 // HACK: Assuming function always return values
                 Some(FunCall) => (2, 1 - (bc[1] as isize), true),
@@ -5459,6 +5512,11 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         let mut last_side_effect_bc = last_bc;
         while !chunk.is_empty() {
             last_bc = chunk[0];
+            if chunk[0] == EraBytecodePrimaryType::InvokeStaticJit as _ {
+                // Give up analysis
+                self.chunk.emit_pop(src_info);
+                return;
+            }
             let (len, stack_delta, has_side_effect) = check_bytecode(chunk);
             chunk = &chunk[len..];
             cur_pos += len;
@@ -5476,10 +5534,17 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             chunk = &chunk[len..];
             stack_balance -= stack_delta;
         }
-        if last_side_effect_bc == EraBytecodePrimaryType::SetArrayVal as u8 {
+        if last_side_effect_bc == EraBytecodePrimaryType::SetArrayVal as _ {
             // Modify bytecode kind
             self.chunk.overwrite_u8(
                 EraBytecodePrimaryType::SetArrayValNoRet as _,
+                last_side_effect_pos - 1,
+            );
+            stack_balance -= 1;
+        } else if last_side_effect_bc == EraBytecodePrimaryType::SetIntArrayVal as _ {
+            // Modify bytecode kind
+            self.chunk.overwrite_u8(
+                EraBytecodePrimaryType::SetIntArrayValNoRet as _,
                 last_side_effect_pos - 1,
             );
             stack_balance -= 1;
@@ -5691,11 +5756,21 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 );
             }
         }
-        self.chunk
-            .emit_load_const(self.p.new_value_int(var_idx as _), src_info);
+        // self.chunk
+        //     .emit_load_const(self.p.new_value_int(var_idx as _), src_info);
+        // if is_in_global_frame {
+        //     self.chunk.emit_bytecode(GetGlobal, src_info);
+        // } else {
+        //     self.chunk.emit_bytecode(GetLocal, src_info);
+        // }
         if is_in_global_frame {
-            self.chunk.emit_bytecode(GetGlobal, src_info);
+            self.chunk.emit_load_const(
+                self.p.vars.get_var_by_idx(var_idx).unwrap().clone(),
+                src_info,
+            );
         } else {
+            self.chunk
+                .emit_load_const(self.p.new_value_int(var_idx as _), src_info);
             self.chunk.emit_bytecode(GetLocal, src_info);
         }
 
@@ -6001,6 +6076,75 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         use EraExpressionValueKind::*;
         use EraVarArrCompileInfo::*;
         let idxs_len = idxs.len();
+        // HACK: Improve performance
+        // if let Some(var) = self.get_global_never_trap_var(var_name) {
+        //     let var_type;
+        //     let can_jit = match var.as_unpacked() {
+        //         RefFlatValue::ArrInt(x) => {
+        //             let mut x = x.borrow_mut();
+        //             x.ensure_alloc();
+        //             var_type = TInteger;
+        //             x.dims.len() == 1 && idxs_len <= 1
+        //         }
+        //         RefFlatValue::ArrStr(x) => {
+        //             let mut x = x.borrow_mut();
+        //             x.ensure_alloc();
+        //             var_type = TString;
+        //             x.dims.len() == 1 && idxs_len <= 1
+        //         }
+        //         _ => unreachable!(),
+        //     };
+        //     if can_jit && EraCsvVarKind::try_from_var(var_name).is_none() {
+        //         self.expr_int(
+        //             idxs.into_iter()
+        //                 .next()
+        //                 .unwrap_or(EraExpr::new_int(0, src_info)),
+        //         )?;
+        //         struct ArrGetFn {
+        //             arr: Value,
+        //         }
+        //         impl EraStaticJitFn for ArrGetFn {
+        //             fn invoke(
+        //                 &self,
+        //                 ctx: &mut crate::vm::EraVirtualMachineContext,
+        //             ) -> anyhow::Result<()> {
+        //                 use anyhow::{bail, Context};
+
+        //                 let (stack, _) = ctx.get_stack_mut();
+        //                 let [.., idx_var] = &mut stack[..] else {
+        //                     bail!("invalid indices into array");
+        //                 };
+        //                 let idx = idx_var
+        //                     .0
+        //                     .as_int()
+        //                     .context("invalid indices into array")?
+        //                     .val as usize;
+        //                 let val = match self.arr.as_unpacked() {
+        //                     RefFlatValue::ArrInt(x) => x
+        //                         .borrow()
+        //                         .vals
+        //                         .get(idx)
+        //                         .map(|x| Value::new_int_obj(x.clone())),
+        //                     RefFlatValue::ArrStr(x) => x
+        //                         .borrow()
+        //                         .vals
+        //                         .get(idx)
+        //                         .map(|x| Value::new_str_obj(x.clone())),
+        //                     _ => unreachable!(),
+        //                 };
+        //                 let Some(val) = val else {
+        //                     bail!("invalid indices into array");
+        //                 };
+        //                 *idx_var = val.into();
+
+        //                 Ok(())
+        //             }
+        //         }
+        //         let jit_fn_idx = self.chunk.add_jit_fn(ArrGetFn { arr: var });
+        //         self.chunk.emit_call_static_jit(jit_fn_idx as _, src_info);
+        //         return Some(var_type);
+        //     }
+        // }
         let info = self.arr_idx_or_pseudo(var_name, idxs, src_info, true)?;
         let var_kind = match info {
             Pseudo(kind) => match kind {
@@ -6033,6 +6177,100 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         rhs: impl FnOnce(&mut Self) -> Option<EraExpressionValueKind>,
     ) -> Option<EraExpressionValueKind> {
         use EraBytecodePrimaryType::*;
+        use EraExpressionValueKind::*;
+        let idxs_len = idxs.len();
+        // HACK: Improve performance
+        // if let Some(var) = self.get_global_never_trap_var(var_name) {
+        //     let var_type;
+        //     let can_jit = match var.as_unpacked() {
+        //         RefFlatValue::ArrInt(x) => {
+        //             let mut x = x.borrow_mut();
+        //             x.ensure_alloc();
+        //             var_type = TInteger;
+        //             x.dims.len() == 1 && idxs_len <= 1
+        //         }
+        //         RefFlatValue::ArrStr(x) => {
+        //             let mut x = x.borrow_mut();
+        //             x.ensure_alloc();
+        //             var_type = TString;
+        //             x.dims.len() == 1 && idxs_len <= 1
+        //         }
+        //         _ => unreachable!(),
+        //     };
+        //     if can_jit && EraCsvVarKind::try_from_var(var_name).is_none() {
+        //         self.expr_int(
+        //             idxs.into_iter()
+        //                 .next()
+        //                 .unwrap_or(EraExpr::new_int(0, src_info)),
+        //         )?;
+        //         if var_type != rhs(self)? {
+        //             bail_opt!(
+        //                 self,
+        //                 src_info,
+        //                 true,
+        //                 "right-hand expression type is incompatible with left-hand"
+        //             )
+        //         }
+        //         struct ArrSetFn {
+        //             arr: Value,
+        //         }
+        //         impl EraStaticJitFn for ArrSetFn {
+        //             fn invoke(
+        //                 &self,
+        //                 ctx: &mut crate::vm::EraVirtualMachineContext,
+        //             ) -> anyhow::Result<()> {
+        //                 use anyhow::{bail, Context};
+
+        //                 let (stack, _) = ctx.get_stack_mut();
+        //                 let [.., idx_var, src] = &mut stack[..] else {
+        //                     bail!("invalid indices into array");
+        //                 };
+        //                 let idx = idx_var
+        //                     .0
+        //                     .as_int()
+        //                     .context("invalid indices into array")?
+        //                     .val as usize;
+        //                 let val = match self.arr.as_unpacked() {
+        //                     RefFlatValue::ArrInt(x) => {
+        //                         let src = src
+        //                             .0
+        //                             .as_int()
+        //                             .context("expected int as rhs of assignment")?;
+        //                         if let Some(lhs) = x.borrow_mut().vals.get_mut(idx) {
+        //                             *lhs = src.clone();
+        //                             Some(Value::new_int_obj(lhs.clone()))
+        //                         } else {
+        //                             None
+        //                         }
+        //                     }
+        //                     RefFlatValue::ArrStr(x) => {
+        //                         let src = src
+        //                             .0
+        //                             .as_str()
+        //                             .context("expected str as rhs of assignment")?;
+        //                         if let Some(lhs) = x.borrow_mut().vals.get_mut(idx) {
+        //                             *lhs = src.clone();
+        //                             Some(Value::new_str_obj(lhs.clone()))
+        //                         } else {
+        //                             None
+        //                         }
+        //                     }
+        //                     _ => unreachable!(),
+        //                 };
+        //                 let Some(val) = val else {
+        //                     bail!("invalid indices into array");
+        //                 };
+        //                 *idx_var = val.into();
+        //                 stack.pop();
+
+        //                 Ok(())
+        //             }
+        //         }
+        //         let jit_fn_idx = self.chunk.add_jit_fn(ArrSetFn { arr: var });
+        //         self.chunk.emit_call_static_jit(jit_fn_idx as _, src_info);
+        //         return Some(var_type);
+        //     }
+        // }
         let var_kind = self.arr_idx(var_name, idxs, src_info)?;
         if var_kind != rhs(self)? {
             bail_opt!(
@@ -6042,6 +6280,10 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 "right-hand expression type is incompatible with left-hand"
             )
         }
+        // match var_kind {
+        //     EraExpressionValueKind::TInteger => self.chunk.emit_bytecode(SetIntArrayVal, src_info),
+        //     _ => self.chunk.emit_bytecode(SetArrayVal, src_info),
+        // }
         self.chunk.emit_bytecode(SetArrayVal, src_info);
         Some(var_kind)
     }
@@ -6177,6 +6419,44 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             );
         };
         Some(var_expr)
+    }
+    fn get_global_never_trap_var(&mut self, var_name: &str) -> Option<Value> {
+        if let Some(var) = self
+            .func_info
+            .local_var_idxs
+            .get(Ascii::new_str(var_name))
+            .map(|&x| &self.func_info.local_vars[x])
+        {
+            if var.is_in_global_frame {
+                self.p.vars.get_var_info(var.idx_in_frame).and_then(|x| {
+                    if x.never_trap {
+                        Some(x.val.clone())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            }
+        } else if let Some(glob_var_idx) =
+            self.p
+                .vars
+                .get_var_idx(&if routine::is_local_or_arg_var(var_name) {
+                    Cow::Owned(format!("{}@{}", var_name, self.func_info.name.as_ref()))
+                } else {
+                    Cow::Borrowed(var_name)
+                })
+        {
+            self.p.vars.get_var_info(glob_var_idx).and_then(|x| {
+                if x.never_trap {
+                    Some(x.val.clone())
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        }
     }
     fn report_err<V: Into<String>>(&mut self, src_info: SourcePosInfo, is_error: bool, msg: V) {
         self.p.report_err(src_info, is_error, msg)

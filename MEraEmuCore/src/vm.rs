@@ -2431,7 +2431,9 @@ impl EraVirtualMachine {
                 ConvertToString => {
                     let [value] = ctx.pop_stack()?;
                     let value = match value.0.into_unpacked() {
-                        FlatValue::Int(x) => Value::new_str(arcstr::format!("{}", x.val)),
+                        FlatValue::Int(x) => {
+                            Value::new_str(itoa::Buffer::new().format(x.val).into())
+                        }
                         FlatValue::Str(x) => Value::new_str_obj(x),
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
                     };
@@ -3002,6 +3004,51 @@ impl EraVirtualMachine {
                     } else {
                         ctx.stack.truncate(ctx.stack.len() - 3);
                     }
+                }
+                SetIntArrayValNoRet => {
+                    let [dst, idx, src] = view_stack!(ctx)?;
+                    let Some(dst) = dst.0.as_arrint() else {
+                        bail_opt!(ctx, true, "invalid indices into array");
+                    };
+                    let Some(idx) = idx.0.as_int() else {
+                        bail_opt!(ctx, true, "invalid indices into array");
+                    };
+                    let idx = idx.val as _;
+                    let Some(src) = src.0.as_int() else {
+                        bail_opt!(ctx, true, "value type mismatches array element type")
+                    };
+                    {
+                        let dst_ptr: *const () = Rc::as_ptr(&dst) as _;
+                        let mut dst = dst.borrow_mut();
+                        match dst.flat_get_mut(idx) {
+                            Some(x) => x.val = src.val,
+                            None => {
+                                bail_opt!(ctx, true, "invalid indices into array")
+                            }
+                        }
+                        if dst.flags.is_trap() {
+                            assert_eq!(
+                                dst.dims.len(),
+                                1,
+                                "multi-dimensional arrays must not be trapped"
+                            );
+                            let trap_var_info = ctx
+                                .global_vars
+                                .get_var_info(*self.trap_vars.get(&dst_ptr).unwrap())
+                                .unwrap();
+                            match ctx.callback.on_var_set_int(
+                                trap_var_info.name.as_ref(),
+                                idx,
+                                src.val,
+                            ) {
+                                Ok(_) => (),
+                                Err(e) => {
+                                    bail_opt!(ctx, true, format!("trap handler failed: {e}"))
+                                }
+                            }
+                        }
+                    }
+                    ctx.stack.truncate(ctx.stack.len() - 3);
                 }
                 BuildArrayIndexFromMD => {
                     let idxs_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;

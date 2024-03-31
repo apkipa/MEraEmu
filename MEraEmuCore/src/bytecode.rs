@@ -74,6 +74,8 @@ pub enum EraBytecodePrimaryType {
     GetArrayVal,
     SetArrayVal,
     SetArrayValNoRet,
+    SetIntArrayVal,
+    SetIntArrayValNoRet,
     // HACK: Special bytecode for handling increments & decrements
     IncMDArrayVal,
     DecMDArrayVal,
@@ -232,7 +234,7 @@ pub enum EraBytecodePrimaryType {
     KbGetKeyState, // Returns i64 with b15 = <key down>, b0 = <key triggered>
     FindCharaDataFile,
     // -----
-    SystemIntrinsics = 192,
+    SystemIntrinsics = 224,
     ExtendedBytecode1, // Values >= ExtendedBytecode should do extended lookup
     InvokeStaticJit = 251,
 }

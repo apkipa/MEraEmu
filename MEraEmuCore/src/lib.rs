@@ -18,6 +18,11 @@ pub use engine::{
 use safer_ffi::{prelude::*, slice, string};
 pub use vm::{EraColorMatrix, MEraEngineFileSeekMode};
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 // NOTE: Used by safer_ffi
 #[cfg(feature = "headers")]
 pub fn generate_headers() -> ::std::io::Result<()> {
@@ -398,16 +403,24 @@ fn engine_load_erh(
     engine: &mut MEraEngineInterop,
     filename: char_p::Ref<'_>,
     content: c_slice::Ref<'_, u8>,
-) -> MEraEngineResultInterop<()> {
-    engine.i.load_erh(filename.to_str(), &content).into()
+) -> MEraEngineResultInterop<u32> {
+    engine
+        .i
+        .load_erh(filename.to_str(), &content)
+        .map(|x| x as _)
+        .into()
 }
 #[ffi_export]
 fn engine_load_erb(
     engine: &mut MEraEngineInterop,
     filename: char_p::Ref<'_>,
     content: c_slice::Ref<'_, u8>,
-) -> MEraEngineResultInterop<()> {
-    engine.i.load_erb(filename.to_str(), &content).into()
+) -> MEraEngineResultInterop<u32> {
+    engine
+        .i
+        .load_erb(filename.to_str(), &content)
+        .map(|x| x as _)
+        .into()
 }
 #[ffi_export]
 fn engine_register_global_var(
