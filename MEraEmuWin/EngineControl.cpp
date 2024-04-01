@@ -13,7 +13,7 @@
 #include <random>
 #include <fstream>
 #include <filesystem>
-//#include <intrin.h>
+#include <variant>
 
 using namespace winrt;
 using namespace Windows::UI;
@@ -26,6 +26,9 @@ using namespace Windows::UI::Core;
 using namespace Windows::Foundation;
 using namespace Windows::System;
 using namespace Windows::System::Threading;
+
+template<class... Ts>
+struct overloaded : Ts... { using Ts::operator()...; };
 
 namespace winrt::MEraEmuWin::implementation {
     auto recur_dir_iter(hstring const& base, hstring const& dir) {
@@ -415,10 +418,14 @@ namespace winrt::MEraEmuWin::implementation {
                 is_error ? L"错误" : L"警告", msg
             );
             auto msg_clr = is_error ? Colors::Red() : Colors::Yellow();
-            m_sd->queue_ui_work([sd = m_sd, final_msg, msg_clr] {
+            m_sd->queue_ui_work([=, sd = m_sd] {
                 auto old_clr = sd->ui_ctrl->EngineForeColor();
                 sd->ui_ctrl->EngineForeColor(msg_clr);
-                sd->ui_ctrl->RoutinePrint(final_msg, ERA_PEF_IS_LINE);
+                sd->ui_ctrl->RoutinePrintSourceButton(
+                    final_msg, filename,
+                    src_info.line, src_info.column,
+                    ERA_PEF_IS_LINE
+                );
                 sd->ui_ctrl->EngineForeColor(old_clr);
             });
         }
@@ -432,10 +439,14 @@ namespace winrt::MEraEmuWin::implementation {
                 is_error ? L"错误" : L"警告", msg
             );
             auto msg_clr = is_error ? Colors::Red() : Colors::Yellow();
-            m_sd->queue_ui_work([sd = m_sd, final_msg, msg_clr] {
+            m_sd->queue_ui_work([=, sd = m_sd] {
                 auto old_clr = sd->ui_ctrl->EngineForeColor();
                 sd->ui_ctrl->EngineForeColor(msg_clr);
-                sd->ui_ctrl->RoutinePrint(final_msg, ERA_PEF_IS_LINE);
+                sd->ui_ctrl->RoutinePrintSourceButton(
+                    final_msg, filename,
+                    src_info.line, src_info.column,
+                    ERA_PEF_IS_LINE
+                );
                 sd->ui_ctrl->EngineForeColor(old_clr);
             });
             // SAFETY: Engine and callback are on the same thread
@@ -1051,6 +1062,7 @@ namespace winrt::MEraEmuWin::implementation {
         uint64_t line_height{};
         uint64_t acc_height{};  // Including current line
         std::vector<EngineUIPrintLineDataEffect> effects;
+        std::vector<EngineUIPrintLineDataButton> buttons;
 
         EngineUIPrintLineData(hstring const& txt, com_ptr<IDWriteTextFormat> const& txt_fmt) :
             txt(txt), txt_fmt(txt_fmt) {}
@@ -1131,6 +1143,24 @@ namespace winrt::MEraEmuWin::implementation {
         EngineOutputImage().SizeChanged([this](auto&&, auto&&) {
             RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
         });
+        RootScrollViewer().ViewChanged([this](auto&&, auto&&) {
+            auto pt = m_cur_pt;
+            auto root_sv = RootScrollViewer();
+            if (root_sv.ScrollableHeight() <= 0) {
+                // Slow path
+                pt = root_sv.TransformToVisual(EngineOutputImage()).TransformPoint(pt);
+            }
+            else {
+                // Fast path
+                pt.Y += root_sv.VerticalOffset();
+            }
+            UpdateAndInvalidateActiveButton(pt);
+        });
+
+        // HACK: Prevent automatic bring into view
+        UserInputTextBox().BringIntoViewRequested([](auto&&, BringIntoViewRequestedEventArgs const& e) {
+            e.Handled(true);
+        });
 
         // Initialize input countdown timer
         m_input_countdown_timer.Interval(std::chrono::milliseconds{ 1 });
@@ -1146,6 +1176,83 @@ namespace winrt::MEraEmuWin::implementation {
     }
     bool EngineControl::IsStarted() {
         return m_sd && m_sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Died;
+    }
+    void EngineControl::EngineOutputImage_PointerMoved(IInspectable const& sender, PointerRoutedEventArgs const& e) {
+        e.Handled(true);
+        auto root_sv = RootScrollViewer();
+        m_cur_pt = e.GetCurrentPoint(root_sv).Position();
+        auto pt = m_cur_pt;
+        if (root_sv.ScrollableHeight() <= 0) {
+            // Slow path
+            pt = root_sv.TransformToVisual(EngineOutputImage()).TransformPoint(pt);
+        }
+        else {
+            // Fast path
+            pt.Y += root_sv.VerticalOffset();
+        }
+        UpdateAndInvalidateActiveButton(pt);
+    }
+    void EngineControl::EngineOutputImage_PointerExited(IInspectable const& sender, PointerRoutedEventArgs const& e) {
+        m_cur_pt = { -1, -1 };
+        UpdateAndInvalidateActiveButton(m_cur_pt);
+    }
+    void EngineControl::EngineOutputImage_PointerCanceled(IInspectable const& sender, PointerRoutedEventArgs const& e) {
+        m_cur_pt = { -1, -1 };
+        UpdateAndInvalidateActiveButton(m_cur_pt);
+    }
+    void EngineControl::EngineOutputImage_Tapped(IInspectable const& sender, TappedRoutedEventArgs const& e) {
+        e.Handled(true);
+        m_cur_pt = e.GetPosition(RootScrollViewer());
+        auto pt = e.GetPosition(EngineOutputImage());
+        UpdateAndInvalidateActiveButton(pt);
+        bool handled_button{};
+        if (m_cur_active_button.line < size(m_ui_lines)) {
+            auto const& cur_line = m_ui_lines[m_cur_active_button.line];
+            if (m_cur_active_button.button_idx < size(cur_line.buttons)) {
+                auto const& cur_button = cur_line.buttons[m_cur_active_button.button_idx];
+                // Tapping a button
+                handled_button = true;
+                auto input_button_fn = [](EngineUIPrintLineDataButton::InputButton const& v) -> fire_and_forget {
+                    // TODO: InputButton
+                    co_return;
+                };
+                auto source_button_fn = [this](EngineUIPrintLineDataButton::SourceButton const& v) -> fire_and_forget {
+                    ContentDialog cd;
+                    auto cmd = std::format(L"/C code -g \"{}:{}:{}\"", v.path, v.line, v.column);
+                    cd.XamlRoot(XamlRoot());
+                    cd.Title(box_value(L"执行外部命令?"));
+                    cd.Content(box_value(winrt::format(L""
+                        "MEraEmu 将在你的系统中执行以下 Shell 命令:\n{}\n"
+                        "如果不信任此命令, 请不要继续。确实要继续执行吗?",
+                        std::wstring_view{ cmd }.substr(3)
+                    )));
+                    cd.PrimaryButtonText(L"是, 执行");
+                    cd.CloseButtonText(L"取消");
+                    cd.PrimaryButtonClick([&](auto&&, auto&&) {
+                        STARTUPINFOW si{ sizeof si };
+                        PROCESS_INFORMATION pi;
+                        bool succeeded = CreateProcessW(
+                            L"C:\\Windows\\System32\\cmd.exe", cmd.data(),
+                            nullptr, nullptr,
+                            false, CREATE_NO_WINDOW,
+                            nullptr, nullptr,
+                            &si,
+                            &pi
+                        );
+                        if (succeeded) {
+                            CloseHandle(pi.hProcess);
+                            CloseHandle(pi.hThread);
+                        }
+                    });
+                    co_await cd.ShowAsync();
+                };
+                std::visit(overloaded{ input_button_fn, source_button_fn }, cur_button.data);
+            }
+        }
+        if (!handled_button) {
+            // Bring to bottom
+            RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
+        }
     }
     void EngineControl::UserInputTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
         if (e.Key() == VirtualKey::Enter) {
@@ -1392,18 +1499,33 @@ namespace winrt::MEraEmuWin::implementation {
                     if (sd->has_execution_error) {
                         // Dump stack trace when execution error occurs
                         sd->has_execution_error = false;
-                        std::wstring print_msg = L"函数堆栈跟踪 (最近调用者最先显示):\n";
+                        struct SrcData {
+                            hstring path;
+                            uint32_t line, column;
+                            hstring msg;
+                        };
+                        std::vector<SrcData> print_msgs;
                         auto stack_trace = engine.get_stack_trace();
                         for (const auto& frame : stack_trace.frames) {
-                            print_msg += std::format(L"  {}({},{}):{}\n",
-                                to_hstring(frame.file_name),
+                            auto path = to_hstring(frame.file_name);
+                            auto msg = winrt::format(L"  {}({},{}):{}",
+                                path,
                                 frame.src_info.line,
                                 frame.src_info.column,
                                 to_hstring(frame.func_name)
                             );
+                            print_msgs.emplace_back(
+                                path,
+                                frame.src_info.line, frame.src_info.column,
+                                std::move(msg)
+                            );
                         }
-                        sd->queue_ui_work([sd, msg = hstring(print_msg)] {
-                            sd->ui_ctrl->RoutinePrint(msg, 0);
+                        sd->queue_ui_work([sd, msgs = std::move(print_msgs)] {
+                            sd->ui_ctrl->RoutinePrint(L"函数堆栈跟踪 (最近调用者最先显示):", ERA_PEF_IS_LINE);
+                            for (auto const& msg : msgs) {
+                                sd->ui_ctrl->RoutinePrintSourceButton(msg.msg, msg.path,
+                                    msg.line, msg.column, ERA_PEF_IS_LINE);
+                            }
                             sd->ui_ctrl->SetRedrawState(2);
                         });
                     }
@@ -1463,6 +1585,8 @@ namespace winrt::MEraEmuWin::implementation {
         m_cur_font_name = m_default_font_name;
         m_auto_redraw = true;
         m_cur_printc_count = 0;
+        m_user_skipping = false;
+        m_cur_pt = { -1, -1 };
         m_brush_map.clear();
         m_font_map.clear();
         ClearValue(m_EngineForeColorProperty);
@@ -1594,8 +1718,30 @@ namespace winrt::MEraEmuWin::implementation {
                 auto& line_data = m_ui_lines[line];
                 int offx = 0;
                 int offy = line_data.acc_height - line_data.line_height;
-                ctx->DrawTextLayout(D2D1::Point2F(offx, offy), line_data.txt_layout.get(),
-                    brush);
+
+                // If we have an active button at this line, apply and flush effects
+                if (m_cur_active_button.line == line && m_cur_active_button.button_idx < size(line_data.buttons)) {
+                    auto const& btn_data = line_data.buttons[m_cur_active_button.button_idx];
+                    EngineUIPrintLineDataEffect effect{
+                        .starti = btn_data.starti,
+                        .len = btn_data.len,
+                        .color = D2D1::ColorF::Yellow | 0xff000000,
+                        .style = 0,
+                    };
+                    line_data.effects.push_back(effect);
+                    tenkai::cpp_utils::ScopeExit se_effect([&] {
+                        line_data.effects.pop_back();
+                        try { line_data.flush_effects(this); }
+                        catch (...) {}
+                    });
+                    line_data.flush_effects(this);
+                    ctx->DrawTextLayout(D2D1::Point2F(offx, offy), line_data.txt_layout.get(),
+                        brush);
+                }
+                else {
+                    ctx->DrawTextLayout(D2D1::Point2F(offx, offy), line_data.txt_layout.get(),
+                        brush);
+                }
             }
             /* Stash:
             // Large transform causes blurry text, so we must manually handle it
@@ -1715,6 +1861,57 @@ namespace winrt::MEraEmuWin::implementation {
     uint64_t EngineControl::GetCalculatedUIHeight() {
         if (m_ui_lines.empty()) { return 0; }
         return m_ui_lines.back().acc_height;
+    }
+    size_t EngineControl::GetLineIndexFromHeight(uint64_t height) {
+        auto ib = begin(m_ui_lines), ie = end(m_ui_lines);
+        return std::ranges::upper_bound(ib, ie, height,
+            [](auto const& a, auto const& b) { return a < b; },
+            [](auto const& e) { return e.acc_height; }
+        ) - ib;
+    }
+    void EngineControl::InvalidateLineAtIndex(size_t line) {
+        if (line >= size(m_ui_lines)) { return; }
+        auto width = static_cast<long>(m_ui_width * m_xscale);
+        auto const& cur_line = m_ui_lines[line];
+        auto height_1 = static_cast<long>((cur_line.acc_height - cur_line.line_height) * m_yscale);
+        auto height_2 = static_cast<long>(cur_line.acc_height * m_yscale);
+        check_hresult(m_vsis_noref->Invalidate({ 0, height_1, width, height_2 }));
+    }
+    void EngineControl::UpdateAndInvalidateActiveButton(Point const& pt) {
+        auto line = GetLineIndexFromHeight(pt.Y);
+        // Check for buttons
+        ActiveButtonData new_active_button;
+        if ((pt.X >= 0 && pt.Y >= 0) && line < size(m_ui_lines)) {
+            auto const& cur_line = m_ui_lines[line];
+            if (!cur_line.buttons.empty()) {
+                // Perform hit test on text
+                BOOL is_trailing_hit;
+                BOOL is_inside;
+                DWRITE_HIT_TEST_METRICS hit_test_metrics;
+                check_hresult(cur_line.txt_layout->HitTestPoint(
+                    pt.X, pt.Y - (cur_line.acc_height - cur_line.line_height),
+                    &is_trailing_hit, &is_inside, &hit_test_metrics
+                ));
+                if (is_inside) {
+                    auto cur_pos = hit_test_metrics.textPosition;
+                    for (size_t i = 0; i < size(cur_line.buttons); i++) {
+                        auto const& cur_btn = cur_line.buttons[i];
+                        if (cur_btn.starti <= cur_pos && cur_pos < cur_btn.starti + cur_btn.len) {
+                            // Found the target button
+                            new_active_button.line = line;
+                            new_active_button.button_idx = i;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // If we are on a button, request redraw for that (/ those) lines
+        if (new_active_button != m_cur_active_button) {
+            InvalidateLineAtIndex(m_cur_active_button.line);
+            m_cur_active_button = new_active_button;
+            InvalidateLineAtIndex(new_active_button.line);
+        }
     }
     ID2D1SolidColorBrush* EngineControl::GetOrCreateSolidColorBrush(uint32_t color) {
         auto& entry = m_brush_map[color];
@@ -1856,6 +2053,8 @@ namespace winrt::MEraEmuWin::implementation {
         }
         std::wstring_view content_sv{ content };
         size_t newline_pos;
+        // TODO: forbid_button
+        // TODO: is_isolated
         while ((newline_pos = content_sv.find(L'\n')) != content_sv.npos) {
             auto subsv = content_sv.substr(0, newline_pos);
             content_sv = content_sv.substr(newline_pos + 1);
@@ -1946,6 +2145,38 @@ namespace winrt::MEraEmuWin::implementation {
         }
         else {
             m_last_redraw_dirty_height = std::min(m_last_redraw_dirty_height, GetCalculatedUIHeight());
+        }
+    }
+    void EngineControl::RoutinePrintSourceButton(hstring const& content, hstring const& path,
+        uint32_t line, uint32_t column, PrintExtendedFlags flags
+    ) {
+        if (content.empty()) { return; }
+        uint32_t ui_line_start = size(m_ui_lines);
+        uint32_t ui_line_offset{};
+        for (auto const& part : m_cur_composing_line.parts) {
+            ui_line_offset += part.str.size();
+        }
+        RoutinePrint(content, flags);
+        // Apply to composed lines
+        for (size_t i = ui_line_start; i < size(m_ui_lines); i++) {
+            auto& line_data = m_ui_lines[i];
+            line_data.buttons.push_back(
+                EngineUIPrintLineDataButton{
+                    .starti = ui_line_offset,
+                    .len = line_data.txt.size() - ui_line_offset,
+                    .data = EngineUIPrintLineDataButton::SourceButton{ path, line, column },
+                }
+            );
+            ui_line_offset = 0;
+        }
+        // Apply to current composing line
+        if (!m_cur_composing_line.parts.empty()) {
+            auto& part = m_cur_composing_line.parts.back();
+            part.explicit_buttons = EngineUIPrintLineDataButton{
+                .starti = ui_line_offset,
+                .len = part.str.size(),
+                .data = EngineUIPrintLineDataButton::SourceButton{ path, line, column },
+            };
         }
     }
     void EngineControl::RoutinePrintButton(hstring const& content, hstring const& value, PrintExtendedFlags flags) {

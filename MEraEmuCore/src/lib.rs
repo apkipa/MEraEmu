@@ -1183,6 +1183,7 @@ mod tests {
                 ;locals@DO_COUNT = oook
                 ;PRINTFORM [Start with cnt={cnt},result={result}]
                 PRINTFORM [IN {iUpper}]
+                result:0:0 = 0
                 WHILE cnt > 0
                     ;PRINTFORM []
                     ;result = result + cnt:0--
@@ -1218,6 +1219,9 @@ mod tests {
                     sum1 += LOCAL
                 NEXT
                 PRINTV '(, sum1, ')
+
+                PRINTFORM [{0&&0},{0&&3},{2&&0},{2&&3}]
+                PRINTFORM [{0||0},{0||3},{2||0},{2||3}]
 
                 ;world_str = \@ 0 ? aaa # bb{4+1}b \@
                 ;world_str '= @"~\@ 0 ? aaa # bb{4+1}b \@~"
@@ -1292,7 +1296,7 @@ mod tests {
         }
         assert_eq!(
             &callback.output,
-            "(5050)Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135[;&]"
+            "(5050)[0,0,0,3][0,3,2,2]Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135[;&]"
         );
 
         Ok(())

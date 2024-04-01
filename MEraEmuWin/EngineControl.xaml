@@ -20,13 +20,17 @@
             </VisualStateGroup>
         </VisualStateManager.VisualStateGroups>
         
-        <ScrollViewer x:Name="RootScrollViewer" HorizontalScrollMode="Auto"
+        <ScrollViewer x:Name="RootScrollViewer" HorizontalScrollMode="Auto" BringIntoViewOnFocusChange="False"
                       VerticalScrollMode="Enabled" VerticalScrollBarVisibility="Visible"
                       ZoomMode="Disabled">
             <Grid>
                 <SwapChainPanel x:Name="BackgroundSwapchainPanel"/>
                 <StackPanel Orientation="Vertical" VerticalAlignment="Bottom" HorizontalAlignment="Left">
-                    <Image x:Name="EngineOutputImage" Stretch="UniformToFill"/>
+                    <Image x:Name="EngineOutputImage" Stretch="UniformToFill"
+                           PointerMoved="EngineOutputImage_PointerMoved"
+                           PointerExited="EngineOutputImage_PointerExited"
+                           PointerCanceled="EngineOutputImage_PointerCanceled"
+                           Tapped="EngineOutputImage_Tapped"/>
                     <TextBox x:Name="UserInputTextBox" TabFocusNavigation="Cycle"
                              RequestedTheme="Dark" MinHeight="24" Padding="2,2,6,1"
                              FontSize="13.5" IsSpellCheckEnabled="False"

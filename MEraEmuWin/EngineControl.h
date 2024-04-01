@@ -9,6 +9,7 @@
 
 #include "MEraEngine.hpp"
 
+#include <variant>
 #include <future>
 
 // TODO: Move to tools header
@@ -53,6 +54,21 @@ namespace winrt::MEraEmuWin::implementation {
     struct InputRequest;
     struct EngineThreadTask;
 
+    struct EngineUIPrintLineDataButton {
+        // For input command
+        struct InputButton {
+            hstring input;
+        };
+        // For source errors & warnings
+        struct SourceButton {
+            hstring path;
+            uint32_t line, column;
+        };
+
+        uint32_t starti, len;
+        std::variant<InputButton, SourceButton> data;
+    };
+
     struct EngineUnhandledExceptionEventArgs : EngineUnhandledExceptionEventArgsT<EngineUnhandledExceptionEventArgs> {
         EngineUnhandledExceptionEventArgs(hresult code, hstring const& msg) :
             m_code(code), m_msg(msg) {}
@@ -94,12 +110,16 @@ namespace winrt::MEraEmuWin::implementation {
             return Windows::UI::Xaml::Media::SolidColorBrush(value);
         }
 
+        void EngineOutputImage_PointerMoved(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
+        void EngineOutputImage_PointerExited(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
+        void EngineOutputImage_PointerCanceled(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
+        void EngineOutputImage_Tapped(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs const& e);
         void UserInputTextBox_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
 
         // Non-midl methods
         void Bootstrap(hstring const& game_base_dir);
 
-        void IsUserSkipping();
+        bool IsUserSkipping() const { return m_user_skipping; }
 
     private:
         friend EngineSharedData;
@@ -114,17 +134,23 @@ namespace winrt::MEraEmuWin::implementation {
         void InitD2DDevice(bool force_software);
         void UpdateUIWidth(uint64_t new_width);
         uint64_t GetCalculatedUIHeight();
+        // NOTE: Returns count of lines if height exceeds all lines
+        size_t GetLineIndexFromHeight(uint64_t height);
+        void InvalidateLineAtIndex(size_t line);
+        void UpdateAndInvalidateActiveButton(Windows::Foundation::Point const& pt);
         ID2D1SolidColorBrush* GetOrCreateSolidColorBrush(uint32_t color);
         IDWriteTextFormat* GetOrCreateTextFormat(hstring const& font_family);
 
-        // NOTE: Wait flag is ignored deliberately
         void OnInputCountDownTick(IInspectable const&, IInspectable const&);
         void FlushCurPrintLine();
+        // NOTE: Wait flag is ignored deliberately
         void RoutinePrint(hstring content, PrintExtendedFlags flags);
         void RoutineHtmlPrint(hstring const& content);
         void RoutineInput(std::unique_ptr<InputRequest> request);
         void RoutineReuseLastLine(hstring const& content);
         void RoutineClearLine(uint64_t count);
+        void RoutinePrintSourceButton(hstring const& content, hstring const& path,
+            uint32_t line, uint32_t column, PrintExtendedFlags flags);
         void RoutinePrintButton(hstring const& content, hstring const& value, PrintExtendedFlags flags);
 
         void SetCurrentLineAlignment(int64_t value);
@@ -163,6 +189,9 @@ namespace winrt::MEraEmuWin::implementation {
                 hstring str;
                 uint32_t color;
                 // TODO: Styles support (strikethrough, ...)
+                bool forbid_button;     // true for PRINTPLAIN
+                bool is_isolated;       // true for PRINTC
+                std::optional<EngineUIPrintLineDataButton> explicit_buttons;
             };
             std::vector<ComposingLineDataPart> parts;
         } m_cur_composing_line;
@@ -177,7 +206,16 @@ namespace winrt::MEraEmuWin::implementation {
             int64_t printc_per_line = 5;
         } m_cfg;
         int64_t m_cur_printc_count{};
-        // TODO: Button style data
+        bool m_user_skipping{};
+        struct ActiveButtonData {
+            size_t line;
+            uint32_t button_idx;
+
+            ActiveButtonData() : line(-1), button_idx() {}
+            auto operator<=>(ActiveButtonData const& rhs) const noexcept = default;
+            bool is_default() const noexcept { return line == -1; }
+        } m_cur_active_button{};
+        Windows::Foundation::Point m_cur_pt{};
     };
 }
 
