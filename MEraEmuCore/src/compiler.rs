@@ -3821,13 +3821,42 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         use EraExpressionValueKind::*;
 
         let stmt = match stmt {
-            EraStmt::Expr(x) => {
+            EraStmt::Expr(mut x) => {
                 // Evaluate and discard values
                 let bc_start_pos = self.chunk.cur_bytes_cnt();
                 let src_info = x.source_pos_info();
+                if let EraExpr::Binary(
+                    _lhs,
+                    EraTokenLite {
+                        kind: op_kind @ EraTokenKind::CmpEq,
+                        src_info: si,
+                    },
+                    _rhs,
+                ) = &mut x
+                {
+                    *op_kind = EraTokenKind::Assign;
+                    self.report_err(
+                        *si,
+                        false,
+                        "`==` has no side effects, converting to assignment for compatibility with Emuera; did you misspell?",
+                    );
+                }
                 match self.expression(x)? {
                     TInteger | TString => {
-                        self.peephole_optimization_pop(bc_start_pos, src_info);
+                        // HACK: Let peephole_optimization_pop return eliminated bytecode
+                        if let Some((bc, si)) =
+                            self.peephole_optimization_pop(bc_start_pos, src_info)
+                        {
+                            // if matches!(bc, EraBytecodePrimaryType::CompareEq) {
+                            //     self.report_err(
+                            //         si,
+                            //         false,
+                            //         format!(
+                            //             "this operation has no side effects; did you misspell?"
+                            //         ),
+                            //     );
+                            // }
+                        }
                     }
                     TVoid => (),
                 }
@@ -5424,7 +5453,11 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
 
         Some(())
     }
-    fn peephole_optimization_pop(&mut self, start_pos: usize, src_info: SourcePosInfo) {
+    fn peephole_optimization_pop(
+        &mut self,
+        start_pos: usize,
+        src_info: SourcePosInfo,
+    ) -> Option<(EraBytecodePrimaryType, SourcePosInfo)> {
         // (len, stack_delta, has_side_effect)
         let check_bytecode = |bc: &[u8]| -> (usize, isize, bool) {
             use EraBytecodePrimaryType::*;
@@ -5515,7 +5548,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             if chunk[0] == EraBytecodePrimaryType::InvokeStaticJit as _ {
                 // Give up analysis
                 self.chunk.emit_pop(src_info);
-                return;
+                return None;
             }
             let (len, stack_delta, has_side_effect) = check_bytecode(chunk);
             chunk = &chunk[len..];
@@ -5552,8 +5585,18 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         if stack_balance < 0 {
             panic!("wrong stack balance after peephole optimization");
         }
+        let last_eliminated_si = if self.chunk.cur_bytes_cnt() != last_side_effect_pos {
+            let pos = self.chunk.cur_bytes_cnt() - 1;
+            Some((
+                EraBytecodePrimaryType::try_from_i(self.chunk.bytecode[pos]).unwrap(),
+                self.chunk.source_info_at(pos).unwrap(),
+            ))
+        } else {
+            None
+        };
         self.chunk.truncate_bytecode(last_side_effect_pos);
         self.chunk.emit_pop_n(stack_balance as _, src_info);
+        last_eliminated_si
     }
     #[must_use]
     fn var_arr(&mut self, var_name: &str, src_info: SourcePosInfo) -> Option<EraVarArrCompileInfo> {
