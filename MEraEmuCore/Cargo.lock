@@ -34,6 +34,7 @@ dependencies = [
  "once_cell",
  "phf",
  "ptr-union",
+ "ptr_iter",
  "rand",
  "rclite",
  "regex",
@@ -743,6 +744,12 @@ dependencies = [
  "erasable",
  "paste",
 ]
+
+[[package]]
+name = "ptr_iter"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331cd2c60ff9d3f52f319b935028b91be5fadb93ca413f408747d91dca3aff28"
 
 [[package]]
 name = "quote"

@@ -138,6 +138,7 @@ namespace winrt::MEraEmuWin::implementation {
         size_t GetLineIndexFromHeight(uint64_t height);
         void InvalidateLineAtIndex(size_t line);
         void UpdateAndInvalidateActiveButton(Windows::Foundation::Point const& pt);
+        bool TryFulfillInputRequest(bool clear_input);
         ID2D1SolidColorBrush* GetOrCreateSolidColorBrush(uint32_t color);
         IDWriteTextFormat* GetOrCreateTextFormat(hstring const& font_family);
 

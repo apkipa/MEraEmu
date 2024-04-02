@@ -78,10 +78,10 @@ namespace winrt::MEraEmuWin::implementation {
         return out;
     }
     template<typename T>
-    std::optional<T> parse(hstring const& str) noexcept {
+    std::optional<T> parse(std::wstring_view str) noexcept {
         if (str.empty()) { return std::nullopt; }
-        hstring::size_type n = str.size();
-        hstring::size_type i;
+        std::wstring_view::size_type n = str.size();
+        std::wstring_view::size_type i;
         T r{};
         bool is_negative{};
         for (i = 0; i < n; i++) {
@@ -1212,8 +1212,12 @@ namespace winrt::MEraEmuWin::implementation {
                 auto const& cur_button = cur_line.buttons[m_cur_active_button.button_idx];
                 // Tapping a button
                 handled_button = true;
-                auto input_button_fn = [](EngineUIPrintLineDataButton::InputButton const& v) -> fire_and_forget {
-                    // TODO: InputButton
+                auto input_button_fn = [this](EngineUIPrintLineDataButton::InputButton const& v) -> fire_and_forget {
+                    auto input_tb = UserInputTextBox();
+                    auto old_text = input_tb.Text();
+                    input_tb.Text(v.input);
+                    TryFulfillInputRequest(false);
+                    input_tb.Text(old_text);
                     co_return;
                 };
                 auto source_button_fn = [this](EngineUIPrintLineDataButton::SourceButton const& v) -> fire_and_forget {
@@ -1259,17 +1263,7 @@ namespace winrt::MEraEmuWin::implementation {
             e.Handled(true);
 
             // Try to fulfill input requests
-            if (auto& input_req = m_outstanding_input_req) {
-                auto input_tb = UserInputTextBox();
-                auto input = input_tb.Text();
-                input_tb.Text({});
-                if (input_req->try_fulfill(input)) {
-                    m_input_countdown_timer.Stop();
-                    input_req = nullptr;
-                    // Echo back
-                    if (!input.empty()) { RoutinePrint(input, ERA_PEF_IS_LINE); }
-                }
-            }
+            TryFulfillInputRequest(true);
         }
     }
     void EngineControl::Bootstrap(hstring const& game_base_dir) try {
@@ -1844,10 +1838,52 @@ namespace winrt::MEraEmuWin::implementation {
         m_ui_width = new_width;
         EngineOutputImage().Width((double)new_width);
         uint64_t last_height{};
-        for (auto& line : m_ui_lines) {
-            line.update_width(this, new_width);
-            line.acc_height = last_height + line.line_height;
-            last_height = line.acc_height;
+        if (size(m_ui_lines) > 5000) {
+            // Multi-threaded process
+            auto total_cnt = size(m_ui_lines);
+            auto split_cnt = (total_cnt + total_cnt - 1) / 5000;
+            if (split_cnt > 4) {
+                split_cnt = 4;
+            }
+            std::vector<std::future<void>> workers;
+            for (size_t i = 1; i < split_cnt; i++) {
+                auto start_pos = total_cnt * i / split_cnt;
+                auto end_pos = total_cnt * (i + 1) / split_cnt;
+                std::promise<void> worker_promise;
+                workers.push_back(worker_promise.get_future());
+                ThreadPool::RunAsync([=, promise = std::move(worker_promise)](auto&&) mutable {
+                    try {
+                        for (size_t i = start_pos; i < end_pos; i++) {
+                            auto& line = m_ui_lines[i];
+                            line.update_width(this, new_width);
+                        }
+                        promise.set_value();
+                    }
+                    catch (...) { promise.set_exception(std::current_exception()); }
+                });
+            }
+            for (size_t i = 0; i < total_cnt * 1 / split_cnt; i++) {
+                auto& line = m_ui_lines[i];
+                line.update_width(this, new_width);
+                line.acc_height = last_height + line.line_height;
+                last_height = line.acc_height;
+            }
+            for (auto& worker : workers) {
+                worker.get();
+            }
+            for (size_t i = total_cnt * 1 / split_cnt; i < total_cnt; i++) {
+                auto& line = m_ui_lines[i];
+                line.acc_height = last_height + line.line_height;
+                last_height = line.acc_height;
+            }
+        }
+        else {
+            // Process directly on the UI thread
+            for (auto& line : m_ui_lines) {
+                line.update_width(this, new_width);
+                line.acc_height = last_height + line.line_height;
+                last_height = line.acc_height;
+            }
         }
 
         if (m_vsis_noref) {
@@ -1913,6 +1949,25 @@ namespace winrt::MEraEmuWin::implementation {
             InvalidateLineAtIndex(new_active_button.line);
         }
     }
+    bool EngineControl::TryFulfillInputRequest(bool clear_input) {
+        if (auto& input_req = m_outstanding_input_req) {
+            auto input_tb = UserInputTextBox();
+            auto input = input_tb.Text();
+            if (clear_input) {
+                input_tb.Text({});
+            }
+            if (input_req->try_fulfill(input)) {
+                m_input_countdown_timer.Stop();
+                input_req = nullptr;
+
+                // Echo back
+                if (!input.empty()) { RoutinePrint(input, ERA_PEF_IS_LINE); }
+
+                return true;
+            }
+        }
+        return false;
+    }
     ID2D1SolidColorBrush* EngineControl::GetOrCreateSolidColorBrush(uint32_t color) {
         auto& entry = m_brush_map[color];
         if (!entry) {
@@ -1961,7 +2016,7 @@ namespace winrt::MEraEmuWin::implementation {
                 if (!expire_msg.empty()) {
                     RoutinePrint(expire_msg, ERA_PEF_IS_LINE);
                     // HACK: Enforce a redraw so that we won't lose texts because of
-                    //       engine-thread-queued UI work running early
+                    //       engine-thread-queued UI work running too early
                     if (m_auto_redraw) {
                         m_sd->ui_redraw_block_engine.store(true, std::memory_order_relaxed);
                     }
@@ -2009,15 +2064,126 @@ namespace winrt::MEraEmuWin::implementation {
                 txt_fmt.copy_from(GetOrCreateTextFormat(m_default_font_name));
             }
 
-            // TODO: Improve string concatenation performance
             m_ui_lines.emplace_back(hstring{}, txt_fmt);
             auto& cur_line = m_ui_lines.back();
-            for (auto const& part : m_cur_composing_line.parts) {
+            uint32_t implicit_button_scan_start{};
+            auto materialize_implicit_buttons_fn = [&] {
+                if (implicit_button_scan_start >= cur_line.txt.size()) { return; }
+                std::wstring_view cur_str{ cur_line.txt };
+                cur_str = cur_str.substr(implicit_button_scan_start);
+
+                // PRECONDITION: it != rend(vec)
+                auto vec_idx_from_rev_it_fn = [](auto const& vec, auto const& it) {
+                    return (uint32_t)(std::distance(it, vec.rend()) - 1);
+                };
+                struct FindResult {
+                    uint32_t start_pos, end_pos;
+                    int64_t value;
+                };
+                // Corresponding regex: \[ *-?\d+ *\]
+                auto find_fn = [&]() -> std::optional<FindResult> {
+                    if (cur_str.empty()) { return std::nullopt; }
+                    auto ib = rbegin(cur_str), ie = rend(cur_str);
+                    auto it = ib;
+#define FIND_ADVANCE(it) do { if (++(it) == ie) { return std::nullopt; } } while (0)
+                    while (true) {
+                        while (*it != L']') { FIND_ADVANCE(it); }
+                        // Read ']'
+                        auto it_end = it;
+                        FIND_ADVANCE(it);
+                        while (*it == L' ') { FIND_ADVANCE(it); }
+                        // Read digits
+                        if (!(L'0' <= *it && *it <= L'9')) { continue; }
+                        auto it_num_end = it;
+                        while (L'0' <= *it && *it <= L'9') { FIND_ADVANCE(it); }
+                        // Read '-'
+                        if (*it == L'-') { FIND_ADVANCE(it); }
+                        auto it_num_start = it - 1;
+                        while (*it == L' ') { FIND_ADVANCE(it); }
+                        // Read '['
+                        if (*it != L'[') { continue; }
+                        // Accept
+                        auto num_start_pos = vec_idx_from_rev_it_fn(cur_str, it_num_start);
+                        auto num_end_pos = vec_idx_from_rev_it_fn(cur_str, it_num_end) + 1;
+                        auto num_len = num_end_pos - num_start_pos;
+                        if (auto value = parse<int64_t>(cur_str.substr(num_start_pos, num_len))) {
+                            return FindResult{
+                                .start_pos = vec_idx_from_rev_it_fn(cur_str, it),
+                                .end_pos = vec_idx_from_rev_it_fn(cur_str, it_end) + 1,
+                                .value = *value,
+                            };
+                        }
+                        // Value overflowed; don't treat it as a valid button
+                        continue;
+                    }
+#undef FIND_ADVANCE
+                };
+                auto opt_find_result = find_fn();
+                while (opt_find_result) {
+                    auto& find_result = *opt_find_result;
+                    EngineUIPrintLineDataButton btn_data{
+                        .starti = find_result.start_pos,
+                        .len = find_result.end_pos - find_result.start_pos,
+                        .data = EngineUIPrintLineDataButton::InputButton{ to_hstring(find_result.value) }
+                    };
+                    if (find_result.end_pos != cur_str.size()) {
+                        // Button `[D] XXX`
+                        btn_data.len = cur_str.size() - find_result.start_pos;
+                        btn_data.starti += implicit_button_scan_start;
+                        cur_line.buttons.push_back(std::move(btn_data));
+
+                        cur_str = cur_str.substr(0, find_result.start_pos);
+                        opt_find_result = find_fn();
+                    }
+                    else {
+                        // Button `XXX [D]`
+                        cur_str = cur_str.substr(0, find_result.start_pos);
+                        opt_find_result = find_fn();
+                        if (opt_find_result) {
+                            cur_str = cur_str.substr(0, opt_find_result->end_pos);
+                            auto endi = btn_data.starti + btn_data.len;
+                            btn_data.starti = opt_find_result->end_pos;
+                            btn_data.len = endi - btn_data.starti;
+                        }
+                        else {
+                            auto endi = btn_data.starti + btn_data.len;
+                            btn_data.starti = 0;
+                            btn_data.len = endi;
+                        }
+                        btn_data.starti += implicit_button_scan_start;
+                        cur_line.buttons.push_back(std::move(btn_data));
+                    }
+                }
+
+                implicit_button_scan_start = cur_line.txt.size();
+            };
+            for (auto& part : m_cur_composing_line.parts) {
+                if (part.forbid_button || part.is_isolated) {
+                    // End current part and handle buttons
+                    materialize_implicit_buttons_fn();
+                }
+
                 auto starti = cur_line.txt.size();
+                // TODO: Improve string concatenation performance
                 cur_line.txt = cur_line.txt + part.str;
                 cur_line.effects.push_back({ .starti = starti, .len = part.str.size(),
                     .color = part.color, .style = m_cur_font_style });
+                if (part.explicit_buttons) {
+                    cur_line.buttons.push_back(std::move(*part.explicit_buttons));
+                }
+
+                // Handle part flags
+                if (part.forbid_button) {
+                    // Skip current part
+                    implicit_button_scan_start = cur_line.txt.size();
+                }
+                if (part.is_isolated) {
+                    // Finish current part early
+                    materialize_implicit_buttons_fn();
+                }
             }
+            materialize_implicit_buttons_fn();
+            // Reset composing line
             m_cur_composing_line = {};
 
             cur_line.ensure_layout(this, m_ui_width);
@@ -2031,6 +2197,8 @@ namespace winrt::MEraEmuWin::implementation {
         };
 
         auto color = to_u32(EngineForeColor());
+        bool forbid_button{};
+        bool is_isolated{};
         if (flags & ERA_PEF_IS_SINGLE) {
             if (!m_cur_composing_line.parts.empty()) {
                 push_cur_composing_line_fn();
@@ -2038,8 +2206,10 @@ namespace winrt::MEraEmuWin::implementation {
         }
         if (flags & (ERA_PEF_LEFT_PAD | ERA_PEF_RIGHT_PAD)) {
             // PRINTC / PRINTLC
+            is_isolated = true;
+
             bool align_right = flags & ERA_PEF_RIGHT_PAD;
-            auto str_width = helper_get_string_width(to_string(content).c_str());
+            auto str_width = helper_get_wstring_width((const uint16_t*)content.c_str());
             if (str_width < m_cfg.printc_char_count) {
                 int space_cnt = m_cfg.printc_char_count - str_width;
                 if (align_right) {
@@ -2051,22 +2221,25 @@ namespace winrt::MEraEmuWin::implementation {
             }
             m_cur_printc_count++;
         }
+        if (flags & ERA_PEF_FORCE_PLAIN) {
+            forbid_button = true;
+        }
         std::wstring_view content_sv{ content };
         size_t newline_pos;
-        // TODO: forbid_button
-        // TODO: is_isolated
         while ((newline_pos = content_sv.find(L'\n')) != content_sv.npos) {
             auto subsv = content_sv.substr(0, newline_pos);
             content_sv = content_sv.substr(newline_pos + 1);
             if (!subsv.empty()) {
-                m_cur_composing_line.parts.push_back(
-                    { .str = hstring(subsv), .color = color });
+                m_cur_composing_line.parts.push_back({
+                    .str = hstring(subsv), .color = color,
+                    .forbid_button = forbid_button, .is_isolated = is_isolated });
             }
             push_cur_composing_line_fn();
         }
         if (!content_sv.empty()) {
-            m_cur_composing_line.parts.push_back(
-                { .str = hstring(content_sv), .color = color });
+            m_cur_composing_line.parts.push_back({
+                .str = hstring(content_sv), .color = color,
+                .forbid_button = forbid_button, .is_isolated = is_isolated });
         }
         if (flags & ERA_PEF_IS_LINE || m_cur_printc_count >= m_cfg.printc_per_line) {
             push_cur_composing_line_fn();
@@ -2098,13 +2271,8 @@ namespace winrt::MEraEmuWin::implementation {
         input_req = std::move(request);
         // Check if we can fulfill the input request immediately
         if (input_req->is_one) {
-            auto input_tb = UserInputTextBox();
-            auto input = input_tb.Text();
-            if (input_req->try_fulfill(input)) {
-                input_tb.Text({});
-                input_req = nullptr;
-                // Echo back
-                if (!input.empty()) { RoutinePrint(input, ERA_PEF_IS_LINE); }
+            if (TryFulfillInputRequest(false)) {
+                UserInputTextBox().Text({});
                 return;
             }
         }
@@ -2156,7 +2324,7 @@ namespace winrt::MEraEmuWin::implementation {
         for (auto const& part : m_cur_composing_line.parts) {
             ui_line_offset += part.str.size();
         }
-        RoutinePrint(content, flags);
+        RoutinePrint(content, flags | ERA_PEF_FORCE_PLAIN);
         // Apply to composed lines
         for (size_t i = ui_line_start; i < size(m_ui_lines); i++) {
             auto& line_data = m_ui_lines[i];
@@ -2180,8 +2348,34 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
     void EngineControl::RoutinePrintButton(hstring const& content, hstring const& value, PrintExtendedFlags flags) {
-        // TODO: RoutinePrintButton
-        RoutinePrint(format(L"[{}] {}", value, content), flags);
+        if (content.empty()) { return; }
+        uint32_t ui_line_start = size(m_ui_lines);
+        uint32_t ui_line_offset{};
+        for (auto const& part : m_cur_composing_line.parts) {
+            ui_line_offset += part.str.size();
+        }
+        RoutinePrint(content, flags | ERA_PEF_FORCE_PLAIN);
+        // Apply to composed lines
+        for (size_t i = ui_line_start; i < size(m_ui_lines); i++) {
+            auto& line_data = m_ui_lines[i];
+            line_data.buttons.push_back(
+                EngineUIPrintLineDataButton{
+                    .starti = ui_line_offset,
+                    .len = line_data.txt.size() - ui_line_offset,
+                    .data = EngineUIPrintLineDataButton::InputButton{ value },
+                }
+            );
+            ui_line_offset = 0;
+        }
+        // Apply to current composing line
+        if (!m_cur_composing_line.parts.empty()) {
+            auto& part = m_cur_composing_line.parts.back();
+            part.explicit_buttons = EngineUIPrintLineDataButton{
+                .starti = ui_line_offset,
+                .len = part.str.size(),
+                .data = EngineUIPrintLineDataButton::InputButton{ value },
+            };
+        }
     }
 
     void EngineControl::SetCurrentLineAlignment(int64_t value) {

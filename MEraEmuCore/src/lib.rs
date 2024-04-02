@@ -368,6 +368,21 @@ fn helper_get_string_width(s: char_p::Ref<'_>) -> u64 {
     use unicode_width::UnicodeWidthStr;
     s.to_str().width() as _
 }
+#[ffi_export]
+fn helper_get_wstring_width(s: safer_ffi::ptr::NonNullRef<u16>) -> u64 {
+    use unicode_width::UnicodeWidthChar;
+    let mut width = 0;
+    // SAFETY: Caller must provide null-terminated wchar_t strings
+    unsafe {
+        let s = s.as_ptr();
+        let s = ptr_iter::ConstPtrIter::read_until_default(s);
+        let s = char::decode_utf16(s);
+        for ch in s.map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER)) {
+            width += ch.width().unwrap_or(0) as u64;
+        }
+    }
+    width
+}
 
 #[ffi_export]
 fn delete_engine_error(e: MEraEngineErrorInterop) {
