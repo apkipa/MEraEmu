@@ -217,6 +217,7 @@ namespace winrt::MEraEmuWin::implementation {
         bool is_one{ false };
         bool can_skip{ false };
         bool break_user_skip{ false };
+        bool can_click{ false };
 
         //virtual void time_tick() = 0;
         virtual bool try_fulfill(hstring const& input) = 0;
@@ -417,7 +418,7 @@ namespace winrt::MEraEmuWin::implementation {
                 filename, src_info.line, src_info.column,
                 is_error ? L"错误" : L"警告", msg
             );
-            auto msg_clr = is_error ? Colors::Red() : Colors::Yellow();
+            auto msg_clr = is_error ? Colors::Red() : Colors::Orange();
             m_sd->queue_ui_work([=, sd = m_sd] {
                 auto old_clr = sd->ui_ctrl->EngineForeColor();
                 sd->ui_ctrl->EngineForeColor(msg_clr);
@@ -438,7 +439,7 @@ namespace winrt::MEraEmuWin::implementation {
                 filename, src_info.line, src_info.column,
                 is_error ? L"错误" : L"警告", msg
             );
-            auto msg_clr = is_error ? Colors::Red() : Colors::Yellow();
+            auto msg_clr = is_error ? Colors::Red() : Colors::Orange();
             m_sd->queue_ui_work([=, sd = m_sd] {
                 auto old_clr = sd->ui_ctrl->EngineForeColor();
                 sd->ui_ctrl->EngineForeColor(msg_clr);
@@ -476,6 +477,7 @@ namespace winrt::MEraEmuWin::implementation {
             auto input_req = std::make_unique<InputRequestVoid>(time_limit);
             input_req->can_skip = true;
             input_req->break_user_skip = is_force;
+            input_req->can_click = true;
             auto future = input_req->promise.get_future();
             m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                 sd->ui_ctrl->RoutineInput(std::move(input_req));
@@ -515,6 +517,7 @@ namespace winrt::MEraEmuWin::implementation {
                 input_req->default_value = default_value;
                 input_req->can_skip = allow_skip;
                 input_req->break_user_skip = true;
+                input_req->can_click = can_click;
                 auto future = input_req->promise.get_future();
                 m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
@@ -531,6 +534,7 @@ namespace winrt::MEraEmuWin::implementation {
                 input_req->default_value = default_value.transform([](auto x) { return to_hstring(x); });
                 input_req->can_skip = allow_skip;
                 input_req->break_user_skip = true;
+                input_req->can_click = can_click;
                 auto future = input_req->promise.get_future();
                 m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
@@ -564,6 +568,7 @@ namespace winrt::MEraEmuWin::implementation {
                 input_req->show_expiry_msg = true;
                 input_req->can_skip = can_click;
                 input_req->break_user_skip = true;
+                input_req->can_click = can_click;
                 auto future = input_req->promise.get_future();
                 m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
@@ -596,6 +601,7 @@ namespace winrt::MEraEmuWin::implementation {
                 input_req->show_expiry_msg = true;
                 input_req->can_skip = can_click;
                 input_req->break_user_skip = true;
+                input_req->can_click = can_click;
                 auto future = input_req->promise.get_future();
                 m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
@@ -605,20 +611,20 @@ namespace winrt::MEraEmuWin::implementation {
             }
             catch (std::future_error const& e) { return nullptr; }
         }
-        std::optional<int64_t> on_oneinput_int(std::optional<int64_t> default_value) override
-        {
+        std::optional<int64_t> on_oneinput_int(std::optional<int64_t> default_value) override {
+            // TODO: on_oneinput_int
             return std::optional<int64_t>();
         }
-        const char* on_oneinput_str(std::optional<std::string_view> default_value) override
-        {
+        const char* on_oneinput_str(std::optional<std::string_view> default_value) override {
+            // TODO: on_oneinput_str
             return nullptr;
         }
-        std::optional<int64_t> on_toneinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override
-        {
+        std::optional<int64_t> on_toneinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
+            // TODO: on_toneinput_int
             return std::optional<int64_t>();
         }
-        const char* on_toneinput_str(int64_t time_limit, std::string_view default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override
-        {
+        const char* on_toneinput_str(int64_t time_limit, std::string_view default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
+            // TODO: on_toneinput_str
             return nullptr;
         }
         void on_reuselastline(std::string_view content) override {
@@ -1256,6 +1262,25 @@ namespace winrt::MEraEmuWin::implementation {
         if (!handled_button) {
             // Bring to bottom
             RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
+            // Try to skip input requests
+            if (auto& input_req = m_outstanding_input_req) {
+                if (input_req->can_click) {
+                    input_req = nullptr;
+                }
+            }
+        }
+    }
+    void EngineControl::EngineOutputImage_RightTapped(IInspectable const& sender, RightTappedRoutedEventArgs const& e) {
+        e.Handled(true);
+
+        // Bring to bottom
+        RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
+        // Try to skip input requests
+        if (auto& input_req = m_outstanding_input_req) {
+            if (input_req->can_click || input_req->can_skip) {
+                input_req = nullptr;
+                m_user_skipping = true;
+            }
         }
     }
     void EngineControl::UserInputTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
@@ -2269,12 +2294,24 @@ namespace winrt::MEraEmuWin::implementation {
         m_input_countdown_timer.Stop();
         auto& input_req = m_outstanding_input_req;
         input_req = std::move(request);
+        // Break user skip if requested
+        if (input_req->break_user_skip) {
+            m_user_skipping = false;
+        }
         // Check if we can fulfill the input request immediately
         if (input_req->is_one) {
             if (TryFulfillInputRequest(false)) {
                 UserInputTextBox().Text({});
                 return;
             }
+        }
+        // If user is skipping, skip current request
+        if (m_user_skipping && input_req->can_skip) {
+            input_req = nullptr;
+            return;
+        }
+        else {
+            m_user_skipping = false;
         }
         // Handle timed input
         if (input_req->time_limit >= 0) {
@@ -2284,7 +2321,6 @@ namespace winrt::MEraEmuWin::implementation {
             }
             OnInputCountDownTick(nullptr, nullptr);
         }
-        // TODO: Check if user is skipping
     }
     void EngineControl::RoutineReuseLastLine(hstring const& content) {
         FlushCurPrintLine();

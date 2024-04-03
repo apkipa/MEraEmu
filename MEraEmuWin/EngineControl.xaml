@@ -30,7 +30,7 @@
                            PointerMoved="EngineOutputImage_PointerMoved"
                            PointerExited="EngineOutputImage_PointerExited"
                            PointerCanceled="EngineOutputImage_PointerCanceled"
-                           Tapped="EngineOutputImage_Tapped"/>
+                           Tapped="EngineOutputImage_Tapped" RightTapped="EngineOutputImage_RightTapped"/>
                     <TextBox x:Name="UserInputTextBox" TabFocusNavigation="Cycle"
                              RequestedTheme="Dark" MinHeight="24" Padding="2,2,6,1"
                              FontSize="13.5" IsSpellCheckEnabled="False"
