@@ -1393,7 +1393,11 @@ impl<'a> MEraEngine<'a> {
     }
     pub fn load_erb(&mut self, filename: &str, content: &[u8]) -> Result<usize, MEraEngineError> {
         use crate::parser::{EraDecl, EraSharpDecl};
-        // TODO: Handle UTF-8 BOM?
+
+        // Handle UTF-8 BOM
+        let content = content
+            .strip_prefix("\u{feff}".as_bytes())
+            .unwrap_or(&content);
 
         if let Some(initial_vars) = self.initial_vars.take() {
             for (name, mut var_desc) in initial_vars {

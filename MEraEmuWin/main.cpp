@@ -13,6 +13,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR pCmdLine, int nCmdShow) 
         make_self<MEraEmuWin::implementation::App>().detach();
     });
     Tenkai::AppService::RunLoop();
+    Tenkai::AppService::UninitializeForApplication();
 
     // Remove reference to threadpoolwinrt.dll to prevent crashes
     clear_factory_cache();

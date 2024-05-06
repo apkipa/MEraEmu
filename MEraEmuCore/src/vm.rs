@@ -462,67 +462,6 @@ impl EraVirtualMachineContext<'_> {
                             .with_context(|| format!("read variable `{var_name}` failed"))?;
                     }
                 }
-                // match var_type {
-                //     Separator => continue,
-                //     EOC | EOF => break,
-                //     Int | IntArray | IntArray2D | IntArray3D | Str | StrArray | StrArray2D
-                //     | StrArray3D => {
-                //         let var = self
-                //             .global_vars
-                //             .get_var_info_by_name(&var_name)
-                //             .with_context(|| format!("variable `{var_name}` does not exist"))?;
-                //         if !var.is_charadata {
-                //             bail!("variable `{var_name}` is not CHARADATA");
-                //         }
-                //         match var_type {
-                //             Int | IntArray | IntArray2D | IntArray3D => {
-                //                 let mut var_val = var
-                //                     .val
-                //                     .as_arrint()
-                //                     .with_context(|| {
-                //                         format!("variable `{var_name}` type mismatch")
-                //                     })?
-                //                     .borrow_mut();
-                //                 match var_type {
-                //                     Int => {
-                //                         file.read_int_array_0d(&mut var_val, Some(chara_i as _))?
-                //                     }
-                //                     IntArray => {
-                //                         file.read_int_array_1d(&mut var_val, Some(chara_i as _))?
-                //                     }
-                //                     IntArray2D => {
-                //                         file.read_int_array_2d(&mut var_val, Some(chara_i as _))?
-                //                     }
-                //                     IntArray3D => bail!("IntArray3D unimplemented for now"),
-                //                     _ => unreachable!(),
-                //                 }
-                //             }
-                //             Str | StrArray | StrArray2D | StrArray3D => {
-                //                 let mut var_val = var
-                //                     .val
-                //                     .as_arrstr()
-                //                     .with_context(|| {
-                //                         format!("variable `{var_name}` type mismatch")
-                //                     })?
-                //                     .borrow_mut();
-                //                 match var_type {
-                //                     Str => {
-                //                         file.read_str_array_0d(&mut var_val, Some(chara_i as _))?
-                //                     }
-                //                     StrArray => {
-                //                         file.read_str_array_1d(&mut var_val, Some(chara_i as _))?
-                //                     }
-                //                     StrArray2D => {
-                //                         file.read_str_array_2d(&mut var_val, Some(chara_i as _))?
-                //                     }
-                //                     StrArray3D => bail!("StrArray3D unimplemented for now"),
-                //                     _ => unreachable!(),
-                //                 }
-                //             }
-                //             _ => unreachable!(),
-                //         }
-                //     }
-                // }
             }
         }
         *self.charas_count = charas_cnt;
@@ -2829,13 +2768,13 @@ impl EraVirtualMachine {
                                 ) {
                                     Ok(_) => (),
                                     Err(e) => {
-                                        bail_opt!(ctx, true, format!("trap handler failed: {e}"))
+                                        bail_opt!(ctx, true, format!("trap handler failed: {e}"));
                                     }
                                 }
                             }
                         }
                         (FlatValue::ArrInt(_) | FlatValue::ArrStr(_), _) => {
-                            bail_opt!(ctx, true, "value type mismatches array element type")
+                            bail_opt!(ctx, true, "value type mismatches array element type");
                         }
                         _ => bail_opt!(ctx, true, "destination is not an array"),
                     }
