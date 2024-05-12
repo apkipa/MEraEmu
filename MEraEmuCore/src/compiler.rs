@@ -108,11 +108,13 @@ impl EraConstantPoolBuilder {
     }
     fn add_val(&mut self, val: Value) -> usize {
         // TODO: Should we intern simple strings?
-        let key = match val.clone().into_unpacked() {
-            FlatValue::Int(x) => either::Either::Left(x.val),
-            FlatValue::Str(x) => either::Either::Right(x.val.as_ptr() as _),
-            FlatValue::ArrInt(x) => either::Either::Right(Rc::as_ptr(&x) as _),
-            FlatValue::ArrStr(x) => either::Either::Right(Rc::as_ptr(&x) as _),
+        use RefFlatValue::*;
+        let key = match val.clone().as_unpacked() {
+            Int(x) => either::Either::Left(x.val),
+            // Str(x) => either::Either::Right(x.val.as_ptr() as _),
+            Str(x) => either::Either::Right(x.val.unique_mark() as _),
+            ArrInt(x) => either::Either::Right(Rc::as_ptr(x) as _),
+            ArrStr(x) => either::Either::Right(Rc::as_ptr(x) as _),
         };
         *self.intern_map.entry(key).or_insert_with(|| {
             let index = self.vals.len();
@@ -123,7 +125,7 @@ impl EraConstantPoolBuilder {
 }
 
 pub struct EraFuncBytecodeInfo {
-    pub name: Ascii<arcstr::ArcStr>,
+    pub name: Ascii<rcstr::ArcStr>,
     pub chunk_idx: u32,
     pub offset: u32,
     pub args: Vec<Value>,
@@ -133,33 +135,33 @@ pub struct EraFuncBytecodeInfo {
 #[derive(Default)]
 struct EraFuncPool {
     // Mapping from names to indices.
-    func_names: HashMap<Ascii<arcstr::ArcStr>, usize>,
+    func_names: HashMap<Ascii<rcstr::ArcStr>, usize>,
     funcs: Vec<EraFuncInfo>,
 }
 
 #[derive(Debug)]
 struct EraFuncInfo {
-    name: Ascii<arcstr::ArcStr>,
+    name: Ascii<rcstr::ArcStr>,
     kind: EraFunKind,
     params: Vec<EraFuncArgInfo>,
-    local_var_idxs: HashMap<Ascii<arcstr::ArcStr>, usize>,
+    local_var_idxs: HashMap<Ascii<rcstr::ArcStr>, usize>,
     local_vars: Vec<EraFuncLocalVarInfo>,
     local_frame_size: usize,
     local_size: Option<u32>,
-    file_name: arcstr::ArcStr,
+    file_name: rcstr::ArcStr,
     src_info: SourcePosInfo,
 }
 #[derive(Debug)]
 struct EraFuncArgInfo {
     // Default ArrInt / ArrStr value indicates ref argument
-    target_var: (Ascii<arcstr::ArcStr>, Vec<u32>),
+    target_var: (Ascii<rcstr::ArcStr>, Vec<u32>),
     default_val: Value, // @FUN(value = <default_val>)
     src_info: SourcePosInfo,
 }
 
 #[derive(Debug)]
 struct EraFuncLocalVarInfo {
-    name: Ascii<arcstr::ArcStr>,
+    name: Ascii<rcstr::ArcStr>,
     init_val: Value, // #DIM value = <init_val>
     has_init: bool,  // Is <init_val> present?
     idx_in_frame: usize,
@@ -176,7 +178,7 @@ pub struct EraBytecodeChunk {
     pub bytecode: Vec<u8>,
     // src_infos[bytecode_offset] => src_info
     pub src_infos: Vec<SlimSourcePosInfo>,
-    pub name: arcstr::ArcStr,
+    pub name: rcstr::ArcStr,
     pub constants: EraConstantPool,
     pub jit_fns: Vec<Box<dyn EraStaticJitFn>>,
 }
@@ -185,7 +187,7 @@ struct EraBytecodeChunkBuilder {
     bytecode: Vec<u8>,
     // src_infos[bytecode_offset] => src_info
     src_infos: Vec<SlimSourcePosInfo>,
-    name: arcstr::ArcStr,
+    name: rcstr::ArcStr,
     constants: EraConstantPoolBuilder,
     jit_fns: Vec<Box<dyn EraStaticJitFn>>,
 }
@@ -510,7 +512,7 @@ impl EraLoopStructCodeMetadata {
 }
 
 pub struct EraBytecodeCompilation {
-    pub func_names: HashMap<Ascii<arcstr::ArcStr>, usize>,
+    pub func_names: HashMap<Ascii<rcstr::ArcStr>, usize>,
     pub funcs: Vec<EraFuncBytecodeInfo>,
     pub chunks: Vec<EraBytecodeChunk>,
     pub global_vars: EraVarPool,
@@ -545,10 +547,10 @@ struct EraGotoJumpInfo {
 
 pub struct EraCompilerImpl<'a, ErrReportFn> {
     err_report_fn: &'a mut ErrReportFn,
-    file_name: arcstr::ArcStr,
+    file_name: rcstr::ArcStr,
     vars: EraVarPool,
     // intern_vals: HashMap<either::Either<IntValue, Rc<StrValue>>, ()>,
-    contextual_indices: &'a HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
+    contextual_indices: &'a HashMap<Ascii<rcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
 }
 
 pub struct EraCompilerImplFunctionSite<'p, 'a, ErrReportFn> {
@@ -608,7 +610,7 @@ impl<T: FnMut(&EraCompileErrorInfo)> EraCompiler<T> {
         &mut self,
         inputs: Vec<EraCompilerFileInput>,
         global_vars: EraVarPool,
-        contextual_indices: &HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
+        contextual_indices: &HashMap<Ascii<rcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
     ) -> Option<EraBytecodeCompilation> {
         EraCompilerImpl::new(self, contextual_indices).compile_all(inputs, global_vars)
     }
@@ -617,7 +619,7 @@ impl<T: FnMut(&EraCompileErrorInfo)> EraCompiler<T> {
 impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
     fn new(
         parser: &'a mut EraCompiler<T>,
-        contextual_indices: &'a HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
+        contextual_indices: &'a HashMap<Ascii<rcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
     ) -> Self {
         EraCompilerImpl {
             err_report_fn: &mut parser.err_report_fn,
@@ -1097,7 +1099,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
                                 Value::new_str_arr(smallvec::smallvec![0], Vec::new())
                             }
                             ValueKind::Int => self.new_value_int(0),
-                            ValueKind::Str => self.new_value_str(arcstr::ArcStr::new()),
+                            ValueKind::Str => self.new_value_str(rcstr::ArcStr::new()),
                         };
 
                         EraFuncArgInfo {
@@ -1136,7 +1138,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         }
 
         let mut funcs = Vec::new();
-        let mut chunks_idxs: HashMap<arcstr::ArcStr, usize> = HashMap::new();
+        let mut chunks_idxs: HashMap<rcstr::ArcStr, usize> = HashMap::new();
         let mut chunks = Vec::new();
 
         // Compile function bodies
@@ -1225,7 +1227,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
             }
         }
     }
-    fn unwrap_str_constant(&mut self, literal: EraLiteral) -> Option<arcstr::ArcStr> {
+    fn unwrap_str_constant(&mut self, literal: EraLiteral) -> Option<rcstr::ArcStr> {
         match literal {
             EraLiteral::Integer(_, src_info) => {
                 self.report_err(src_info, true, "expected string value, found integer");
@@ -1319,7 +1321,7 @@ impl<'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImpl<'a, T> {
         // }
         Value::new_int(value)
     }
-    fn new_value_str(&mut self, value: arcstr::ArcStr) -> Value {
+    fn new_value_str(&mut self, value: rcstr::ArcStr) -> Value {
         // use std::collections::hash_map::Entry::*;
         // let value = StrValue { val: value };
         // match self
@@ -1615,7 +1617,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 self.chunk.emit_bytecode(ReturnInteger, func_decl.src_info);
             }
             EraFunKind::FunctionS => {
-                let val = self.p.new_value_str(arcstr::ArcStr::new());
+                let val = self.p.new_value_str(rcstr::ArcStr::new());
                 self.chunk.emit_load_const(val, func_decl.src_info);
                 self.chunk.emit_bytecode(ReturnString, func_decl.src_info);
             }
@@ -2845,7 +2847,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 let [] = ctx.unpack_some_args(args)?;
                 //ctx.this.arr_get_int("@ALIGN", vec![], src_info)?;
                 let args = vec![Some(EraExpr::new_var(
-                    arcstr::literal!("@ALIGN"),
+                    rcstr::literal!("@ALIGN"),
                     vec![],
                     src_info,
                 ))];
@@ -3509,7 +3511,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 if is_money {
                     ctx.this
                         .chunk
-                        .emit_load_const(ctx.this.p.new_value_str(arcstr::literal!("$")), src_info);
+                        .emit_load_const(ctx.this.p.new_value_str(rcstr::literal!("$")), src_info);
                 }
                 match args.len() {
                     1 => {
@@ -3911,7 +3913,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             }
             EraStmt::Invalid(src_info) => {
                 self.chunk.emit_load_const(
-                    self.p.new_value_str(arcstr::literal!("invalid statement")),
+                    self.p.new_value_str(rcstr::literal!("invalid statement")),
                     src_info,
                 );
                 self.chunk.emit_bytecode(InvalidWithMessage, src_info);
@@ -4220,7 +4222,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                                 match func_kind {
                                     EraFunKind::Function => EraExpr::new_int(0, src_info),
                                     EraFunKind::FunctionS => {
-                                        EraExpr::new_str(arcstr::ArcStr::new(), src_info)
+                                        EraExpr::new_str(rcstr::ArcStr::new(), src_info)
                                     }
                                     _ => unreachable!(),
                                 }
@@ -4278,7 +4280,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                 // Simply redirect to FOR statement
                 let for_stmt = crate::parser::EraForStmt {
                     var: EraVarExpr {
-                        name: arcstr::literal!("COUNT"),
+                        name: rcstr::literal!("COUNT"),
                         idxs: vec![],
                         src_info: x.src_info,
                     },
@@ -5027,12 +5029,12 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             Cmd::LoadData(x) => {
                 // Statement form will also call SYSPROC_LOADDATAEND
                 let load_data_expr = EraExpr::FunCall(
-                    Box::new(EraExpr::new_str(arcstr::literal!("LOADDATA"), x.src_info)),
+                    Box::new(EraExpr::new_str(rcstr::literal!("LOADDATA"), x.src_info)),
                     vec![Some(x.save_id)],
                 );
                 let expr = EraExpr::FunCall(
                     Box::new(EraExpr::new_str(
-                        arcstr::literal!("SYSPROC_LOADDATAEND"),
+                        rcstr::literal!("SYSPROC_LOADDATAEND"),
                         x.src_info,
                     )),
                     vec![Some(load_data_expr)],
@@ -5183,10 +5185,10 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             let first_data = if let Some(data) = data_it.next() {
                 data
             } else {
-                EraExpr::new_str(arcstr::ArcStr::new(), src_info)
+                EraExpr::new_str(rcstr::ArcStr::new(), src_info)
             };
             self.expr_str(first_data)?;
-            let newline_value = self.p.new_value_str(arcstr::literal!("\n"));
+            let newline_value = self.p.new_value_str(rcstr::literal!("\n"));
             for rest_data in data_it {
                 self.chunk.emit_load_const(newline_value.clone(), src_info);
                 self.expr_str(rest_data)?;
@@ -5975,7 +5977,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
                         if fix_chara_idxs {
                             // Push implicit TARGET as first index, then try again
                             let target_var = EraVarExpr {
-                                name: arcstr::literal!("TARGET"),
+                                name: rcstr::literal!("TARGET"),
                                 idxs: vec![],
                                 src_info,
                             };
@@ -6518,7 +6520,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
 fn default_expr(expr_kind: EraExpressionValueKind, src_info: SourcePosInfo) -> EraExpr {
     use EraExpressionValueKind::*;
     match expr_kind {
-        TString => EraExpr::new_str(arcstr::ArcStr::new(), src_info),
+        TString => EraExpr::new_str(rcstr::ArcStr::new(), src_info),
         TInteger => EraExpr::new_int(0, src_info),
         TVoid => panic!("no default EraExpr for void type"),
     }

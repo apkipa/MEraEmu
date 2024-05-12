@@ -38,12 +38,12 @@ pub struct MEraEngine<'a> {
     callback: Box<dyn MEraEngineSysCallback + 'a>,
     config: MEraEngineConfig,
     global_vars: EraVarPool,
-    watching_vars: HashSet<Ascii<arcstr::ArcStr>>,
+    watching_vars: HashSet<Ascii<rcstr::ArcStr>>,
     replace_list: HashMap<Box<[u8]>, Box<[u8]>>,
     define_list: HashMap<Box<[u8]>, Box<[u8]>>,
     chara_list: BTreeMap<u32, EraCharaInitTemplate>,
     initial_vars: Option<hashbrown::HashMap<Ascii<String>, InitialVarDesc>>,
-    contextual_indices: HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
+    contextual_indices: HashMap<Ascii<rcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
     last_repl_val: Option<crate::bytecode::Value>,
     source_map: HashMap<usize, Box<[u8]>>,
 }
@@ -786,7 +786,7 @@ impl<'a> MEraEngine<'a> {
             };
             let mut initial_sval = vec![
                 StrValue {
-                    val: arcstr::ArcStr::new()
+                    val: rcstr::ArcStr::new()
                 };
                 var_desc.dims[0] as _
             ];
@@ -797,7 +797,7 @@ impl<'a> MEraEngine<'a> {
                     Ok(x) => x,
                     Err(e) => return Err(MEraEngineError::new(format!("{e}"))),
                 };
-                let name: arcstr::ArcStr = String::from_utf8_lossy(&name).into();
+                let name: rcstr::ArcStr = String::from_utf8_lossy(&name).into();
                 initial_sval[index as usize] = StrValue { val: name.clone() };
                 // Add to define list
                 if let Some(kind) = kind {
@@ -840,7 +840,7 @@ impl<'a> MEraEngine<'a> {
             fn add_var_str(
                 &mut self,
                 name: &str,
-                value: arcstr::ArcStr,
+                value: rcstr::ArcStr,
             ) -> Result<(), MEraEngineError> {
                 _ = self.global_vars.add_var_ex(
                     name,
@@ -1208,7 +1208,7 @@ impl<'a> MEraEngine<'a> {
                 };
                 let mut initial_nameval = vec![
                     StrValue {
-                        val: arcstr::ArcStr::new()
+                        val: rcstr::ArcStr::new()
                     };
                     name_vd.dims[0] as _
                 ];
@@ -1239,7 +1239,7 @@ impl<'a> MEraEngine<'a> {
                         Ok(x) => x,
                         Err(e) => return Err(MEraEngineError::new(format!("{e}"))),
                     };
-                    let name: arcstr::ArcStr = name.into();
+                    let name: rcstr::ArcStr = name.into();
                     let price: u32 = match atoi_simd::parse_pos(price.as_bytes()) {
                         Ok(x) => x,
                         Err(e) => return Err(MEraEngineError::new(format!("{e}"))),
@@ -1321,7 +1321,7 @@ impl<'a> MEraEngine<'a> {
                             ctx.add_var_str("GAMEBASE_TITLE", value.into())?;
                         }
                         "作者" => {
-                            let value: arcstr::ArcStr = value.into();
+                            let value: rcstr::ArcStr = value.into();
                             ctx.add_var_str("GAMEBASE_AUTHER", value.clone())?;
                             ctx.add_var_str("GAMEBASE_AUTHOR", value)?;
                         }
@@ -1600,7 +1600,7 @@ impl<'a> MEraEngine<'a> {
 
         struct AdhocCallback<'a> {
             callback: &'a mut dyn MEraEngineSysCallback,
-            contextual_indices: &'a mut HashMap<Ascii<arcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
+            contextual_indices: &'a mut HashMap<Ascii<rcstr::ArcStr>, Vec<(EraCsvVarKind, u32)>>,
         }
         impl crate::vm::EraVirtualMachineCallback for AdhocCallback<'_> {
             fn on_execution_error(&mut self, error: crate::vm::EraRuntimeErrorInfo) {

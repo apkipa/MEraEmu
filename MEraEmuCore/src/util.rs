@@ -1,8 +1,8 @@
 pub mod ascii;
-pub mod hstring;
 pub mod html;
 pub mod io;
 pub mod number;
+pub mod rcstr;
 
 use std::{borrow::Borrow, fmt::Display, hash::Hash, ops::Deref, rc::Rc};
 

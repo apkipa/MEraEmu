@@ -758,7 +758,7 @@ pub trait EraStaticJitFn {
 #[derive(Default)]
 pub struct EraVarPool {
     // Mapping from names to indices.
-    var_names: HashMap<Ascii<arcstr::ArcStr>, usize>,
+    var_names: HashMap<Ascii<rcstr::ArcStr>, usize>,
     chara_var_idxs: Vec<usize>,
     global_var_idxs: Vec<usize>,
     vars: Vec<EraVarInfo>,
@@ -766,7 +766,7 @@ pub struct EraVarPool {
 }
 
 pub struct EraVarInfo {
-    pub name: Ascii<arcstr::ArcStr>,
+    pub name: Ascii<rcstr::ArcStr>,
     pub val: Value,
     // TODO: Compress with modular-bitfield
     pub is_const: bool,
@@ -799,7 +799,7 @@ impl EraVarPool {
         is_global: bool,
         never_trap: bool,
     ) -> Option<usize> {
-        let name: Ascii<arcstr::ArcStr> = Ascii::new(name.into());
+        let name: Ascii<rcstr::ArcStr> = Ascii::new(name.into());
         let var_idx = self.vars.len();
         match self.var_names.entry(name.clone()) {
             std::collections::hash_map::Entry::Occupied(e) => return None,
@@ -905,7 +905,7 @@ struct EraFuncExecFrame {
 }
 
 pub struct EraVirtualMachine {
-    func_names: HashMap<Ascii<arcstr::ArcStr>, usize>,
+    func_names: HashMap<Ascii<rcstr::ArcStr>, usize>,
     funcs: Vec<EraFuncBytecodeInfo>,
     chunks: Vec<EraBytecodeChunk>,
     global_vars: EraVarPool,
@@ -1956,11 +1956,11 @@ impl EraVirtualMachine {
                 InvalidWithMessage => {
                     let msg = ctx.stack.pop().and_then(|x| match x.0.into_unpacked() {
                         FlatValue::Int(x) => Some(StrValue {
-                            val: arcstr::format!("{}", x.val),
+                            val: rcstr::format!("{}", x.val),
                         }),
                         FlatValue::Str(x) => Some(x.clone()),
                         FlatValue::ArrInt(x) => x.borrow().vals.first().map(|x| StrValue {
-                            val: arcstr::format!("{}", x.val),
+                            val: rcstr::format!("{}", x.val),
                         }),
                         FlatValue::ArrStr(x) => x.borrow().vals.first().map(|x| x.clone()),
                     });
@@ -1970,11 +1970,11 @@ impl EraVirtualMachine {
                 Throw => {
                     let msg = ctx.stack.pop().and_then(|x| match x.0.into_unpacked() {
                         FlatValue::Int(x) => Some(StrValue {
-                            val: arcstr::format!("{}", x.val),
+                            val: rcstr::format!("{}", x.val),
                         }),
                         FlatValue::Str(x) => Some(x.clone()),
                         FlatValue::ArrInt(x) => x.borrow().vals.first().map(|x| StrValue {
-                            val: arcstr::format!("{}", x.val),
+                            val: rcstr::format!("{}", x.val),
                         }),
                         FlatValue::ArrStr(x) => x.borrow().vals.first().map(|x| x.clone()),
                     });
@@ -2370,34 +2370,33 @@ impl EraVirtualMachine {
                     ctx.stack.push(Value::new_int(imm as _).into());
                 }
                 ConvertToString => {
-                    let [value] = ctx.pop_stack()?;
-                    let value = match value.0.into_unpacked() {
-                        FlatValue::Int(x) => {
-                            Value::new_str(itoa::Buffer::new().format(x.val).into())
+                    let [value] = view_stack!(ctx)?;
+                    match value.0.as_unpacked() {
+                        RefFlatValue::Int(x) => {
+                            *value =
+                                Value::new_str(itoa::Buffer::new().format(x.val).into()).into();
                         }
-                        FlatValue::Str(x) => Value::new_str_obj(x),
+                        RefFlatValue::Str(_) => (),
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
-                    };
-                    ctx.stack.push(value.into());
+                    }
                 }
                 ConvertToInteger => {
-                    let [value] = ctx.pop_stack()?;
-                    let value = match value.0.into_unpacked() {
-                        FlatValue::Int(x) => Value::new_int_obj(x),
-                        FlatValue::Str(x) => {
+                    let [value] = view_stack!(ctx)?;
+                    match value.0.as_unpacked() {
+                        RefFlatValue::Int(_) => (),
+                        RefFlatValue::Str(x) => {
                             let x = routine::parse_era_int(&x.val).unwrap_or(0);
-                            Value::new_int(x)
+                            *value = Value::new_int(x).into();
                         }
                         _ => bail_opt!(ctx, true, "expected primitive values as operands"),
-                    };
-                    ctx.stack.push(value.into());
+                    }
                 }
                 BuildString => {
                     const ERR_MSG: &str = "BuildString requires string values as operands";
                     let count = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)?;
                     ip_offset_delta += 1;
                     if count == 0 {
-                        ctx.stack.push(Value::new_str(arcstr::ArcStr::new()).into());
+                        ctx.stack.push(Value::new_str(rcstr::ArcStr::new()).into());
                     } else if count == 1 {
                         let [value] = view_stack!(ctx)?;
                         if !matches!(value.0.kind(), ValueKind::Str) {
@@ -2456,8 +2455,8 @@ impl EraVirtualMachine {
                                 let spaces = " ".repeat(width - val_width);
                                 // left_pad means: pad to left (spaces on the right side)
                                 Value::new_str(match (flags.left_pad(), flags.right_pad()) {
-                                    (true, false) => arcstr::format!("{x}{spaces}"),
-                                    (false, true) | _ => arcstr::format!("{spaces}{x}"),
+                                    (true, false) => rcstr::format!("{x}{spaces}"),
+                                    (false, true) | _ => rcstr::format!("{spaces}{x}"),
                                 })
                             }
                         }
@@ -3376,7 +3375,7 @@ impl EraVirtualMachine {
                         _ => bail_opt!(ctx, true, "operands must be (int, str)"),
                     };
                     let result =
-                        arcstr::ArcStr::try_repeat(&haystack.val, count.val.max(0) as _).unwrap();
+                        rcstr::ArcStr::try_repeat(&haystack.val, count.val.max(0) as _).unwrap();
                     ctx.stack.push(Value::new_str(result).into());
                 }
                 SubString | SubStringU => {
@@ -3392,7 +3391,7 @@ impl EraVirtualMachine {
                         length.val as _
                     };
                     let result = if length <= 0 {
-                        arcstr::ArcStr::new()
+                        rcstr::ArcStr::new()
                     } else {
                         let haystack_len = haystack.len();
                         let idx_fn = |(index, _)| index;
@@ -3449,13 +3448,13 @@ impl EraVirtualMachine {
                     let haystack = &haystack.val;
                     let pos = pos.val;
                     let result = if pos < 0 {
-                        arcstr::ArcStr::new()
+                        rcstr::ArcStr::new()
                     } else {
                         let pos = pos as _;
                         haystack
                             .chars()
                             .nth(pos)
-                            .map_or(arcstr::ArcStr::new(), |x| arcstr::format!("{x}"))
+                            .map_or(rcstr::ArcStr::new(), |x| rcstr::format!("{x}"))
                     };
                     ctx.stack.push(Value::new_str(result).into());
                 }
@@ -3546,7 +3545,7 @@ impl EraVirtualMachine {
                         bail_opt!(ctx, true, "value is not a valid Unicode scalar value");
                     };
                     ctx.stack
-                        .push(Value::new_str(arcstr::format!("{result}")).into());
+                        .push(Value::new_str(rcstr::format!("{result}")).into());
                 }
                 IntToStrWithBase => {
                     let [value, base] = ctx.pop_stack()?;
@@ -3555,10 +3554,10 @@ impl EraVirtualMachine {
                     let value = value.val;
                     let base = base.val;
                     let result = match base {
-                        2 => arcstr::format!("{value:b}"),
-                        8 => arcstr::format!("{value:o}"),
-                        10 => arcstr::format!("{value}"),
-                        16 => arcstr::format!("{value:x}"),
+                        2 => rcstr::format!("{value:b}"),
+                        8 => rcstr::format!("{value:o}"),
+                        10 => rcstr::format!("{value}"),
+                        16 => rcstr::format!("{value:x}"),
                         _ => bail_opt!(ctx, true, format!("{} is not a valid base", base)),
                     };
                     ctx.stack.push(Value::new_str(result).into());
@@ -4521,7 +4520,7 @@ impl EraVirtualMachine {
                     let t: DateTime<Local> = t.into();
                     let result = t.format("%Y/%m/%d %H:%M:%S");
                     ctx.stack
-                        .push(Value::new_str(arcstr::format!("{result}")).into());
+                        .push(Value::new_str(rcstr::format!("{result}")).into());
                 }
                 Input => {
                     let sub_bc = EraInputSubBytecodeType::from(
@@ -5011,7 +5010,7 @@ impl EraVirtualMachine {
                         }
                         (status, _, _) => {
                             vresults.borrow_mut().vals[0] = StrValue {
-                                val: arcstr::literal!("unknown error"),
+                                val: rcstr::literal!("unknown error"),
                             };
                             ctx.stack.push(Value::new_int(status).into());
                         }

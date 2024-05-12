@@ -79,7 +79,7 @@ pub struct EraEventKindDecl {
 
 #[derive(Debug, Clone)]
 pub struct EraVarExpr {
-    pub name: arcstr::ArcStr,
+    pub name: rcstr::ArcStr,
     // Array indices. May be empty or smaller than actual array dimensions.
     pub idxs: Vec<EraExpr>,
     pub src_info: SourcePosInfo,
@@ -181,10 +181,10 @@ impl EraExpr {
     pub fn new_int(val: i64, src_info: SourcePosInfo) -> Self {
         EraExpr::Term(EraTermExpr::Literal(EraLiteral::Integer(val, src_info)))
     }
-    pub fn new_str(val: arcstr::ArcStr, src_info: SourcePosInfo) -> Self {
+    pub fn new_str(val: rcstr::ArcStr, src_info: SourcePosInfo) -> Self {
         EraExpr::Term(EraTermExpr::Literal(EraLiteral::String(val, src_info)))
     }
-    pub fn new_var(name: arcstr::ArcStr, idxs: Vec<EraExpr>, src_info: SourcePosInfo) -> Self {
+    pub fn new_var(name: rcstr::ArcStr, idxs: Vec<EraExpr>, src_info: SourcePosInfo) -> Self {
         EraExpr::Term(EraTermExpr::Var(EraVarExpr {
             name,
             idxs,
@@ -210,7 +210,7 @@ impl EraExpr {
             }),
         }
     }
-    pub fn unwrap_str_constant(lit: EraLiteral) -> Result<arcstr::ArcStr, EraParseErrorInfo> {
+    pub fn unwrap_str_constant(lit: EraLiteral) -> Result<rcstr::ArcStr, EraParseErrorInfo> {
         match lit {
             EraLiteral::String(x, _) => Ok(x),
             EraLiteral::Integer(_, src_info) => Err(EraParseErrorInfo {
@@ -280,7 +280,7 @@ impl EraExpr {
                                     val_stack.push(EL::Integer(x, a_si));
                                 }
                                 (EL::String(a, a_si), EL::String(b, b_si)) => {
-                                    let x = arcstr::format!("{a}{b}");
+                                    let x = rcstr::format!("{a}{b}");
                                     val_stack.push(EL::String(x, a_si));
                                 }
                                 _ => {
@@ -522,7 +522,7 @@ impl EraExpr {
                             let arg = if let Some(arg) = arg {
                                 Self::unwrap_str_constant(arg.try_evaluate_constant(vars)?)?
                             } else {
-                                arcstr::ArcStr::new()
+                                rcstr::ArcStr::new()
                             };
                             let Some(value) = vars.get_var(&arg) else {
                                 return Err(make_err(
@@ -675,7 +675,7 @@ impl EraExpr {
 #[derive(Debug, Clone)]
 pub enum EraLiteral {
     Integer(i64, SourcePosInfo),
-    String(arcstr::ArcStr, SourcePosInfo),
+    String(rcstr::ArcStr, SourcePosInfo),
 }
 impl EraLiteral {
     pub fn source_pos_info(&self) -> SourcePosInfo {
@@ -2672,7 +2672,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
                             // HACK: Add `@` as part of variable name
                             let rhs =
                                 self.consume(EraLexerMode::Normal, EraTokenKind::Identifier)?;
-                            x.name = arcstr::format!(
+                            x.name = rcstr::format!(
                                 "{}@{}",
                                 x.name,
                                 String::from_utf8_lossy(rhs.lexeme)
@@ -3686,7 +3686,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             self.var_expression()?
         } else {
             EraVarExpr {
-                name: arcstr::literal!("RESULT"),
+                name: rcstr::literal!("RESULT"),
                 idxs: Vec::new(),
                 src_info,
             }
@@ -4076,7 +4076,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.consume_comma()?;
         let default_value = self.expression(true)?;
         let mut show_prompt = EraExpr::new_int(1, src_info);
-        let mut expiry_msg = EraExpr::new_str(arcstr::literal!("時間切れ"), src_info);
+        let mut expiry_msg = EraExpr::new_str(rcstr::literal!("時間切れ"), src_info);
         let mut can_click = EraExpr::new_int(0, src_info);
         if self.matches_comma().is_some() {
             show_prompt = self.expression(true)?;
@@ -4115,7 +4115,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.consume_comma()?;
         let default_value = self.expression(true)?;
         let mut show_prompt = EraExpr::new_int(1, src_info);
-        let mut expiry_msg = EraExpr::new_str(arcstr::ArcStr::new(), src_info);
+        let mut expiry_msg = EraExpr::new_str(rcstr::ArcStr::new(), src_info);
         let mut can_click = EraExpr::new_int(0, src_info);
         if self.matches_comma().is_some() {
             show_prompt = self.expression(true)?;
@@ -4182,7 +4182,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
     fn stmt_setfont(&mut self) -> Option<EraSetFontStmt> {
         let src_info = self.src_info;
         let font_name = if self.matches_newline().is_some() {
-            EraExpr::new_str(arcstr::ArcStr::new(), src_info)
+            EraExpr::new_str(rcstr::ArcStr::new(), src_info)
         } else {
             let r = self.expression(true)?;
             self.consume_newline()?;
@@ -4197,7 +4197,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         let src_info = self.src_info;
         let target = if self.matches_newline().is_some() {
             EraVarExpr {
-                name: arcstr::literal!("RESULTS"),
+                name: rcstr::literal!("RESULTS"),
                 idxs: Vec::new(),
                 src_info,
             }
@@ -4418,7 +4418,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             self.var_expression()?
         } else {
             EraVarExpr {
-                name: arcstr::literal!("RESULTS"),
+                name: rcstr::literal!("RESULTS"),
                 idxs: Vec::new(),
                 src_info,
             }
@@ -4427,7 +4427,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
             self.var_expression()?
         } else {
             EraVarExpr {
-                name: arcstr::literal!("RESULT"),
+                name: rcstr::literal!("RESULT"),
                 idxs: Vec::new(),
                 src_info,
             }
@@ -4549,7 +4549,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         }
     }
     #[must_use]
-    fn unwrap_str_literal(&mut self, lit: EraLiteral) -> Option<arcstr::ArcStr> {
+    fn unwrap_str_literal(&mut self, lit: EraLiteral) -> Option<rcstr::ArcStr> {
         match lit {
             EraLiteral::Integer(_, cur_si) => {
                 self.synchronize();
@@ -4575,7 +4575,7 @@ impl<'a, 'b, T: FnMut(&EraParseErrorInfo), U: FnMut(&crate::lexer::EraLexErrorIn
         self.unwrap_int_literal(lit)
     }
     #[must_use]
-    fn unwrap_str_from_expression(&mut self, expr: EraExpr) -> Option<arcstr::ArcStr> {
+    fn unwrap_str_from_expression(&mut self, expr: EraExpr) -> Option<rcstr::ArcStr> {
         let lit = self.unwrap_literal_from_expression(expr)?;
         self.unwrap_str_literal(lit)
     }

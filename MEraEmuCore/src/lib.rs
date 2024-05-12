@@ -18,10 +18,15 @@ pub use engine::{
 use safer_ffi::{prelude::*, slice, string};
 pub use vm::{EraColorMatrix, MEraEngineFileSeekMode};
 
-use mimalloc::MiMalloc;
-
+#[cfg(not(miri))]
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+// #[global_allocator]
+// static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
+// #[global_allocator]
+// static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
 
 // NOTE: Used by safer_ffi
 #[cfg(feature = "headers")]

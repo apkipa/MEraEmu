@@ -5,7 +5,7 @@
 
 using namespace winrt;
 
-int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
+int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE, _In_ PWSTR pCmdLine, _In_ int nCmdShow) {
     init_apartment(apartment_type::single_threaded);
     Tenkai::AppService::InitializeForApplication([&](auto&&) {
         // HACK: Keep application alive FOREVER to prevent crashes on

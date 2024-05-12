@@ -2,6 +2,8 @@ use std::{cell::RefCell, collections::BTreeMap, ops::Deref};
 
 use rclite::Rc;
 
+use crate::util::rcstr;
+
 #[repr(u8)]
 #[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
 // TODO: Make bytecode with strongly-typed operands to ease JIT compilation
@@ -471,7 +473,7 @@ pub struct IntValue {
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StrValue {
-    pub val: arcstr::ArcStr,
+    pub val: rcstr::ArcStr,
 }
 
 // NOTE: Arr*Value are used as variable references
@@ -735,7 +737,7 @@ impl Value {
         Value(ValueInner::Int(IntValue { val }))
     }
     #[inline(always)]
-    pub fn new_str(val: arcstr::ArcStr) -> Self {
+    pub fn new_str(val: rcstr::ArcStr) -> Self {
         Value(ValueInner::Str(StrValue { val }))
     }
     // pub fn new_int_rc(val: Rc<IntValue>) -> Self {
@@ -785,7 +787,7 @@ impl Value {
     pub fn new_int_0darr(val: i64) -> Self {
         Self::new_int_arr(smallvec::smallvec![1], vec![IntValue { val }])
     }
-    pub fn new_str_0darr(val: arcstr::ArcStr) -> Self {
+    pub fn new_str_0darr(val: rcstr::ArcStr) -> Self {
         Self::new_str_arr(smallvec::smallvec![1], vec![StrValue { val }])
     }
     pub fn into_unpacked(self) -> FlatValue {
@@ -917,10 +919,10 @@ impl SourcePosLenInfo {
 pub struct EraCharaInitTemplate {
     pub no: u32,
     pub csv_no: u32,
-    pub name: arcstr::ArcStr,
-    pub callname: arcstr::ArcStr,
-    pub nickname: arcstr::ArcStr,
-    pub mastername: arcstr::ArcStr,
+    pub name: rcstr::ArcStr,
+    pub callname: rcstr::ArcStr,
+    pub nickname: rcstr::ArcStr,
+    pub mastername: rcstr::ArcStr,
     pub maxbase: BTreeMap<u32, i64>,
     pub mark: BTreeMap<u32, i64>,
     pub exp: BTreeMap<u32, i64>,
@@ -930,5 +932,5 @@ pub struct EraCharaInitTemplate {
     pub cflag: BTreeMap<u32, i64>,
     pub equip: BTreeMap<u32, i64>,
     pub juel: BTreeMap<u32, i64>,
-    pub cstr: BTreeMap<u32, arcstr::ArcStr>,
+    pub cstr: BTreeMap<u32, rcstr::ArcStr>,
 }
