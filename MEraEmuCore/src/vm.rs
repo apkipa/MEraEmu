@@ -14,10 +14,12 @@ use crate::{
     util::*,
 };
 use std::{
+    borrow::Cow,
     cell::RefCell,
     collections::{BTreeMap, HashMap},
     future::Future,
     mem::MaybeUninit,
+    num::NonZeroUsize,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -917,6 +919,7 @@ pub struct EraVirtualMachine {
     trap_vars: hashbrown::HashMap<*const (), usize>,
     chara_templates: BTreeMap<u32, EraCharaInitTemplate>,
     charas_count: usize,
+    regex_cache: lru::LruCache<rcstr::ArcStr, regex::Regex>,
 }
 
 pub struct EraVirtualMachineStackTraceFrame {
@@ -1711,6 +1714,7 @@ impl EraVirtualMachine {
             trap_vars: hashbrown::HashMap::new(),
             chara_templates,
             charas_count: 0,
+            regex_cache: lru::LruCache::new(NonZeroUsize::new(15).unwrap()),
         };
         this
     }
@@ -1844,6 +1848,20 @@ impl EraVirtualMachine {
             .partition_point(|x| (x.offset as usize) <= ip.offset)
             .saturating_sub(1);
         Some(idxs[idx])
+    }
+    pub fn mem_usage(&self) -> (usize, usize) {
+        let var_size = self
+            .global_vars
+            .vars
+            .iter()
+            .map(|x| match x.val.as_unpacked() {
+                RefFlatValue::ArrInt(x) => std::mem::size_of_val(x.borrow().vals.as_slice()),
+                RefFlatValue::ArrStr(x) => std::mem::size_of_val(x.borrow().vals.as_slice()),
+                RefFlatValue::Int(_) | RefFlatValue::Str(_) => 8,
+            })
+            .sum::<usize>();
+        let code_size = self.chunks.iter().map(|x| x.bytecode.len()).sum::<usize>();
+        (var_size, code_size)
     }
     fn execute_inner(
         &mut self,
@@ -3358,7 +3376,10 @@ impl EraVirtualMachine {
                     unpack_str!(ctx, haystack);
                     unpack_str!(ctx, needle);
                     unpack_str!(ctx, replace_with);
-                    let re = match regex::Regex::new(&needle.val) {
+                    let re = match self
+                        .regex_cache
+                        .try_get_or_insert(needle.val.clone(), || regex::Regex::new(&needle.val))
+                    {
                         Ok(re) => re,
                         Err(e) => bail_opt!(ctx, true, format!("failed to compile regex: {e}")),
                     };
@@ -4321,12 +4342,22 @@ impl EraVirtualMachine {
                         FlatValue::ArrStr(x) => {
                             let x = x.borrow();
                             unpack_str!(ctx, value);
-                            let Ok(mut re) = regex::Regex::new(&value.val) else {
-                                bail_opt!(ctx, true, "invalid regex");
+                            let re_str = if complete_match.val != 0 {
+                                rcstr::format!("^(?:{})$", value.val)
+                            } else {
+                                value.val.clone()
                             };
-                            if complete_match.val != 0 {
-                                re = regex::Regex::new(&format!("^(?:{})$", value.val)).unwrap()
-                            }
+                            let re = self.regex_cache.try_get_or_insert(re_str.clone(), || {
+                                // Compile twice to ensure input is safe
+                                regex::Regex::new(&value.val)
+                                    .and_then(|_| regex::Regex::new(&re_str))
+                            });
+                            let re = match re {
+                                Ok(re) => re,
+                                Err(e) => {
+                                    bail_opt!(ctx, true, format!("failed to compile regex: {e}"))
+                                }
+                            };
                             let (dim_pos, end_idx) = (usize::MAX, end_idx);
                             let mut it = x
                                 .stride_iter(0, dim_pos, start_idx, end_idx)

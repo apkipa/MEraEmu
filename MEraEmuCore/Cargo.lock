@@ -22,6 +22,7 @@ dependencies = [
  "indoc",
  "itertools",
  "itoa",
+ "lru",
  "memchr",
  "memory-stats",
  "mimalloc",
@@ -551,6 +552,15 @@ name = "log"
 version = "0.4.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90ed8c1e510134f979dbc4f070f87d4313098b704861a105fe34231c70a3901c"
+
+[[package]]
+name = "lru"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3262e75e648fce39813cb56ac41f3c3e3f65217ebf3844d818d1f9398cfb0dc"
+dependencies = [
+ "hashbrown",
+]
 
 [[package]]
 name = "macro_rules_attribute"

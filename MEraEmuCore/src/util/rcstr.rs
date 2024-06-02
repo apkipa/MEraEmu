@@ -45,7 +45,8 @@ impl ArcStr {
     unsafe fn inline_bytes_mut(&mut self) -> &mut [u8] {
         unsafe {
             let len = self.inline_len();
-            self.bytes.get_unchecked_mut(Self::INLINE_OFFSET..Self::INLINE_OFFSET + len)
+            self.bytes
+                .get_unchecked_mut(Self::INLINE_OFFSET..Self::INLINE_OFFSET + len)
         }
     }
     #[inline]
@@ -57,16 +58,17 @@ impl ArcStr {
         unsafe {
             if self.is_inline() {
                 let len = self.inline_len();
-                self.bytes.get_unchecked(Self::INLINE_OFFSET..Self::INLINE_OFFSET + len)
+                self.bytes
+                    .get_unchecked(Self::INLINE_OFFSET..Self::INLINE_OFFSET + len)
             } else {
                 self.s.as_bytes()
             }
         }
     }
     #[inline]
-    pub const fn _private_new_inline_literal(__TEXT: &str) -> Option<usize> {
-        if __TEXT.len() <= Self::MAX_INLINE_LEN {
-            let mut i = __TEXT.len() << 1;
+    pub const fn _private_new_inline_literal(__text: &str) -> Option<usize> {
+        if __text.len() <= Self::MAX_INLINE_LEN {
+            let mut i = __text.len() << 1;
             i |= 1;
             union PureArcStr {
                 i: usize,
@@ -75,7 +77,7 @@ impl ArcStr {
             let mut s = PureArcStr { i };
             unsafe {
                 let mut offset = Self::INLINE_OFFSET;
-                let mut in_buf = __TEXT.as_bytes();
+                let mut in_buf = __text.as_bytes();
                 while let [b, rest @ ..] = in_buf {
                     s.bytes[offset] = *b;
                     offset += 1;
@@ -92,9 +94,9 @@ impl ArcStr {
         ArcStr { i }
     }
     #[inline]
-    pub const fn _private_new_heap_literal(__TEXT: arcstr::ArcStr) -> Self {
+    pub const fn _private_new_heap_literal(__text: arcstr::ArcStr) -> Self {
         ArcStr {
-            s: ManuallyDrop::new(__TEXT),
+            s: ManuallyDrop::new(__text),
         }
     }
 }
@@ -310,10 +312,13 @@ macro_rules! format {
 macro_rules! literal {
     ($text:expr $(,)?) => {{
         const __TEXT: &str = $text;
-        const S: $crate::util::rcstr::ArcStr = match $crate::util::rcstr::ArcStr::_private_new_inline_literal(__TEXT) {
-            Some(s) => $crate::util::rcstr::ArcStr::_private_new_inline_literal_2(s),
-            None => $crate::util::rcstr::ArcStr::_private_new_heap_literal(arcstr::literal!($text)),
-        };
+        const S: $crate::util::rcstr::ArcStr =
+            match $crate::util::rcstr::ArcStr::_private_new_inline_literal(__TEXT) {
+                Some(s) => $crate::util::rcstr::ArcStr::_private_new_inline_literal_2(s),
+                None => {
+                    $crate::util::rcstr::ArcStr::_private_new_heap_literal(arcstr::literal!($text))
+                }
+            };
         S
     }};
 }

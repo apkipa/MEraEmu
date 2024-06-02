@@ -1505,6 +1505,14 @@ mod tests {
             size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)
         );
         {
+            let mem_usage = engine.get_mem_usage().unwrap();
+            *errors.borrow_mut() += &format!(
+                "[engine reported mem usage: var = {}, code = {}]\n",
+                size::Size::from_bytes(mem_usage.var_size),
+                size::Size::from_bytes(mem_usage.code_size)
+            );
+        }
+        {
             let errors = errors.borrow();
             if errors.contains("error:") {
                 drop(engine);

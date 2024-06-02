@@ -285,6 +285,12 @@ pub struct EngineStackTrace<'a> {
     pub frames: Vec<EngineStackTraceFrame<'a>>,
 }
 
+#[derive(Debug)]
+pub struct EngineMemoryUsage {
+    pub var_size: usize,
+    pub code_size: usize,
+}
+
 #[safer_ffi::derive_ReprC]
 #[repr(u8)]
 #[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
@@ -1984,6 +1990,18 @@ impl<'a> MEraEngine<'a> {
     }
     pub fn get_version() -> &'static str {
         "MEraEngine in MEraEmuCore v0.1.0"
+    }
+    pub fn get_mem_usage(&self) -> Result<EngineMemoryUsage, MEraEngineError> {
+        let Some(vm) = self.vm.as_ref() else {
+            return Err(MEraEngineError::new(
+                "virtual machine not created yet".to_owned(),
+            ));
+        };
+        let (var_size, code_size) = vm.mem_usage();
+        Ok(EngineMemoryUsage {
+            code_size,
+            var_size,
+        })
     }
     fn load_builtin_srcs(&mut self) -> Result<(), MEraEngineError> {
         // TODO: Expose builtin source code to user for debugging
