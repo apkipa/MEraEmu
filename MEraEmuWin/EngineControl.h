@@ -163,6 +163,11 @@ namespace winrt::MEraEmuWin::implementation {
         hstring GetCurrentFontName();
         void SetRedrawState(int64_t value);
         int64_t GetRedrawState();
+        void SetSkipDisplay(int64_t value);
+        int64_t GetSkipDisplay();
+        int64_t GetEffectiveSkipDisplay();
+        void PushNoSkipDisplay();
+        void PopNoSkipDisplay();
 
         DP_DECLARE(EngineForeColor);
         DP_DECLARE(EngineBackColor);
@@ -185,6 +190,8 @@ namespace winrt::MEraEmuWin::implementation {
         uint32_t m_cur_font_style{};
         hstring m_cur_font_name{};
         bool m_auto_redraw{};
+        bool m_skip_display{};
+        uint64_t m_no_skip_display_cnt{};
         uint64_t m_last_redraw_dirty_height{};
         struct ComposingLineData {
             struct ComposingLineDataPart {

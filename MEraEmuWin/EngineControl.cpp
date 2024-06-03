@@ -697,8 +697,12 @@ namespace winrt::MEraEmuWin::implementation {
                 return 0;
             }
             if (name == "@SKIPDISP") {
-                // TODO: @SKIPDISP
-                return 0;
+                std::promise<int64_t> promise;
+                auto future = promise.get_future();
+                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                    promise.set_value(sd->ui_ctrl->GetSkipDisplay());
+                });
+                return future.get();
             }
             if (name == "@MESSKIP") {
                 // TODO: @MESSKIP
@@ -834,6 +838,13 @@ namespace winrt::MEraEmuWin::implementation {
                 // TODO: @TOOLTIP_DURATION
                 return;
             }
+            if (name == "@SKIPDISP") {
+                m_sd->queue_ui_work([sd = m_sd, val]() {
+                    sd->ui_ctrl->SetSkipDisplay(val);
+                });
+                return;
+            }
+            // TODO...
             if (name == "@ANIMETIMER") {
                 // TODO: @ANIMETIMER
                 return;
@@ -1540,11 +1551,14 @@ namespace winrt::MEraEmuWin::implementation {
                             );
                         }
                         sd->queue_ui_work([sd, msgs = std::move(print_msgs)] {
+                            sd->ui_ctrl->SetSkipDisplay(0);
+
                             sd->ui_ctrl->RoutinePrint(L"函数堆栈跟踪 (最近调用者最先显示):", ERA_PEF_IS_LINE);
                             for (auto const& msg : msgs) {
                                 sd->ui_ctrl->RoutinePrintSourceButton(msg.msg, msg.path,
                                     msg.line, msg.column, ERA_PEF_IS_LINE);
                             }
+
                             sd->ui_ctrl->SetRedrawState(2);
                         });
                     }
@@ -1603,6 +1617,8 @@ namespace winrt::MEraEmuWin::implementation {
         m_cur_font_style = {};
         m_cur_font_name = m_default_font_name;
         m_auto_redraw = true;
+        m_skip_display = false;
+        m_no_skip_display_cnt = 0;
         m_cur_printc_count = 0;
         m_user_skipping = false;
         m_cur_pt = { -1, -1 };
@@ -2068,6 +2084,11 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
     void EngineControl::RoutinePrint(hstring content, PrintExtendedFlags flags) {
+        if (GetEffectiveSkipDisplay()) {
+            // Engine requested to skip output
+            return;
+        }
+
         bool updated = false;
 
         auto push_cur_composing_line_fn = [this, &updated] {
@@ -2221,7 +2242,18 @@ namespace winrt::MEraEmuWin::implementation {
             updated = true;
         };
 
-        auto color = to_u32(EngineForeColor());
+        //auto color = to_u32(EngineForeColor());
+        uint32_t color;
+        if (flags & ERA_PEF_IGNORE_COLOR) {
+            color = to_u32(unbox_value<Color>(
+                m_EngineForeColorProperty
+                .GetMetadata(xaml_typename<MEraEmuWin::EngineControl>())
+                .DefaultValue()
+            ));
+        }
+        else {
+            color = to_u32(EngineForeColor());
+        }
         bool forbid_button{};
         bool is_isolated{};
         if (flags & ERA_PEF_IS_SINGLE) {
@@ -2447,6 +2479,34 @@ namespace winrt::MEraEmuWin::implementation {
     }
     int64_t EngineControl::GetRedrawState() {
         return m_auto_redraw;
+    }
+    void EngineControl::SetSkipDisplay(int64_t value) {
+        if (value == 0) {
+            m_auto_redraw = false;
+        }
+        else {
+            m_auto_redraw = true;
+        }
+    }
+    int64_t EngineControl::GetSkipDisplay() {
+        return m_skip_display;
+    }
+    int64_t EngineControl::GetEffectiveSkipDisplay() {
+        return m_no_skip_display_cnt > 0 ? false : GetSkipDisplay();
+    }
+    void EngineControl::PushNoSkipDisplay() {
+        if (m_no_skip_display_cnt++ == 0) {
+            // Do nothing
+        }
+    }
+    void EngineControl::PopNoSkipDisplay() {
+        if (m_no_skip_display_cnt == 0) {
+            // TODO: Treat extra pops as an error?
+            return;
+        }
+        if (--m_no_skip_display_cnt == 0) {
+            // Do nothing
+        }
     }
 
 #define DP_CLASS EngineControl
