@@ -150,6 +150,12 @@
     <Page Include="MainPage.xaml">
       <SubType>Designer</SubType>
     </Page>
+    <Page Include="ScrollBar_themeresources_v1.xaml">
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="ScrollViewer_themeresources_v1.xaml">
+      <SubType>Designer</SubType>
+    </Page>
   </ItemGroup>
   <ItemGroup>
     <AppxManifest Include="Package.appxmanifest">

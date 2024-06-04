@@ -6,6 +6,8 @@
   <ItemGroup>
     <Page Include="MainPage.xaml" />
     <Page Include="EngineControl.xaml" />
+    <Page Include="ScrollBar_themeresources_v1.xaml" />
+    <Page Include="ScrollViewer_themeresources_v1.xaml" />
   </ItemGroup>
   <ItemGroup>
     <Midl Include="App.idl" />
