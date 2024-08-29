@@ -1355,6 +1355,9 @@ mod tests {
         engine.reg_int("SCREENWIDTH")?;
         engine.reg_int("LINECOUNT")?;
         engine.reg_str("SAVEDATA_TEXT")?;
+
+        let mut start_time = std::time::Instant::now();
+
         let mut total_cnt = 0usize;
         let mut pass_cnt = 0usize;
         // Load CSV files
@@ -1443,6 +1446,10 @@ mod tests {
                 return Err(e);
             }
         }
+
+        let csv_load_time = start_time.elapsed();
+        start_time = std::time::Instant::now();
+
         let mut erhs = Vec::new();
         let mut erbs = Vec::new();
         for i in walkdir::WalkDir::new(format!("{game_base_dir}ERB")) {
@@ -1499,11 +1506,19 @@ mod tests {
             "[FINIALIZE, used mem = {}]\n",
             size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)
         );
+
+        let erb_parse_time = start_time.elapsed();
+        start_time = std::time::Instant::now();
+
         _ = engine.finialize_load_srcs();
         *errors.borrow_mut() += &format!(
             "[DONE, used mem = {}]\n",
             size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)
         );
+
+        let finialize_time = start_time.elapsed();
+        start_time = std::time::Instant::now();
+
         {
             let mem_usage = engine.get_mem_usage().unwrap();
             *errors.borrow_mut() += &format!(
@@ -1511,6 +1526,12 @@ mod tests {
                 size::Size::from_bytes(mem_usage.var_size),
                 size::Size::from_bytes(mem_usage.code_size)
             );
+        }
+        {
+            let mut errors = errors.borrow_mut();
+            *errors += &format!("CSV load time: {:?}\n", csv_load_time);
+            *errors += &format!("ERB parse time: {:?}\n", erb_parse_time);
+            *errors += &format!("ERB finialize time: {:?}\n", finialize_time);
         }
         {
             let errors = errors.borrow();
