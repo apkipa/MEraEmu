@@ -5,7 +5,9 @@ mod engine;
 mod lexer;
 mod parser;
 mod routine;
+pub mod types;
 mod util;
+pub mod v2;
 mod vm;
 
 use std::sync::atomic::AtomicBool;
@@ -902,12 +904,28 @@ mod tests {
         fn reg_int(&mut self, name: &str) -> Result<(), MEraEngineError>;
         fn reg_str(&mut self, name: &str) -> Result<(), MEraEngineError>;
     }
+
     impl EngineExtension for MEraEngine<'_> {
         fn reg_int(&mut self, name: &str) -> Result<(), MEraEngineError> {
             self.register_global_var(name, false, 1, false)
         }
         fn reg_str(&mut self, name: &str) -> Result<(), MEraEngineError> {
             self.register_global_var(name, true, 1, false)
+        }
+    }
+
+    trait EngineBuilderExtension {
+        fn reg_int(&mut self, name: &str) -> Result<(), v2::engine::MEraEngineError>;
+        fn reg_str(&mut self, name: &str) -> Result<(), v2::engine::MEraEngineError>;
+    }
+    impl<T: v2::engine::MEraEngineSysCallback, U: v2::engine::MEraEngineBuilderCallback>
+        EngineBuilderExtension for v2::engine::MEraEngineBuilder<T, U>
+    {
+        fn reg_int(&mut self, name: &str) -> Result<(), v2::engine::MEraEngineError> {
+            self.register_variable(name, false, 1, false)
+        }
+        fn reg_str(&mut self, name: &str) -> Result<(), v2::engine::MEraEngineError> {
+            self.register_variable(name, true, 1, false)
         }
     }
 
@@ -1184,112 +1202,408 @@ mod tests {
         }
     }
 
+    impl v2::engine::MEraEngineSysCallback for &mut MockEngineCallback<'_> {
+        fn on_error(&mut self, diag: &types::DiagnosticProvider) {
+            let mut errors = self.errors.borrow_mut();
+
+            const PRINT_TO_STDOUT: bool = false;
+
+            for entry in diag.get_entries() {
+                let (noun, color) = if entry.level == types::DiagnosticLevel::Error {
+                    self.err_cnt += 1;
+                    ("error", Color::Red)
+                } else if entry.level == types::DiagnosticLevel::Warning {
+                    self.warn_cnt += 1;
+                    ("warning", Color::BrightYellow)
+                } else {
+                    ("note", Color::BrightCyan)
+                };
+                let resolved = diag.resolve_src_span(&entry.filename, entry.span).unwrap();
+                {
+                    let msg = format!(
+                        "{}({},{}): {}: {}\nSnippet: {}\n",
+                        entry.filename,
+                        resolved.loc.line,
+                        resolved.loc.col + 1,
+                        noun,
+                        entry.message,
+                        resolved.snippet,
+                    )
+                    .color(color);
+                    if PRINT_TO_STDOUT {
+                        print!("{}", msg);
+                    } else {
+                        *errors += &msg.to_string();
+                    }
+                }
+                // Print underlines
+                let indent = 9;
+                let underline = " ".repeat(indent + resolved.loc.col as usize)
+                    + &"^".repeat(resolved.len as _)
+                    + "\n";
+                if PRINT_TO_STDOUT {
+                    print!("{}", underline.color(color));
+                } else {
+                    *errors += &underline.color(color).to_string();
+                }
+            }
+        }
+
+        fn on_get_rand(&mut self) -> u64 {
+            0
+        }
+
+        fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {}
+
+        fn on_html_print(&mut self, content: &str) {}
+
+        fn on_wait(&mut self, any_key: bool, is_force: bool) {}
+
+        fn on_twait(&mut self, duration: i64, is_force: bool) {}
+
+        fn on_input_int(
+            &mut self,
+            default_value: Option<i64>,
+            can_click: bool,
+            allow_skip: bool,
+        ) -> std::ops::ControlFlow<(), Option<i64>> {
+            std::ops::ControlFlow::Continue(None)
+        }
+
+        fn on_input_str(
+            &mut self,
+            default_value: Option<&str>,
+            can_click: bool,
+            allow_skip: bool,
+        ) -> std::ops::ControlFlow<(), Option<String>> {
+            std::ops::ControlFlow::Continue(None)
+        }
+
+        fn on_tinput_int(
+            &mut self,
+            time_limit: i64,
+            default_value: i64,
+            show_prompt: bool,
+            expiry_msg: &str,
+            can_click: bool,
+        ) -> std::ops::ControlFlow<(), Option<i64>> {
+            std::ops::ControlFlow::Continue(None)
+        }
+
+        fn on_tinput_str(
+            &mut self,
+            time_limit: i64,
+            default_value: &str,
+            show_prompt: bool,
+            expiry_msg: &str,
+            can_click: bool,
+        ) -> std::ops::ControlFlow<(), Option<String>> {
+            std::ops::ControlFlow::Continue(None)
+        }
+
+        fn on_oneinput_int(
+            &mut self,
+            default_value: Option<i64>,
+        ) -> std::ops::ControlFlow<(), Option<i64>> {
+            std::ops::ControlFlow::Continue(None)
+        }
+
+        fn on_oneinput_str(
+            &mut self,
+            default_value: Option<&str>,
+        ) -> std::ops::ControlFlow<(), Option<String>> {
+            std::ops::ControlFlow::Continue(None)
+        }
+
+        fn on_toneinput_int(
+            &mut self,
+            time_limit: i64,
+            default_value: i64,
+            show_prompt: bool,
+            expiry_msg: &str,
+            can_click: bool,
+        ) -> std::ops::ControlFlow<(), Option<i64>> {
+            std::ops::ControlFlow::Continue(None)
+        }
+
+        fn on_toneinput_str(
+            &mut self,
+            time_limit: i64,
+            default_value: &str,
+            show_prompt: bool,
+            expiry_msg: &str,
+            can_click: bool,
+        ) -> std::ops::ControlFlow<(), Option<String>> {
+            std::ops::ControlFlow::Continue(None)
+        }
+
+        fn on_reuselastline(&mut self, content: &str) {}
+
+        fn on_clearline(&mut self, count: i64) {}
+
+        fn on_print_button(
+            &mut self,
+            content: &str,
+            value: &str,
+            flags: crate::bytecode::PrintExtendedFlags,
+        ) {
+        }
+
+        fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
+            Ok(0)
+        }
+
+        fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error> {
+            Ok(String::new())
+        }
+
+        fn on_var_set_int(
+            &mut self,
+            name: &str,
+            idx: usize,
+            val: i64,
+        ) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+
+        fn on_var_set_str(
+            &mut self,
+            name: &str,
+            idx: usize,
+            val: &str,
+        ) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+
+        fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
+            0
+        }
+
+        fn on_gcreatefromfile(&mut self, gid: i64, path: &str) -> i64 {
+            0
+        }
+
+        fn on_gdispose(&mut self, gid: i64) -> i64 {
+            0
+        }
+
+        fn on_gcreated(&mut self, gid: i64) -> i64 {
+            0
+        }
+
+        fn on_gdrawsprite(
+            &mut self,
+            gid: i64,
+            sprite_name: &str,
+            dest_x: i64,
+            dest_y: i64,
+            dest_width: i64,
+            dest_height: i64,
+            color_matrix: Option<&types::EraColorMatrix>,
+        ) -> i64 {
+            0
+        }
+
+        fn on_gclear(&mut self, gid: i64, color: i64) -> i64 {
+            0
+        }
+
+        fn on_spritecreate(
+            &mut self,
+            name: &str,
+            gid: i64,
+            x: i64,
+            y: i64,
+            width: i64,
+            height: i64,
+        ) -> i64 {
+            0
+        }
+
+        fn on_spritedispose(&mut self, name: &str) -> i64 {
+            0
+        }
+
+        fn on_spritecreated(&mut self, name: &str) -> i64 {
+            0
+        }
+
+        fn on_spriteanimecreate(&mut self, name: &str, width: i64, height: i64) -> i64 {
+            0
+        }
+
+        fn on_spriteanimeaddframe(
+            &mut self,
+            name: &str,
+            gid: i64,
+            x: i64,
+            y: i64,
+            width: i64,
+            height: i64,
+            offset_x: i64,
+            offset_y: i64,
+            delay: i64,
+        ) -> i64 {
+            0
+        }
+
+        fn on_spritewidth(&mut self, name: &str) -> i64 {
+            0
+        }
+
+        fn on_spriteheight(&mut self, name: &str) -> i64 {
+            0
+        }
+
+        fn on_open_host_file(
+            &mut self,
+            path: &str,
+            can_write: bool,
+        ) -> anyhow::Result<Box<dyn types::EraCompilerHostFile>> {
+            anyhow::bail!("no such file");
+        }
+
+        fn on_check_host_file_exists(&mut self, path: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        fn on_delete_host_file(&mut self, path: &str) -> anyhow::Result<()> {
+            anyhow::bail!("no such file");
+        }
+
+        fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        fn on_check_font(&mut self, font_name: &str) -> i64 {
+            0
+        }
+
+        fn on_get_host_time(&mut self) -> u64 {
+            0
+        }
+
+        fn on_get_config_int(&mut self, name: &str) -> anyhow::Result<i64> {
+            anyhow::bail!("no such config entry");
+        }
+
+        fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String> {
+            anyhow::bail!("no such config entry");
+        }
+
+        fn on_get_key_state(&mut self, key_code: i64) -> i64 {
+            0
+        }
+    }
+
+    const BASIC_ENGINE_SRC: &str = indoc! {r#"
+        ; Simple counter pure function
+        @DO_COUNT(iUpper = 100)
+            #FUNCTION
+            #DIM DYNAMIC iUpper
+            #DIM result, 1, 1 = 0
+            ;[SKIPSTART]
+            ;#DIM cnt = 100
+            ;wdwd
+            ;[SKIPEND]
+            #DIM cnt = 100
+            ;iUpper:d():1
+            cnt '= iUpper
+            ;results = oook
+            ;locals@DO_COUNT = oook
+            ;PRINTFORM [Start with cnt={cnt},result={result}]
+            PRINTFORM [IN {iUpper}]
+            result:0:0 = 0
+            WHILE cnt > 0
+                ;PRINTFORM []
+                ;result = result + cnt:0--
+                result += cnt:0--
+                ;SIF cnt < 98
+                ;    BREAK
+                ;cnt = cnt - 1
+                ;cnt = --cnt
+                ;--cnt
+            WEND
+            ;PRINTFORM [Returning {result}]
+            PRINTFORM [Ret]
+            RETURNF result
+        @BAD_GOTO
+            ;$LABEL1
+            REPEAT 1
+                ;GOTO LABEL1
+            REND
+        @SYSTEM_TITLE()
+            ;#DIM REF xre
+            #DIM val = 1 + 1 ;*0
+            #DIMS world_str, -2 + 3 = ""
+            #DIMS tmpstr = "[" + ";" + "&" + "]"
+
+            ;#DIM cnt = 10000000
+            #DIM cnt = 100
+            #DIM DYNAMIC sum1
+            WHILE cnt > 0
+                cnt = cnt - 1
+            WEND
+            ;cnt = 100
+            FOR LOCAL, 100, 0, -1
+                sum1 += LOCAL
+            NEXT
+            PRINTV '(, sum1, ')
+
+            PRINTFORM [{0&&0},{0&&3},{2&&0},{2&&3}]
+            PRINTFORM [{0||0},{0||3},{2||0},{2||3}]
+
+            ;world_str = \@ 0 ? aaa # bb{4+1}b \@
+            ;world_str '= @"~\@ 0 ? aaa # bb{4+1}b \@~"
+            ;PRINTV world_str
+            world_str '= @"worl{"d"}"
+
+            val:0 = val + 1
+            ; Print hello world
+            Printform Hello, {val + 1,2,LEFT}the %world_str%!
+            IF 1 + 2 - 3;
+                PRINTFORM true
+            ELSE
+                PRINTFORM false
+            ENDIF
+            PRINTFORM Done
+            ;CALL DO_COUNT
+            TRYCCALLFORM DO_%"COUN"+"T"%(50)
+                PRINTFORM [OK]
+            CATCH
+                PRINTFORM [FAIL]
+            ENDCATCH
+            PRINTV DO_COUNT(0 ? 0 # 10), @"~{-DO_COUNT()}~"
+            PRINTV WINDOW_TITLE += "!"
+
+            SELECTCASE 42
+                CASE 1, is >= 42
+                    PRINTFORM [1]
+                    ;THROW "??? {4+1}"
+                CASE 43 to 41, 42
+                    PRINTFORM [2]
+                CASEELSE
+                    PRINTFORM [else]
+            ENDSELECT
+
+            REPEAT 5
+                SIF COUNT == 2
+                    CONTINUE
+                SIF COUNT == 4
+                    BREAK
+                PRINTFORM {COUNT}
+            REND
+            PRINTFORM {COUNT}
+
+            PRINTV tmpstr
+
+            QUIT
+            PRINTFORM not printed
+    "#};
+
     #[test]
     fn basic_engine() -> anyhow::Result<()> {
-        let main_erb = indoc! {r#"
-            ; Simple counter pure function
-            @DO_COUNT(iUpper = 100)
-                #FUNCTION
-                #DIM DYNAMIC iUpper
-                #DIM result, 1, 1 = 0
-                ;[SKIPSTART]
-                ;#DIM cnt = 100
-                ;wdwd
-                ;[SKIPEND]
-                #DIM cnt = 100
-                ;iUpper:d():1
-                cnt '= iUpper
-                ;results = oook
-                ;locals@DO_COUNT = oook
-                ;PRINTFORM [Start with cnt={cnt},result={result}]
-                PRINTFORM [IN {iUpper}]
-                result:0:0 = 0
-                WHILE cnt > 0
-                    ;PRINTFORM []
-                    ;result = result + cnt:0--
-                    result += cnt:0--
-                    ;SIF cnt < 98
-                    ;    BREAK
-                    ;cnt = cnt - 1
-                    ;cnt = --cnt
-                    ;--cnt
-                WEND
-                ;PRINTFORM [Returning {result}]
-                PRINTFORM [Ret]
-                RETURNF result
-            @BAD_GOTO
-                ;$LABEL1
-                REPEAT 1
-                    ;GOTO LABEL1
-                REND
-            @SYSTEM_TITLE()
-                ;#DIM REF xre
-                #DIM val = 1 + 1 ;*0
-                #DIMS world_str, -2 + 3 = ""
-                #DIMS tmpstr = "[" + ";" + "&" + "]"
-
-                ;#DIM cnt = 10000000
-                #DIM cnt = 100
-                #DIM DYNAMIC sum1
-                WHILE cnt > 0
-                    cnt = cnt - 1
-                WEND
-                ;cnt = 100
-                FOR LOCAL, 100, 0, -1
-                    sum1 += LOCAL
-                NEXT
-                PRINTV '(, sum1, ')
-
-                PRINTFORM [{0&&0},{0&&3},{2&&0},{2&&3}]
-                PRINTFORM [{0||0},{0||3},{2||0},{2||3}]
-
-                ;world_str = \@ 0 ? aaa # bb{4+1}b \@
-                ;world_str '= @"~\@ 0 ? aaa # bb{4+1}b \@~"
-                ;PRINTV world_str
-                world_str '= @"worl{"d"}"
-
-                val:0 = val + 1
-                ; Print hello world
-                Printform Hello, {val + 1,2,LEFT}the %world_str%!
-                IF 1 + 2 - 3;
-                    PRINTFORM true
-                ELSE
-                    PRINTFORM false
-                ENDIF
-                PRINTFORM Done
-                ;CALL DO_COUNT
-                TRYCCALLFORM DO_%"COUN"+"T"%(50)
-                    PRINTFORM [OK]
-                CATCH
-                    PRINTFORM [FAIL]
-                ENDCATCH
-                PRINTV DO_COUNT(0 ? 0 # 10), @"~{-DO_COUNT()}~"
-                PRINTV WINDOW_TITLE += "!"
-
-                SELECTCASE 42
-                    CASE 1, is >= 42
-                        PRINTFORM [1]
-                        ;THROW "??? {4+1}"
-                    CASE 43 to 41, 42
-                        PRINTFORM [2]
-                    CASEELSE
-                        PRINTFORM [else]
-                ENDSELECT
-
-                REPEAT 5
-                    SIF COUNT == 2
-                        CONTINUE
-                    SIF COUNT == 4
-                        BREAK
-                    PRINTFORM {COUNT}
-                REND
-                PRINTFORM {COUNT}
-
-                PRINTV tmpstr
-
-                QUIT
-                PRINTFORM not printed
-        "#};
+        let main_erb = BASIC_ENGINE_SRC;
         let errors = RefCell::new(String::new());
         let mut callback = MockEngineCallback::new(&errors);
         let mut engine = MEraEngine::new();
@@ -1321,6 +1635,42 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn basic_engine_v2() -> anyhow::Result<()> {
+        let main_erb = BASIC_ENGINE_SRC;
+        let errors = RefCell::new(String::new());
+        let mut callback = MockEngineCallback::new(&errors);
+        let mut builder = v2::engine::MEraEngineBuilder::new(&mut callback);
+        builder.register_variable("WINDOW_TITLE", true, 1, true)?;
+        builder.load_erb("main.erb", main_erb.as_bytes())?;
+        // engine.register_global_var("WINDOW_TITLE", true, 1, true)?;
+        // _ = engine.load_erb("main.erb", main_erb.as_bytes());
+        // _ = engine.finialize_load_srcs();
+        // let stop_flag = AtomicBool::new(false);
+        // _ = engine.do_execution(&stop_flag, 1024 * 1024);
+        // assert!(engine.get_is_halted());
+        // drop(engine);
+        {
+            let errors = errors.borrow();
+            if errors.contains("error:") {
+                panic!(
+                    "compile output:\n{errors}\nexec output:\n{}",
+                    callback.output
+                );
+            }
+            if !errors.is_empty() {
+                println!("compile output:\n{errors}");
+            }
+        }
+        // assert_eq!(
+        //     &callback.output,
+        //     "(5050)[0,0,0,3][0,3,2,2]Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135[;&]"
+        // );
+
+        Ok(())
+    }
+
     #[test]
     fn assembled_game() -> anyhow::Result<()> {
         // TODO: Redact this
@@ -1550,6 +1900,279 @@ mod tests {
         engine.do_execution(&stop_flag, u64::MAX)?;
         assert!(engine.get_is_halted());
         drop(engine);
+
+        Ok(())
+    }
+
+    #[test]
+    fn assembled_game_v2() -> anyhow::Result<()> {
+        // HACK: Grow stack size
+        match stacker::remaining_stack() {
+            Some(remaining) if remaining < 4 * 1024 * 1024 => {
+                return stacker::grow(8 * 1024 * 1024, assembled_game_v2);
+            }
+            _ => (),
+        }
+
+        // TODO: Redact this
+        let game_base_dir = r#"D:\MyData\Games\Others\1\eraTW\TW4.881画蛇添足版（04.07更新）\"#;
+        // let game_base_dir = r#"D:\MyData\Games\Others\1\eraTW\eratw-sub-modding-888ab0cd\"#;
+        // let game_base_dir = r#"D:\MyData\Games\Others\1\eratohoK\"#;
+
+        let errors = RefCell::new(String::new());
+        let mut callback = MockEngineCallback::new(&errors);
+        let mut builder = v2::engine::MEraEngineBuilder::new(&mut callback);
+        builder.register_variable("WINDOW_TITLE", true, 1, true)?;
+        builder.reg_int("@COLOR")?;
+        builder.reg_int("@DEFCOLOR")?;
+        builder.reg_int("@BGCOLOR")?;
+        builder.reg_int("@DEFBGCOLOR")?;
+        builder.reg_int("@FOCUSCOLOR")?;
+        builder.reg_int("@STYLE")?;
+        builder.reg_str("@FONT")?;
+        builder.reg_int("@REDRAW")?;
+        builder.reg_int("@ALIGN")?;
+        builder.reg_int("@TOOLTIP_DELAY")?;
+        builder.reg_int("@TOOLTIP_DURATION")?;
+        builder.reg_int("@SKIPDISP")?;
+        builder.reg_int("@MESSKIP")?;
+        builder.reg_int("@ANIMETIMER")?;
+        builder.reg_int("@PRINTCPERLINE")?;
+        builder.reg_int("@PRINTCLENGTH")?;
+        builder.reg_int("@LINEISEMPTY")?;
+        // builder.reg_str("DRAWLINESTR_UNIT")?;
+        builder.reg_str("DRAWLINESTR")?;
+        builder.reg_int("SCREENWIDTH")?;
+        builder.reg_int("LINECOUNT")?;
+        builder.reg_str("SAVEDATA_TEXT")?;
+
+        let mut start_time = std::time::Instant::now();
+
+        let mut total_cnt = 0usize;
+        let mut pass_cnt = 0usize;
+        // Load CSV files
+        let mut load_csv = |file_path: &std::path::Path, kind| -> anyhow::Result<()> {
+            // let Ok(content) = std::fs::read(file_path) else {
+            //     // Proceed if we cannot read the file
+            //     return Ok(());
+            // };
+            let content = std::fs::read(file_path)?;
+            let content = content
+                .strip_prefix("\u{feff}".as_bytes())
+                .unwrap_or(&content);
+            builder.load_csv(&file_path.to_string_lossy(), content, kind)?;
+            Ok(())
+        };
+        let mut misc_csvs = Vec::new();
+        let mut chara_csvs = Vec::new();
+        for i in walkdir::WalkDir::new(format!("{game_base_dir}CSV")) {
+            use v2::engine::EraCsvLoadKind::*;
+            let i = i?;
+            if !i.file_type().is_file() {
+                continue;
+            }
+            let file_name = i.file_name().to_ascii_lowercase();
+            let file_name = file_name.as_encoded_bytes();
+            let path = i.path();
+            if file_name.eq_ignore_ascii_case(b"_Rename.csv") {
+                load_csv(path, _Rename)?;
+            } else if file_name.eq_ignore_ascii_case(b"VariableSize.csv") {
+                load_csv(path, VariableSize)?;
+            } else {
+                let file_name = file_name.to_ascii_uppercase();
+                if !file_name.ends_with(b".CSV") {
+                    continue;
+                }
+                if file_name.starts_with(b"CHARA") {
+                    chara_csvs.push(path.to_owned());
+                } else {
+                    misc_csvs.push(path.to_owned());
+                }
+            }
+        }
+        for csv in misc_csvs {
+            use v2::engine::EraCsvLoadKind::*;
+            let csv_name = csv
+                .file_name()
+                .unwrap()
+                .as_encoded_bytes()
+                .to_ascii_uppercase();
+            let kind = match &csv_name[..] {
+                b"ABL.CSV" => Abl,
+                b"EXP.CSV" => Exp,
+                b"TALENT.CSV" => Talent,
+                b"PALAM.CSV" => Palam,
+                b"TRAIN.CSV" => Train,
+                b"MARK.CSV" => Mark,
+                b"ITEM.CSV" => Item,
+                b"BASE.CSV" => Base,
+                b"SOURCE.CSV" => Source,
+                b"EX.CSV" => Ex,
+                b"STR.CSV" => Str,
+                b"EQUIP.CSV" => Equip,
+                b"TEQUIP.CSV" => TEquip,
+                b"FLAG.CSV" => Flag,
+                b"TFLAG.CSV" => TFlag,
+                b"CFLAG.CSV" => CFlag,
+                b"TCVAR.CSV" => TCVar,
+                b"CSTR.CSV" => CStr,
+                b"STAIN.CSV" => Stain,
+                b"CDFLAG1.CSV" => CDFlag1,
+                b"CDFLAG2.CSV" => CDFlag2,
+                b"STRNAME.CSV" => StrName,
+                b"TSTR.CSV" => TStr,
+                b"SAVESTR.CSV" => SaveStr,
+                b"GLOBAL.CSV" => Global,
+                b"GLOBALS.CSV" => Globals,
+                b"GAMEBASE.CSV" => GameBase,
+                _ => continue,
+            };
+            //load_csv(&csv, kind)?;
+            _ = load_csv(&csv, kind);
+        }
+        for csv in chara_csvs {
+            if let Err(e) = load_csv(&csv, v2::engine::EraCsvLoadKind::Chara_) {
+                panic!("{}", errors.borrow());
+                return Err(e);
+            }
+        }
+        builder.finish_load_csv()?;
+        *errors.borrow_mut() += &format!(
+            "[CSV LOAD FINISH, used mem = {}]\n",
+            size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)
+        );
+
+        let csv_load_time = start_time.elapsed();
+        start_time = std::time::Instant::now();
+
+        let mut erhs = Vec::new();
+        let mut erbs = Vec::new();
+        for i in walkdir::WalkDir::new(format!("{game_base_dir}ERB")) {
+            let i = i?;
+            if !i.file_type().is_file() {
+                continue;
+            }
+            let file_name = i.file_name().to_ascii_lowercase();
+            let file_name = file_name.as_encoded_bytes();
+            if file_name.ends_with(b".erb") {
+                erbs.push(i.path().to_owned());
+            } else if file_name.ends_with(b".erh") {
+                erhs.push(i.path().to_owned());
+            } else {
+                // println!("warn: skipping file `{}`", i.path().display());
+            }
+        }
+        let get_phy_mem = || memory_stats::memory_stats().unwrap().physical_mem;
+        let mut last_mem_usage = get_phy_mem();
+        let mut file_mem_usages = Vec::new();
+        // TODO: Separate erh with erb when calling into engine
+        let mut load_erb_fn = |builder: &mut v2::engine::MEraEngineBuilder<
+            &mut MockEngineCallback,
+            v2::engine::EmptyCallback,
+        >,
+                               erb_path: std::path::PathBuf,
+                               is_header: bool|
+         -> anyhow::Result<()> {
+            let mut erb = std::fs::read(&erb_path)?;
+            let erb = erb.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&erb);
+            let result = if is_header {
+                builder.load_erh(&erb_path.to_string_lossy(), erb)
+            } else {
+                builder.load_erb(&erb_path.to_string_lossy(), erb)
+            };
+            match result {
+                Ok(_) => pass_cnt += 1,
+                Err(e) => {
+                    // *errors.borrow_mut() +=
+                    //     &format!("[File `{}` failed to compile]\n", erb_path.display());
+                    panic!(
+                        "{}\n[File `{}` failed to compile: {}]\n",
+                        errors.borrow(),
+                        erb_path.display(),
+                        e
+                    );
+                }
+            }
+            total_cnt += 1;
+            let cur_mem_usage = get_phy_mem();
+            file_mem_usages.push((
+                erb_path.to_string_lossy().into_owned(),
+                cur_mem_usage.saturating_sub(last_mem_usage),
+            ));
+            last_mem_usage = cur_mem_usage;
+            Ok(())
+        };
+
+        for erb_path in erhs.into_iter() {
+            load_erb_fn(&mut builder, erb_path, true)?;
+        }
+        builder.finish_load_erh()?;
+        *errors.borrow_mut() += &format!(
+            "[ERH LOAD FINISH, used mem = {}]\n",
+            size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)
+        );
+
+        let erh_parse_time = start_time.elapsed();
+        start_time = std::time::Instant::now();
+
+        for erb_path in erbs.into_iter() {
+            load_erb_fn(&mut builder, erb_path, false)?;
+        }
+        println!("Loaded {}/{} files", pass_cnt, total_cnt);
+        println!("Top 10 files with highest memory consumption:");
+        file_mem_usages.sort_by_key(|x| x.1);
+        for (path, mem_usage) in file_mem_usages.into_iter().rev().take(10) {
+            println!("{path}: {}", size::Size::from_bytes(mem_usage));
+        }
+        *errors.borrow_mut() += &format!(
+            "[FINIALIZE, used mem = {}]\n",
+            size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)
+        );
+
+        let erb_parse_time = start_time.elapsed();
+        start_time = std::time::Instant::now();
+
+        // _ = builder.finialize_load_srcs();
+        *errors.borrow_mut() += &format!(
+            "[DONE, used mem = {}]\n",
+            size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)
+        );
+
+        let finialize_time = start_time.elapsed();
+        start_time = std::time::Instant::now();
+
+        // {
+        //     let mem_usage = builder.get_mem_usage().unwrap();
+        //     *errors.borrow_mut() += &format!(
+        //         "[engine reported mem usage: var = {}, code = {}]\n",
+        //         size::Size::from_bytes(mem_usage.var_size),
+        //         size::Size::from_bytes(mem_usage.code_size)
+        //     );
+        // }
+        {
+            let mut errors = errors.borrow_mut();
+            *errors += &format!("CSV load time: {:?}\n", csv_load_time);
+            *errors += &format!("ERH parse time: {:?}\n", erh_parse_time);
+            *errors += &format!("ERB parse time: {:?}\n", erb_parse_time);
+            *errors += &format!("ERB finialize time: {:?}\n", finialize_time);
+        }
+        {
+            let errors = errors.borrow();
+            if errors.contains("error:") {
+                drop(builder);
+                panic!(
+                    "compile output:\n{errors}\nexec output:\n{}\nCompiled {}/{} files.\n{} warning(s), {} error(s) generated.",
+                    callback.output, pass_cnt, total_cnt, callback.warn_cnt, callback.err_cnt
+                );
+            }
+            if !errors.is_empty() {
+                println!("compile output:\n{errors}");
+            }
+        }
+        // let stop_flag = AtomicBool::new(false);
+        // builder.do_execution(&stop_flag, u64::MAX)?;
+        // assert!(builder.get_is_halted());
+        // drop(builder);
 
         Ok(())
     }

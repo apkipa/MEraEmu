@@ -146,3 +146,76 @@ impl Display for CaselessString {
 }
 
 pub use ascii::Ascii;
+
+macro_rules! uppercase_bliteral {
+    ($value:expr) => {{
+        const STR_IN: &[u8] = $value;
+        const STR_OUT: [u8; STR_IN.len()] = {
+            let mut out = [0; STR_IN.len()];
+            let mut i = 0;
+            while i < STR_IN.len() {
+                out[i] = STR_IN[i].to_ascii_uppercase();
+                i += 1;
+            }
+            out
+        };
+        &STR_OUT
+    }};
+}
+
+macro_rules! bmatch_caseless {
+    // ($pattern:expr => $value:expr, _ => $default_value:expr) => {
+    //     |value: &[u8]| if value.iter().map(|&c| c.to_ascii_uppercase()) == uppercase_bliteral!($pattern).iter().copied() {
+    //         $value
+    //     } else {
+    //         $default_value
+    //     }
+    // };
+    ($pattern:expr => $value:expr $(, $patterns:expr => $values:expr)*, _ => $default_value:expr $(,)?) => {{
+        use crate::util::uppercase_bliteral;
+
+        |value: &[u8]| if value.iter().map(|&c| c.to_ascii_uppercase()).eq(uppercase_bliteral!($pattern).iter().copied()) {
+            $value
+        } $(else if value.iter().map(|&c| c.to_ascii_uppercase()).eq(uppercase_bliteral!($patterns).iter().copied()) {
+            $values
+        })* else {
+            $default_value
+        }
+    }};
+}
+
+pub(crate) use bmatch_caseless;
+pub(crate) use uppercase_bliteral;
+
+// Source: https://stackoverflow.com/a/50781657
+pub trait SubsliceOffset {
+    /**
+    Returns the byte offset of an inner slice relative to an enclosing outer slice.
+
+    Examples
+
+    ```ignore
+    let string = "a\nb\nc";
+    let lines: Vec<&str> = string.lines().collect();
+    assert!(string.subslice_offset(lines[0]) == Some(0)); // &"a"
+    assert!(string.subslice_offset(lines[1]) == Some(2)); // &"b"
+    assert!(string.subslice_offset(lines[2]) == Some(4)); // &"c"
+    assert!(string.subslice_offset("other!") == None);
+    ```
+    */
+    fn subslice_offset(&self, inner: &Self) -> Option<usize>;
+}
+
+impl SubsliceOffset for str {
+    fn subslice_offset(&self, inner: &Self) -> Option<usize> {
+        let self_range = self.as_bytes().as_ptr_range();
+        let self_range = (self_range.start as usize)..(self_range.end as usize);
+        let inner = inner.as_ptr() as usize;
+        // if inner < self_range.start || inner + inner.len() > self_range.end {
+        if inner < self_range.start || inner > self_range.end {
+            None
+        } else {
+            Some(inner - self_range.start)
+        }
+    }
+}

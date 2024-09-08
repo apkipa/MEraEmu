@@ -1,9 +1,10 @@
 use std::{borrow::Cow, mem::ManuallyDrop};
 
-/// Fake arcstr::ArcStr, with SSO for strings up to word size - 1. Least
+/// Fake arcstr::ArcStr, with SSO for strings up to `word size - 1`. Least
 /// significant byte is used as inline marker and inline string length.
 #[cfg(target_pointer_width = "64")]
 #[repr(C)]
+// TODO: Niche optimization
 pub union ArcStr {
     i: usize,
     bytes: [u8; std::mem::size_of::<usize>()],
