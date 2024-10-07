@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arcstr",
+ "arrayvec",
  "atoi_simd",
  "bstr",
  "byteorder",
@@ -18,9 +19,11 @@ dependencies = [
  "either",
  "enumset",
  "full2half",
+ "fxhash",
  "hashbrown",
  "html-escape",
  "htmlize",
+ "indexmap",
  "indoc",
  "itertools",
  "itoa",
@@ -37,6 +40,7 @@ dependencies = [
  "num-ordinal",
  "num-traits",
  "once_cell",
+ "paste",
  "phf",
  "polonius-the-crab",
  "ptr-union",
@@ -45,11 +49,14 @@ dependencies = [
  "rclite",
  "regex",
  "safer-ffi",
+ "scopeguard",
  "size",
  "smallvec",
  "stacker",
+ "strum",
  "text_io",
  "thiserror",
+ "tinyvec",
  "unicase",
  "unicode-width",
  "walkdir",
@@ -158,6 +165,12 @@ name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03918c3dbd7701a85c6b9887732e2921175f26c350b4563841d0958c21d57e6d"
+
+[[package]]
+name = "arrayvec"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
 name = "atoi_simd"
@@ -1220,6 +1233,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "strum"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
+dependencies = [
+ "strum_macros",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 2.0.77",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1283,6 +1318,12 @@ dependencies = [
  "quote",
  "syn 2.0.77",
 ]
+
+[[package]]
+name = "tinyvec"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "445e881f4f6d382d5f27c034e25eb92edd7c784ceab92a0937db7f2e9471b938"
 
 [[package]]
 name = "toml_datetime"

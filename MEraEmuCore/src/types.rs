@@ -8,16 +8,28 @@ use std::{
     ops::{ControlFlow, Deref},
 };
 
-use cstree::syntax::{SyntaxNode, SyntaxToken};
+use cstree::{
+    interning::{Resolver, TokenInterner, TokenKey},
+    syntax::{SyntaxElement, SyntaxElementRef, SyntaxNode, SyntaxToken},
+    util::NodeOrToken,
+    Syntax,
+};
+use either::Either;
+use fxhash::FxBuildHasher;
 use hashbrown::HashMap;
+use indexmap::IndexMap;
 use rclite::Rc;
 use safer_ffi::{derive_ReprC, prelude::VirtualPtr};
+use tinyvec::ArrayVec;
 
 use crate::util::{rcstr::ArcStr, Ascii};
 
+type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
+
 #[derive_ReprC]
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SrcPos(pub u32);
 
 impl Default for SrcPos {
@@ -59,6 +71,15 @@ impl SrcSpan {
     pub fn new(start: SrcPos, len: u32) -> SrcSpan {
         SrcSpan { start, len }
     }
+    pub fn with_ends(start: SrcPos, end: SrcPos) -> SrcSpan {
+        if end.0 < start.0 {
+            panic!("end position is before start position");
+        }
+        SrcSpan {
+            start,
+            len: end.0 - start.0,
+        }
+    }
     pub fn start(&self) -> SrcPos {
         self.start
     }
@@ -68,12 +89,21 @@ impl SrcSpan {
     pub fn end(&self) -> SrcPos {
         SrcPos(self.start.0 + self.len)
     }
-    pub fn is_tagged(&self) -> bool {
-        const TAG_MASK: u32 = 0x80000000;
-        (self.len & TAG_MASK) != 0
+    // pub fn is_tagged(&self) -> bool {
+    //     const TAG_MASK: u32 = 0x80000000;
+    //     (self.len & TAG_MASK) != 0
+    // }
+    // pub fn len_without_tag(&self) -> u32 {
+    //     self.len & 0x7FFFFFFF
+    // }
+    pub fn contains_pos(&self, pos: SrcPos) -> bool {
+        self.start() <= pos && pos < self.end()
     }
-    pub fn len_without_tag(&self) -> u32 {
-        self.len & 0x7FFFFFFF
+    pub fn contains_span(&self, other: SrcSpan) -> bool {
+        self.start() <= other.start() && other.end() <= self.end()
+    }
+    pub fn intersects(&self, other: SrcSpan) -> bool {
+        self.start() < other.end() && other.start() < self.end()
     }
 }
 
@@ -205,6 +235,8 @@ pub enum EraTokenKind {
     #[static_text("\"")]
     DoubleQuote,
     // ----- Keywords -----
+    /// A generic keyword identifier.
+    KwIdent,
     KwDim,
     KwDimS,
     KwGlobal,
@@ -222,6 +254,7 @@ pub enum EraTokenKind {
     KwPri,
     KwLater,
     KwSingle,
+    KwTransient,
     // ----- Nodes -----
     Program,
 
@@ -233,6 +266,7 @@ pub enum EraTokenKind {
     EventKindDecl,
     FunctionDecl,  // `#FUNCTION`
     FunctionSDecl, // `#FUNCTIONS`
+    TransientDecl,
     SharpDeclList,
 
     FunctionItem,
@@ -246,6 +280,8 @@ pub enum EraTokenKind {
     PrintStmt,
     PrintDataStmt,
     WaitStmt,
+    ForceWaitStmt,
+    WaitAnyKeyStmt,
     IfStmt,
     QuitStmt,
     SelectCaseStmt,
@@ -259,6 +295,7 @@ pub enum EraTokenKind {
     ReturnStmt,
     ContinueStmt,
     BreakStmt,
+    RestartStmt,
     ThrowStmt,
     RepeatStmt,
     GotoStmt,
@@ -282,6 +319,8 @@ pub enum EraTokenKind {
     SwapStmt,
     HtmlPrintStmt,
     PrintButtonStmt,
+    PrintButtonCStmt,
+    PrintButtonLCStmt,
     ArrayRemoveStmt,
     ArraySortStmt,
     ArrayMSortStmt,
@@ -320,6 +359,7 @@ pub enum EraTokenKind {
     DumpRandStmt,
     InitRandStmt,
     BarStmt,
+    BarLStmt,
     AddCharaStmt,
     PickUpCharaStmt,
     DelCharaStmt,
@@ -334,7 +374,6 @@ pub enum EraTokenKind {
     LoadDataStmt,
     SaveDataStmt,
     // CheckDataStmt,
-    RestartStmt,
     GetTimeStmt,
     LoadGlobalStmt,
     SaveGlobalStmt,
@@ -348,6 +387,7 @@ pub enum EraTokenKind {
     SelectCaseSingle,
     SelectCaseRange,
     SelectCaseCond,
+    SelectCasePredList,
 
     PreUnaryExpr,
     PostUnaryExpr,
@@ -481,6 +521,7 @@ impl EraTokenKind {
             | DumpRandStmt
             | InitRandStmt
             | BarStmt
+            | BarLStmt
             | AddCharaStmt
             | PickUpCharaStmt
             | DelCharaStmt
@@ -547,13 +588,13 @@ pub struct EraDefineData {
 // }
 #[derive(Debug, Default)]
 pub struct EraDefineScope {
-    defines: HashMap<Box<str>, EraDefineData>,
+    defines: HashMap<Box<str>, EraDefineData, FxBuildHasher>,
 }
 
 impl EraDefineScope {
     pub fn new() -> Self {
         EraDefineScope {
-            defines: HashMap::new(),
+            defines: FxHashMap::default(),
         }
     }
 
@@ -572,11 +613,13 @@ pub struct EraSourceFile {
     /// The root AST node of the lossless syntax tree, including untouched macros.
     pub orig_root: cstree::green::GreenNode,
     /// The list of macro substitution mappings.
-    pub macro_map: HashMap<SrcSpan, cstree::green::GreenNode>,
+    pub macro_map: HashMap<SrcSpan, cstree::green::GreenNode, FxBuildHasher>,
     /// The list of `#define`'s.
     pub defines: EraDefineScope,
     /// Whether the file is a header file.
     pub is_header: bool,
+    /// The list of newline positions.
+    pub newline_pos: Vec<SrcPos>,
 }
 
 /* TODO: Design notes:
@@ -586,6 +629,8 @@ pub struct EraSourceFile {
 
 #[derive(Debug)]
 pub struct EraCompilerCtx<Callback> {
+    // TODO: Wrap callback in Mutex; this makes it easier for concurrent access, while also
+    //       ensuring zero overhead for single-threaded access (i.e. &mut Ctx).
     pub callback: Callback,
     /// Replacements defined in `_Rename.csv`.
     pub global_replace: EraDefineScope,
@@ -593,16 +638,23 @@ pub struct EraCompilerCtx<Callback> {
     // global_define: EraDefineScope<'static>,
     pub global_define: EraDefineScope,
     /// The source file map.
-    pub source_map: Rc<HashMap<ArcStr, EraSourceFile>>,
+    pub source_map: Rc<FxIndexMap<ArcStr, EraSourceFile>>,
     /// Current active source file name. Empty if no source file is active.
     pub active_source: ArcStr,
     pub variables: EraVarPool,
-    /// The node cache used for CST building.
-    pub node_cache: cstree::build::NodeCache<'static>,
     /// The list of character templates. Used by runtime.
     pub chara_templates: BTreeMap<u32, EraCharaInitTemplate>,
     /// The list of CSV contextual indices. Used by CSV variable access.
-    pub csv_indices: HashMap<Ascii<ArcStr>, Vec<(EraCsvVarKind, u32)>>,
+    pub csv_indices: FxHashMap<Ascii<ArcStr>, Vec<(EraCsvVarKind, u32)>>,
+    // NOTE: We usually never remove chunks, so we use `Vec` instead of `HashMap`.
+    pub bc_chunks: Vec<EraBcChunk>,
+    /// The list of function entries. Note that the value is wrapped in `Option` to
+    /// allow for soft deletion.
+    pub func_entries: Rc<FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo>>>,
+    // TODO: Always use `&'i ThreadedRodeo`. We also need to implement a `ThreadedNodeCache` later.
+    //       This helps with concurrent interning, and also helps to eliminate the usage of `unsafe`.
+    /// The node cache used for CST building.
+    pub node_cache: cstree::build::NodeCache<'static>,
 }
 
 impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
@@ -616,8 +668,14 @@ impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
             variables: EraVarPool::new(),
             node_cache: cstree::build::NodeCache::new(),
             chara_templates: BTreeMap::new(),
-            csv_indices: HashMap::new(),
+            csv_indices: FxHashMap::default(),
+            bc_chunks: Vec::new(),
+            func_entries: Default::default(),
         }
+    }
+
+    pub fn make_diag(&self) -> Diagnostic<'static> {
+        Diagnostic::with_file(self.active_source.clone())
     }
 
     pub fn emit_diag(&mut self, diag: Diagnostic) {
@@ -626,8 +684,20 @@ impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
         diag.cancel();
     }
 
-    pub fn interner(&self) -> &cstree::interning::TokenInterner {
+    pub fn interner(&self) -> &TokenInterner {
         self.node_cache.interner()
+    }
+
+    pub fn interner_mut(&mut self) -> &mut TokenInterner {
+        self.node_cache.interner_mut()
+    }
+
+    /// # Safety
+    ///
+    /// You must ensure that the returned reference is not used after the `EraCompilerCtx` is dropped.
+    /// [`lasso::Rodeo`] guarantees that the strings are not deallocated until the interner is dropped.
+    pub unsafe fn resolve_static_str(&self, key: TokenKey) -> &'static str {
+        unsafe { std::mem::transmute(self.interner().resolve(key)) }
     }
 }
 
@@ -636,9 +706,9 @@ pub trait EraCompilerCallback {
     fn emit_diag(&mut self, diag: &DiagnosticProvider);
     // ----- Virtual Machine -----
     fn on_get_rand(&mut self) -> u64;
-    fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
+    fn on_print(&mut self, content: &str, flags: EraPrintExtendedFlags);
     // TODO: Debug is a global flag inside VM?
-    fn on_debugprint(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags);
+    fn on_debugprint(&mut self, content: &str, flags: EraPrintExtendedFlags);
     fn on_html_print(&mut self, content: &str);
     fn on_wait(&mut self, any_key: bool, is_force: bool);
     fn on_twait(&mut self, duration: i64, is_force: bool);
@@ -694,12 +764,7 @@ pub trait EraCompilerCallback {
     fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error>;
     fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error>;
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error>;
-    fn on_print_button(
-        &mut self,
-        content: &str,
-        value: &str,
-        flags: crate::bytecode::PrintExtendedFlags,
-    );
+    fn on_print_button(&mut self, content: &str, value: &str, flags: EraPrintExtendedFlags);
     // Graphics subsystem
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64;
     fn on_gcreatefromfile(&mut self, gid: i64, path: &str) -> i64;
@@ -781,9 +846,15 @@ pub enum EraCompilerFileSeekMode {
 #[derive_ReprC]
 #[repr(u32)]
 pub enum EraExecutionBreakReason {
+    /// User requested break from inside the callback.
     CallbackBreak,
+    /// User requested break from the stop flag.
     StopFlag,
+    /// Comes from the statement `THROW`.
+    CodeThrows,
+    /// Comes from the instruction `FailWithMsg`.
     IllegalInstruction,
+    /// Comes from the instruction `DebugBreak`.
     DebugBreakInstruction,
 }
 
@@ -1018,15 +1089,15 @@ impl Drop for Diagnostic<'_> {
 
 pub struct DiagnosticProvider<'a, 'src> {
     diag: &'a Diagnostic<'src>,
-    src_map: &'a HashMap<ArcStr, EraSourceFile>,
-    resolver: &'a cstree::interning::TokenInterner,
+    src_map: &'a FxIndexMap<ArcStr, EraSourceFile>,
+    resolver: &'a TokenInterner,
 }
 
 impl<'a, 'src> DiagnosticProvider<'a, 'src> {
     pub fn new(
         diag: &'a Diagnostic<'src>,
-        src_map: &'a HashMap<ArcStr, EraSourceFile>,
-        resolver: &'a cstree::interning::TokenInterner,
+        src_map: &'a FxIndexMap<ArcStr, EraSourceFile>,
+        resolver: &'a TokenInterner,
     ) -> Self {
         DiagnosticProvider {
             diag,
@@ -1047,24 +1118,110 @@ impl<'a, 'src> DiagnosticProvider<'a, 'src> {
     ) -> Option<DiagnosticResolveSrcSpanResult> {
         use bstr::ByteSlice;
 
-        // return None;
-
-        // let src_file = self.src_map.get(filename)?;
-        // let src_root =
-        //     cstree::syntax::SyntaxNode::<EraTokenKind>::new_root(src_file.orig_root.clone());
-        // let src = src_root.display(self.resolver);
+        let src_offset;
         let src = if filename.is_empty() {
             if self.diag.filename.is_empty() {
                 return None;
             }
+            src_offset = 0;
             Cow::Borrowed(self.diag.src)
-        } else if std::ptr::eq(self.diag.filename.as_str(), filename) && !self.diag.src.is_empty() {
+        } else if self.diag.filename.as_str() == filename && !self.diag.src.is_empty() {
+            src_offset = 0;
             Cow::Borrowed(self.diag.src)
         } else {
+            // Only resolve necessary lines from CST to improve performance.
+            let input_span = span;
+            let len = span.len();
+            let resolver = self.resolver;
             let src_file = self.src_map.get(&ArcStr::from(filename))?;
-            let src_root =
-                cstree::syntax::SyntaxNode::<EraTokenKind>::new_root(src_file.orig_root.clone());
-            Cow::Owned(src_root.display(self.resolver).into_bytes())
+            // NOTE: We can guarantee that `start_line` never overflows.
+            let start_line = src_file
+                .newline_pos
+                .partition_point(|&pos| pos <= span.start())
+                - 1;
+            let end_line = src_file
+                .newline_pos
+                .partition_point(|&pos| pos <= span.end());
+            let start_pos = src_file.newline_pos[start_line];
+            let end_pos = src_file
+                .newline_pos
+                .get(end_line)
+                .copied()
+                .unwrap_or_else(|| SrcPos(src_file.orig_root.text_len().into()));
+            let snippet_span = SrcSpan::with_ends(start_pos, end_pos);
+
+            // Find covering element first, then find the children elements.
+            let mut covering_snippet = String::new();
+            let mut node = &src_file.orig_root;
+            let mut span = SrcSpan::new(SrcPos(0), node.text_len().into());
+            let mut covering_snippet_start_pos = SrcPos(0);
+            if !span.contains_span(snippet_span) {
+                return None;
+            }
+            'outer: loop {
+                for i in node.children() {
+                    let i_len = i.text_len().into();
+                    span = SrcSpan::new(span.start(), i_len);
+                    if span.contains_span(snippet_span) {
+                        // Enter the covering element.
+                        node = match i {
+                            NodeOrToken::Node(n) => n,
+                            NodeOrToken::Token(t) => {
+                                covering_snippet += t.resolve_text::<EraTokenKind, _>(resolver);
+                                break 'outer;
+                            }
+                        };
+                        continue 'outer;
+                    }
+                    if span.intersects(snippet_span) {
+                        if covering_snippet.is_empty() {
+                            covering_snippet_start_pos = span.start();
+                        }
+                        i.write_display::<EraTokenKind, _>(resolver, &mut covering_snippet)
+                            .unwrap();
+                    } else if !covering_snippet.is_empty() {
+                        break 'outer;
+                    }
+                    span = SrcSpan::new(span.end(), 0);
+                }
+            }
+
+            // Trim the covering snippet to the actual snippet.
+            // if cfg!(debug_assertions) {
+            //     println!(
+            //         "covering_snippet: {:?}, len: {} -> {}",
+            //         covering_snippet,
+            //         covering_snippet.len(),
+            //         snippet_span.len()
+            //     );
+            // }
+            let covering_snippet_span =
+                SrcSpan::new(covering_snippet_start_pos, covering_snippet.len() as _);
+            covering_snippet.replace_range(
+                (covering_snippet.len()
+                    - ((covering_snippet_span.end().0 - snippet_span.end().0) as usize))..,
+                "",
+            );
+            covering_snippet.replace_range(
+                ..(snippet_span.start().0 - covering_snippet_start_pos.0) as usize,
+                "",
+            );
+            while covering_snippet.ends_with(['\r', '\n']) {
+                covering_snippet.pop();
+            }
+
+            let offset = (input_span.start().0 - snippet_span.start().0) as _;
+            let loc = SrcLoc {
+                line: (start_line + 1) as _,
+                col: covering_snippet[..offset as usize].chars().count() as _,
+            };
+
+            return Some(DiagnosticResolveSrcSpanResult {
+                snippet: covering_snippet,
+                offset,
+                loc,
+                len,
+            });
         };
 
         let start = span.start().0 as usize;
@@ -1109,7 +1266,7 @@ pub struct DiagnosticResolveSrcSpanResult {
 #[modular_bitfield::bitfield]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
-pub struct PrintExtendedFlags {
+pub struct EraPrintExtendedFlags {
     pub is_single: bool,
     pub use_kana: bool,
     pub ignore_color: bool,
@@ -1123,10 +1280,33 @@ pub struct PrintExtendedFlags {
 #[modular_bitfield::bitfield]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
-pub struct PadStringFlags {
+pub struct EraWaitFlags {
+    pub any_key: bool,
+    pub is_force: bool,
+    #[skip]
+    __: modular_bitfield::specifiers::B6,
+}
+
+#[modular_bitfield::bitfield]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub struct EraPadStringFlags {
     pub left_pad: bool,
     pub right_pad: bool,
+    #[skip]
     __: modular_bitfield::specifiers::B6,
+}
+
+#[modular_bitfield::bitfield]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub struct EraInputExtendedFlags {
+    pub is_string: bool,
+    pub is_one: bool,
+    pub is_timed: bool,
+    pub has_default_value: bool,
+    #[skip]
+    __: modular_bitfield::specifiers::B4,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
@@ -1140,13 +1320,13 @@ pub struct StrValue {
 }
 
 // NOTE: Arr*Value are used as variable references
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArrIntValue {
     pub vals: Vec<IntValue>,
     pub dims: EraVarDims,
     pub flags: EraValueFlags,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArrStrValue {
     pub vals: Vec<StrValue>,
     pub dims: EraVarDims,
@@ -1155,11 +1335,12 @@ pub struct ArrStrValue {
 
 #[modular_bitfield::bitfield]
 #[repr(u8)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct EraValueFlags {
     pub is_trap: bool,
     pub is_const: bool,
     pub is_charadata: bool,
+    #[skip]
     __: modular_bitfield::specifiers::B5,
 }
 
@@ -1281,7 +1462,7 @@ impl ArrStrValue {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub enum ValueKind {
     Int,
     Str,
@@ -1317,6 +1498,13 @@ impl ValueKind {
     pub fn is_str(&self) -> bool {
         matches!(self, ValueKind::Str | ValueKind::ArrStr)
     }
+    pub fn to_scalar(&self) -> ScalarValueKind {
+        use ValueKind::*;
+        match self {
+            Int | ArrInt => ScalarValueKind::Int,
+            Str | ArrStr => ScalarValueKind::Str,
+        }
+    }
 }
 
 //pub type Value = ptr_union::Union4<Box<IntValue>, Box<StrValue>, Box<ArrValue>, Box<()>>;
@@ -1328,16 +1516,16 @@ impl ValueKind {
 // >;
 pub type ValueInner = FlatValue;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Value(ValueInner);
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlatValue {
     Int(IntValue),
     Str(StrValue),
     ArrInt(Rc<RefCell<ArrIntValue>>),
     ArrStr(Rc<RefCell<ArrStrValue>>),
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefFlatValue<'a> {
     Int(&'a IntValue),
     Str(&'a StrValue),
@@ -1352,6 +1540,19 @@ impl RefFlatValue<'_> {
             Str(_) => ValueKind::Str,
             ArrInt(_) => ValueKind::ArrInt,
             ArrStr(_) => ValueKind::ArrStr,
+        }
+    }
+}
+
+impl Value {
+    pub fn inner_hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+
+        match self.as_unpacked() {
+            RefFlatValue::Int(x) => x.val.hash(state),
+            RefFlatValue::Str(x) => x.val.hash(state),
+            RefFlatValue::ArrInt(x) => x.borrow().vals.hash(state),
+            RefFlatValue::ArrStr(x) => x.borrow().vals.hash(state),
         }
     }
 }
@@ -1474,6 +1675,20 @@ impl Value {
             _ => None,
         }
     }
+    pub fn dims(&self) -> Option<EraVarDims> {
+        match self.as_unpacked() {
+            RefFlatValue::ArrInt(x) => Some(x.borrow().dims.clone()),
+            RefFlatValue::ArrStr(x) => Some(x.borrow().dims.clone()),
+            _ => None,
+        }
+    }
+    pub fn dims_cnt(&self) -> Option<usize> {
+        match self.as_unpacked() {
+            RefFlatValue::ArrInt(x) => Some(x.borrow().dims.len()),
+            RefFlatValue::ArrStr(x) => Some(x.borrow().dims.len()),
+            _ => None,
+        }
+    }
 }
 impl FlatValue {
     pub fn into_packed(self) -> Value {
@@ -1586,6 +1801,46 @@ impl EraVarPool {
     }
 
     #[must_use]
+    pub fn add_var_force(&mut self, info: EraVarInfo) -> (usize, bool) {
+        let is_replaced;
+        let (var_idx, info) = match self.var_names.entry(info.name.clone()) {
+            hashbrown::hash_map::Entry::Occupied(e) => {
+                // Update existing variable
+                is_replaced = true;
+
+                let var_idx = *e.get();
+                self.init_vars.retain(|x| x.0 != var_idx);
+                self.chara_var_idxs.retain(|&x| x != var_idx);
+                self.normal_var_idxs.retain(|&x| x != var_idx);
+                (var_idx, &mut self.vars[var_idx])
+            }
+            hashbrown::hash_map::Entry::Vacant(e) => {
+                // Add new variable
+                is_replaced = false;
+
+                let var_idx = self.vars.len();
+                e.insert(var_idx);
+                self.vars.push(info);
+                (var_idx, &mut self.vars[var_idx])
+            }
+        };
+
+        if !info.is_const && !info.val.is_default() {
+            // When resetting, we need to keep original variable values
+            self.init_vars.push((var_idx, info.val.clone()));
+            info.val = info.val.deep_clone();
+        }
+
+        if info.is_charadata {
+            self.chara_var_idxs.push(var_idx);
+        } else {
+            self.normal_var_idxs.push(var_idx);
+        }
+
+        (var_idx, is_replaced)
+    }
+
+    #[must_use]
     pub fn get_var(&self, name: &str) -> Option<&Value> {
         self.var_names
             .get(Ascii::new_str(name))
@@ -1626,6 +1881,14 @@ impl EraVarPool {
 
     pub fn iter(&self) -> impl Iterator<Item = &EraVarInfo> {
         self.vars.iter()
+    }
+
+    pub fn chara_vars_iter(&self) -> impl Iterator<Item = &EraVarInfo> {
+        self.chara_var_idxs.iter().map(|&x| &self.vars[x])
+    }
+
+    pub fn normal_vars_iter(&self) -> impl Iterator<Item = &EraVarInfo> {
+        self.normal_var_idxs.iter().map(|&x| &self.vars[x])
     }
 }
 
@@ -1817,9 +2080,23 @@ impl ScalarValue {
             self
         }
     }
+
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            ScalarValue::Int(x) => Some(*x),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            ScalarValue::Str(x) => Some(x),
+            _ => None,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub enum ScalarValueKind {
     Int,
     Str,
@@ -1869,9 +2146,7 @@ pub trait CstreeNodeOrTokenExt2 {
         R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized;
 }
 
-impl<S: cstree::Syntax, D> CstreeNodeOrTokenExt2
-    for cstree::util::NodeOrToken<SyntaxNode<S, D>, SyntaxToken<S, D>>
-{
+impl<'a, S: cstree::Syntax, D> CstreeNodeOrTokenExt2 for SyntaxElementRef<'a, S, D> {
     fn src_span(&self) -> SrcSpan {
         match self {
             cstree::util::NodeOrToken::Node(x) => x.text_range().into(),
@@ -1883,9 +2158,1430 @@ impl<S: cstree::Syntax, D> CstreeNodeOrTokenExt2
     where
         R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized,
     {
+        self.display(resolver)
+    }
+}
+
+impl<S: cstree::Syntax, D> CstreeNodeOrTokenExt2 for SyntaxElement<S, D> {
+    fn src_span(&self) -> SrcSpan {
+        self.text_range().into()
+    }
+
+    fn resolve_text<R>(&self, resolver: &R) -> String
+    where
+        R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized,
+    {
+        self.display(resolver)
+    }
+}
+
+pub trait CstreeGreenTokenExt {
+    fn resolve_text<'r, S: Syntax, R>(&self, resolver: &'r R) -> &'r str
+    where
+        R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized;
+}
+
+impl CstreeGreenTokenExt for cstree::green::GreenToken {
+    fn resolve_text<'r, S: Syntax, R>(&self, resolver: &'r R) -> &'r str
+    where
+        R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized,
+    {
+        let kind = S::from_raw(self.kind());
+        kind.static_text().or_else(|| self.text(resolver)).unwrap()
+    }
+}
+
+pub trait CstreeGreenExt {
+    fn write_display<'r, S: Syntax, R>(
+        &self,
+        resolver: &'r R,
+        target: &mut impl std::fmt::Write,
+    ) -> std::fmt::Result
+    where
+        R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized;
+}
+
+impl CstreeGreenExt for cstree::green::GreenToken {
+    fn write_display<'r, S: Syntax, R>(
+        &self,
+        resolver: &'r R,
+        target: &mut impl std::fmt::Write,
+    ) -> std::fmt::Result
+    where
+        R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized,
+    {
+        target.write_str(self.resolve_text::<S, _>(resolver))
+    }
+}
+
+impl CstreeGreenExt for cstree::green::GreenNode {
+    fn write_display<'r, S: Syntax, R>(
+        &self,
+        resolver: &'r R,
+        target: &mut impl std::fmt::Write,
+    ) -> std::fmt::Result
+    where
+        R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized,
+    {
+        for child in self.children() {
+            match child {
+                NodeOrToken::Node(x) => x.write_display::<S, _>(resolver, target)?,
+                NodeOrToken::Token(x) => x.write_display::<S, _>(resolver, target)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CstreeGreenExt for NodeOrToken<cstree::green::GreenNode, cstree::green::GreenToken> {
+    fn write_display<'r, S: Syntax, R>(
+        &self,
+        resolver: &'r R,
+        target: &mut impl std::fmt::Write,
+    ) -> std::fmt::Result
+    where
+        R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized,
+    {
         match self {
-            cstree::util::NodeOrToken::Node(x) => x.display(resolver),
-            cstree::util::NodeOrToken::Token(x) => x.resolve_text(resolver).to_owned(),
+            NodeOrToken::Node(x) => x.write_display::<S, _>(resolver, target),
+            NodeOrToken::Token(x) => x.write_display::<S, _>(resolver, target),
         }
     }
+}
+
+impl CstreeGreenExt for NodeOrToken<&cstree::green::GreenNode, &cstree::green::GreenToken> {
+    fn write_display<'r, S: Syntax, R>(
+        &self,
+        resolver: &'r R,
+        target: &mut impl std::fmt::Write,
+    ) -> std::fmt::Result
+    where
+        R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized,
+    {
+        match self {
+            NodeOrToken::Node(x) => x.write_display::<S, _>(resolver, target),
+            NodeOrToken::Token(x) => x.write_display::<S, _>(resolver, target),
+        }
+    }
+}
+
+#[derive_ReprC]
+#[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
+pub enum EraAlignmentKind {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive_ReprC]
+#[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
+pub enum EraPriBytecode {
+    /// Fails the execution with a message, stored on stack.
+    FailWithMsg,
+    /// Issues a debug interrupt for current control flow.
+    DebugBreak,
+    /// Ends the execution normally.
+    Quit,
+    /// Fails the execution with a message, stored on stack.
+    Throw,
+    /// No operation.
+    Nop,
+    ReturnVoid,
+    ReturnInt,
+    ReturnStr,
+    /// `(args..., func_idx: Int) -> return value of function`
+    ///
+    /// `[imm8: count of arguments]`
+    CallFun,
+    /// `(args..., func_name: Str) -> function exists`
+    ///
+    /// `[imm8: count of arguments]`
+    TryCallFun,
+    /// `(args..., func_name: Str) -> Void`
+    ///
+    /// `[imm8: count of arguments]`
+    TryCallFunForce,
+    /// `(func_idx: Int) -> Void`
+    ///
+    /// Resets the current call stack, then restarts the execution at
+    /// the specified function.
+    ///
+    /// WARN: The function must not take any arguments.
+    /// Failure to do so will result in unspecified behavior.
+    RestartExecAtFun,
+    JumpWW,
+    /// Jumps if the top of the stack is a truthy integer.
+    JumpIfWW,
+    /// Jumps if the top of the stack is a falsy integer.
+    JumpIfNotWW,
+    /// Pushes a constant string (from interner) onto the stack.
+    LoadConstStr,
+    LoadImm8,
+    LoadImm16,
+    /// Pushes a constant integer onto the stack, encoded in the instruction. Sign-extended.
+    LoadImm32,
+    /// Pushes a constant integer onto the stack, encoded in the instruction.
+    LoadImm64,
+    /// `[imm32: global variable index]`
+    ///
+    /// Pushes a variable from global frame onto the stack, encoded in the instruction.
+    LoadVarWW,
+    /// `[imm32: interned variable index]`
+    ///
+    /// Like `LoadVar`, but deep clones the value. Usually used for constant values.
+    /// For example, `#DIM DYNAMIC x = 1, 2, 3` will cause the compiler to add
+    /// an interned `[1, 2, 3]` into the variable pool, then issue a `LoadConstVar`.
+    LoadConstVarWW,
+    /// `[imm8: local variable index]`
+    ///
+    /// Pushes a variable from local frame onto the stack, encoded in the instruction.
+    LoadLocalVar,
+    Pop,
+    /// `[imm8: count to pop]`
+    PopAllN,
+    /// `[imm8: index to pop, from stack top]`
+    PopOneN,
+    Swap2,
+    Duplicate,
+    /// `[imm8: count of duplicates]`
+    DuplicateAllN,
+    /// `[imm8: index of duplicate, from stack top]`
+    DuplicateOneN,
+    AddInt,
+    SubInt,
+    MulInt,
+    DivInt,
+    ModInt,
+    NegInt,
+    BitAndInt,
+    BitOrInt,
+    BitXorInt,
+    BitNotInt,
+    ShlInt,
+    ShrInt,
+    CmpIntLT,
+    CmpIntLEq,
+    CmpIntGT,
+    CmpIntGEq,
+    CmpIntEq,
+    CmpIntNEq,
+    CmpStrLT,
+    CmpStrLEq,
+    CmpStrGT,
+    CmpStrGEq,
+    CmpStrEq,
+    CmpStrNEq,
+    LogicalNot,
+    MaxInt,
+    MinInt,
+    ClampInt,
+    InRangeInt,
+    InRangeStr,
+    GetBit,
+    SetBit,
+    ClearBit,
+    InvertBit,
+    /// `(strings...: Str) -> (str: Str)`
+    ///
+    /// `[imm8: count of strings]`
+    ///
+    /// Concatenates strings on the stack.
+    BuildString,
+    /// `(str: Str, width: Int) -> (str: Str)`
+    ///
+    /// `[imm8: EraPadStringFlags]`
+    PadString,
+    /// `(str: Str, count: Int) -> (str: Str)`
+    RepeatStr,
+    /// `[imm8: count of indices]`
+    BuildArrIdxFromMD,
+    /// `(arr: Arr, idx: Int) -> (val: Any)`
+    GetArrValFlat,
+    /// `(arr: Arr, idx: Int, val: Any) -> (arr: Arr)`
+    SetArrValFlat,
+    /// `(val: Int, factor_float_encoded: Int) -> (val: Int)`
+    TimesFloat,
+    /// `(func_name: Str) -> (func_exists: Int)`
+    ///
+    /// Whether the function exists.
+    FunExists,
+    ReplaceStr,
+    SubStr,
+    SubStrU,
+    StrFind,
+    StrFindU,
+    StrLen,
+    StrLenU,
+    CountSubStr,
+    StrCharAtU,
+    IntToStr,
+    StrToInt,
+    FormatIntToStr,
+    StrIsValidInt,
+    StrToUpper,
+    StrToLower,
+    /// `(str: Str) -> (str: Str)`
+    ///
+    /// Converts characters in the string to half-width, if they have a full-width equivalent.
+    StrToHalf,
+    /// `(str: Str) -> (str: Str)`
+    ///
+    /// Converts characters in the string to full-width, if they have a half-width equivalent.
+    StrToFull,
+    BuildBarStr,
+    EscapeRegexStr,
+    /// `(str: Str, pos: Int) -> (ch: Int)`
+    ///
+    /// Returns the Unicode code point of the character at the specified position.
+    EncodeToUnicode,
+    UnicodeToStr,
+    IntToStrWithBase,
+    HtmlTagSplit,
+    HtmlToPlainText,
+    HtmlEscape,
+    PowerInt,
+    SqrtInt,
+    CbrtInt,
+    LogInt,
+    Log10Int,
+    ExponentInt,
+    AbsInt,
+    GroupMatch,
+    ArrayCountMatches,
+    CArrayCountMatches,
+    SumArray,
+    SumCArray,
+    MaxArray,
+    MaxCArray,
+    MinArray,
+    MinCArray,
+    InRangeArray,
+    InRangeCArray,
+    ArrayRemove,
+    ArraySortAsc,
+    ArraySortDesc,
+    ArrayMSort,
+    ArrayCopy,
+    ArrayShift,
+    // -----
+    Print,
+    PrintLine,
+    /// `[imm8: EraPrintExtendedFlags]`
+    PrintExtended,
+    ReuseLastLine,
+    ClearLine,
+    /// `[imm8: EraWaitFlags]`
+    Wait,
+    TWait,
+    /// `[imm8: EraInputExtendedFlags]`
+    Input,
+    KbGetKeyState, // Returns i64 with b15 = <key down>, b0 = <key triggered>
+    /// `() -> (func_name: Str)`
+    ///
+    /// Get the name of the caller function. Returns an empty string if current function
+    /// is the only one in the call stack.
+    GetCallerFunName,
+    GetCharaNum,
+    CsvGetNum,
+    GetRandomMax,
+    /// Extra (fused) operations group #1. Introduced for performance reasons.
+    ExtOp1,
+}
+
+#[derive_ReprC]
+#[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
+pub enum EraExtBytecode1 {
+    RowAssign,
+    /// `(var: Arr, flat_idx: Int, end: Int, step: Int) -> (Self, do_next: Int)`
+    ///
+    /// Steps the current FOR loop, and returns whether the loop should continue.
+    ForLoopStep,
+    ExtendStrToWidth,
+    HtmlPrint,
+    PrintButton,
+    PrintImg,
+    // PrintImg2,
+    // PrintImg3,
+    PrintImg4,
+    SplitString,
+    GCreate,
+    GCreateFromFile,
+    GDispose,
+    GCreated,
+    GDrawSprite,
+    GDrawSpriteWithColorMatrix,
+    GClear,
+    SpriteCreate,
+    SpriteDispose,
+    SpriteCreated,
+    SpriteAnimeCreate,
+    SpriteAnimeAddFrame,
+    SpriteWidth,
+    SpriteHeight,
+    CheckFont,
+    SaveText,
+    LoadText,
+    FindElement,
+    FindLastElement,
+    FindChara,
+    FindLastChara,
+    VarSet,
+    CVarSet,
+    GetVarSize,
+    GetVarAllSize,
+    GetHostTimeRaw,
+    GetHostTime,
+    GetHostTimeS,
+    CsvGetProp2,
+    CharaCsvExists,
+    GetPalamLv,
+    GetExpLv,
+    AddChara,
+    AddVoidChara,
+    PickUpChara,
+    DeleteChara,
+    SwapChara,
+    AddCopyChara,
+    LoadData,
+    SaveData,
+    CheckData,
+    GetCharaRegNum,
+    LoadGlobal,
+    SaveGlobal,
+    ResetData,
+    ResetCharaStain,
+    SaveChara,
+    LoadChara,
+    GetConfig,
+    GetConfigS,
+    FindCharaDataFile,
+}
+
+/// Strongly typed version of Era bytecode. All integer values are encoded in platform-endian.
+#[derive(Debug, Clone)]
+pub enum EraBytecodeKind {
+    FailWithMsg,
+    DebugBreak,
+    Quit,
+    Throw,
+    Nop,
+    ReturnVoid,
+    ReturnInt,
+    ReturnStr,
+    CallFun { args_cnt: u8 },
+    TryCallFun { args_cnt: u8 },
+    TryCallFunForce { args_cnt: u8 },
+    RestartExecAtFun,
+    JumpWW { offset: i32 },
+    JumpIfWW { offset: i32 },
+    JumpIfNotWW { offset: i32 },
+    LoadConstStr { idx: u32 },
+    LoadImm8 { imm: i8 },
+    LoadImm16 { imm: i16 },
+    LoadImm32 { imm: i32 },
+    LoadImm64 { imm: i64 },
+    LoadVarWW { idx: u32 },
+    LoadConstVarWW { idx: u32 },
+    LoadLocalVar { idx: u8 },
+    Pop,
+    PopAllN { count: u8 },
+    PopOneN { idx: u8 },
+    Swap2,
+    Duplicate,
+    DuplicateAllN { count: u8 },
+    DuplicateOneN { idx: u8 },
+    AddInt,
+    SubInt,
+    MulInt,
+    DivInt,
+    ModInt,
+    NegInt,
+    BitAndInt,
+    BitOrInt,
+    BitXorInt,
+    BitNotInt,
+    ShlInt,
+    ShrInt,
+    CmpIntLT,
+    CmpIntLEq,
+    CmpIntGT,
+    CmpIntGEq,
+    CmpIntEq,
+    CmpIntNEq,
+    CmpStrLT,
+    CmpStrLEq,
+    CmpStrGT,
+    CmpStrGEq,
+    CmpStrEq,
+    CmpStrNEq,
+    LogicalNot,
+    MaxInt,
+    MinInt,
+    ClampInt,
+    InRangeInt,
+    InRangeStr,
+    GetBit,
+    SetBit,
+    ClearBit,
+    InvertBit,
+    BuildString { count: u8 },
+    PadString { flags: EraPadStringFlags },
+    RepeatStr,
+    BuildArrIdxFromMD { count: u8 },
+    GetArrValFlat,
+    SetArrValFlat,
+    TimesFloat,
+    FunExists,
+    ReplaceStr,
+    SubStr,
+    SubStrU,
+    StrFind,
+    StrFindU,
+    StrLen,
+    StrLenU,
+    CountSubStr,
+    StrCharAtU,
+    IntToStr,
+    StrToInt,
+    FormatIntToStr,
+    StrIsValidInt,
+    StrToUpper,
+    StrToLower,
+    StrToHalf,
+    StrToFull,
+    BuildBarStr,
+    EscapeRegexStr,
+    EncodeToUnicode,
+    UnicodeToStr,
+    IntToStrWithBase,
+    HtmlTagSplit,
+    HtmlToPlainText,
+    HtmlEscape,
+    PowerInt,
+    SqrtInt,
+    CbrtInt,
+    LogInt,
+    Log10Int,
+    ExponentInt,
+    AbsInt,
+    GroupMatch,
+    ArrayCountMatches,
+    CArrayCountMatches,
+    SumArray,
+    SumCArray,
+    MaxArray,
+    MaxCArray,
+    MinArray,
+    MinCArray,
+    InRangeArray,
+    InRangeCArray,
+    ArrayRemove,
+    ArraySortAsc,
+    ArraySortDesc,
+    ArrayMSort { subs_cnt: u8 },
+    ArrayCopy,
+    ArrayShift,
+    // -----
+    Print,
+    PrintLine,
+    PrintExtended { flags: EraPrintExtendedFlags },
+    ReuseLastLine,
+    ClearLine,
+    Wait { flags: EraWaitFlags },
+    TWait,
+    Input { flags: EraInputExtendedFlags },
+    KbGetKeyState,
+    GetCallerFuncName,
+    GetCharaNum,
+    CsvGetNum { kind: EraCsvVarKind },
+    GetRandomMax,
+    // ----- ExtOp1 -----
+    RowAssign { dims_cnt: u8, vals_cnt: u8 },
+    ForLoopStep,
+    ExtendStrToWidth,
+    HtmlPrint,
+    PrintButton { flags: EraPrintExtendedFlags },
+    PrintImg,
+    PrintImg4,
+    SplitString,
+    GCreate,
+    GCreateFromFile,
+    GDispose,
+    GCreated,
+    GDrawSprite,
+    GDrawSpriteWithColorMatrix,
+    GClear,
+    SpriteCreate,
+    SpriteDispose,
+    SpriteCreated,
+    SpriteAnimeCreate,
+    SpriteAnimeAddFrame,
+    SpriteWidth,
+    SpriteHeight,
+    CheckFont,
+    SaveText,
+    LoadText,
+    FindElement,
+    FindLastElement,
+    FindChara,
+    FindLastChara,
+    VarSet,
+    CVarSet,
+    GetVarSize,
+    GetVarAllSize,
+    GetHostTimeRaw,
+    GetHostTime,
+    GetHostTimeS,
+    CsvGetProp2,
+    CharaCsvExists,
+    GetPalamLv,
+    GetExpLv,
+    AddChara,
+    AddVoidChara,
+    PickUpChara { charas_cnt: u8 },
+    DeleteChara { charas_cnt: u8 },
+    SwapChara,
+    AddCopyChara,
+    LoadData,
+    SaveData,
+    CheckData,
+    GetCharaRegNum,
+    LoadGlobal,
+    SaveGlobal,
+    ResetData,
+    ResetCharaStain,
+    SaveChara { charas_cnt: u8 },
+    LoadChara,
+    GetConfig,
+    GetConfigS,
+    FindCharaDataFile,
+}
+
+impl EraBytecodeKind {
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        use EraBytecodeKind::*;
+        use EraExtBytecode1 as Ext1;
+        use EraPriBytecode as Pri;
+        let byte0 = *bytes.get(0)?;
+        let byte1 = || bytes.get(1).copied();
+        let byte2 = || bytes.get(1).copied();
+        let byte1_3 = || bytes.get(1..3);
+        let byte1_5 = || bytes.get(1..5);
+        let byte1_9 = || bytes.get(1..9);
+        let get = |idx: usize| bytes.get(idx).copied();
+        let gets = |s: usize, e: usize| bytes.get(s..e);
+        match num_traits::FromPrimitive::from_u8(byte0)? {
+            Pri::FailWithMsg => Some(FailWithMsg),
+            Pri::DebugBreak => Some(DebugBreak),
+            Pri::Quit => Some(Quit),
+            Pri::Throw => Some(Throw),
+            Pri::Nop => Some(Nop),
+            Pri::ReturnVoid => Some(ReturnVoid),
+            Pri::ReturnInt => Some(ReturnInt),
+            Pri::ReturnStr => Some(ReturnStr),
+            Pri::CallFun => Some(CallFun { args_cnt: byte1()? }),
+            Pri::TryCallFun => Some(TryCallFun { args_cnt: byte1()? }),
+            Pri::TryCallFunForce => Some(TryCallFunForce { args_cnt: byte1()? }),
+            Pri::RestartExecAtFun => Some(RestartExecAtFun),
+            Pri::JumpWW => Some(JumpWW {
+                offset: i32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
+            }),
+            Pri::JumpIfWW => Some(JumpIfWW {
+                offset: i32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
+            }),
+            Pri::JumpIfNotWW => Some(JumpIfNotWW {
+                offset: i32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
+            }),
+            Pri::LoadConstStr => Some(LoadConstStr {
+                idx: u32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
+            }),
+            Pri::LoadImm8 => Some(LoadImm8 { imm: byte1()? as _ }),
+            Pri::LoadImm16 => Some(LoadImm16 {
+                imm: i16::from_ne_bytes(byte1_3()?.try_into().unwrap()),
+            }),
+            Pri::LoadImm32 => Some(LoadImm32 {
+                imm: i32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
+            }),
+            Pri::LoadImm64 => Some(LoadImm64 {
+                imm: i64::from_ne_bytes(byte1_9()?.try_into().unwrap()),
+            }),
+            Pri::LoadVarWW => Some(LoadVarWW {
+                idx: u32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
+            }),
+            Pri::LoadConstVarWW => Some(LoadConstVarWW {
+                idx: u32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
+            }),
+            Pri::LoadLocalVar => Some(LoadLocalVar { idx: byte1()? }),
+            Pri::Pop => Some(Pop),
+            Pri::PopAllN => Some(PopAllN { count: byte1()? }),
+            Pri::PopOneN => Some(PopOneN { idx: byte1()? }),
+            Pri::Swap2 => Some(Swap2),
+            Pri::Duplicate => Some(Duplicate),
+            Pri::DuplicateAllN => Some(DuplicateAllN { count: byte1()? }),
+            Pri::DuplicateOneN => Some(DuplicateOneN { idx: byte1()? }),
+            Pri::AddInt => Some(AddInt),
+            Pri::SubInt => Some(SubInt),
+            Pri::MulInt => Some(MulInt),
+            Pri::DivInt => Some(DivInt),
+            Pri::ModInt => Some(ModInt),
+            Pri::NegInt => Some(NegInt),
+            Pri::BitAndInt => Some(BitAndInt),
+            Pri::BitOrInt => Some(BitOrInt),
+            Pri::BitXorInt => Some(BitXorInt),
+            Pri::BitNotInt => Some(BitNotInt),
+            Pri::ShlInt => Some(ShlInt),
+            Pri::ShrInt => Some(ShrInt),
+            Pri::CmpIntLT => Some(CmpIntLT),
+            Pri::CmpIntLEq => Some(CmpIntLEq),
+            Pri::CmpIntGT => Some(CmpIntGT),
+            Pri::CmpIntGEq => Some(CmpIntGEq),
+            Pri::CmpIntEq => Some(CmpIntEq),
+            Pri::CmpIntNEq => Some(CmpIntNEq),
+            Pri::CmpStrLT => Some(CmpStrLT),
+            Pri::CmpStrLEq => Some(CmpStrLEq),
+            Pri::CmpStrGT => Some(CmpStrGT),
+            Pri::CmpStrGEq => Some(CmpStrGEq),
+            Pri::CmpStrEq => Some(CmpStrEq),
+            Pri::CmpStrNEq => Some(CmpStrNEq),
+            Pri::LogicalNot => Some(LogicalNot),
+            Pri::MaxInt => Some(MaxInt),
+            Pri::MinInt => Some(MinInt),
+            Pri::ClampInt => Some(ClampInt),
+            Pri::InRangeInt => Some(InRangeInt),
+            Pri::InRangeStr => Some(InRangeStr),
+            Pri::GetBit => Some(GetBit),
+            Pri::SetBit => Some(SetBit),
+            Pri::ClearBit => Some(ClearBit),
+            Pri::InvertBit => Some(InvertBit),
+            Pri::BuildString => Some(BuildString { count: byte1()? }),
+            Pri::PadString => Some(PadString {
+                flags: EraPadStringFlags::from(byte1()?),
+            }),
+            Pri::RepeatStr => Some(RepeatStr),
+            Pri::BuildArrIdxFromMD => Some(BuildArrIdxFromMD { count: byte1()? }),
+            Pri::GetArrValFlat => Some(GetArrValFlat),
+            Pri::SetArrValFlat => Some(SetArrValFlat),
+            Pri::TimesFloat => Some(TimesFloat),
+            Pri::FunExists => Some(FunExists),
+            Pri::ReplaceStr => Some(ReplaceStr),
+            Pri::SubStr => Some(SubStr),
+            Pri::SubStrU => Some(SubStrU),
+            Pri::StrFind => Some(StrFind),
+            Pri::StrFindU => Some(StrFindU),
+            Pri::StrLen => Some(StrLen),
+            Pri::StrLenU => Some(StrLenU),
+            Pri::CountSubStr => Some(CountSubStr),
+            Pri::StrCharAtU => Some(StrCharAtU),
+            Pri::IntToStr => Some(IntToStr),
+            Pri::StrToInt => Some(StrToInt),
+            Pri::FormatIntToStr => Some(FormatIntToStr),
+            Pri::StrIsValidInt => Some(StrIsValidInt),
+            Pri::StrToUpper => Some(StrToUpper),
+            Pri::StrToLower => Some(StrToLower),
+            Pri::StrToHalf => Some(StrToHalf),
+            Pri::StrToFull => Some(StrToFull),
+            Pri::BuildBarStr => Some(BuildBarStr),
+            Pri::EscapeRegexStr => Some(EscapeRegexStr),
+            Pri::EncodeToUnicode => Some(EncodeToUnicode),
+            Pri::UnicodeToStr => Some(UnicodeToStr),
+            Pri::IntToStrWithBase => Some(IntToStrWithBase),
+            Pri::HtmlTagSplit => Some(HtmlTagSplit),
+            Pri::HtmlToPlainText => Some(HtmlToPlainText),
+            Pri::HtmlEscape => Some(HtmlEscape),
+            Pri::PowerInt => Some(PowerInt),
+            Pri::SqrtInt => Some(SqrtInt),
+            Pri::CbrtInt => Some(CbrtInt),
+            Pri::LogInt => Some(LogInt),
+            Pri::Log10Int => Some(Log10Int),
+            Pri::ExponentInt => Some(ExponentInt),
+            Pri::AbsInt => Some(AbsInt),
+            Pri::GroupMatch => Some(GroupMatch),
+            Pri::ArrayCountMatches => Some(ArrayCountMatches),
+            Pri::CArrayCountMatches => Some(CArrayCountMatches),
+            Pri::SumArray => Some(SumArray),
+            Pri::SumCArray => Some(SumCArray),
+            Pri::MaxArray => Some(MaxArray),
+            Pri::MaxCArray => Some(MaxCArray),
+            Pri::MinArray => Some(MinArray),
+            Pri::MinCArray => Some(MinCArray),
+            Pri::InRangeArray => Some(InRangeArray),
+            Pri::InRangeCArray => Some(InRangeCArray),
+            Pri::ArrayRemove => Some(ArrayRemove),
+            Pri::ArraySortAsc => Some(ArraySortAsc),
+            Pri::ArraySortDesc => Some(ArraySortDesc),
+            Pri::ArrayMSort => Some(ArrayMSort { subs_cnt: byte1()? }),
+            Pri::ArrayCopy => Some(ArrayCopy),
+            Pri::ArrayShift => Some(ArrayShift),
+            Pri::Print => Some(Print),
+            Pri::PrintLine => Some(PrintLine),
+            Pri::PrintExtended => Some(PrintExtended {
+                flags: EraPrintExtendedFlags::from(byte1()?),
+            }),
+            Pri::ReuseLastLine => Some(ReuseLastLine),
+            Pri::ClearLine => Some(ClearLine),
+            Pri::Wait => Some(Wait {
+                flags: EraWaitFlags::from(byte1()?),
+            }),
+            Pri::TWait => Some(TWait),
+            Pri::Input => Some(Input {
+                flags: EraInputExtendedFlags::from(byte1()?),
+            }),
+            Pri::KbGetKeyState => Some(KbGetKeyState),
+            Pri::GetCallerFunName => Some(GetCallerFuncName),
+            Pri::GetCharaNum => Some(GetCharaNum),
+            Pri::CsvGetNum => Some(CsvGetNum {
+                kind: EraCsvVarKind::try_from_i(byte1()?)?,
+            }),
+            Pri::GetRandomMax => Some(GetRandomMax),
+            // ----- ExtOp1 -----
+            Pri::ExtOp1 => match num_traits::FromPrimitive::from_u8(get(1)?)? {
+                Ext1::RowAssign => Some(RowAssign {
+                    dims_cnt: get(2)?,
+                    vals_cnt: get(3)?,
+                }),
+                Ext1::ForLoopStep => Some(ForLoopStep),
+                Ext1::ExtendStrToWidth => Some(ExtendStrToWidth),
+                Ext1::HtmlPrint => Some(HtmlPrint),
+                Ext1::PrintButton => Some(PrintButton {
+                    flags: EraPrintExtendedFlags::from(get(2)?),
+                }),
+                Ext1::PrintImg => Some(PrintImg),
+                Ext1::PrintImg4 => Some(PrintImg4),
+                Ext1::SplitString => Some(SplitString),
+                Ext1::GCreate => Some(GCreate),
+                Ext1::GCreateFromFile => Some(GCreateFromFile),
+                Ext1::GDispose => Some(GDispose),
+                Ext1::GCreated => Some(GCreated),
+                Ext1::GDrawSprite => Some(GDrawSprite),
+                Ext1::GDrawSpriteWithColorMatrix => Some(GDrawSpriteWithColorMatrix),
+                Ext1::GClear => Some(GClear),
+                Ext1::SpriteCreate => Some(SpriteCreate),
+                Ext1::SpriteDispose => Some(SpriteDispose),
+                Ext1::SpriteCreated => Some(SpriteCreated),
+                Ext1::SpriteAnimeCreate => Some(SpriteAnimeCreate),
+                Ext1::SpriteAnimeAddFrame => Some(SpriteAnimeAddFrame),
+                Ext1::SpriteWidth => Some(SpriteWidth),
+                Ext1::SpriteHeight => Some(SpriteHeight),
+                Ext1::CheckFont => Some(CheckFont),
+                Ext1::SaveText => Some(SaveText),
+                Ext1::LoadText => Some(LoadText),
+                Ext1::FindElement => Some(FindElement),
+                Ext1::FindLastElement => Some(FindLastElement),
+                Ext1::FindChara => Some(FindChara),
+                Ext1::FindLastChara => Some(FindLastChara),
+                Ext1::VarSet => Some(VarSet),
+                Ext1::CVarSet => Some(CVarSet),
+                Ext1::GetVarSize => Some(GetVarSize),
+                Ext1::GetVarAllSize => Some(GetVarAllSize),
+                Ext1::GetHostTimeRaw => Some(GetHostTimeRaw),
+                Ext1::GetHostTime => Some(GetHostTime),
+                Ext1::GetHostTimeS => Some(GetHostTimeS),
+                Ext1::CsvGetProp2 => Some(CsvGetProp2),
+                Ext1::CharaCsvExists => Some(CharaCsvExists),
+                Ext1::GetPalamLv => Some(GetPalamLv),
+                Ext1::GetExpLv => Some(GetExpLv),
+                Ext1::AddChara => Some(AddChara),
+                Ext1::AddVoidChara => Some(AddVoidChara),
+                Ext1::PickUpChara => Some(PickUpChara {
+                    charas_cnt: get(2)?,
+                }),
+                Ext1::DeleteChara => Some(DeleteChara {
+                    charas_cnt: get(2)?,
+                }),
+                Ext1::SwapChara => Some(SwapChara),
+                Ext1::AddCopyChara => Some(AddCopyChara),
+                Ext1::LoadData => Some(LoadData),
+                Ext1::SaveData => Some(SaveData),
+                Ext1::CheckData => Some(CheckData),
+                Ext1::GetCharaRegNum => Some(GetCharaRegNum),
+                Ext1::LoadGlobal => Some(LoadGlobal),
+                Ext1::SaveGlobal => Some(SaveGlobal),
+                Ext1::ResetData => Some(ResetData),
+                Ext1::ResetCharaStain => Some(ResetCharaStain),
+                Ext1::SaveChara => Some(SaveChara {
+                    charas_cnt: get(2)?,
+                }),
+                Ext1::LoadChara => Some(LoadChara),
+                Ext1::GetConfig => Some(GetConfig),
+                Ext1::GetConfigS => Some(GetConfigS),
+                Ext1::FindCharaDataFile => Some(FindCharaDataFile),
+                _ => None,
+            },
+            _ => todo!(),
+        }
+    }
+
+    pub fn to_bytes(&self) -> ArrayVec<[u8; 12]> {
+        use EraBytecodeKind::*;
+        use EraExtBytecode1 as Ext1;
+        use EraPriBytecode as Pri;
+        let mut bytes = ArrayVec::new();
+        match *self {
+            FailWithMsg => bytes.push(Pri::FailWithMsg as u8),
+            DebugBreak => bytes.push(Pri::DebugBreak as u8),
+            Quit => bytes.push(Pri::Quit as u8),
+            Throw => bytes.push(Pri::Throw as u8),
+            Nop => bytes.push(Pri::Nop as u8),
+            ReturnVoid => bytes.push(Pri::ReturnVoid as u8),
+            ReturnInt => bytes.push(Pri::ReturnInt as u8),
+            ReturnStr => bytes.push(Pri::ReturnStr as u8),
+            CallFun { args_cnt } => {
+                bytes.push(Pri::CallFun as u8);
+                bytes.push(args_cnt);
+            }
+            TryCallFun { args_cnt } => {
+                bytes.push(Pri::TryCallFun as u8);
+                bytes.push(args_cnt);
+            }
+            TryCallFunForce { args_cnt } => {
+                bytes.push(Pri::TryCallFunForce as u8);
+                bytes.push(args_cnt);
+            }
+            RestartExecAtFun => bytes.push(Pri::RestartExecAtFun as u8),
+            JumpWW { offset } => {
+                bytes.push(Pri::JumpWW as u8);
+                bytes.extend_from_slice(&offset.to_ne_bytes());
+            }
+            JumpIfWW { offset } => {
+                bytes.push(Pri::JumpIfWW as u8);
+                bytes.extend_from_slice(&offset.to_ne_bytes());
+            }
+            JumpIfNotWW { offset } => {
+                bytes.push(Pri::JumpIfNotWW as u8);
+                bytes.extend_from_slice(&offset.to_ne_bytes());
+            }
+            LoadConstStr { idx } => {
+                bytes.push(Pri::LoadConstStr as u8);
+                bytes.extend_from_slice(&idx.to_ne_bytes());
+            }
+            LoadImm8 { imm } => {
+                bytes.push(Pri::LoadImm8 as u8);
+                bytes.push(imm as u8);
+            }
+            LoadImm16 { imm } => {
+                bytes.push(Pri::LoadImm16 as u8);
+                bytes.extend_from_slice(&imm.to_ne_bytes());
+            }
+            LoadImm32 { imm } => {
+                bytes.push(Pri::LoadImm32 as u8);
+                bytes.extend_from_slice(&imm.to_ne_bytes());
+            }
+            LoadImm64 { imm } => {
+                bytes.push(Pri::LoadImm64 as u8);
+                bytes.extend_from_slice(&imm.to_ne_bytes());
+            }
+            LoadVarWW { idx } => {
+                bytes.push(Pri::LoadVarWW as u8);
+                bytes.extend_from_slice(&idx.to_ne_bytes());
+            }
+            LoadConstVarWW { idx } => {
+                bytes.push(Pri::LoadConstVarWW as u8);
+                bytes.extend_from_slice(&idx.to_ne_bytes());
+            }
+            LoadLocalVar { idx } => {
+                bytes.push(Pri::LoadLocalVar as u8);
+                bytes.push(idx);
+            }
+            Pop => bytes.push(Pri::Pop as u8),
+            PopAllN { count } => {
+                bytes.push(Pri::PopAllN as u8);
+                bytes.push(count);
+            }
+            PopOneN { idx } => {
+                bytes.push(Pri::PopOneN as u8);
+                bytes.push(idx);
+            }
+            Swap2 => bytes.push(Pri::Swap2 as u8),
+            Duplicate => bytes.push(Pri::Duplicate as u8),
+            DuplicateAllN { count } => {
+                bytes.push(Pri::DuplicateAllN as u8);
+                bytes.push(count);
+            }
+            DuplicateOneN { idx } => {
+                bytes.push(Pri::DuplicateOneN as u8);
+                bytes.push(idx);
+            }
+            AddInt => bytes.push(Pri::AddInt as u8),
+            SubInt => bytes.push(Pri::SubInt as u8),
+            MulInt => bytes.push(Pri::MulInt as u8),
+            DivInt => bytes.push(Pri::DivInt as u8),
+            ModInt => bytes.push(Pri::ModInt as u8),
+            NegInt => bytes.push(Pri::NegInt as u8),
+            BitAndInt => bytes.push(Pri::BitAndInt as u8),
+            BitOrInt => bytes.push(Pri::BitOrInt as u8),
+            BitXorInt => bytes.push(Pri::BitXorInt as u8),
+            BitNotInt => bytes.push(Pri::BitNotInt as u8),
+            ShlInt => bytes.push(Pri::ShlInt as u8),
+            ShrInt => bytes.push(Pri::ShrInt as u8),
+            CmpIntLT => bytes.push(Pri::CmpIntLT as u8),
+            CmpIntLEq => bytes.push(Pri::CmpIntLEq as u8),
+            CmpIntGT => bytes.push(Pri::CmpIntGT as u8),
+            CmpIntGEq => bytes.push(Pri::CmpIntGEq as u8),
+            CmpIntEq => bytes.push(Pri::CmpIntEq as u8),
+            CmpIntNEq => bytes.push(Pri::CmpIntNEq as u8),
+            CmpStrLT => bytes.push(Pri::CmpStrLT as u8),
+            CmpStrLEq => bytes.push(Pri::CmpStrLEq as u8),
+            CmpStrGT => bytes.push(Pri::CmpStrGT as u8),
+            CmpStrGEq => bytes.push(Pri::CmpStrGEq as u8),
+            CmpStrEq => bytes.push(Pri::CmpStrEq as u8),
+            CmpStrNEq => bytes.push(Pri::CmpStrNEq as u8),
+            LogicalNot => bytes.push(Pri::LogicalNot as u8),
+            MaxInt => bytes.push(Pri::MaxInt as u8),
+            MinInt => bytes.push(Pri::MinInt as u8),
+            ClampInt => bytes.push(Pri::ClampInt as u8),
+            InRangeInt => bytes.push(Pri::InRangeInt as u8),
+            InRangeStr => bytes.push(Pri::InRangeStr as u8),
+            GetBit => bytes.push(Pri::GetBit as u8),
+            SetBit => bytes.push(Pri::SetBit as u8),
+            ClearBit => bytes.push(Pri::ClearBit as u8),
+            InvertBit => bytes.push(Pri::InvertBit as u8),
+            BuildString { count } => {
+                bytes.push(Pri::BuildString as u8);
+                bytes.push(count);
+            }
+            PadString { flags } => {
+                bytes.push(Pri::PadString as u8);
+                bytes.push(flags.into());
+            }
+            RepeatStr => bytes.push(Pri::RepeatStr as u8),
+            BuildArrIdxFromMD { count } => {
+                bytes.push(Pri::BuildArrIdxFromMD as u8);
+                bytes.push(count);
+            }
+            GetArrValFlat => bytes.push(Pri::GetArrValFlat as u8),
+            SetArrValFlat => bytes.push(Pri::SetArrValFlat as u8),
+            TimesFloat => bytes.push(Pri::TimesFloat as u8),
+            FunExists => bytes.push(Pri::FunExists as u8),
+            ReplaceStr => bytes.push(Pri::ReplaceStr as u8),
+            SubStr => bytes.push(Pri::SubStr as u8),
+            SubStrU => bytes.push(Pri::SubStrU as u8),
+            StrFind => bytes.push(Pri::StrFind as u8),
+            StrFindU => bytes.push(Pri::StrFindU as u8),
+            StrLen => bytes.push(Pri::StrLen as u8),
+            StrLenU => bytes.push(Pri::StrLenU as u8),
+            CountSubStr => bytes.push(Pri::CountSubStr as u8),
+            StrCharAtU => bytes.push(Pri::StrCharAtU as u8),
+            IntToStr => bytes.push(Pri::IntToStr as u8),
+            StrToInt => bytes.push(Pri::StrToInt as u8),
+            FormatIntToStr => bytes.push(Pri::FormatIntToStr as u8),
+            StrIsValidInt => bytes.push(Pri::StrIsValidInt as u8),
+            StrToUpper => bytes.push(Pri::StrToUpper as u8),
+            StrToLower => bytes.push(Pri::StrToLower as u8),
+            StrToHalf => bytes.push(Pri::StrToHalf as u8),
+            StrToFull => bytes.push(Pri::StrToFull as u8),
+            BuildBarStr => bytes.push(Pri::BuildBarStr as u8),
+            EscapeRegexStr => bytes.push(Pri::EscapeRegexStr as u8),
+            EncodeToUnicode => bytes.push(Pri::EncodeToUnicode as u8),
+            UnicodeToStr => bytes.push(Pri::UnicodeToStr as u8),
+            IntToStrWithBase => bytes.push(Pri::IntToStrWithBase as u8),
+            HtmlTagSplit => bytes.push(Pri::HtmlTagSplit as u8),
+            HtmlToPlainText => bytes.push(Pri::HtmlToPlainText as u8),
+            HtmlEscape => bytes.push(Pri::HtmlEscape as u8),
+            PowerInt => bytes.push(Pri::PowerInt as u8),
+            SqrtInt => bytes.push(Pri::SqrtInt as u8),
+            CbrtInt => bytes.push(Pri::CbrtInt as u8),
+            LogInt => bytes.push(Pri::LogInt as u8),
+            Log10Int => bytes.push(Pri::Log10Int as u8),
+            ExponentInt => bytes.push(Pri::ExponentInt as u8),
+            AbsInt => bytes.push(Pri::AbsInt as u8),
+            GroupMatch => bytes.push(Pri::GroupMatch as u8),
+            ArrayCountMatches => bytes.push(Pri::ArrayCountMatches as u8),
+            CArrayCountMatches => bytes.push(Pri::CArrayCountMatches as u8),
+            SumArray => bytes.push(Pri::SumArray as u8),
+            SumCArray => bytes.push(Pri::SumCArray as u8),
+            MaxArray => bytes.push(Pri::MaxArray as u8),
+            MaxCArray => bytes.push(Pri::MaxCArray as u8),
+            MinArray => bytes.push(Pri::MinArray as u8),
+            MinCArray => bytes.push(Pri::MinCArray as u8),
+            InRangeArray => bytes.push(Pri::InRangeArray as u8),
+            InRangeCArray => bytes.push(Pri::InRangeCArray as u8),
+            ArrayRemove => bytes.push(Pri::ArrayRemove as u8),
+            ArraySortAsc => bytes.push(Pri::ArraySortAsc as u8),
+            ArraySortDesc => bytes.push(Pri::ArraySortDesc as u8),
+            ArrayMSort { subs_cnt } => {
+                bytes.push(Pri::ArrayMSort as u8);
+                bytes.push(subs_cnt);
+            }
+            ArrayCopy => bytes.push(Pri::ArrayCopy as u8),
+            ArrayShift => bytes.push(Pri::ArrayShift as u8),
+            Print => bytes.push(Pri::Print as u8),
+            PrintLine => bytes.push(Pri::PrintLine as u8),
+            PrintExtended { flags } => {
+                bytes.push(Pri::PrintExtended as u8);
+                bytes.push(flags.into());
+            }
+            ReuseLastLine => bytes.push(Pri::ReuseLastLine as u8),
+            ClearLine => bytes.push(Pri::ClearLine as u8),
+            Wait { flags } => {
+                bytes.push(Pri::Wait as u8);
+                bytes.push(flags.into());
+            }
+            TWait => bytes.push(Pri::TWait as u8),
+            Input { flags } => {
+                bytes.push(Pri::Input as u8);
+                bytes.push(flags.into());
+            }
+            KbGetKeyState => bytes.push(Pri::KbGetKeyState as u8),
+            GetCallerFuncName => bytes.push(Pri::GetCallerFunName as u8),
+            GetCharaNum => bytes.push(Pri::GetCharaNum as u8),
+            CsvGetNum { kind } => {
+                bytes.push(Pri::CsvGetNum as u8);
+                bytes.push(kind.to_i());
+            }
+            GetRandomMax => bytes.push(Pri::GetRandomMax as u8),
+            // ----- ExtOp1 -----
+            // TODO...
+            RowAssign { dims_cnt, vals_cnt } => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::RowAssign as u8);
+                bytes.push(dims_cnt);
+                bytes.push(vals_cnt);
+            }
+            ForLoopStep => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::ForLoopStep as u8);
+            }
+            ExtendStrToWidth => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::ExtendStrToWidth as u8);
+            }
+            HtmlPrint => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::HtmlPrint as u8);
+            }
+            PrintButton { flags } => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::PrintButton as u8);
+                bytes.push(flags.into());
+            }
+            PrintImg => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::PrintImg as u8);
+            }
+            PrintImg4 => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::PrintImg4 as u8);
+            }
+            SplitString => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SplitString as u8);
+            }
+            GCreate => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GCreate as u8);
+            }
+            GCreateFromFile => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GCreateFromFile as u8);
+            }
+            GDispose => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GDispose as u8);
+            }
+            GCreated => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GCreated as u8);
+            }
+            GDrawSprite => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GDrawSprite as u8);
+            }
+            GDrawSpriteWithColorMatrix => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GDrawSpriteWithColorMatrix as u8);
+            }
+            GClear => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GClear as u8);
+            }
+            SpriteCreate => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SpriteCreate as u8);
+            }
+            SpriteDispose => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SpriteDispose as u8);
+            }
+            SpriteCreated => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SpriteCreated as u8);
+            }
+            SpriteAnimeCreate => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SpriteAnimeCreate as u8);
+            }
+            SpriteAnimeAddFrame => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SpriteAnimeAddFrame as u8);
+            }
+            SpriteWidth => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SpriteWidth as u8);
+            }
+            SpriteHeight => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SpriteHeight as u8);
+            }
+            CheckFont => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::CheckFont as u8);
+            }
+            SaveText => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SaveText as u8);
+            }
+            LoadText => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::LoadText as u8);
+            }
+            FindElement => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::FindElement as u8);
+            }
+            FindLastElement => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::FindLastElement as u8);
+            }
+            FindChara => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::FindChara as u8);
+            }
+            FindLastChara => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::FindLastChara as u8);
+            }
+            VarSet => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::VarSet as u8);
+            }
+            CVarSet => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::CVarSet as u8);
+            }
+            GetVarSize => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GetVarSize as u8);
+            }
+            GetVarAllSize => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GetVarAllSize as u8);
+            }
+            GetHostTimeRaw => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GetHostTimeRaw as u8);
+            }
+            GetHostTime => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GetHostTime as u8);
+            }
+            GetHostTimeS => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GetHostTimeS as u8);
+            }
+            CsvGetProp2 => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::CsvGetProp2 as u8);
+            }
+            CharaCsvExists => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::CharaCsvExists as u8);
+            }
+            GetPalamLv => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GetPalamLv as u8);
+            }
+            GetExpLv => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GetExpLv as u8);
+            }
+            AddChara => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::AddChara as u8);
+            }
+            AddVoidChara => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::AddVoidChara as u8);
+            }
+            PickUpChara { charas_cnt } => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::PickUpChara as u8);
+                bytes.push(charas_cnt);
+            }
+            DeleteChara { charas_cnt } => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::DeleteChara as u8);
+                bytes.push(charas_cnt);
+            }
+            SwapChara => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SwapChara as u8);
+            }
+            AddCopyChara => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::AddCopyChara as u8);
+            }
+            LoadData => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::LoadData as u8);
+            }
+            SaveData => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SaveData as u8);
+            }
+            CheckData => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::CheckData as u8);
+            }
+            GetCharaRegNum => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GetCharaRegNum as u8);
+            }
+            LoadGlobal => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::LoadGlobal as u8);
+            }
+            SaveGlobal => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SaveGlobal as u8);
+            }
+            ResetData => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::ResetData as u8);
+            }
+            ResetCharaStain => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::ResetCharaStain as u8);
+            }
+            SaveChara { charas_cnt } => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SaveChara as u8);
+                bytes.push(charas_cnt);
+            }
+            LoadChara => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::LoadChara as u8);
+            }
+            GetConfig => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GetConfig as u8);
+            }
+            GetConfigS => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::GetConfigS as u8);
+            }
+            FindCharaDataFile => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::FindCharaDataFile as u8);
+            }
+            _ => todo!(),
+        }
+        bytes
+    }
+
+    pub fn bytes_len(&self) -> usize {
+        self.to_bytes().len()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraBcChunk {
+    pub name: ArcStr,
+    bc: Vec<u8>,
+    // TODO: Maybe compress src_spans?
+    src_spans: Vec<SrcSpan>,
+}
+
+impl EraBcChunk {
+    pub fn new(name: ArcStr, bc: Vec<u8>, src_spans: Vec<SrcSpan>) -> Self {
+        EraBcChunk {
+            name,
+            bc,
+            src_spans,
+        }
+    }
+
+    pub fn get_bc(&self) -> &[u8] {
+        &self.bc
+    }
+
+    pub fn get_src_spans(&self) -> &[SrcSpan] {
+        &self.src_spans
+    }
+
+    pub fn lookup_src(&self, idx: usize) -> Option<SrcSpan> {
+        self.src_spans.get(idx).copied()
+    }
+
+    pub fn clear(&mut self) {
+        self.bc.clear();
+        self.src_spans.clear();
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraFuncFrameArgInfo {
+    /// The type of the argument. If it is of array type, the variable is REF-qualified.
+    pub var_kind: ValueKind,
+    // /// The dimension count of the argument, if it is REF-qualified (i.e. var_kind is `Arr*`).
+    pub dims_cnt: u8,
+    /// The default value of the argument.
+    pub default_value: ScalarValue,
+}
+
+impl EraFuncFrameArgInfo {
+    pub fn is_ref(&self) -> bool {
+        self.var_kind.is_arr()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraFuncFrameVarInfo {
+    // NOTE: Name is always interned; this does not affect FFI, since we always
+    //       communicate with the engine (/ debugger) via JSON, skipping the
+    //       internal representation.
+    pub name: TokenKey,
+    pub span: SrcSpan,
+    pub is_ref: bool,
+    pub is_const: bool,
+    pub is_charadata: bool,
+    pub in_local_frame: bool,
+    /// Index of the variable in the frame.
+    pub var_idx: u32,
+    /// The type of the variable. Only `Arr*` are used for now.
+    pub var_kind: ValueKind,
+    /// The dimension count of the variable.
+    pub dims_cnt: u8,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EraFuncFrameInfo {
+    /// Argument slots for the function.
+    pub args: Vec<EraFuncFrameArgInfo>,
+    /// Declared variables in the function scope.
+    pub vars: FxIndexMap<&'static Ascii<str>, EraFuncFrameVarInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraFuncInfo {
+    pub name: TokenKey,
+    pub name_span: SrcSpan,
+    pub frame_info: EraFuncFrameInfo,
+    pub chunk_idx: u32,
+    pub bc_offset: u32,
+    pub ret_kind: ScalarValueKind,
+    /// Whether the function is transient. Transient functions cannot access their locals;
+    /// they share the same local frame with the caller. Used by `EVAL(S)` and `EXEC`. Not
+    /// intended for user-defined functions.
+    pub is_transient: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum EraEventFuncKind {
+    Only,
+    Pri,
+    Normal,
+    Later,
 }

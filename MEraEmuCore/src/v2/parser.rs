@@ -41,9 +41,10 @@ impl<'a, 'b, 'ctx, 'i, Callback: EraCompilerCallback> EraParser<'a, 'b, 'ctx, 'i
         }
     }
 
-    pub fn parse(&mut self) -> GreenNode {
+    pub fn parse_program(&mut self) -> GreenNode {
         let builder = GreenNodeBuilder::with_cache(self.node_cache);
         let mut site = EraParserSite::new(self.lexer, builder, self.is_header);
+        // NOTE: We use error-tolerant parsing here, so theoretically this should never fail.
         site.program().unwrap();
         site.into_builder().finish().0
     }
@@ -128,6 +129,12 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
     fn bump(&mut self) -> EraLexerNextResult {
         let result = self.l.bump();
         self.b.token(result.token.kind, result.lexeme);
+        result
+    }
+
+    fn bump_as(&mut self, kind: Token) -> EraLexerNextResult {
+        let result = self.l.bump();
+        self.b.token(kind, result.lexeme);
         result
     }
 
@@ -256,6 +263,11 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                 self.o.bump();
                 self.o.b.start_node_at(cp, Token::DefineDecl);
                 self.define_declaration()
+            }
+            Token::KwTransient => {
+                self.o.bump();
+                self.o.b.start_node_at(cp, Token::TransientDecl);
+                Ok(())
             }
             _ => {
                 let mut diag = self.base_diag.clone();
@@ -432,34 +444,6 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         // Statements
         self.o.b.start_node(Token::StmtList);
         loop {
-            // let token = self.o.peek_token(Mode::Normal).token;
-            // match token.kind {
-            //     Token::At | Token::Eof => break,
-            //     Token::NumberSign => {
-            //         let mut diag = self.base_diag.clone();
-            //         diag.span_warn(
-            //             Default::default(),
-            //             token.span,
-            //             "sharp declaration should not appear within function body; ignoring",
-            //         );
-            //         self.o.emit_diag(diag);
-            //         _ = self.sync_to(Terminal::LineBreak.into());
-
-            //         self.skip_newline();
-            //         continue;
-            //     }
-            //     _ => (),
-            // }
-
-            // let cp = self.o.b.checkpoint();
-            // if self.statement().is_err() {
-            //     _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
-            // } else {
-            //     // After a successful statement, a newline is expected.
-            //     _ = self.expect_sync_to_newline();
-            // }
-            // self.skip_newline();
-
             match self.safe_statement() {
                 ControlFlow::Break(()) => break,
                 ControlFlow::Continue(()) => self.skip_newline(),
@@ -551,11 +535,10 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                 return Err(());
             }
             _ => {
-                self.o.b.start_node(Token::ExprStmt);
+                let cp = self.o.b.checkpoint();
                 if self.stmt_expression().is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
+                    _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
                 }
-                self.o.b.finish_node();
                 return Ok(());
             }
         }
@@ -566,7 +549,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         }
         impl<Callback: EraCompilerCallback> Adhoc for EraParserSite<'_, '_, '_, '_, '_, Callback> {
             fn r(&mut self) -> &mut Self {
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 self
             }
         }
@@ -574,7 +557,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         macro_rules! make {
             ($node:expr) => {{
                 self.o.b.start_node($node);
-                _ = self.o.bump();
+                self.r();
                 self.o.b.finish_node();
             }};
             ($node:expr, $name:ident()) => {{
@@ -602,34 +585,30 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             }};
         }
 
-        let cmd = lexeme.to_ascii_uppercase();
+        // NOTE: We assume that built-in commands are not too long. If that's not the case,
+        //       remember to revisit and modify the `MAX_BUF_LEN` below.
+        const MAX_BUF_LEN: usize = 32;
+        let Some(cmd) = crate::util::inline_to_ascii_uppercase::<MAX_BUF_LEN>(lexeme.as_bytes())
+        else {
+            // NOTE: Cannot use `make!` because we cannot bump the token here.
+            let cp = self.o.b.checkpoint();
+            if self.stmt_expression().is_err() {
+                _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
+            }
+            return Ok(());
+        };
         let cmd = cmd.as_bytes();
         if let Some((arg_fmt, _)) = routines::recognize_print_cmd(cmd) {
-            // self.o.b.start_node(Token::PrintStmt);
-            // if self.r().command_arg(arg_fmt).is_err() {
-            //     _ = self.sync_to(Terminal::LineBreak.into());
-            // }
-            // self.o.b.finish_node();
             make!(Token::PrintStmt, command_arg(arg_fmt));
         } else if let Some((arg_fmt, _)) = routines::recognize_debugprint_cmd(cmd) {
-            // self.o.b.start_node(Token::DebugPrintStmt);
-            // if self.r().command_arg(arg_fmt).is_err() {
-            //     _ = self.sync_to(Terminal::LineBreak.into());
-            // }
-            // self.o.b.finish_node();
             make!(Token::DebugPrintStmt, command_arg(arg_fmt));
         } else if let Some(_) = routines::recognize_printdata_cmd(cmd) {
-            // self.o.b.start_node(Token::PrintDataStmt);
-            // if self.r().stmt_printdata().is_err() {
-            //     _ = self.sync_to(Terminal::LineBreak.into());
-            // }
-            // self.o.b.finish_node();
             make!(Token::PrintDataStmt, stmt_printdata());
         } else {
             match cmd {
                 b"STRDATA" => make!(Token::StrDataStmt, stmt_strdata()),
                 b"IF" => {
-                    let start_span = self.o.bump().token.span;
+                    let start_span = self.o.bump_as(Token::KwIdent).token.span;
                     make_wo_bump!(Token::IfStmt, stmt_if(start_span))
                 }
                 b"SIF" => make!(Token::IfStmt, stmt_sif()),
@@ -656,49 +635,50 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                 b"NOP" => make!(Token::NopStmt),
                 b"CONTINUE" => make!(Token::ContinueStmt),
                 b"BREAK" => make!(Token::BreakStmt),
+                b"RESTART" => make!(Token::RestartStmt),
                 b"RETURN" | b"RETURNF" => make!(Token::ReturnStmt, command_arg(CmdArg::Expression)),
                 b"THROW" => make!(Token::ThrowStmt, command_arg(CmdArg::RawStringForm)),
                 b"GOTO" => make!(Token::GotoStmt, command_arg(CmdArg::Expression)),
-                b"QUIT" => make!(Token::QuitStmt, command_arg(CmdArg::Expression)),
-                b"WAIT" => make!(Token::WaitStmt, command_arg(CmdArg::Expression)),
-                b"FORCEWAIT" => make!(Token::WaitStmt, command_arg(CmdArg::Expression)),
-                b"WAITANYKEY" => make!(Token::WaitStmt, command_arg(CmdArg::Expression)),
+                b"QUIT" => make!(Token::QuitStmt),
+                b"WAIT" => make!(Token::WaitStmt),
+                b"FORCEWAIT" => make!(Token::ForceWaitStmt),
+                b"WAITANYKEY" => make!(Token::WaitAnyKeyStmt),
                 // b"GCREATE" => make!(Token::GCreateStmt, command_arg(CmdArg::Expression)),
                 // b"GDISPOSE" => make!(Token::GDisposeStmt, command_arg(CmdArg::Expression)),
                 // b"GDRAWSPRITE" => make!(Token::GDrawSpriteStmt, command_arg(CmdArg::Expression)),
-                b"SPLIT" => make!(Token::SplitStmt, command_arg(CmdArg::Expression)),
+                b"SPLIT" => make!(Token::SplitStmt, cmd_arg_limit(3, 4)),
                 b"SETBIT" => make!(Token::SetBitStmt, command_arg(CmdArg::Expression)),
                 b"CLEARBIT" => make!(Token::ClearBitStmt, command_arg(CmdArg::Expression)),
                 b"INVERTBIT" => make!(Token::InvertBitStmt, command_arg(CmdArg::Expression)),
                 b"SETCOLOR" => make!(Token::SetColorStmt, command_arg(CmdArg::Expression)),
-                b"RESETCOLOR" => make!(Token::ResetColorStmt, command_arg(CmdArg::Expression)),
+                b"RESETCOLOR" => make!(Token::ResetColorStmt),
                 b"SETBGCOLOR" => make!(Token::SetBgColorStmt, command_arg(CmdArg::Expression)),
-                b"RESETBGCOLOR" => make!(Token::ResetBgColorStmt, command_arg(CmdArg::Expression)),
-                b"VARSET" => make!(Token::VarSetStmt, command_arg(CmdArg::Expression)),
-                b"CVARSET" => make!(Token::CVarSetStmt, command_arg(CmdArg::Expression)),
-                b"VARSIZE" => make!(Token::VarSizeStmt, command_arg(CmdArg::Expression)),
-                b"SWAP" => make!(Token::SwapStmt, command_arg(CmdArg::Expression)),
-                b"HTML_PRINT" => make!(Token::HtmlPrintStmt, command_arg(CmdArg::Expression)),
-                b"PRINTBUTTON" | b"PRINTBUTTONC" | b"PRINTBUTTONLC" => {
-                    make!(Token::PrintButtonStmt, command_arg(CmdArg::Expression))
-                }
-                b"ARRAYREMOVE" => make!(Token::ArrayRemoveStmt, command_arg(CmdArg::Expression)),
-                b"ARRAYSORT" => make!(Token::ArraySortStmt, command_arg(CmdArg::Expression)),
+                b"RESETBGCOLOR" => make!(Token::ResetBgColorStmt),
+                b"VARSET" => make!(Token::VarSetStmt, cmd_arg_limit(1, 4)),
+                b"CVARSET" => make!(Token::CVarSetStmt, cmd_arg_limit(1, 5)),
+                b"VARSIZE" => make!(Token::VarSizeStmt, cmd_arg_limit(1, 1)),
+                b"SWAP" => make!(Token::SwapStmt, cmd_arg_limit(2, 2)),
+                b"HTML_PRINT" => make!(Token::HtmlPrintStmt, cmd_arg_limit(1, 1)),
+                b"PRINTBUTTON" => make!(Token::PrintButtonStmt, cmd_arg_limit(2, 2)),
+                b"PRINTBUTTONC" => make!(Token::PrintButtonCStmt, cmd_arg_limit(2, 2)),
+                b"PRINTBUTTONLC" => make!(Token::PrintButtonLCStmt, cmd_arg_limit(2, 2)),
+                b"ARRAYREMOVE" => make!(Token::ArrayRemoveStmt, cmd_arg_limit(3, 3)),
+                b"ARRAYSORT" => make!(Token::ArraySortStmt, cmd_arg_limit(1, 4)),
                 b"ARRAYMSORT" => make!(Token::ArrayMSortStmt, command_arg(CmdArg::Expression)),
-                b"ARRAYCOPY" => make!(Token::ArrayCopyStmt, command_arg(CmdArg::Expression)),
-                b"ARRAYSHIFT" => make!(Token::ArrayShiftStmt, command_arg(CmdArg::Expression)),
-                b"INPUT" => make!(Token::InputStmt, command_arg(CmdArg::Expression)),
-                b"INPUTS" => make!(Token::InputSStmt, command_arg(CmdArg::Expression)),
-                b"TINPUT" => make!(Token::TInputStmt, command_arg(CmdArg::Expression)),
-                b"TINPUTS" => make!(Token::TInputSStmt, command_arg(CmdArg::Expression)),
-                b"ONEINPUT" => make!(Token::OneInputStmt, command_arg(CmdArg::Expression)),
-                b"ONEINPUTS" => make!(Token::OneInputSStmt, command_arg(CmdArg::Expression)),
-                b"TONEINPUT" => make!(Token::TOneInputStmt, command_arg(CmdArg::Expression)),
-                b"TONEINPUTS" => make!(Token::TOneInputSStmt, command_arg(CmdArg::Expression)),
+                b"ARRAYCOPY" => make!(Token::ArrayCopyStmt, cmd_arg_limit(2, 2)),
+                b"ARRAYSHIFT" => make!(Token::ArrayShiftStmt, cmd_arg_limit(3, 5)),
+                b"INPUT" => make!(Token::InputStmt, cmd_arg_limit(0, 3)),
+                b"INPUTS" => make!(Token::InputSStmt, cmd_arg_limit(0, 3)),
+                b"TINPUT" => make!(Token::TInputStmt, cmd_arg_limit(2, 5)),
+                b"TINPUTS" => make!(Token::TInputSStmt, cmd_arg_limit(2, 5)),
+                b"ONEINPUT" => make!(Token::OneInputStmt, cmd_arg_limit(0, 1)),
+                b"ONEINPUTS" => make!(Token::OneInputSStmt, cmd_arg_limit(0, 1)),
+                b"TONEINPUT" => make!(Token::TOneInputStmt, cmd_arg_limit(2, 5)),
+                b"TONEINPUTS" => make!(Token::TOneInputSStmt, cmd_arg_limit(2, 5)),
                 b"REUSELASTLINE" => {
                     make!(Token::ReuseLastLineStmt, command_arg(CmdArg::RawStringForm))
                 }
-                b"CLEARLINE" => make!(Token::ClearLineStmt, command_arg(CmdArg::Expression)),
+                b"CLEARLINE" => make!(Token::ClearLineStmt, cmd_arg_limit(1, 1)),
                 b"DRAWLINE" => make!(Token::DrawLineStmt),
                 b"CUSTOMDRAWLINE" => {
                     make!(Token::CustomDrawLineStmt, command_arg(CmdArg::RawString))
@@ -707,53 +687,49 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                     Token::CustomDrawLineStmt,
                     command_arg(CmdArg::RawStringForm)
                 ),
-                b"TWAIT" => make!(Token::TWaitStmt, command_arg(CmdArg::Expression)),
-                b"FONTSTYLE" => make!(Token::FontStyleStmt, command_arg(CmdArg::Expression)),
+                b"TWAIT" => make!(Token::TWaitStmt, cmd_arg_limit(2, 2)),
+                b"FONTSTYLE" => make!(Token::FontStyleStmt, cmd_arg_limit(1, 1)),
                 b"FONTBOLD" => make!(Token::FontBoldStmt),
                 b"FONTITALIC" => make!(Token::FontItalicStmt),
                 b"FONTREGULAR" => make!(Token::FontRegularStmt),
-                b"SETFONT" => make!(Token::SetFontStmt, command_arg(CmdArg::Expression)),
+                b"SETFONT" => make!(Token::SetFontStmt, cmd_arg_limit(1, 1)),
                 b"PUTFORM" => make!(Token::PutFormStmt, command_arg(CmdArg::RawStringForm)),
-                b"SKIPDISP" => make!(Token::SkipDispStmt, command_arg(CmdArg::Expression)),
-                b"BEGIN" => make!(Token::BeginStmt, command_arg(CmdArg::Expression)),
-                b"DOTRAIN" => make!(Token::DoTrainStmt, command_arg(CmdArg::Expression)),
-                b"REDRAW" => make!(Token::RedrawStmt, command_arg(CmdArg::Expression)),
+                b"SKIPDISP" => make!(Token::SkipDispStmt, cmd_arg_limit(1, 1)),
+                b"BEGIN" => make!(Token::BeginStmt, cmd_arg_limit(1, 1)),
+                b"DOTRAIN" => make!(Token::DoTrainStmt, cmd_arg_limit(1, 1)),
+                b"REDRAW" => make!(Token::RedrawStmt, cmd_arg_limit(1, 1)),
                 b"STRLEN" => make!(Token::StrLenStmt, command_arg(CmdArg::RawString)),
                 b"STRLENFORM" => make!(Token::StrLenStmt, command_arg(CmdArg::RawStringForm)),
                 b"STRLENU" => make!(Token::StrLenUStmt, command_arg(CmdArg::RawString)),
                 b"STRLENFORMU" => make!(Token::StrLenUStmt, command_arg(CmdArg::RawStringForm)),
-                b"ALIGNMENT" => make!(Token::AlignmentStmt, command_arg(CmdArg::Expression)),
+                b"ALIGNMENT" => make!(Token::AlignmentStmt, cmd_arg_limit(1, 1)),
                 b"TOOLTIP_SETDELAY" => {
-                    make!(Token::ToolTipSetDelayStmt, command_arg(CmdArg::Expression))
+                    make!(Token::ToolTipSetDelayStmt, cmd_arg_limit(1, 1))
                 }
                 b"TOOLTIP_SETDURATION" => {
-                    make!(
-                        Token::ToolTipSetDurationStmt,
-                        command_arg(CmdArg::Expression)
-                    )
+                    make!(Token::ToolTipSetDurationStmt, cmd_arg_limit(1, 1))
                 }
-                b"RANDOMIZE" => make!(Token::RandomizeStmt, command_arg(CmdArg::Expression)),
+                b"RANDOMIZE" => make!(Token::RandomizeStmt, cmd_arg_limit(1, 1)),
                 b"DUMPRAND" => make!(Token::DumpRandStmt),
                 b"INITRAND" => make!(Token::InitRandStmt),
-                b"BAR" => make!(Token::BarStmt, command_arg(CmdArg::Expression)),
-                b"BARL" => make!(Token::BarStmt, command_arg(CmdArg::Expression)),
+                b"BAR" => make!(Token::BarStmt, cmd_arg_limit(3, 3)),
+                b"BARL" => make!(Token::BarLStmt, cmd_arg_limit(3, 3)),
                 b"ADDCHARA" => make!(Token::AddCharaStmt, command_arg(CmdArg::Expression)),
                 b"PICKUPCHARA" => make!(Token::PickUpCharaStmt, command_arg(CmdArg::Expression)),
                 b"DELCHARA" => make!(Token::DelCharaStmt, command_arg(CmdArg::Expression)),
-                b"SWAPCHARA" => make!(Token::SwapCharaStmt, command_arg(CmdArg::Expression)),
-                b"ADDCOPYCHARA" => make!(Token::AddCopyCharaStmt, command_arg(CmdArg::Expression)),
-                b"RESET_STAIN" => make!(Token::ResetStainStmt, command_arg(CmdArg::Expression)),
-                b"SAVECHARA" => make!(Token::SaveCharaStmt, command_arg(CmdArg::Expression)),
-                b"LOADCHARA" => make!(Token::LoadCharaStmt, command_arg(CmdArg::Expression)),
+                b"SWAPCHARA" => make!(Token::SwapCharaStmt, cmd_arg_limit(2, 2)),
+                b"ADDCOPYCHARA" => make!(Token::AddCopyCharaStmt, cmd_arg_limit(1, 1)),
+                b"RESET_STAIN" => make!(Token::ResetStainStmt, cmd_arg_limit(1, 1)),
+                b"SAVECHARA" => make!(Token::SaveCharaStmt, cmd_arg_limit(3, u64::MAX)),
+                b"LOADCHARA" => make!(Token::LoadCharaStmt, cmd_arg_limit(1, 1)),
                 b"SETANIMETIMER" => {
-                    make!(Token::SetAnimeTimerStmt, command_arg(CmdArg::Expression))
+                    make!(Token::SetAnimeTimerStmt, cmd_arg_limit(1, 1))
                 }
-                b"HTML_TAGSPLIT" => make!(Token::HtmlTagSplitStmt, command_arg(CmdArg::Expression)),
-                b"POWER" => make!(Token::PowerStmt, command_arg(CmdArg::Expression)),
-                b"LOADDATA" => make!(Token::LoadDataStmt, command_arg(CmdArg::Expression)),
-                b"SAVEDATA" => make!(Token::SaveDataStmt, command_arg(CmdArg::Expression)),
+                b"HTML_TAGSPLIT" => make!(Token::HtmlTagSplitStmt, cmd_arg_limit(1, 3)),
+                b"POWER" => make!(Token::PowerStmt, cmd_arg_limit(3, 3)),
+                b"LOADDATA" => make!(Token::LoadDataStmt, cmd_arg_limit(1, 1)),
+                b"SAVEDATA" => make!(Token::SaveDataStmt, cmd_arg_limit(2, 2)),
                 // b"CHKDATA" => Cmd::CheckData(self.r().stmt_chkdata()?),
-                b"RESTART" => make!(Token::RestartStmt),
                 b"GETTIME" => make!(Token::GetTimeStmt),
                 b"LOADGLOBAL" => make!(Token::LoadGlobalStmt),
                 b"SAVEGLOBAL" => make!(Token::SaveGlobalStmt),
@@ -874,11 +850,10 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                 | b"CHKDATA" => make!(Token::ResultCmdCallStmt, command_arg(CmdArg::Expression)),
                 _ => {
                     // NOTE: Cannot use `make!` because we cannot bump the token here.
-                    self.o.b.start_node(Token::ExprStmt);
+                    let cp = self.o.b.checkpoint();
                     if self.stmt_expression().is_err() {
-                        _ = self.sync_to(Terminal::LineBreak.into());
+                        _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
                     }
-                    self.o.b.finish_node();
                 }
             }
         }
@@ -930,40 +905,42 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         loop {
             if self.try_match_command("ENDDATA") {
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 break;
             } else if self.try_match_command("DATA") {
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 self.o.b.start_node(Token::StringForm);
                 if self.raw_string().is_err() {
                     _ = self.sync_to(Terminal::LineBreak.into());
                 }
                 self.o.b.finish_node();
             } else if self.try_match_command("DATAFORM") {
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 let cp = self.o.b.checkpoint();
                 if self.raw_strform().is_err() {
                     _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
                 }
             } else if self.try_match_command("DATALIST") {
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
 
                 _ = self.expect_sync_to_newline();
                 self.skip_newline();
 
-                self.o.b.start_node(Token::StmtList);
+                self.o.b.start_node(Token::ExprList);
                 loop {
                     if self.try_match_command("ENDLIST") {
                         self.o.b.finish_node();
-                        _ = self.o.bump();
+                        _ = self.o.bump_as(Token::KwIdent);
                         break;
                     } else if self.try_match_command("DATA") {
+                        _ = self.o.bump_as(Token::KwIdent);
                         self.o.b.start_node(Token::StringForm);
                         if self.raw_string().is_err() {
                             _ = self.sync_to(Terminal::LineBreak.into());
                         }
                         self.o.b.finish_node();
                     } else if self.try_match_command("DATAFORM") {
+                        _ = self.o.bump_as(Token::KwIdent);
                         let cp = self.o.b.checkpoint();
                         if self.raw_strform().is_err() {
                             _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
@@ -1019,7 +996,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             if can_else && self.try_match_command("ELSEIF") {
                 // Transition to next condition
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 _ = self.safe_expression(true, Terminal::LineBreak.into());
                 _ = self.expect_sync_to_newline();
                 self.skip_newline();
@@ -1031,7 +1008,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                 can_else = false;
 
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 _ = self.expect_sync_to_newline();
                 self.skip_newline();
                 self.o.b.start_node(Token::StmtList);
@@ -1040,7 +1017,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             if self.try_match_command("ENDIF") {
                 // End of if block
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 break;
             }
 
@@ -1052,7 +1029,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                         self.o.peek_token(Mode::Normal).token.span,
                         "unexpected end of block in IF; did you forget to close it?",
                     );
-                    diag.span_note(Default::default(), start_span, "current block started here");
+                    diag.span_note(Default::default(), start_span, "block started here");
                     self.o.emit_diag(diag);
 
                     self.o.b.finish_node();
@@ -1104,16 +1081,16 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             if self.try_match_command("ENDSELECT") {
                 // End of select statement
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 break;
             }
 
             if can_else && self.try_match_command("CASE") {
                 // Transition to next case
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
 
-                self.o.b.start_node(Token::ExprList);
+                self.o.b.start_node(Token::SelectCasePredList);
                 if self.stmt_selectcase_case().is_err() {
                     _ = self.sync_to(Terminal::LineBreak.into());
                 }
@@ -1129,7 +1106,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                 can_else = false;
 
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 _ = self.expect_sync_to_newline();
                 self.skip_newline();
                 self.o.b.start_node(Token::StmtList);
@@ -1184,7 +1161,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             if self.try_match_command("IS") {
                 // `IS <op> <expr>`
                 self.o.b.start_node(Token::SelectCaseCond);
-                _ = self.o.bump(); // `IS`
+                _ = self.o.bump_as(Token::KwIdent); // `IS`
                 let result = (|| -> ParseResult<()> {
                     if !matches!(
                         self.o.peek_token(Mode::Normal).token.kind,
@@ -1228,7 +1205,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                     if self.try_match_command("TO") {
                         // Range
                         self.o.b.start_node_at(cp, Token::SelectCaseRange);
-                        _ = self.o.bump(); // `TO`
+                        _ = self.o.bump_as(Token::KwIdent); // `TO`
                         if self
                             .safe_expression(true, Terminal::Comma | Terminal::LineBreak)
                             .is_err()
@@ -1277,7 +1254,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             if self.try_match_command("WEND") {
                 // End of while block
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 break;
             }
 
@@ -1314,7 +1291,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             if self.try_match_command("REND") {
                 // End of repeat block
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 break;
             }
 
@@ -1342,7 +1319,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
     fn stmt_for(&mut self) -> ParseResult<()> {
         // <var, start, end, step>
         self.o.b.start_node(Token::ExprList);
-        if self.comma_expr_list(0).is_err() {
+        if self.comma_expr_list_limit(0, 4).is_err() {
             _ = self.sync_to(Terminal::LineBreak.into());
         }
         self.o.b.finish_node();
@@ -1355,7 +1332,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             if self.try_match_command("NEXT") {
                 // End of for block
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 break;
             }
 
@@ -1389,7 +1366,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             if self.try_match_command("LOOP") {
                 // End of do loop block
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 break;
             }
 
@@ -1533,7 +1510,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                 can_catch = false;
 
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 _ = self.expect_sync_to_newline();
                 self.skip_newline();
                 self.o.b.start_node(Token::StmtList);
@@ -1542,7 +1519,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             if self.try_match_command("ENDCATCH") {
                 // End of try block
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 break;
             }
 
@@ -1590,7 +1567,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                 can_catch = false;
 
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 _ = self.expect_sync_to_newline();
                 self.skip_newline();
                 self.o.b.start_node(Token::StmtList);
@@ -1599,7 +1576,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             if self.try_match_command("ENDCATCH") {
                 // End of try block
                 self.o.b.finish_node();
-                _ = self.o.bump();
+                _ = self.o.bump_as(Token::KwIdent);
                 break;
             }
 
@@ -1632,6 +1609,10 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             return Ok(());
         }
 
+        if self.eat(Mode::Normal, Token::Comma).is_err() {
+            _ = self.sync_to(Terminal::LineBreak.into());
+        }
+
         // Factor (floating point, read as raw string instead)
         self.o.b.start_node(Token::StringForm);
         if self.raw_string().is_err() {
@@ -1646,15 +1627,14 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
     ///
     /// Generates a node of type `ExprList` containing the arguments of a command.
     fn command_arg(&mut self, arg_fmt: EraCmdArgFmt) -> ParseResult<()> {
+        self.o.b.start_node(Token::ExprList);
         match arg_fmt {
             EraCmdArgFmt::Expression
             | EraCmdArgFmt::ExpressionS
             | EraCmdArgFmt::ExpressionSForm => {
-                self.o.b.start_node(Token::ExprList);
                 if self.comma_expr_list(0).is_err() {
                     _ = self.sync_to(Terminal::LineBreak.into());
                 }
-                self.o.b.finish_node();
             }
             EraCmdArgFmt::RawStringForm => {
                 let cp = self.o.b.checkpoint();
@@ -1670,6 +1650,31 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                 self.o.b.finish_node();
             }
         }
+        self.o.b.finish_node();
+        Ok(())
+    }
+
+    fn cmd_arg_limit(&mut self, lower_limit: u64, upper_limit: u64) -> ParseResult<()> {
+        self.o.b.start_node(Token::ExprList);
+        match self.comma_expr_list_limit(0, upper_limit) {
+            Ok(count) => {
+                if count < lower_limit {
+                    let mut diag = self.base_diag.clone();
+                    diag.span_err(
+                        Default::default(),
+                        self.o.peek_token(Mode::Normal).token.span,
+                        format!("expected at least {} arguments", lower_limit),
+                    );
+                    self.o.emit_diag(diag);
+                } else if count > upper_limit {
+                    // No need to emit a diagnostic here, it is handled by the caller
+                }
+            }
+            Err(_) => {
+                _ = self.sync_to(Terminal::LineBreak.into());
+            }
+        }
+        self.o.b.finish_node();
         Ok(())
     }
 
@@ -1695,7 +1700,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// {NODE OWN}
     fn stmt_expression(&mut self) -> ParseResult<()> {
         let cp = self.o.b.checkpoint();
 
@@ -1714,8 +1719,12 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                 }
                 self.o.b.finish_node();
                 self.o.b.finish_node();
+                return Ok(());
             }
         }
+
+        self.o.b.start_node_at(cp, Token::ExprStmt);
+        self.o.b.finish_node();
 
         Ok(())
     }
@@ -2036,7 +2045,9 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
     /// {NODE BORROW}
     ///
     /// Parses residual of expressions like `, var1, var2`.
-    fn comma_expr_list(&mut self, min_bp: u8) -> ParseResult<()> {
+    fn comma_expr_list_limit(&mut self, min_bp: u8, size_limit: u64) -> ParseResult<u64> {
+        assert!(size_limit > 0, "size limit must be greater than 0");
+        let mut count = 0;
         loop {
             // // Handle min_bp
             // if min_bp != 0 {
@@ -2054,6 +2065,14 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                     self.o.b.start_node(Token::EmptyExpr);
                     self.o.b.finish_node();
                     _ = self.o.bump();
+
+                    // Check limit
+                    count += 1;
+                    if count >= size_limit {
+                        // Too many expressions, exit early
+                        break;
+                    }
+
                     continue;
                 }
                 Token::LineBreak => break,
@@ -2069,10 +2088,24 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
                     .sync_cp_to(Terminal::Comma | Terminal::LineBreak, cp)
                     .is_err()
                 {
-                    return Ok(());
+                    return Ok(count);
                 }
                 // Otherwise, synced to comma
+
+                // Check limit
+                count += 1;
+                if count >= size_limit {
+                    // Too many expressions, exit early
+                    break;
+                }
             } else {
+                // Check limit
+                count += 1;
+                if count >= size_limit {
+                    // Too many expressions, exit early
+                    break;
+                }
+
                 // If no comma, must be end of expression list
                 if self.try_eat(Mode::Normal, Token::Comma).is_none() {
                     break;
@@ -2080,7 +2113,14 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             }
         }
 
-        Ok(())
+        Ok(count)
+    }
+
+    /// {NODE BORROW}
+    ///
+    /// Parses residual of expressions like `, var1, var2`.
+    fn comma_expr_list(&mut self, min_bp: u8) -> ParseResult<u64> {
+        self.comma_expr_list_limit(min_bp, u64::MAX)
     }
 
     /// {NODE BORROW}

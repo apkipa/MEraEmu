@@ -168,6 +168,19 @@ impl<'a, 'ctx, Callback: EraCompilerCallback> EraLexer<'a, 'ctx, Callback> {
     pub fn previous_token(&self) -> EraTokenKind {
         self.i.last_token
     }
+
+    /// Returns the positions of all newlines (start of line) in the source.
+    pub fn newline_positions(&self) -> Vec<SrcPos> {
+        let mut positions = vec![SrcPos(0)];
+        let mut src = self.o.src;
+        let mut offset = 0;
+        while let Some(pos) = memchr::memchr(b'\n', src) {
+            offset += pos + 1;
+            positions.push(SrcPos(offset as _));
+            src = &src[pos + 1..];
+        }
+        positions
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -537,6 +550,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                             b"PRI" => KwPri,
                             b"LATER" => KwLater,
                             b"SINGLE" => KwSingle,
+                            b"TRANSIENT" => KwTransient,
                             _ => Identifier,
                         };
                         matcher(lexeme.as_bytes())
@@ -637,13 +651,13 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     }
                     impl<Callback: EraCompilerCallback> Adhoc for EraLexerInnerSite<'_, '_, '_, Callback> {
                         fn read_fn(&mut self) -> Option<Box<[u8]>> {
-                            // TODO: Better use Vec<u8> push method
+                            let lexeme_start = self.cur_lexeme_len;
                             loop {
                                 if let None | Some(b']' | b'\r' | b'\n') = self.next_char() {
                                     break;
                                 }
                             }
-                            let lexeme = &self.current_lexeme()[1..self.cur_lexeme_len];
+                            let lexeme = &self.current_lexeme()[lexeme_start..];
                             let [lexeme @ .., b']'] = lexeme else {
                                 return None;
                             };
@@ -691,8 +705,6 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                         // Scan until found `[end_name]`
                         let mut last_is_newline = false;
                         loop {
-                            self.reset_lexeme();
-
                             let Some(ch) = self.next_char() else {
                                 let mut diag = self.o.new_diag();
                                 diag.span_err(
@@ -741,7 +753,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     let mut diag = self.o.new_diag();
                     diag.span_err(
                         Default::default(),
-                        SrcSpan::new(SrcPos(self.i.src_pos as _), 1),
+                        SrcSpan::new(SrcPos(initial_src_pos as _), 1),
                         format!("illegal character `{}`", std::ascii::escape_default(ch)),
                     );
                     self.o.ctx.emit_diag(diag);
@@ -902,7 +914,6 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
         // Handle alternate source
         if let [ch, rest @ ..] = self.i.alternate_src {
             self.has_replaced = true;
-            // self.append_lexeme(ch);
             self.append_lexeme(self.i.alternate_src.as_ptr());
             self.i.alternate_src = rest;
             return Some(*ch);
@@ -910,7 +921,6 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
 
         // Handle normal
         if let [ch, rest @ ..] = self.src() {
-            // self.append_lexeme(ch);
             self.append_lexeme(self.src().as_ptr());
             self.i.src_pos += 1;
             return Some(*ch);

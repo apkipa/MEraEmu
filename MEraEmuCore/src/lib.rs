@@ -897,6 +897,7 @@ mod tests {
 
     use colored::{Color, Colorize};
     use indoc::indoc;
+    use types::EraPrintExtendedFlags;
 
     use super::*;
 
@@ -1204,9 +1205,11 @@ mod tests {
 
     impl v2::engine::MEraEngineSysCallback for &mut MockEngineCallback<'_> {
         fn on_error(&mut self, diag: &types::DiagnosticProvider) {
+            use unicode_width::UnicodeWidthStr;
+
             let mut errors = self.errors.borrow_mut();
 
-            const PRINT_TO_STDOUT: bool = false;
+            const PRINT_TO_STDOUT: bool = true;
 
             for entry in diag.get_entries() {
                 let (noun, color) = if entry.level == types::DiagnosticLevel::Error {
@@ -1218,7 +1221,20 @@ mod tests {
                 } else {
                     ("note", Color::BrightCyan)
                 };
-                let resolved = diag.resolve_src_span(&entry.filename, entry.span).unwrap();
+                let mut resolved = diag.resolve_src_span(&entry.filename, entry.span).unwrap();
+                let mut snippet_prefix_bytes = resolved
+                    .snippet
+                    .char_indices()
+                    .nth(resolved.loc.col as _)
+                    .map(|(i, _)| i)
+                    .unwrap_or(resolved.snippet.len());
+                // Convert tabs to 4 spaces
+                snippet_prefix_bytes += resolved.snippet[..snippet_prefix_bytes]
+                    .chars()
+                    .filter(|&c| c == '\t')
+                    .count()
+                    * 3;
+                resolved.snippet = resolved.snippet.replace("\t", "    ");
                 {
                     let msg = format!(
                         "{}({},{}): {}: {}\nSnippet: {}\n",
@@ -1238,8 +1254,12 @@ mod tests {
                 }
                 // Print underlines
                 let indent = 9;
-                let underline = " ".repeat(indent + resolved.loc.col as usize)
-                    + &"^".repeat(resolved.len as _)
+                let snippet_prefix_width = resolved.snippet[..snippet_prefix_bytes].width();
+                let snippet_target_width = resolved.snippet
+                    [snippet_prefix_bytes..snippet_prefix_bytes + resolved.len as usize]
+                    .width();
+                let underline = " ".repeat(indent + snippet_prefix_width)
+                    + &"^".repeat(snippet_target_width)
                     + "\n";
                 if PRINT_TO_STDOUT {
                     print!("{}", underline.color(color));
@@ -1253,7 +1273,7 @@ mod tests {
             0
         }
 
-        fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {}
+        fn on_print(&mut self, content: &str, flags: EraPrintExtendedFlags) {}
 
         fn on_html_print(&mut self, content: &str) {}
 
@@ -1341,13 +1361,7 @@ mod tests {
 
         fn on_clearline(&mut self, count: i64) {}
 
-        fn on_print_button(
-            &mut self,
-            content: &str,
-            value: &str,
-            flags: crate::bytecode::PrintExtendedFlags,
-        ) {
-        }
+        fn on_print_button(&mut self, content: &str, value: &str, flags: EraPrintExtendedFlags) {}
 
         fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
             Ok(0)
@@ -1643,7 +1657,10 @@ mod tests {
         let mut callback = MockEngineCallback::new(&errors);
         let mut builder = v2::engine::MEraEngineBuilder::new(&mut callback);
         builder.register_variable("WINDOW_TITLE", true, 1, true)?;
+        // builder.finish_load_csv()?;
+        // builder.finish_load_erh()?;
         builder.load_erb("main.erb", main_erb.as_bytes())?;
+        let engine = builder.build()?;
         // engine.register_global_var("WINDOW_TITLE", true, 1, true)?;
         // _ = engine.load_erb("main.erb", main_erb.as_bytes());
         // _ = engine.finialize_load_srcs();
@@ -1915,9 +1932,12 @@ mod tests {
         }
 
         // TODO: Redact this
-        let game_base_dir = r#"D:\MyData\Games\Others\1\eraTW\TW4.881画蛇添足版（04.07更新）\"#;
-        // let game_base_dir = r#"D:\MyData\Games\Others\1\eraTW\eratw-sub-modding-888ab0cd\"#;
-        // let game_base_dir = r#"D:\MyData\Games\Others\1\eratohoK\"#;
+        // Read from environment variable
+        let game_base_dir = std::env::var("ERA_GAME_BASE_DIR").unwrap_or_else(|_| {
+            r#"D:\MyData\Games\Others\1\eraTW\TW4.881画蛇添足版（04.07更新）\"#.to_owned()
+            // r#"D:\MyData\Games\Others\1\eraTW\eratw-sub-modding-888ab0cd\"#.to_owned()
+            // r#"D:\MyData\Games\Others\1\eratohoK\"#.to_owned()
+        });
 
         let errors = RefCell::new(String::new());
         let mut callback = MockEngineCallback::new(&errors);
@@ -2124,6 +2144,7 @@ mod tests {
         for (path, mem_usage) in file_mem_usages.into_iter().rev().take(10) {
             println!("{path}: {}", size::Size::from_bytes(mem_usage));
         }
+        let engine = builder.build()?;
         *errors.borrow_mut() += &format!(
             "[FINIALIZE, used mem = {}]\n",
             size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)
@@ -2159,7 +2180,6 @@ mod tests {
         {
             let errors = errors.borrow();
             if errors.contains("error:") {
-                drop(builder);
                 panic!(
                     "compile output:\n{errors}\nexec output:\n{}\nCompiled {}/{} files.\n{} warning(s), {} error(s) generated.",
                     callback.output, pass_cnt, total_cnt, callback.warn_cnt, callback.err_cnt

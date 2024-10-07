@@ -25,7 +25,7 @@ MEraEmu (Modern Era Emulator) is an EraBasic script emulator for modern Windows.
 This project requires:
 
 * The latest version of Rust compiler (at the time of writing 1.80, although MSRV is not strictly defined).
-* The latest version of Visual Studio 2022, with C++ workload.
+* The latest version of Visual Studio 2022, with C++ & UWP workload.
 
 You may also need the NuGet package *Tenkai.UWP* (see https://github.com/apkipa/TenkaiXamlSample), which is required by the UI part when building for Windows.
 

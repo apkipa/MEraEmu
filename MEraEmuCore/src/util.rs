@@ -1,4 +1,5 @@
 pub mod ascii;
+pub mod dhashmap;
 pub mod html;
 pub mod io;
 pub mod number;
@@ -163,23 +164,49 @@ macro_rules! uppercase_bliteral {
     }};
 }
 
+// TODO: Does compiler optimize bmatch_caseless! well enough?
 macro_rules! bmatch_caseless {
-    // ($pattern:expr => $value:expr, _ => $default_value:expr) => {
-    //     |value: &[u8]| if value.iter().map(|&c| c.to_ascii_uppercase()) == uppercase_bliteral!($pattern).iter().copied() {
-    //         $value
-    //     } else {
-    //         $default_value
-    //     }
-    // };
     ($pattern:expr => $value:expr $(, $patterns:expr => $values:expr)*, _ => $default_value:expr $(,)?) => {{
         use crate::util::uppercase_bliteral;
 
-        |value: &[u8]| if value.iter().map(|&c| c.to_ascii_uppercase()).eq(uppercase_bliteral!($pattern).iter().copied()) {
-            $value
-        } $(else if value.iter().map(|&c| c.to_ascii_uppercase()).eq(uppercase_bliteral!($patterns).iter().copied()) {
-            $values
-        })* else {
-            $default_value
+        // const ALL_PATTERNS: &[&[u8]] = &[$pattern, $($patterns,)*];
+        const MAX_LEN: usize = {
+            let mut max_len = 0;
+            const fn get_max(a: usize, b: usize) -> usize {
+                if a > b {
+                    a
+                } else {
+                    b
+                }
+            }
+            max_len = get_max(max_len, $pattern.len());
+            $(max_len = get_max(max_len, $patterns.len());)*
+            max_len
+        };
+
+        |value: &[u8]| {
+            if value.len() > MAX_LEN {
+                return $default_value;
+            }
+
+            let uppercased = {
+                let mut uppercased = [0; MAX_LEN];
+                for (i, &c) in value.iter().enumerate() {
+                    uppercased[i] = c.to_ascii_uppercase();
+                }
+                // uppercased[..value.len()].copy_from_slice(value);
+                // uppercased.make_ascii_uppercase();
+                uppercased
+            };
+            let uppercased = &uppercased[..value.len()];
+
+            if uppercased == uppercase_bliteral!($pattern) {
+                $value
+            } $(else if uppercased == uppercase_bliteral!($patterns) {
+                $values
+            })* else {
+                $default_value
+            }
         }
     }};
 }
@@ -218,4 +245,37 @@ impl SubsliceOffset for str {
             Some(inner - self_range.start)
         }
     }
+}
+
+pub trait StrReplaceCount {
+    fn replace_count(&self, from: &str, to: &str) -> (String, usize);
+}
+
+impl StrReplaceCount for str {
+    fn replace_count(&self, from: &str, to: &str) -> (String, usize) {
+        let mut count = 0;
+        let mut last_end = 0;
+        let mut result = String::new();
+        for (start, part) in self.match_indices(from) {
+            count += 1;
+            result.push_str(&self[last_end..start]);
+            result.push_str(to);
+            last_end = start + part.len();
+        }
+        result.push_str(&self[last_end..]);
+        (result, count)
+    }
+}
+
+pub fn inline_to_ascii_uppercase<const LEN: usize>(
+    value: &[u8],
+) -> Option<arrayvec::ArrayVec<u8, LEN>> {
+    if value.len() > LEN {
+        return None;
+    }
+    let mut out = arrayvec::ArrayVec::<u8, LEN>::new();
+    for b in value {
+        out.push(b.to_ascii_uppercase());
+    }
+    Some(out)
 }
