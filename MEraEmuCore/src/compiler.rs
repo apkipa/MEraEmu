@@ -5144,10 +5144,10 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
     fn cmd_print_core(&mut self, flags: PrintExtendedFlags, src_info: SourcePosInfo) -> Option<()> {
         use EraBytecodePrimaryType::*;
         match u8::from(flags) {
-            x if x == PrintExtendedFlags::new().into() => {
+            _ if flags == PrintExtendedFlags::new() => {
                 self.chunk.emit_bytecode(Print, src_info);
             }
-            x if x == PrintExtendedFlags::new().with_is_line(true).into() => {
+            _ if flags == PrintExtendedFlags::new().with_is_line(true) => {
                 self.chunk.emit_bytecode(PrintLine, src_info);
             }
             x => {
@@ -5547,7 +5547,7 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
         let mut last_side_effect_bc = last_bc;
         while !chunk.is_empty() {
             last_bc = chunk[0];
-            if chunk[0] == EraBytecodePrimaryType::InvokeStaticJit as _ {
+            if chunk[0] == EraBytecodePrimaryType::InvokeStaticJit as u8 {
                 // Give up analysis
                 self.chunk.emit_pop(src_info);
                 return None;
@@ -5569,14 +5569,14 @@ impl<'p, 'a, T: FnMut(&EraCompileErrorInfo)> EraCompilerImplFunctionSite<'p, 'a,
             chunk = &chunk[len..];
             stack_balance -= stack_delta;
         }
-        if last_side_effect_bc == EraBytecodePrimaryType::SetArrayVal as _ {
+        if last_side_effect_bc == EraBytecodePrimaryType::SetArrayVal as u8 {
             // Modify bytecode kind
             self.chunk.overwrite_u8(
                 EraBytecodePrimaryType::SetArrayValNoRet as _,
                 last_side_effect_pos - 1,
             );
             stack_balance -= 1;
-        } else if last_side_effect_bc == EraBytecodePrimaryType::SetIntArrayVal as _ {
+        } else if last_side_effect_bc == EraBytecodePrimaryType::SetIntArrayVal as u8 {
             // Modify bytecode kind
             self.chunk.overwrite_u8(
                 EraBytecodePrimaryType::SetIntArrayValNoRet as _,

@@ -1286,13 +1286,13 @@ impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
     fn try_read_encoded_int_with_mark(&mut self, mark: u8) -> anyhow::Result<Option<i64>> {
         use crate::util::io::CSharpBinaryReader;
         let b = mark;
-        Ok(if b <= EraBinaryMark::Byte as _ {
+        Ok(if b <= EraBinaryMark::Byte as u8 {
             Some(b.into())
-        } else if b == EraBinaryMark::Int16 as _ {
+        } else if b == EraBinaryMark::Int16 as u8 {
             Some(self.read_i16()?.into())
-        } else if b == EraBinaryMark::Int32 as _ {
+        } else if b == EraBinaryMark::Int32 as u8 {
             Some(self.read_i32()?.into())
-        } else if b == EraBinaryMark::Int64 as _ {
+        } else if b == EraBinaryMark::Int64 as u8 {
             Some(self.read_i64()?)
         } else {
             None
@@ -1345,9 +1345,9 @@ impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
                     *dst = IntValue { val: x };
                 }
                 offset += 1;
-            } else if bin_mark == EraBinaryMark::EoD as _ {
+            } else if bin_mark == EraBinaryMark::EoD as u8 {
                 break;
-            } else if bin_mark == EraBinaryMark::Zero as _ {
+            } else if bin_mark == EraBinaryMark::Zero as u8 {
                 offset += self.read_encoded_int()? as usize;
             } else {
                 anyhow::bail!("invalid binary data");
@@ -1390,14 +1390,14 @@ impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
                     *dst = IntValue { val: x };
                 }
                 offset_1 += 1;
-            } else if bin_mark == EraBinaryMark::EoD as _ {
+            } else if bin_mark == EraBinaryMark::EoD as u8 {
                 break;
-            } else if bin_mark == EraBinaryMark::Zero as _ {
+            } else if bin_mark == EraBinaryMark::Zero as u8 {
                 offset_1 += self.read_encoded_int()? as usize;
-            } else if bin_mark == EraBinaryMark::ZeroA1 as _ {
+            } else if bin_mark == EraBinaryMark::ZeroA1 as u8 {
                 offset_0 += self.read_encoded_int()? as usize;
                 offset_1 = 0;
-            } else if bin_mark == EraBinaryMark::EoA1 as _ {
+            } else if bin_mark == EraBinaryMark::EoA1 as u8 {
                 offset_0 += 1;
                 offset_1 = 0;
             } else {
@@ -1444,21 +1444,21 @@ impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
                     *dst = IntValue { val: x };
                 }
                 offset_2 += 1;
-            } else if bin_mark == EraBinaryMark::EoD as _ {
+            } else if bin_mark == EraBinaryMark::EoD as u8 {
                 break;
-            } else if bin_mark == EraBinaryMark::Zero as _ {
+            } else if bin_mark == EraBinaryMark::Zero as u8 {
                 offset_2 += self.read_encoded_int()? as usize;
-            } else if bin_mark == EraBinaryMark::ZeroA1 as _ {
+            } else if bin_mark == EraBinaryMark::ZeroA1 as u8 {
                 offset_1 += self.read_encoded_int()? as usize;
                 offset_2 = 0;
-            } else if bin_mark == EraBinaryMark::EoA1 as _ {
+            } else if bin_mark == EraBinaryMark::EoA1 as u8 {
                 offset_1 += 1;
                 offset_2 = 0;
-            } else if bin_mark == EraBinaryMark::ZeroA2 as _ {
+            } else if bin_mark == EraBinaryMark::ZeroA2 as u8 {
                 offset_0 += self.read_encoded_int()? as usize;
                 offset_1 = 0;
                 offset_2 = 0;
-            } else if bin_mark == EraBinaryMark::EoA2 as _ {
+            } else if bin_mark == EraBinaryMark::EoA2 as u8 {
                 offset_0 += 1;
                 offset_1 = 0;
                 offset_2 = 0;
@@ -1510,7 +1510,7 @@ impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
         let mut offset = 0;
         loop {
             let bin_mark = self.read_u8()?;
-            if bin_mark == EraBinaryMark::String as _ {
+            if bin_mark == EraBinaryMark::String as u8 {
                 // Don't handle excessive data, drain them instead
                 if let Some(dst) = dst_vals.get_mut(offset) {
                     *dst = StrValue {
@@ -1518,9 +1518,9 @@ impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
                     };
                 }
                 offset += 1;
-            } else if bin_mark == EraBinaryMark::EoD as _ {
+            } else if bin_mark == EraBinaryMark::EoD as u8 {
                 break;
-            } else if bin_mark == EraBinaryMark::Zero as _ {
+            } else if bin_mark == EraBinaryMark::Zero as u8 {
                 offset += self.read_encoded_int()? as usize;
             } else {
                 anyhow::bail!("invalid binary data");
@@ -1555,7 +1555,7 @@ impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
         let mut offset_1 = 0;
         loop {
             let bin_mark = self.read_u8()?;
-            if bin_mark == EraBinaryMark::String as _ {
+            if bin_mark == EraBinaryMark::String as u8 {
                 // Don't handle excessive data, drain them instead
                 if offset_0 < dim_0 && offset_1 < dim_1 {
                     let dst_idx = offset_0 * dim_1 + offset_1;
@@ -1565,14 +1565,14 @@ impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
                     };
                 }
                 offset_1 += 1;
-            } else if bin_mark == EraBinaryMark::EoD as _ {
+            } else if bin_mark == EraBinaryMark::EoD as u8 {
                 break;
-            } else if bin_mark == EraBinaryMark::Zero as _ {
+            } else if bin_mark == EraBinaryMark::Zero as u8 {
                 offset_1 += self.read_encoded_int()? as usize;
-            } else if bin_mark == EraBinaryMark::ZeroA1 as _ {
+            } else if bin_mark == EraBinaryMark::ZeroA1 as u8 {
                 offset_0 += self.read_encoded_int()? as usize;
                 offset_1 = 0;
-            } else if bin_mark == EraBinaryMark::EoA1 as _ {
+            } else if bin_mark == EraBinaryMark::EoA1 as u8 {
                 offset_0 += 1;
                 offset_1 = 0;
             } else {
@@ -1611,7 +1611,7 @@ impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
         let mut offset_2 = 0;
         loop {
             let bin_mark = self.read_u8()?;
-            if bin_mark == EraBinaryMark::String as _ {
+            if bin_mark == EraBinaryMark::String as u8 {
                 // Don't handle excessive data, drain them instead
                 if offset_0 < dim_0 && offset_1 < dim_1 && offset_2 < dim_2 {
                     let dst_idx = offset_0 * dim_1 * dim_2 + offset_1 * dim_2 + offset_2;
@@ -1621,21 +1621,21 @@ impl<T: std::io::Read> EraVirtualMachineHostFileReadExt for T {
                     };
                 }
                 offset_2 += 1;
-            } else if bin_mark == EraBinaryMark::EoD as _ {
+            } else if bin_mark == EraBinaryMark::EoD as u8 {
                 break;
-            } else if bin_mark == EraBinaryMark::Zero as _ {
+            } else if bin_mark == EraBinaryMark::Zero as u8 {
                 offset_2 += self.read_encoded_int()? as usize;
-            } else if bin_mark == EraBinaryMark::ZeroA1 as _ {
+            } else if bin_mark == EraBinaryMark::ZeroA1 as u8 {
                 offset_1 += self.read_encoded_int()? as usize;
                 offset_2 = 0;
-            } else if bin_mark == EraBinaryMark::EoA1 as _ {
+            } else if bin_mark == EraBinaryMark::EoA1 as u8 {
                 offset_1 += 1;
                 offset_2 = 0;
-            } else if bin_mark == EraBinaryMark::ZeroA2 as _ {
+            } else if bin_mark == EraBinaryMark::ZeroA2 as u8 {
                 offset_0 += self.read_encoded_int()? as usize;
                 offset_1 = 0;
                 offset_2 = 0;
-            } else if bin_mark == EraBinaryMark::EoA2 as _ {
+            } else if bin_mark == EraBinaryMark::EoA2 as u8 {
                 offset_0 += 1;
                 offset_1 = 0;
                 offset_2 = 0;
@@ -2112,7 +2112,7 @@ impl EraVirtualMachine {
                 //     }
                 // }
                 FunCall => {
-                    let args_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)? as _;
+                    let args_cnt = ctx.chunk_read_u8(ctx.cur_frame.ip.offset + 1)? as usize;
                     ip_offset_delta += 1;
                     let [entry] = ctx.pop_stack()?;
                     // NOTE: We ignore the return value if we are looking up the callee

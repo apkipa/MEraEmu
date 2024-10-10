@@ -1,4 +1,5 @@
 pub mod ascii;
+pub mod dhashmap;
 pub mod html;
 pub mod io;
 pub mod number;
@@ -146,3 +147,156 @@ impl Display for CaselessString {
 }
 
 pub use ascii::Ascii;
+
+macro_rules! uppercase_bliteral {
+    ($value:expr) => {{
+        const STR_IN: &[u8] = $value;
+        const STR_OUT: [u8; STR_IN.len()] = {
+            let mut out = [0; STR_IN.len()];
+            let mut i = 0;
+            while i < STR_IN.len() {
+                out[i] = STR_IN[i].to_ascii_uppercase();
+                i += 1;
+            }
+            out
+        };
+        &STR_OUT
+    }};
+}
+
+// TODO: Does compiler optimize bmatch_caseless! well enough?
+macro_rules! bmatch_caseless {
+    ($pattern:expr => $value:expr $(, $patterns:expr => $values:expr)*, _ => $default_value:expr $(,)?) => {{
+        use crate::util::uppercase_bliteral;
+
+        // const ALL_PATTERNS: &[&[u8]] = &[$pattern, $($patterns,)*];
+        const MAX_LEN: usize = {
+            let mut max_len = 0;
+            const fn get_max(a: usize, b: usize) -> usize {
+                if a > b {
+                    a
+                } else {
+                    b
+                }
+            }
+            max_len = get_max(max_len, $pattern.len());
+            $(max_len = get_max(max_len, $patterns.len());)*
+            max_len
+        };
+
+        |value: &[u8]| {
+            if value.len() > MAX_LEN {
+                return $default_value;
+            }
+
+            let uppercased = {
+                let mut uppercased = [0; MAX_LEN];
+                for (i, &c) in value.iter().enumerate() {
+                    uppercased[i] = c.to_ascii_uppercase();
+                }
+                // uppercased[..value.len()].copy_from_slice(value);
+                // uppercased.make_ascii_uppercase();
+                uppercased
+            };
+            let uppercased = &uppercased[..value.len()];
+
+            if uppercased == uppercase_bliteral!($pattern) {
+                $value
+            } $(else if uppercased == uppercase_bliteral!($patterns) {
+                $values
+            })* else {
+                $default_value
+            }
+        }
+    }};
+}
+
+pub(crate) use bmatch_caseless;
+pub(crate) use uppercase_bliteral;
+
+// Source: https://stackoverflow.com/a/50781657
+pub trait SubsliceOffset {
+    /**
+    Returns the byte offset of an inner slice relative to an enclosing outer slice.
+
+    Examples
+
+    ```ignore
+    let string = "a\nb\nc";
+    let lines: Vec<&str> = string.lines().collect();
+    assert!(string.subslice_offset(lines[0]) == Some(0)); // &"a"
+    assert!(string.subslice_offset(lines[1]) == Some(2)); // &"b"
+    assert!(string.subslice_offset(lines[2]) == Some(4)); // &"c"
+    assert!(string.subslice_offset("other!") == None);
+    ```
+    */
+    fn subslice_offset(&self, inner: &Self) -> Option<usize>;
+}
+
+impl SubsliceOffset for str {
+    fn subslice_offset(&self, inner: &Self) -> Option<usize> {
+        let self_range = self.as_bytes().as_ptr_range();
+        let self_range = (self_range.start as usize)..(self_range.end as usize);
+        let inner = inner.as_ptr() as usize;
+        // if inner < self_range.start || inner + inner.len() > self_range.end {
+        if inner < self_range.start || inner > self_range.end {
+            None
+        } else {
+            Some(inner - self_range.start)
+        }
+    }
+}
+
+pub trait StrReplaceCount {
+    fn replace_count(&self, from: &str, to: &str) -> (String, usize);
+}
+
+impl StrReplaceCount for str {
+    fn replace_count(&self, from: &str, to: &str) -> (String, usize) {
+        let mut count = 0;
+        let mut last_end = 0;
+        let mut result = String::new();
+        for (start, part) in self.match_indices(from) {
+            count += 1;
+            result.push_str(&self[last_end..start]);
+            result.push_str(to);
+            last_end = start + part.len();
+        }
+        result.push_str(&self[last_end..]);
+        (result, count)
+    }
+}
+
+pub fn inline_to_ascii_uppercase<const LEN: usize>(
+    value: &[u8],
+) -> Option<arrayvec::ArrayVec<u8, LEN>> {
+    if value.len() > LEN {
+        return None;
+    }
+    let mut out = arrayvec::ArrayVec::<u8, LEN>::new();
+    for b in value {
+        out.push(b.to_ascii_uppercase());
+    }
+    Some(out)
+}
+
+pub fn array_try_from_fn<T, E, const N: usize, F>(mut cb: F) -> Result<[T; N], E>
+where
+    F: FnMut(usize) -> Result<T, E>,
+{
+    let out = [const { std::mem::MaybeUninit::uninit() }; N];
+    let mut out = scopeguard::guard((out, 0usize), |(mut out, count)| {
+        for i in 0..count {
+            unsafe {
+                // Drop in place
+                out[i].assume_init_drop();
+            }
+        }
+    });
+    for i in 0..N {
+        out.0[i].write(cb(i)?);
+        out.1 += 1;
+    }
+    let (out, _) = scopeguard::ScopeGuard::into_inner(out);
+    Ok(unsafe { core::mem::transmute_copy(&out) })
+}
