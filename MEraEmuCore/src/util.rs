@@ -279,3 +279,24 @@ pub fn inline_to_ascii_uppercase<const LEN: usize>(
     }
     Some(out)
 }
+
+pub fn array_try_from_fn<T, E, const N: usize, F>(mut cb: F) -> Result<[T; N], E>
+where
+    F: FnMut(usize) -> Result<T, E>,
+{
+    let out = [const { std::mem::MaybeUninit::uninit() }; N];
+    let mut out = scopeguard::guard((out, 0usize), |(mut out, count)| {
+        for i in 0..count {
+            unsafe {
+                // Drop in place
+                out[i].assume_init_drop();
+            }
+        }
+    });
+    for i in 0..N {
+        out.0[i].write(cb(i)?);
+        out.1 += 1;
+    }
+    let (out, _) = scopeguard::ScopeGuard::into_inner(out);
+    Ok(unsafe { core::mem::transmute_copy(&out) })
+}

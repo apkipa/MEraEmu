@@ -20,9 +20,13 @@ pub use engine::{
 use safer_ffi::{prelude::*, slice, string};
 pub use vm::{EraColorMatrix, MEraEngineFileSeekMode};
 
-#[cfg(not(miri))]
+#[cfg(all(not(miri), not(feature = "dhat-heap")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
 // #[global_allocator]
 // static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
@@ -1209,7 +1213,7 @@ mod tests {
 
             let mut errors = self.errors.borrow_mut();
 
-            const PRINT_TO_STDOUT: bool = true;
+            const PRINT_TO_STDOUT: bool = false;
 
             for entry in diag.get_entries() {
                 let (noun, color) = if entry.level == types::DiagnosticLevel::Error {
@@ -1931,6 +1935,9 @@ mod tests {
             _ => (),
         }
 
+        #[cfg(feature = "dhat-heap")]
+        let _profiler = dhat::Profiler::new_heap();
+
         // TODO: Redact this
         // Read from environment variable
         let game_base_dir = std::env::var("ERA_GAME_BASE_DIR").unwrap_or_else(|_| {
@@ -1965,6 +1972,11 @@ mod tests {
         builder.reg_int("SCREENWIDTH")?;
         builder.reg_int("LINECOUNT")?;
         builder.reg_str("SAVEDATA_TEXT")?;
+
+        *errors.borrow_mut() += &format!(
+            "[START BUILD, used mem = {}]\n",
+            size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)
+        );
 
         let mut start_time = std::time::Instant::now();
 
@@ -2144,16 +2156,16 @@ mod tests {
         for (path, mem_usage) in file_mem_usages.into_iter().rev().take(10) {
             println!("{path}: {}", size::Size::from_bytes(mem_usage));
         }
-        let engine = builder.build()?;
+
+        let erb_parse_time = start_time.elapsed();
+        start_time = std::time::Instant::now();
+
         *errors.borrow_mut() += &format!(
             "[FINIALIZE, used mem = {}]\n",
             size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)
         );
 
-        let erb_parse_time = start_time.elapsed();
-        start_time = std::time::Instant::now();
-
-        // _ = builder.finialize_load_srcs();
+        let engine = builder.build()?;
         *errors.borrow_mut() += &format!(
             "[DONE, used mem = {}]\n",
             size::Size::from_bytes(memory_stats::memory_stats().unwrap().physical_mem)

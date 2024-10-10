@@ -922,7 +922,11 @@ pub enum EraVarOptIdxExprConstruct<'a> {
 impl<'a> EraVarOptIdxExprConstruct<'a> {
     pub fn cast(val: SyntaxElementRef<'a, Token>) -> Option<Self> {
         Some(if let NodeOrToken::Node(node) = val {
-            Self::VarIdx(EraVarIdxExprNode::cast(node)?)
+            if let Some(x) = EraVarIdxExprNode::cast(node) {
+                Self::VarIdx(x)
+            } else {
+                Self::Var(EraVarExprNodeOrLeaf::cast(val)?)
+            }
         } else {
             Self::Var(EraVarExprNodeOrLeaf::cast(val)?)
         })

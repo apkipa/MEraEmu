@@ -29,7 +29,7 @@ type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
 
 #[derive_ReprC]
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SrcPos(pub u32);
 
 impl Default for SrcPos {
@@ -40,7 +40,7 @@ impl Default for SrcPos {
 
 #[derive_ReprC]
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SrcSpan {
     start: SrcPos,
     /// If the span is tagged (MSB is 1), then the len represents the tag (excluding
@@ -72,9 +72,7 @@ impl SrcSpan {
         SrcSpan { start, len }
     }
     pub fn with_ends(start: SrcPos, end: SrcPos) -> SrcSpan {
-        if end.0 < start.0 {
-            panic!("end position is before start position");
-        }
+        assert!(start <= end, "end position is before start position");
         SrcSpan {
             start,
             len: end.0 - start.0,
@@ -256,6 +254,8 @@ pub enum EraTokenKind {
     KwSingle,
     KwTransient,
     // ----- Nodes -----
+    MacroNode,
+
     Program,
 
     VarDecl,
@@ -588,7 +588,7 @@ pub struct EraDefineData {
 // }
 #[derive(Debug, Default)]
 pub struct EraDefineScope {
-    defines: HashMap<Box<str>, EraDefineData, FxBuildHasher>,
+    defines: FxHashMap<Box<str>, EraDefineData>,
 }
 
 impl EraDefineScope {
@@ -607,13 +607,125 @@ impl EraDefineScope {
     }
 }
 
+/// Macro mappings, from the replaced source span to the original text.
+#[derive(Debug, Default)]
+pub struct EraMacroMap {
+    /// The list of macro mappings (monotonic).
+    mappings: Vec<(SrcSpan, ArcStr)>,
+}
+
+impl EraMacroMap {
+    pub fn iter(&self) -> std::slice::Iter<'_, (SrcSpan, ArcStr)> {
+        self.mappings.iter()
+    }
+
+    pub fn push(&mut self, span: SrcSpan, text: ArcStr) {
+        if let Some((last_span, last_text)) = self.mappings.last() {
+            // Ensure that the mappings are monotonic.
+            assert!(
+                last_span.end() <= span.start(),
+                "non-monotonic macro mappings: {:?} -> {} and {:?} -> {}",
+                last_span,
+                last_text,
+                span,
+                text
+            );
+        }
+        let _: u32 = text.len().try_into().expect("text length overflow");
+        self.mappings.push((span, text));
+    }
+
+    pub fn get(&self, span: &SrcSpan) -> Option<&ArcStr> {
+        self.mappings
+            .binary_search_by_key(span, |(span, _)| *span)
+            .ok()
+            .map(|idx| &self.mappings[idx].1)
+    }
+
+    /// Translates the given (replaced) span to the original source span.
+    pub fn translate_span(&self, mut span: SrcSpan) -> SrcSpan {
+        let mut delta = 0;
+        for (from_span, text) in self.mappings.iter() {
+            let from_len = from_span.len();
+            let text_len = text.len() as u32;
+            // NOTE: `text_span` has its end pos altered to adapt to offset.
+            let text_span = SrcSpan::new(from_span.start(), text_len);
+            let cur_delta = text_len as i32 - from_len as i32;
+            // TODO: Remove this part later, because the logic is redundant
+            // if from_span.contains_span(span) {
+            //     // Extend to whole macro
+            //     span = text_span;
+            //     break;
+            // }
+            if from_span.intersects(span) {
+                // Extend one side to whole macro
+                let start = if span.start() < from_span.start() {
+                    span.start()
+                } else {
+                    text_span.start()
+                };
+                let end = if span.end() > from_span.end() {
+                    // Fix end position
+                    let end = span.end().0.wrapping_add_signed(cur_delta);
+                    SrcPos(end)
+                } else {
+                    text_span.end()
+                };
+                span = SrcSpan::with_ends(start, end);
+                break;
+            }
+            // Otherwise, not intersecting in any way
+            if span.end() <= from_span.start() {
+                break;
+            }
+            delta += cur_delta;
+        }
+        let new_start_pos = span.start().0.wrapping_add_signed(delta);
+        SrcSpan::new(SrcPos(new_start_pos), span.len())
+    }
+
+    /// Translates the given (original) span to the replaced source span.
+    pub fn inverse_translate_span(&self, mut span: SrcSpan) -> SrcSpan {
+        let mut delta = 0;
+        for (from_span, text) in self.mappings.iter() {
+            let from_len = from_span.len();
+            let text_len = text.len() as u32;
+            let text_start_pos = SrcPos(from_span.start().0.wrapping_add_signed(delta));
+            let text_span = SrcSpan::new(text_start_pos, text_len);
+            let cur_delta = text_len as i32 - from_len as i32;
+            if text_span.intersects(span) {
+                let start = if span.start() < text_span.start() {
+                    let diff = text_span.start().0 - span.start().0;
+                    SrcPos(from_span.start().0 - diff)
+                } else {
+                    from_span.start()
+                };
+                let end = if span.end() > text_span.end() {
+                    let diff = span.end().0 - text_span.end().0;
+                    SrcPos(from_span.end().0 + diff)
+                } else {
+                    from_span.end()
+                };
+                span = SrcSpan::with_ends(start, end);
+                return span;
+            }
+            if span.end() <= text_span.start() {
+                break;
+            }
+            delta += cur_delta;
+        }
+        let new_start_pos = span.start().0.wrapping_add_signed(-delta);
+        SrcSpan::new(SrcPos(new_start_pos), span.len())
+    }
+}
+
 #[derive(Debug)]
 pub struct EraSourceFile {
     pub filename: ArcStr,
-    /// The root AST node of the lossless syntax tree, including untouched macros.
-    pub orig_root: cstree::green::GreenNode,
+    /// The root AST node of the lossless syntax tree, with macros replaced.
+    pub final_root: cstree::green::GreenNode,
     /// The list of macro substitution mappings.
-    pub macro_map: HashMap<SrcSpan, cstree::green::GreenNode, FxBuildHasher>,
+    pub macro_map: EraMacroMap,
     /// The list of `#define`'s.
     pub defines: EraDefineScope,
     /// Whether the file is a header file.
@@ -1147,12 +1259,12 @@ impl<'a, 'src> DiagnosticProvider<'a, 'src> {
                 .newline_pos
                 .get(end_line)
                 .copied()
-                .unwrap_or_else(|| SrcPos(src_file.orig_root.text_len().into()));
+                .unwrap_or_else(|| SrcPos(src_file.final_root.text_len().into()));
             let snippet_span = SrcSpan::with_ends(start_pos, end_pos);
 
             // Find covering element first, then find the children elements.
             let mut covering_snippet = String::new();
-            let mut node = &src_file.orig_root;
+            let mut node = &src_file.final_root;
             let mut span = SrcSpan::new(SrcPos(0), node.text_len().into());
             let mut covering_snippet_start_pos = SrcPos(0);
             if !span.contains_span(snippet_span) {
@@ -1265,7 +1377,7 @@ pub struct DiagnosticResolveSrcSpanResult {
 
 #[modular_bitfield::bitfield]
 #[repr(u8)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EraPrintExtendedFlags {
     pub is_single: bool,
     pub use_kana: bool,
@@ -1399,12 +1511,15 @@ impl ArrIntValue {
                 });
         Some(idx)
     }
-    #[inline]
     pub fn ensure_alloc(&mut self) {
         if self.vals.is_empty() {
             let size = self.dims.iter().fold(1, |acc, x| acc * (*x as usize));
             self.vals.resize(size, Default::default());
         }
+    }
+    pub fn clear_alloc(&mut self) {
+        self.vals.clear();
+        self.vals.shrink_to_fit();
     }
 }
 impl ArrStrValue {
@@ -1452,12 +1567,15 @@ impl ArrStrValue {
                 });
         Some(idx)
     }
-    #[inline]
     pub fn ensure_alloc(&mut self) {
         if self.vals.is_empty() {
             let size = self.dims.iter().fold(1, |acc, x| acc * (*x as usize));
             self.vals.resize(size, Default::default());
         }
+    }
+    pub fn clear_alloc(&mut self) {
+        self.vals.clear();
+        self.vals.shrink_to_fit();
     }
 }
 
@@ -1923,6 +2041,63 @@ pub struct EraCharaInitTemplate {
     pub equip: BTreeMap<u32, i64>,
     pub juel: BTreeMap<u32, i64>,
     pub cstr: BTreeMap<u32, ArcStr>,
+}
+
+#[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraCharaCsvPropType {
+    CsvName,
+    CsvCallName,
+    CsvNickName,
+    CsvMasterName,
+    CsvBase,
+    CsvCStr,
+    CsvAbl,
+    CsvTalent,
+    CsvMark,
+    CsvExp,
+    CsvRelation,
+    CsvJuel,
+    CsvEquip,
+    CsvCFlag,
+}
+impl EraCharaCsvPropType {
+    // pub fn from_i(value: u8) -> Self {
+    //     num_traits::FromPrimitive::from_u8(value).unwrap_or(Self::Invalid)
+    // }
+    pub fn try_from_i(value: u8) -> Option<Self> {
+        num_traits::FromPrimitive::from_u8(value)
+    }
+    pub fn to_i(self) -> u8 {
+        num_traits::ToPrimitive::to_u8(&self).unwrap()
+    }
+    pub fn try_from_var(var: &str) -> Option<Self> {
+        use EraCharaCsvPropType::*;
+        let is = |x| var.eq_ignore_ascii_case(x);
+        Some(if is("BASE") || is("MAXBASE") {
+            CsvBase
+        } else if is("CSTR") {
+            CsvCStr
+        } else if is("ABL") {
+            CsvAbl
+        } else if is("TALENT") {
+            CsvTalent
+        } else if is("MARK") {
+            CsvMark
+        } else if is("EXP") {
+            CsvExp
+        } else if is("RELATION") {
+            CsvRelation
+        } else if is("JUEL") {
+            CsvJuel
+        } else if is("EQUIP") {
+            CsvEquip
+        } else if is("CFLAG") {
+            CsvCFlag
+        } else {
+            return None;
+        })
+    }
 }
 
 #[repr(u8)]
@@ -2448,6 +2623,7 @@ pub enum EraPriBytecode {
     Log10Int,
     ExponentInt,
     AbsInt,
+    SignInt,
     GroupMatch,
     ArrayCountMatches,
     CArrayCountMatches,
@@ -2485,6 +2661,7 @@ pub enum EraPriBytecode {
     GetCallerFunName,
     GetCharaNum,
     CsvGetNum,
+    GetRandomRange,
     GetRandomMax,
     /// Extra (fused) operations group #1. Introduced for performance reasons.
     ExtOp1,
@@ -2530,7 +2707,7 @@ pub enum EraExtBytecode1 {
     FindLastChara,
     VarSet,
     CVarSet,
-    GetVarSize,
+    GetVarSizeByName,
     GetVarAllSize,
     GetHostTimeRaw,
     GetHostTime,
@@ -2667,7 +2844,8 @@ pub enum EraBytecodeKind {
     Log10Int,
     ExponentInt,
     AbsInt,
-    GroupMatch,
+    SignInt,
+    GroupMatch { count: u8 },
     ArrayCountMatches,
     CArrayCountMatches,
     SumArray,
@@ -2697,6 +2875,7 @@ pub enum EraBytecodeKind {
     GetCallerFuncName,
     GetCharaNum,
     CsvGetNum { kind: EraCsvVarKind },
+    GetRandomRange,
     GetRandomMax,
     // ----- ExtOp1 -----
     RowAssign { dims_cnt: u8, vals_cnt: u8 },
@@ -2730,12 +2909,12 @@ pub enum EraBytecodeKind {
     FindLastChara,
     VarSet,
     CVarSet,
-    GetVarSize,
+    GetVarSizeByName,
     GetVarAllSize,
     GetHostTimeRaw,
     GetHostTime,
     GetHostTimeS,
-    CsvGetProp2,
+    CsvGetProp2 { csv_kind: EraCharaCsvPropType },
     CharaCsvExists,
     GetPalamLv,
     GetExpLv,
@@ -2898,7 +3077,8 @@ impl EraBytecodeKind {
             Pri::Log10Int => Some(Log10Int),
             Pri::ExponentInt => Some(ExponentInt),
             Pri::AbsInt => Some(AbsInt),
-            Pri::GroupMatch => Some(GroupMatch),
+            Pri::SignInt => Some(SignInt),
+            Pri::GroupMatch => Some(GroupMatch { count: byte1()? }),
             Pri::ArrayCountMatches => Some(ArrayCountMatches),
             Pri::CArrayCountMatches => Some(CArrayCountMatches),
             Pri::SumArray => Some(SumArray),
@@ -2935,6 +3115,7 @@ impl EraBytecodeKind {
             Pri::CsvGetNum => Some(CsvGetNum {
                 kind: EraCsvVarKind::try_from_i(byte1()?)?,
             }),
+            Pri::GetRandomRange => Some(GetRandomRange),
             Pri::GetRandomMax => Some(GetRandomMax),
             // ----- ExtOp1 -----
             Pri::ExtOp1 => match num_traits::FromPrimitive::from_u8(get(1)?)? {
@@ -2974,12 +3155,14 @@ impl EraBytecodeKind {
                 Ext1::FindLastChara => Some(FindLastChara),
                 Ext1::VarSet => Some(VarSet),
                 Ext1::CVarSet => Some(CVarSet),
-                Ext1::GetVarSize => Some(GetVarSize),
+                Ext1::GetVarSizeByName => Some(GetVarSizeByName),
                 Ext1::GetVarAllSize => Some(GetVarAllSize),
                 Ext1::GetHostTimeRaw => Some(GetHostTimeRaw),
                 Ext1::GetHostTime => Some(GetHostTime),
                 Ext1::GetHostTimeS => Some(GetHostTimeS),
-                Ext1::CsvGetProp2 => Some(CsvGetProp2),
+                Ext1::CsvGetProp2 => Some(CsvGetProp2 {
+                    csv_kind: EraCharaCsvPropType::try_from_i(get(2)?)?,
+                }),
                 Ext1::CharaCsvExists => Some(CharaCsvExists),
                 Ext1::GetPalamLv => Some(GetPalamLv),
                 Ext1::GetExpLv => Some(GetExpLv),
@@ -3187,7 +3370,11 @@ impl EraBytecodeKind {
             Log10Int => bytes.push(Pri::Log10Int as u8),
             ExponentInt => bytes.push(Pri::ExponentInt as u8),
             AbsInt => bytes.push(Pri::AbsInt as u8),
-            GroupMatch => bytes.push(Pri::GroupMatch as u8),
+            SignInt => bytes.push(Pri::SignInt as u8),
+            GroupMatch { count } => {
+                bytes.push(Pri::GroupMatch as u8);
+                bytes.push(count);
+            }
             ArrayCountMatches => bytes.push(Pri::ArrayCountMatches as u8),
             CArrayCountMatches => bytes.push(Pri::CArrayCountMatches as u8),
             SumArray => bytes.push(Pri::SumArray as u8),
@@ -3231,6 +3418,7 @@ impl EraBytecodeKind {
                 bytes.push(Pri::CsvGetNum as u8);
                 bytes.push(kind.to_i());
             }
+            GetRandomRange => bytes.push(Pri::GetRandomRange as u8),
             GetRandomMax => bytes.push(Pri::GetRandomMax as u8),
             // ----- ExtOp1 -----
             // TODO...
@@ -3361,9 +3549,9 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::CVarSet as u8);
             }
-            GetVarSize => {
+            GetVarSizeByName => {
                 bytes.push(Pri::ExtOp1 as u8);
-                bytes.push(Ext1::GetVarSize as u8);
+                bytes.push(Ext1::GetVarSizeByName as u8);
             }
             GetVarAllSize => {
                 bytes.push(Pri::ExtOp1 as u8);
@@ -3381,9 +3569,10 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::GetHostTimeS as u8);
             }
-            CsvGetProp2 => {
+            CsvGetProp2 { csv_kind } => {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::CsvGetProp2 as u8);
+                bytes.push(csv_kind.to_i());
             }
             CharaCsvExists => {
                 bytes.push(Pri::ExtOp1 as u8);

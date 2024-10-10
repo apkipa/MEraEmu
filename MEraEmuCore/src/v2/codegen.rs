@@ -1,6 +1,7 @@
 use cstree::{
     interning::{InternKey, Interner, Resolver, TokenKey},
     syntax::SyntaxNode,
+    Syntax,
 };
 use fxhash::FxBuildHasher;
 use hashbrown::HashMap;
@@ -270,6 +271,8 @@ struct EraFuncPrebuildInfo {
     name_str: ArcStr,
     args: Vec<EraFuncArgsBinding>,
     event_kind: Option<EraEventFuncKind>,
+    // (init_val_idx, var_span)
+    dyn_vars: Vec<(u32, SrcSpan)>,
 }
 
 impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
@@ -293,13 +296,13 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                 Option<EraFuncInfo>,
             ),
         > = Default::default();
-        let mut funcs_count_file = Vec::new();
 
         let sources = filenames
             .iter()
             .map(|filename| {
                 let program = self.ctx.source_map.get(filename).expect("source not found");
-                let program = SyntaxNode::new_root(program.orig_root.clone());
+                let program = &program.final_root;
+                let program = SyntaxNode::new_root(program.clone());
                 let program = EraProgramNode::cast(&program)
                     .expect("invalid program")
                     .to_owned();
@@ -320,7 +323,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                     }) as u32;
                 (chunk_idx, filename, program)
             })
-            .collect::<Vec<_>>();
+            .collect_vec();
         let sources_iter = sources
             .iter()
             .map(|(chunk_idx, filename, program)| (*chunk_idx, *filename, program.as_ref()));
@@ -338,8 +341,6 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
         let mut site = EraCodeGenPrebuildSite::new(self);
         for (chunk_idx, filename, program) in sources_iter.clone() {
             site.o.ctx.active_source = filename.clone();
-
-            funcs_count_file.push(0usize);
 
             for item in program.children() {
                 match item.kind() {
@@ -370,16 +371,12 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                         // eprintln!("[Add func {}, span={:?}]", name, func_info.name_span);
                         prebuild_funcs
                             .insert(Ascii::new_str(name), (node, prebuild_info, Some(func_info)));
-
-                        *funcs_count_file.last_mut().unwrap() += 1;
                     }
                     _ => continue,
                 }
             }
         }
         drop(site);
-
-        funcs_count_file.reverse();
 
         // Merge prebuild functions into global function table
         let func_entries = Rc::get_mut(&mut self.ctx.func_entries).unwrap();
@@ -390,41 +387,70 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
         }
         _ = func_entries;
 
-        // Now start compiling functions
-        let mut chunk_builders = FxHashMap::<u32, EraBcChunkBuilder>::default();
+        let mut compile_units = FxIndexMap::<_, (EraBcChunkBuilder, Vec<_>)>::default();
         for (name, (node, prebuild_info, _)) in prebuild_funcs {
             let func_idx = prebuild_info.func_idx;
-            let func_info = Rc::get_mut(&mut self.ctx.func_entries)
-                .unwrap()
-                .get_index_mut(func_idx as _)
+            let chunk_idx = self
+                .ctx
+                .func_entries
+                .get_index(func_idx as _)
                 .unwrap()
                 .1
-                .as_mut()
-                .unwrap();
-            let chunk_idx = func_info.chunk_idx;
-            let filename = self.ctx.bc_chunks[chunk_idx as usize].name.clone();
-            self.ctx.active_source = filename.clone();
-            let chunk = chunk_builders.entry(chunk_idx).or_default();
-            let func_offset = chunk
-                .get_len()
-                .try_into()
-                .expect("function offset overflow");
-            func_info.bc_offset = func_offset;
-            _ = func_info;
-            EraCodeGenSite::gen_function(self, chunk, node, prebuild_info);
+                .as_ref()
+                .unwrap()
+                .chunk_idx;
+            let unit = compile_units.entry(chunk_idx).or_default();
+            unit.1.push((name, node.to_owned(), prebuild_info));
+        }
+
+        drop(sources);
+
+        // Now start compiling functions
+        let mut current_progress = 0;
+        let mut func_offsets = Vec::new();
+        for (chunk, funcs) in compile_units.values_mut() {
+            let funcs = std::mem::take(funcs);
+            for (name, node, prebuild_info) in funcs {
+                let func_idx = prebuild_info.func_idx;
+                let func_info = self
+                    .ctx
+                    .func_entries
+                    .get_index(func_idx as _)
+                    .unwrap()
+                    .1
+                    .as_ref()
+                    .unwrap();
+                let chunk_idx = func_info.chunk_idx;
+                let filename = self.ctx.bc_chunks[chunk_idx as usize].name.clone();
+                self.ctx.active_source = filename.clone();
+                let func_offset: u32 = chunk
+                    .get_len()
+                    .try_into()
+                    .expect("function offset overflow");
+                // func_info.bc_offset = func_offset;
+                func_offsets.push((func_idx, func_offset));
+                EraCodeGenSite::gen_function(self, chunk, node, prebuild_info);
+            }
 
             // Update progress
-            while *funcs_count_file.last().unwrap() == 0 {
-                funcs_count_file.pop();
-                progress_callback(filenames.len() - funcs_count_file.len());
-            }
-            *funcs_count_file.last_mut().unwrap() -= 1;
+            current_progress += 1;
+            progress_callback(current_progress);
         }
 
         self.ctx.active_source = ArcStr::default();
 
         // Finialize bytecode chunks
-        for (chunk_idx, chunk) in chunk_builders {
+        let func_entries = Rc::get_mut(&mut self.ctx.func_entries).unwrap();
+        for (func_idx, func_offset) in func_offsets {
+            let func_info = func_entries
+                .get_index_mut(func_idx as _)
+                .unwrap()
+                .1
+                .as_mut()
+                .unwrap();
+            func_info.bc_offset = func_offset;
+        }
+        for (chunk_idx, (chunk, _)) in compile_units {
             let mut chunk = chunk.finish();
             chunk.name = self.ctx.bc_chunks[chunk_idx as usize].name.clone();
             self.ctx.bc_chunks[chunk_idx as usize] = chunk;
@@ -1151,6 +1177,28 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
             }
         }
 
+        // Allocate stack slots for local variables
+        let mut dyn_vars = Vec::new();
+        let mut dyn_vars_cnt = func_info
+            .frame_info
+            .args
+            .len()
+            .try_into()
+            .expect("too many arguments");
+        for var in func_info.frame_info.vars.values_mut() {
+            assert!(var.var_idx != u32::MAX, "unbound variable");
+
+            // Is the variable DYNAMIC?
+            if !(var.in_local_frame && !var.is_ref) {
+                continue;
+            }
+
+            let init_val_idx = var.var_idx;
+            dyn_vars.push((init_val_idx, var.span));
+            var.var_idx = dyn_vars_cnt;
+            dyn_vars_cnt += 1;
+        }
+
         Ok((
             EraFuncPrebuildInfo {
                 func_idx: 0,
@@ -1158,6 +1206,7 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
                 name_str,
                 args,
                 event_kind: event_func_kind,
+                dyn_vars,
             },
             func_info,
         ))
@@ -1234,46 +1283,14 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
     fn gen_function(
         o: &'o mut EraCodeGenerator<'ctx, Callback>,
         chunk: &'b mut EraBcChunkBuilder,
-        node: EraFunctionItemNode,
+        node: OwnedEraFunctionItemNode,
         prebuild_info: EraFuncPrebuildInfo,
     ) {
+        let node = node.as_ref();
+
         // Stage 3 - Generate bytecode
         let cur_func_idx = prebuild_info.func_idx as _;
         let name = prebuild_info.name;
-        let func_info = Rc::get_mut(&mut o.ctx.func_entries)
-            .unwrap()
-            .get_index_mut(cur_func_idx)
-            .unwrap()
-            .1
-            .as_mut()
-            .unwrap();
-        let name_span = func_info.name_span;
-
-        // TODO: Move this step out so that we can better parallelize the compilation process
-        // Generate function prologue (local frame)
-        // Allocates stack slots for local variables
-        let mut dyn_vars_cnt = func_info
-            .frame_info
-            .args
-            .len()
-            .try_into()
-            .expect("too many arguments");
-        for var in func_info.frame_info.vars.values_mut() {
-            assert!(var.var_idx != u32::MAX, "unbound variable");
-
-            // Is the variable DYNAMIC?
-            if !(var.in_local_frame && !var.is_ref) {
-                continue;
-            }
-
-            let init_val_idx = var.var_idx;
-            chunk.push_bc(BcKind::LoadConstVarWW { idx: init_val_idx }, var.span);
-            var.var_idx = dyn_vars_cnt;
-            dyn_vars_cnt += 1;
-        }
-
-        _ = func_info;
-
         // Lock down func_entries so that lifetime is decoupled from ctx, and content is freezed
         // (i.e. prevents modifications)
         let func_entries = o.ctx.func_entries.clone();
@@ -1284,6 +1301,14 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
             })
         };
         let func_info = func_info_yoke.get();
+        let name_span = func_info.name_span;
+
+        // Generate function prologue (local frame)
+        // Allocates stack slots for local variables
+        let dyn_vars_cnt = prebuild_info.dyn_vars.len() as _;
+        for (init_val_idx, var_span) in prebuild_info.dyn_vars {
+            chunk.push_bc(BcKind::LoadConstVarWW { idx: init_val_idx }, var_span);
+        }
 
         // Assign arguments
         for (arg_idx, arg) in prebuild_info.args.iter().enumerate() {
@@ -2798,10 +2823,10 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
     fn stmt_print_emit_bc(&mut self, flags: EraPrintExtendedFlags, span: SrcSpan) {
         use EraPrintExtendedFlags as Flags;
         match u8::from(flags) {
-            x if x == Flags::new().into() => {
+            _ if flags == Flags::new() => {
                 self.chunk.push_bc(BcKind::Print, span);
             }
-            x if x == Flags::new().with_is_line(true).into() => {
+            _ if flags == Flags::new().with_is_line(true) => {
                 self.chunk.push_bc(BcKind::PrintLine, span);
             }
             _ => {
@@ -4675,6 +4700,19 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
                 } else {
                     let rhs = self.expression(rhs)?;
                     match op {
+                        Token::Plus => match rhs {
+                            ScalarValueKind::Int => ScalarValueKind::Int,
+                            _ => {
+                                let mut diag = self.o.ctx.make_diag();
+                                diag.span_err(
+                                    Default::default(),
+                                    op_span,
+                                    "operand to unary `+` must be an integer",
+                                );
+                                self.o.ctx.emit_diag(diag);
+                                return Err(());
+                            }
+                        },
                         Token::Minus => match rhs {
                             ScalarValueKind::Int => {
                                 self.chunk.push_bc(BcKind::NegInt, op_span);
@@ -5003,8 +5041,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
                     if csv_var_kind.is_some()
                         && idx
                             .as_leaf()
-                            .map(|x| x.kind() == Token::Identifier)
-                            .unwrap_or(false)
+                            .map_or(false, |x| x.kind() == Token::Identifier)
                     {
                         let csv_var_kind = csv_var_kind.unwrap();
                         let name = idx.as_leaf().unwrap().resolve_text(self.o.ctx.interner());
@@ -5836,19 +5873,27 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
                 };
 
                 if arg != target_param.var_kind.to_scalar() {
-                    let mut diag = self.o.ctx.make_diag();
-                    diag.span_err(
-                        Default::default(),
-                        arg_span,
-                        "incompatible types in argument",
-                    );
-                    diag.span_note(
-                        self.o.ctx.bc_chunks[target_chunk_idx].name.clone(),
-                        target_func.name_span,
-                        "see signature of callee",
-                    );
-                    self.o.ctx.emit_diag(diag);
-                    return Err(());
+                    match (arg, target_param.var_kind.to_scalar()) {
+                        (ScalarValueKind::Int, ScalarValueKind::Str) => {
+                            // Implicitly cast to string
+                            self.chunk.push_bc(BcKind::IntToStr, arg_span);
+                        }
+                        _ => {
+                            let mut diag = self.o.ctx.make_diag();
+                            diag.span_err(
+                                Default::default(),
+                                arg_span,
+                                "incompatible types in argument",
+                            );
+                            diag.span_note(
+                                self.o.ctx.bc_chunks[target_chunk_idx].name.clone(),
+                                target_func.name_span,
+                                "see signature of callee",
+                            );
+                            self.o.ctx.emit_diag(diag);
+                            return Err(());
+                        }
+                    }
                 }
             }
         }
@@ -5965,14 +6010,15 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
     ) -> CompileResult<ScalarValueKind> {
         use std::ops::{Deref, DerefMut};
 
-        struct Site<'this, 'o, 'ctx, 'b, Callback> {
+        struct Site<'this, 'o, 'ctx, 'b, 'name, Callback> {
             this: &'this mut EraCodeGenSite<'o, 'ctx, 'b, Callback>,
             ret_kind: ScalarValueKind,
+            name: &'name str,
             name_span: SrcSpan,
             assign_to_result: bool,
         }
 
-        impl<'this, 'o, 'ctx, 'b, Callback> Deref for Site<'this, 'o, 'ctx, 'b, Callback> {
+        impl<'this, 'o, 'ctx, 'b, Callback> Deref for Site<'this, 'o, 'ctx, 'b, '_, Callback> {
             type Target = EraCodeGenSite<'o, 'ctx, 'b, Callback>;
 
             fn deref(&self) -> &Self::Target {
@@ -5980,13 +6026,92 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
             }
         }
 
-        impl<'this, 'o, 'ctx, 'b, Callback> DerefMut for Site<'this, 'o, 'ctx, 'b, Callback> {
+        impl<'this, 'o, 'ctx, 'b, Callback> DerefMut for Site<'this, 'o, 'ctx, 'b, '_, Callback> {
             fn deref_mut(&mut self) -> &mut Self::Target {
                 self.this
             }
         }
 
-        impl<Callback: EraCompilerCallback> Site<'_, '_, '_, '_, Callback> {
+        impl<Callback: EraCompilerCallback> Site<'_, '_, '_, '_, '_, Callback> {
+            fn result(&mut self) -> CompileResult<()> {
+                self.ret_kind = ScalarValueKind::Int;
+                if !self.assign_to_result {
+                    return Ok(());
+                }
+                self.this.int_var_static_idx("RESULT", self.name_span, 0)
+            }
+
+            fn results(&mut self) -> CompileResult<()> {
+                self.ret_kind = ScalarValueKind::Str;
+                if !self.assign_to_result {
+                    return Ok(());
+                }
+                self.this.str_var_static_idx("RESULTS", self.name_span, 0)
+            }
+
+            fn unpack_args<'a, const N: usize>(
+                &mut self,
+                args: EraExprListNode<'a>,
+            ) -> CompileResult<[EraExprNodeOrLeaf<'a>; N]> {
+                let mut args_cnt = 0;
+                let mut args = args.children().inspect(|_| args_cnt += 1);
+                match crate::util::array_try_from_fn(|_| args.next().ok_or(())) {
+                    Ok(out) if args.next().is_none() => Ok(out),
+                    _ => {
+                        args.for_each(|_| ());
+                        let mut diag = self.o.ctx.make_diag();
+                        diag.span_err(
+                            Default::default(),
+                            self.name_span,
+                            format!(
+                                "function `{}` expects {} arguments, bue {} were given",
+                                self.name, N, args_cnt
+                            ),
+                        );
+                        self.o.ctx.emit_diag(diag);
+                        Err(())
+                    }
+                }
+            }
+
+            fn unpack_opt_args<'a, const N: usize>(
+                &mut self,
+                args: EraExprListNode<'a>,
+                min_cnt: usize,
+            ) -> CompileResult<[Option<EraExprNodeOrLeaf<'a>>; N]> {
+                let mut args_cnt = 0;
+                let mut args = args.children().inspect(|_| args_cnt += 1);
+                let out = std::array::from_fn(|_| args.next());
+                args.for_each(|_| ());
+                if args_cnt < min_cnt {
+                    let mut diag = self.o.ctx.make_diag();
+                    diag.span_err(
+                        Default::default(),
+                        self.name_span,
+                        format!(
+                            "function `{}` expects at least {} arguments, but {} were given",
+                            self.name, min_cnt, args_cnt
+                        ),
+                    );
+                    self.o.ctx.emit_diag(diag);
+                    return Err(());
+                }
+                if args_cnt > N {
+                    let mut diag = self.o.ctx.make_diag();
+                    diag.span_err(
+                        Default::default(),
+                        self.name_span,
+                        format!(
+                            "function `{}` expects at most {} arguments, but {} were given",
+                            self.name, N, args_cnt
+                        ),
+                    );
+                    self.o.ctx.emit_diag(diag);
+                    return Err(());
+                }
+                Ok(out)
+            }
+
             fn finish(mut self) -> ScalarValueKind {
                 let name_span = self.name_span;
                 if !self.assign_to_result {
@@ -6007,12 +6132,952 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
         let mut site = Site {
             this: self,
             ret_kind: ScalarValueKind::Void,
+            name,
             name_span,
             assign_to_result: is_cmd,
         };
 
+        macro_rules! apply_one_arg {
+            ($span:expr, $var_name:ident:i) => {
+                site.int_expr($var_name)?;
+            };
+            ($span:expr, $var_name:ident:s) => {
+                site.str_expr($var_name)?;
+            };
+            ($span:expr, $var_name:ident:v) => {{
+                let var = site.expr_to_var($var_name)?;
+                site.norm_var(var)?;
+            }};
+            ($span:expr, $var_name:ident:vi) => {{
+                let var = site.expr_to_var($var_name)?;
+                site.int_norm_var(var)?;
+            }};
+            ($span:expr, $var_name:ident:vs) => {{
+                let var = site.expr_to_var($var_name)?;
+                site.str_norm_var(var)?;
+            }};
+            ($span:expr, $var_name:ident:vii) => {{
+                let var = site.expr_to_var_opt_idx($var_name)?;
+                site.int_norm_var_idx(var, true)?;
+            }};
+            ($span:expr, $var_name:ident:vis) => {{
+                let var = site.expr_to_var_opt_idx($var_name)?;
+                site.str_norm_var_idx(var, true)?;
+            }};
+            ($span:expr, $var_name:ident:vi || $fallback:expr) => {{
+                if let Some(var) = $var_name {
+                    let var = site.expr_to_var(var)?;
+                    site.int_norm_var(var)?;
+                } else {
+                    site.int_var_static($fallback, $span)?;
+                }
+            }};
+            ($span:expr, $var_name:ident:vs || $fallback:expr) => {{
+                if let Some(var) = $var_name {
+                    let var = site.expr_to_var(var)?;
+                    site.str_norm_var(var)?;
+                } else {
+                    site.str_var_static($fallback, $span)?;
+                }
+            }};
+            ($span:expr, $var_name:ident:vii || $fallback:expr) => {{
+                if let Some(var) = $var_name {
+                    let var = site.expr_to_var_opt_idx(var)?;
+                    site.int_norm_var_idx(var, true)?;
+                } else {
+                    site.int_var_static_idx($fallback, $span, 0)?;
+                }
+            }};
+            ($span:expr, $var_name:ident:vis || $fallback:expr) => {{
+                if let Some(var) = $var_name {
+                    let var = site.expr_to_var_opt_idx(var)?;
+                    site.str_norm_var_idx(var, true)?;
+                } else {
+                    site.str_var_static_idx($fallback, $span, 0)?;
+                }
+            }};
+            ($span:expr, $var_name:ident:i?) => {
+                site.expr_or_default($var_name.or_span($span), ScalarValueKind::Int)?;
+            };
+            ($span:expr, $var_name:ident:s?) => {
+                site.expr_or_default($var_name.or_span($span), ScalarValueKind::Str)?;
+            };
+            ($span:expr, $var_name:ident:i || $fallback:expr) => {
+                site.int_expr_or($var_name.or_span($span), $fallback)?;
+            };
+            ($span:expr, $var_name:ident:s || $fallback:expr) => {
+                site.str_expr_or($var_name.or_span($span), $fallback)?;
+            };
+        }
+        macro_rules! apply_args {
+            ($span:expr,) => {};
+            ($span:expr, $arg:ident:$ty:ident, $($tokens:tt)*) => {
+                apply_one_arg!($span, $arg:$ty);
+                apply_args!($span, $($tokens)*);
+            };
+            ($span:expr, $arg:ident:$ty:ident?, $($tokens:tt)*) => {
+                apply_one_arg!($span, $arg:$ty?);
+                apply_args!($span, $($tokens)*);
+            };
+            ($span:expr, $arg:ident:$ty:ident || $fallback:expr, $($tokens:tt)*) => {
+                apply_one_arg!($span, $arg:$ty || $fallback);
+                apply_args!($span, $($tokens)*);
+            };
+            ($span:expr, $arg:ident:$ty:ident) => {
+                apply_one_arg!($span, $arg:$ty);
+            };
+            ($span:expr, $arg:ident:$ty:ident?) => {
+                apply_one_arg!($span, $arg:$ty?);
+            };
+            ($span:expr, $arg:ident:$ty:ident || $fallback:expr) => {
+                apply_one_arg!($span, $arg:$ty || $fallback);
+            };
+        }
+        macro_rules! unwrap {
+            ($($var:ident),*) => {
+                $(let $var = $var.ok_or(())?;)*
+            };
+        }
+
         let upper_name = name.to_ascii_uppercase();
         match upper_name.as_bytes() {
+            b"GCREATE" => {
+                site.result()?;
+                let [gid, width, height] = site.unpack_args(args)?;
+                apply_args!(name_span, gid:i, width:i, height:i);
+                site.chunk.push_bc(BcKind::GCreate, name_span);
+            }
+            b"GCREATEFROMFILE" => {
+                site.result()?;
+                let [gid, file_path] = site.unpack_args(args)?;
+                apply_args!(name_span, gid:i, file_path:s);
+                site.chunk.push_bc(BcKind::GCreateFromFile, name_span);
+            }
+            b"GDISPOSE" => {
+                site.result()?;
+                let [gid] = site.unpack_args(args)?;
+                apply_args!(name_span, gid:i);
+                site.chunk.push_bc(BcKind::GDispose, name_span);
+            }
+            b"GCREATED" => {
+                site.result()?;
+                let [gid] = site.unpack_args(args)?;
+                apply_args!(name_span, gid:i);
+                site.chunk.push_bc(BcKind::GCreated, name_span);
+            }
+            b"GDRAWSPRITE" => {
+                site.result()?;
+                let [gid, sprite_name, dest_x, dest_y, dest_width, dest_height, a_cm] =
+                    site.unpack_opt_args(args, 2)?;
+                unwrap!(gid, sprite_name);
+                apply_args!(
+                    name_span,
+                    gid:i,
+                    sprite_name:s,
+                    dest_x:i || 0,
+                    dest_y:i || 0,
+                    dest_width:i || -1,
+                    dest_height:i || -1,
+                );
+                if let Some(color_matrix) = a_cm {
+                    apply_one_arg!(name_span, color_matrix:vi);
+                    site.chunk
+                        .push_bc(BcKind::GDrawSpriteWithColorMatrix, name_span);
+                } else {
+                    site.chunk.push_bc(BcKind::GDrawSprite, name_span);
+                }
+            }
+            b"GCLEAR" => {
+                site.result()?;
+                let [gid, color] = site.unpack_args(args)?;
+                apply_args!(name_span, gid:i, color:i);
+                site.chunk.push_bc(BcKind::GClear, name_span);
+            }
+            b"SPRITECREATE" => {
+                site.result()?;
+                let [sprite_name, gid, x, y, width, height] = site.unpack_opt_args(args, 2)?;
+                unwrap!(sprite_name, gid);
+                apply_args!(
+                    name_span,
+                    sprite_name:s,
+                    gid:i,
+                    x:i || 0,
+                    y:i || 0,
+                    width:i || -1,
+                    height:i || -1,
+                );
+                site.chunk.push_bc(BcKind::SpriteCreate, name_span);
+            }
+            b"SPRITEDISPOSE" => {
+                site.result()?;
+                let [name] = site.unpack_args(args)?;
+                apply_args!(name_span, name:s);
+                site.chunk.push_bc(BcKind::SpriteDispose, name_span);
+            }
+            b"SPRITECREATED" => {
+                site.result()?;
+                let [name] = site.unpack_args(args)?;
+                apply_args!(name_span, name:s);
+                site.chunk.push_bc(BcKind::SpriteCreated, name_span);
+            }
+            b"SPRITEANIMECREATE" => {
+                site.result()?;
+                let [name, width, height] = site.unpack_args(args)?;
+                apply_args!(name_span, name:s, width:i, height:i);
+                site.chunk.push_bc(BcKind::SpriteAnimeCreate, name_span);
+            }
+            b"SPRITEANIMEADDFRAME" => {
+                site.result()?;
+                let [name, gid, x, y, width, height, offset_x, offset_y, delay] =
+                    site.unpack_args(args)?;
+                apply_args!(
+                    name_span,
+                    name:s,
+                    gid:i,
+                    x:i,
+                    y:i,
+                    width:i,
+                    height:i,
+                    offset_x:i,
+                    offset_y:i,
+                    delay:i,
+                );
+                site.chunk.push_bc(BcKind::SpriteAnimeAddFrame, name_span);
+            }
+            b"SPRITEWIDTH" => {
+                site.result()?;
+                let [name] = site.unpack_args(args)?;
+                apply_args!(name_span, name:s);
+                site.chunk.push_bc(BcKind::SpriteWidth, name_span);
+            }
+            b"SPRITEHEIGHT" => {
+                site.result()?;
+                let [name] = site.unpack_args(args)?;
+                apply_args!(name_span, name:s);
+                site.chunk.push_bc(BcKind::SpriteHeight, name_span);
+            }
+            b"GETBIT" => {
+                site.result()?;
+                let [val, bit] = site.unpack_args(args)?;
+                apply_args!(name_span, val:i, bit:i);
+                site.chunk.push_bc(BcKind::GetBit, name_span);
+            }
+            b"GETSTYLE" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@STYLE", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"CHKFONT" => {
+                site.result()?;
+                let [font_name] = site.unpack_args(args)?;
+                apply_args!(name_span, font_name:s);
+                site.chunk.push_bc(BcKind::CheckFont, name_span);
+            }
+            b"GETFONT" => {
+                site.results()?;
+                let [] = site.unpack_args(args)?;
+                site.str_var_static_idx("@FONT", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"REPLACE" => {
+                site.results()?;
+                let [haystack, needle, replace_with] = site.unpack_args(args)?;
+                apply_args!(name_span, haystack:s, needle:s, replace_with:s);
+                site.chunk.push_bc(BcKind::ReplaceStr, name_span);
+            }
+            b"SUBSTRING" | b"SUBSTRINGU" => {
+                site.results()?;
+                let [haystack, start_pos, length] = site.unpack_opt_args(args, 2)?;
+                unwrap!(haystack, start_pos);
+                apply_args!(name_span, haystack:s, start_pos:i, length:i || -1);
+                site.chunk.push_bc(
+                    match upper_name.as_bytes() {
+                        b"SUBSTRING" => BcKind::SubStr,
+                        b"SUBSTRINGU" => BcKind::SubStrU,
+                        _ => unreachable!(),
+                    },
+                    name_span,
+                );
+            }
+            b"STRFIND" | b"STRFINDU" => {
+                site.result()?;
+                let [haystack, needle, start_pos] = site.unpack_opt_args(args, 2)?;
+                unwrap!(haystack, needle);
+                apply_args!(
+                    name_span,
+                    haystack:s,
+                    needle:s,
+                    start_pos:i || 0,
+                );
+                site.chunk.push_bc(
+                    match upper_name.as_bytes() {
+                        b"STRFIND" => BcKind::StrFind,
+                        b"STRFINDU" => BcKind::StrFindU,
+                        _ => unreachable!(),
+                    },
+                    name_span,
+                );
+            }
+            b"STRLENS" | b"STRLENSU" => {
+                site.result()?;
+                let [haystack] = site.unpack_args(args)?;
+                apply_args!(name_span, haystack:s);
+                site.chunk.push_bc(
+                    match upper_name.as_bytes() {
+                        b"STRLENS" => BcKind::StrLen,
+                        b"STRLENSU" => BcKind::StrLenU,
+                        _ => unreachable!(),
+                    },
+                    name_span,
+                );
+            }
+            b"STRCOUNT" => {
+                site.result()?;
+                let [haystack, needle] = site.unpack_args(args)?;
+                apply_args!(name_span, haystack:s, needle:s);
+                site.chunk.push_bc(BcKind::CountSubStr, name_span);
+            }
+            b"CHARATU" => {
+                site.results()?;
+                let [haystack, pos] = site.unpack_args(args)?;
+                apply_args!(name_span, haystack:s, pos:i);
+                site.chunk.push_bc(BcKind::StrCharAtU, name_span);
+            }
+            b"CURRENTREDRAW" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@REDRAW", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"CURRENTALIGN" => {
+                site.results()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@ALIGN", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+                let func_idx = site.match_user_func_sig(
+                    "SYSFUNC_ALIGN_INT_TO_STR",
+                    name_span,
+                    &[ValueKind::Int],
+                    ScalarValueKind::Str,
+                )?;
+                site.chunk.push_load_imm(func_idx as _, name_span);
+                site.chunk
+                    .push_bc(BcKind::CallFun { args_cnt: 1 }, name_span);
+            }
+            b"MAX" => {
+                site.result()?;
+                let mut iter = args.children();
+                let Some(a0) = iter.next() else {
+                    let mut diag = self.o.ctx.make_diag();
+                    diag.span_err(
+                        Default::default(),
+                        name_span,
+                        "function `MAX` expects at least one argument",
+                    );
+                    self.o.ctx.emit_diag(diag);
+                    return Err(());
+                };
+                site.int_expr(a0)?;
+                for arg in iter {
+                    site.int_expr(arg)?;
+                    site.chunk.push_bc(BcKind::MaxInt, name_span);
+                }
+            }
+            b"MIN" => {
+                site.result()?;
+                let mut iter = args.children();
+                let Some(a0) = iter.next() else {
+                    let mut diag = self.o.ctx.make_diag();
+                    diag.span_err(
+                        Default::default(),
+                        name_span,
+                        "function `MIN` expects at least one argument",
+                    );
+                    self.o.ctx.emit_diag(diag);
+                    return Err(());
+                };
+                site.int_expr(a0)?;
+                for arg in iter {
+                    site.int_expr(arg)?;
+                    site.chunk.push_bc(BcKind::MinInt, name_span);
+                }
+            }
+            b"LIMIT" => {
+                site.result()?;
+                let [a, amin, amax] = site.unpack_args(args)?;
+                apply_args!(name_span, a:i, amin:i, amax:i);
+                site.chunk.push_bc(BcKind::ClampInt, name_span);
+            }
+            b"INRANGE" => {
+                site.result()?;
+                let [a, amin, amax] = site.unpack_args(args)?;
+                apply_args!(name_span, a:i, amin:i, amax:i);
+                site.chunk.push_bc(BcKind::InRangeInt, name_span);
+            }
+            b"CHKCHARADATA" => {
+                site.result()?;
+                // TODO: CHKCHARADATA
+                site.chunk.push_load_imm(0, name_span);
+            }
+            b"SAVETEXT" => {
+                site.result()?;
+                let [text, file_no, force_save_dir, force_utf8] = site.unpack_opt_args(args, 2)?;
+                unwrap!(text, file_no);
+                apply_args!(
+                    name_span,
+                    text:s,
+                    file_no:i,
+                    force_save_dir:i || 0,
+                    force_utf8:i || 0,
+                );
+                site.chunk.push_bc(BcKind::SaveText, name_span);
+            }
+            b"LOADTEXT" => {
+                site.results()?;
+                let [file_no, force_save_dir, force_utf8] = site.unpack_opt_args(args, 1)?;
+                unwrap!(file_no);
+                apply_args!(
+                    name_span,
+                    file_no:i,
+                    force_save_dir:i || 0,
+                    force_utf8:i || 0,
+                );
+                site.chunk.push_bc(BcKind::LoadText, name_span);
+            }
+            b"FINDELEMENT" | b"FINDLASTELEMENT" => {
+                site.result()?;
+                let [arr, value, start_idx, end_idx, complete_match] =
+                    site.unpack_opt_args(args, 2)?;
+                unwrap!(arr, value);
+                let arr = site.expr_to_var(arr)?;
+                let arr = site.norm_var(arr)?;
+                site.expr_or_default(value.into(), arr)?;
+                apply_args!(
+                    name_span,
+                    start_idx:i || 0,
+                    end_idx:i || -1,
+                    complete_match:i || 0,
+                );
+                site.chunk.push_bc(
+                    match upper_name.as_bytes() {
+                        b"FINDELEMENT" => BcKind::FindElement,
+                        b"FINDLASTELEMENT" => BcKind::FindLastElement,
+                        _ => unreachable!(),
+                    },
+                    name_span,
+                );
+            }
+            b"FINDCHARA" | b"FINDLASTCHARA" => {
+                site.result()?;
+                let [chara_var, value, start_id, end_id] = site.unpack_opt_args(args, 2)?;
+                unwrap!(chara_var, value);
+                let chara_var = site.expr_to_var_opt_idx(chara_var)?;
+                let chara_var = site.norm_var_idx(chara_var, false)?;
+                site.expr_or_default(value.into(), chara_var)?;
+                apply_args!(
+                    name_span,
+                    start_id:i || 0,
+                    end_id:i || -1,
+                );
+                site.chunk.push_bc(
+                    match upper_name.as_bytes() {
+                        b"FINDCHARA" => BcKind::FindChara,
+                        b"FINDLASTCHARA" => BcKind::FindLastChara,
+                        _ => unreachable!(),
+                    },
+                    name_span,
+                );
+            }
+            b"GETCOLOR" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@COLOR", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"GETBGCOLOR" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@BGCOLOR", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"GETDEFCOLOR" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@DEFCOLOR", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"GETDEFBGCOLOR" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@DEFBGCOLOR", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"GETFOCUSCOLOR" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@FOCUSCOLOR", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"MATCH" | b"CMATCH" => {
+                site.result()?;
+                let [array, value, start_idx, end_idx] = site.unpack_opt_args(args, 2)?;
+                unwrap!(array, value);
+                let array = site.expr_to_var_opt_idx(array)?;
+                let array = site.norm_var_idx(array, false)?;
+                site.expr_or_default(value.into(), array)?;
+                apply_args!(
+                    name_span,
+                    start_idx:i || 0,
+                    end_idx:i || -1,
+                );
+                site.chunk.push_bc(
+                    match upper_name.as_bytes() {
+                        b"MATCH" => BcKind::ArrayCountMatches,
+                        b"CMATCH" => BcKind::CArrayCountMatches,
+                        _ => unreachable!(),
+                    },
+                    name_span,
+                );
+            }
+            b"SUMARRAY" | b"SUMCARRAY" | b"MAXARRAY" | b"MAXCARRAY" | b"MINARRAY"
+            | b"MINCARRAY" => {
+                site.result()?;
+                let [array, start_idx, end_idx] = site.unpack_opt_args(args, 1)?;
+                unwrap!(array);
+                let array = site.expr_to_var_opt_idx(array)?;
+                let array = site.norm_var_idx(array, false)?;
+                apply_args!(
+                    name_span,
+                    start_idx:i || 0,
+                    end_idx:i || -1,
+                );
+                site.chunk.push_bc(
+                    match upper_name.as_bytes() {
+                        b"SUMARRAY" => BcKind::SumArray,
+                        b"SUMCARRAY" => BcKind::SumCArray,
+                        b"MAXARRAY" => BcKind::MaxArray,
+                        b"MAXCARRAY" => BcKind::MaxCArray,
+                        b"MINARRAY" => BcKind::MinArray,
+                        b"MINCARRAY" => BcKind::MinCArray,
+                        _ => unreachable!(),
+                    },
+                    name_span,
+                );
+            }
+            b"INRANGEARRAY" | b"INRANGECARRAY" => {
+                site.result()?;
+                let [array, lower, upper, start_idx, end_idx] = site.unpack_opt_args(args, 3)?;
+                unwrap!(array, lower, upper);
+                let array = site.expr_to_var_opt_idx(array)?;
+                let array = site.norm_var_idx(array, false)?;
+                site.int_expr(lower)?;
+                site.int_expr(upper)?;
+                apply_args!(
+                    name_span,
+                    start_idx:i || 0,
+                    end_idx:i || -1,
+                );
+                site.chunk.push_bc(
+                    match upper_name.as_bytes() {
+                        b"INRANGEARRAY" => BcKind::InRangeArray,
+                        b"INRANGECARRAY" => BcKind::InRangeCArray,
+                        _ => unreachable!(),
+                    },
+                    name_span,
+                );
+            }
+            b"GETNUM" => {
+                site.result()?;
+                let [target, index] = site.unpack_args(args)?;
+                let target = site.expr_to_var(target)?;
+                let Some(kind) = target.as_leaf().and_then(|x| {
+                    let x = x.resolve_text(site.o.ctx.node_cache.interner());
+                    EraCsvVarKind::try_from_var(x)
+                }) else {
+                    let mut diag = self.o.ctx.make_diag();
+                    diag.span_err(Default::default(), name_span, "unknown CSV var type");
+                    self.o.ctx.emit_diag(diag);
+                    return Err(());
+                };
+                site.str_expr(index)?;
+                site.chunk.push_bc(BcKind::CsvGetNum { kind }, name_span);
+            }
+            b"GROUPMATCH" | b"NOSAMES" | b"ALLSAMES" => {
+                site.result()?;
+                let mut iter = args.children();
+                let Some(a0) = iter.next() else {
+                    let mut diag = self.o.ctx.make_diag();
+                    diag.span_err(
+                        Default::default(),
+                        name_span,
+                        format!("`{name}` requires at least 1 argument", name = name),
+                    );
+                    self.o.ctx.emit_diag(diag);
+                    return Err(());
+                };
+                let a0 = site.expression(a0)?;
+                if !a0.is_value() {
+                    let mut diag = self.o.ctx.make_diag();
+                    diag.span_err(
+                        Default::default(),
+                        name_span,
+                        format!("first argument of `{name}` cannot be void", name = name),
+                    );
+                    self.o.ctx.emit_diag(diag);
+                    return Err(());
+                }
+                let mut count = 0;
+                for arg in iter {
+                    site.expr_or_default(arg.into(), a0)?;
+                    count += 1;
+                }
+                site.chunk.push_bc(BcKind::GroupMatch { count }, name_span);
+                match upper_name.as_bytes() {
+                    b"NOSAMES" => {
+                        site.chunk.push_load_imm(0, name_span);
+                        site.chunk.push_bc(BcKind::CmpIntEq, name_span);
+                    }
+                    b"ALLSAMES" => {
+                        site.chunk.push_load_imm(count as _, name_span);
+                        site.chunk.push_bc(BcKind::CmpIntEq, name_span);
+                    }
+                    _ => (),
+                }
+            }
+            b"GETTIME" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.chunk.push_bc(BcKind::GetHostTime, name_span);
+            }
+            b"GETTIMES" => {
+                site.results()?;
+                let [] = site.unpack_args(args)?;
+                site.chunk.push_bc(BcKind::GetHostTimeS, name_span);
+            }
+            b"UNICODE" => {
+                // TODO: Optimize for constexpr
+                site.results()?;
+                let [a0] = site.unpack_args(args)?;
+                apply_args!(name_span, a0:i);
+                site.chunk.push_bc(BcKind::UnicodeToStr, name_span);
+            }
+            b"GETMILLISECOND" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.chunk.push_bc(BcKind::GetHostTimeRaw, name_span);
+            }
+            b"GETSECOND" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.chunk.push_bc(BcKind::GetHostTimeRaw, name_span);
+                site.chunk.push_load_imm(1000, name_span);
+                site.chunk.push_bc(BcKind::DivInt, name_span);
+            }
+            b"CSVNAME" | b"CSVCALLNAME" | b"CSVNICKNAME" | b"CSVMASTERNAME" | b"CSVBASE"
+            | b"CSVCSTR" | b"CSVABL" | b"CSVTALENT" | b"CSVMARK" | b"CSVEXP" | b"CSVRELATION"
+            | b"CSVJUEL" | b"CSVEQUIP" | b"CSVCFLAG" => {
+                use crate::types::EraCharaCsvPropType::*;
+                let (is_string, csv_kind) = match upper_name.as_bytes() {
+                    b"CSVNAME" => (true, CsvName),
+                    b"CSVCALLNAME" => (true, CsvCallName),
+                    b"CSVNICKNAME" => (true, CsvNickName),
+                    b"CSVMASTERNAME" => (true, CsvMasterName),
+                    b"CSVBASE" => (false, CsvBase),
+                    b"CSVCSTR" => (true, CsvCStr),
+                    b"CSVABL" => (false, CsvAbl),
+                    b"CSVTALENT" => (false, CsvTalent),
+                    b"CSVMARK" => (false, CsvMark),
+                    b"CSVEXP" => (false, CsvExp),
+                    b"CSVRELATION" => (false, CsvRelation),
+                    b"CSVJUEL" => (false, CsvJuel),
+                    b"CSVEQUIP" => (false, CsvEquip),
+                    b"CSVCFLAG" => (false, CsvCFlag),
+                    _ => unreachable!(),
+                };
+                if is_string {
+                    site.results()?;
+                } else {
+                    site.result()?;
+                }
+                match upper_name.as_bytes() {
+                    b"CSVNAME" | b"CSVCALLNAME" | b"CSVNICKNAME" | b"CSVMASTERNAME" => {
+                        let [chara_no] = site.unpack_args(args)?;
+                        apply_args!(name_span, chara_no:i);
+                        site.chunk.push_load_imm(0, name_span);
+                        site.chunk
+                            .push_bc(BcKind::CsvGetProp2 { csv_kind }, name_span);
+                    }
+                    _ => {
+                        let [chara_no, index] = site.unpack_args(args)?;
+                        apply_args!(name_span, chara_no:i, index:i);
+                        site.chunk
+                            .push_bc(BcKind::CsvGetProp2 { csv_kind }, name_span);
+                    }
+                }
+            }
+            b"POWER" => {
+                site.result()?;
+                let [base, expo] = site.unpack_args(args)?;
+                apply_args!(name_span, base:i, expo:i);
+                site.chunk.push_bc(BcKind::PowerInt, name_span);
+            }
+            b"RAND" => {
+                site.result()?;
+                let [a0, a1] = site.unpack_opt_args(args, 1)?;
+                unwrap!(a0);
+                if let Some(a1) = a1 {
+                    // lower, upper
+                    apply_args!(name_span, a0:i, a1:i);
+                    site.chunk.push_bc(BcKind::GetRandomRange, name_span);
+                } else {
+                    // upper
+                    apply_args!(name_span, a0:i);
+                    site.chunk.push_bc(BcKind::GetRandomMax, name_span);
+                }
+            }
+            b"SQRT" | b"CBRT" | b"LOG" | b"LOG10" | b"EXPONENT" => {
+                site.result()?;
+                let bc = match upper_name.as_bytes() {
+                    b"SQRT" => BcKind::SqrtInt,
+                    b"CBRT" => BcKind::CbrtInt,
+                    b"LOG" => BcKind::LogInt,
+                    b"LOG10" => BcKind::Log10Int,
+                    b"EXPONENT" => BcKind::ExponentInt,
+                    _ => unreachable!(),
+                };
+                let [value] = site.unpack_args(args)?;
+                apply_args!(name_span, value:i);
+                site.chunk.push_bc(bc, name_span);
+            }
+            b"ABS" => {
+                site.result()?;
+                let [value] = site.unpack_args(args)?;
+                apply_args!(name_span, value:i);
+                site.chunk.push_bc(BcKind::AbsInt, name_span);
+            }
+            b"SIGN" => {
+                site.result()?;
+                let [value] = site.unpack_args(args)?;
+                apply_args!(name_span, value:i);
+                site.chunk.push_bc(BcKind::SignInt, name_span);
+            }
+            b"TOSTR" | b"MONEYSTR" => {
+                let is_money = upper_name == "MONEYSTR";
+                // TODO: Support https://learn.microsoft.com/ja-jp/dotnet/api/system.int64.tostring
+                site.results()?;
+                if is_money {
+                    let key = site.o.ctx.interner_mut().get_or_intern("$");
+                    site.chunk.push_bc(
+                        BcKind::LoadConstStr {
+                            idx: key.into_u32(),
+                        },
+                        name_span,
+                    );
+                }
+                let [value, format] = site.unpack_opt_args(args, 1)?;
+                unwrap!(value);
+                if let Some(format) = format {
+                    apply_args!(name_span, value:i, format:s);
+                    site.chunk.push_bc(BcKind::FormatIntToStr, name_span);
+                } else {
+                    apply_args!(name_span, value:i);
+                    site.chunk.push_bc(BcKind::IntToStr, name_span);
+                }
+                if is_money {
+                    site.chunk.push_build_string(2, name_span);
+                }
+            }
+            b"TOINT" => {
+                site.result()?;
+                let [value] = site.unpack_args(args)?;
+                apply_args!(name_span, value:s);
+                site.chunk.push_bc(BcKind::StrToInt, name_span);
+            }
+            b"ISNUMERIC" => {
+                site.result()?;
+                let [value] = site.unpack_args(args)?;
+                apply_args!(name_span, value:s);
+                site.chunk.push_bc(BcKind::StrIsValidInt, name_span);
+            }
+            b"VARSIZE" => {
+                // TODO: Optimize for constexpr
+                site.result()?;
+                let [var_name, dimension] = site.unpack_opt_args(args, 1)?;
+                unwrap!(var_name);
+                apply_args!(name_span, var_name:s, dimension:i || -1);
+                site.chunk.push_bc(BcKind::GetVarSizeByName, name_span);
+            }
+            b"TOUPPER" | b"TOLOWER" | b"TOHALF" | b"TOFULL" => {
+                site.results()?;
+                let bc = match upper_name.as_bytes() {
+                    b"TOUPPER" => BcKind::StrToUpper,
+                    b"TOLOWER" => BcKind::StrToLower,
+                    b"TOHALF" => BcKind::StrToHalf,
+                    b"TOFULL" => BcKind::StrToFull,
+                    _ => unreachable!(),
+                };
+                let [value] = site.unpack_args(args)?;
+                apply_args!(name_span, value:s);
+                site.chunk.push_bc(bc, name_span);
+            }
+            b"EXISTCSV" => {
+                site.result()?;
+                let [chara_no] = site.unpack_args(args)?;
+                apply_args!(name_span, chara_no:i);
+                site.chunk.push_bc(BcKind::CharaCsvExists, name_span);
+            }
+            b"GETPALAMLV" | b"GETEXPLV" => {
+                site.result()?;
+                let bc = match upper_name.as_bytes() {
+                    b"GETPALAMLV" => BcKind::GetPalamLv,
+                    b"GETEXPLV" => BcKind::GetExpLv,
+                    _ => unreachable!(),
+                };
+                let [value, max_lv] = site.unpack_args(args)?;
+                apply_args!(name_span, value:i, max_lv:i);
+                site.chunk.push_bc(bc, name_span);
+            }
+            b"GETCHARA" => {
+                site.result()?;
+                let [chara_no] = site.unpack_args(args)?;
+                apply_args!(name_span, chara_no:i);
+                site.chunk.push_bc(BcKind::GetCharaRegNum, name_span);
+            }
+            b"ESCAPE" => {
+                site.results()?;
+                let [haystack] = site.unpack_args(args)?;
+                apply_args!(name_span, haystack:s);
+                site.chunk.push_bc(BcKind::EscapeRegexStr, name_span);
+            }
+            b"LINEISEMPTY" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@LINEISEMPTY", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"ENCODETOUNI" => {
+                site.result()?;
+                let [haystack, pos] = site.unpack_opt_args(args, 1)?;
+                unwrap!(haystack);
+                apply_args!(name_span, haystack:s, pos:i || 0);
+                site.chunk.push_bc(BcKind::EncodeToUnicode, name_span);
+            }
+            b"GETCONFIG" => {
+                site.result()?;
+                let [name] = site.unpack_args(args)?;
+                apply_args!(name_span, name:s);
+                site.chunk.push_bc(BcKind::GetConfig, name_span);
+            }
+            b"GETCONFIGS" => {
+                site.results()?;
+                let [name] = site.unpack_args(args)?;
+                apply_args!(name_span, name:s);
+                site.chunk.push_bc(BcKind::GetConfigS, name_span);
+            }
+            b"ISSKIP" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@SKIPDISP", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"MOUSESKIP" | b"MESSKIP" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@MESSKIP", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"CONVERT" => {
+                site.results()?;
+                let [value, base] = site.unpack_args(args)?;
+                apply_args!(name_span, value:i, base:i);
+                site.chunk.push_bc(BcKind::IntToStrWithBase, name_span);
+            }
+            b"PRINTCPERLINE" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@PRINTCPERLINE", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"PRINTCLENGTH" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@PRINTCLENGTH", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            // b"COLOR_FROMNAME" => {
+            //     site.result()?;
+            //     // TODO...
+            // }
+            b"COLOR_FROMRGB" => {
+                site.result()?;
+                let [r, g, b] = site.unpack_args(args)?;
+                // TODO: Check argument range [0, 255]
+                site.int_expr(r)?;
+                site.chunk.push_load_imm(16, name_span);
+                site.chunk.push_bc(BcKind::ShlInt, name_span);
+                site.int_expr(g)?;
+                site.chunk.push_load_imm(8, name_span);
+                site.chunk.push_bc(BcKind::ShlInt, name_span);
+                site.int_expr(b)?;
+                site.chunk.push_bc(BcKind::BitOrInt, name_span);
+                site.chunk.push_bc(BcKind::BitOrInt, name_span);
+            }
+            b"HTML_TOPLAINTEXT" => {
+                site.results()?;
+                let [html] = site.unpack_args(args)?;
+                apply_args!(name_span, html:s);
+                site.chunk.push_bc(BcKind::HtmlToPlainText, name_span);
+            }
+            b"HTML_ESCAPE" => {
+                site.results()?;
+                let [html] = site.unpack_args(args)?;
+                apply_args!(name_span, html:s);
+                site.chunk.push_bc(BcKind::HtmlEscape, name_span);
+            }
+            b"GETKEY" => {
+                site.result()?;
+                let [keycode] = site.unpack_args(args)?;
+                apply_args!(name_span, keycode:i);
+                site.chunk.push_bc(BcKind::KbGetKeyState, name_span);
+                site.chunk.push_load_imm(15, name_span);
+                site.chunk.push_bc(BcKind::GetBit, name_span);
+            }
+            b"GETKEYTRIGGERED" => {
+                site.result()?;
+                let [keycode] = site.unpack_args(args)?;
+                apply_args!(name_span, keycode:i);
+                site.chunk.push_bc(BcKind::KbGetKeyState, name_span);
+                site.chunk.push_load_imm(1, name_span);
+                site.chunk.push_bc(BcKind::BitAndInt, name_span);
+            }
+            b"FIND_CHARADATA" => {
+                site.result()?;
+                let [filename] = site.unpack_args(args)?;
+                apply_args!(name_span, filename:s);
+                site.chunk.push_bc(BcKind::FindCharaDataFile, name_span);
+            }
+            b"LOADDATA" => {
+                site.result()?;
+                let [save_id] = site.unpack_args(args)?;
+                apply_args!(name_span, save_id:i);
+                site.chunk.push_bc(BcKind::LoadData, name_span);
+            }
+            b"CHKDATA" => {
+                site.result()?;
+                let [save_id] = site.unpack_args(args)?;
+                apply_args!(name_span, save_id:i);
+                site.chunk.push_bc(BcKind::CheckData, name_span);
+            }
+            _ if name.eq_ignore_ascii_case("SYSINTRINSIC_LoadGameInit") => {
+                // Do nothing
+            }
+            _ if name.eq_ignore_ascii_case("SYSINTRINSIC_LoadGameUninit") => {
+                // Do nothing
+            }
+            // _ if name.eq_ignore_ascii_case("SYSINTRINSIC_LoadGamePrintText") => {
+            //     // Do nothing
+            // }
             _ => {
                 let mut diag = self.o.ctx.make_diag();
                 diag.span_err(

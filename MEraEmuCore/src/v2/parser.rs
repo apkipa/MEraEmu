@@ -14,11 +14,17 @@ use cstree::{
     build::{Checkpoint, GreenNodeBuilder, NodeCache},
     green::GreenNode,
     interning::Interner,
+    Syntax,
 };
-use hashbrown::HashSet;
+use fxhash::FxBuildHasher;
+use hashbrown::{HashMap, HashSet};
+use indexmap::IndexMap;
 use itertools::Itertools;
 use EraLexerMode as Mode;
 use EraTokenKind as Token;
+
+type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
 
 type ParseResult<T> = Result<T, ()>;
 
@@ -41,12 +47,13 @@ impl<'a, 'b, 'ctx, 'i, Callback: EraCompilerCallback> EraParser<'a, 'b, 'ctx, 'i
         }
     }
 
-    pub fn parse_program(&mut self) -> GreenNode {
+    pub fn parse_program(&mut self) -> (GreenNode, EraMacroMap) {
         let builder = GreenNodeBuilder::with_cache(self.node_cache);
         let mut site = EraParserSite::new(self.lexer, builder, self.is_header);
         // NOTE: We use error-tolerant parsing here, so theoretically this should never fail.
         site.program().unwrap();
-        site.into_builder().finish().0
+        let (builder, macro_map) = site.into_inner();
+        (builder.finish().0, macro_map)
     }
 }
 
@@ -57,6 +64,64 @@ struct EraParserOuter<'a, 'b, 'ctx, 'cache, 'i, Callback> {
     b: GreenNodeBuilder<'cache, 'i, EraTokenKind>,
     is_header: bool,
     is_panicking: bool,
+    macro_place: EraParserMacroPlace<'a>,
+}
+
+// ((macro_span, covering_span, start_pos), macro_map, src)
+#[derive(Debug, Default)]
+struct EraParserMacroPlace<'src>(Option<(SrcSpan, SrcSpan, u32)>, EraMacroMap, &'src str);
+
+impl EraParserMacroPlace<'_> {
+    fn handle_macro_token(&mut self, result: &EraLexerNextResult, start_pos: u32, end_pos: u32) {
+        if !result.is_replaced && self.0.is_none() {
+            return;
+        }
+
+        // Extend macro place
+        let token_span = result.token.span;
+        let extend_fn = |span: SrcSpan| {
+            let start = span.start().min(token_span.start());
+            let end = span.end().max(token_span.end());
+            SrcSpan::with_ends(start, end)
+        };
+        if let Some((macro_span, covering_span, _)) = self.0.as_mut() {
+            if result.is_replaced {
+                *macro_span = extend_fn(*macro_span);
+            }
+            *covering_span = extend_fn(*covering_span);
+        } else {
+            self.0 = Some((token_span, token_span, start_pos));
+        }
+
+        // Close over macro if needed
+        self.close_over_macro(end_pos);
+    }
+
+    fn has_macro(&self) -> bool {
+        self.0.is_some()
+    }
+
+    fn is_closed_over(&self) -> bool {
+        self.0.map_or(false, |(macro_span, covering_span, _)| {
+            // Ensure that we have left the macro region (avoids repeated macro tokens)
+            // NOTE: No equal here because then we won't be able to tell if we have
+            //       left the macro region.
+            covering_span.end() > macro_span.end()
+        })
+    }
+
+    fn close_over_macro(&mut self, end_pos: u32) -> bool {
+        if !self.is_closed_over() {
+            return false;
+        }
+
+        let (macro_span, covering_span, start_pos) = self.0.take().unwrap();
+        let in_span = SrcSpan::with_ends(SrcPos(start_pos), SrcPos(end_pos));
+        let text = &self.2[covering_span.start().0 as usize..covering_span.end().0 as usize];
+        self.1.push(in_span, text.into());
+
+        true
+    }
 }
 
 impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
@@ -67,16 +132,19 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         b: GreenNodeBuilder<'cache, 'i, EraTokenKind>,
         is_header: bool,
     ) -> Self {
+        let mut macro_place = EraParserMacroPlace::default();
+        macro_place.2 = l.get_src();
         EraParserOuter {
             l,
             b,
             is_header,
             is_panicking: false,
+            macro_place,
         }
     }
 
-    fn into_builder(self) -> GreenNodeBuilder<'cache, 'i, EraTokenKind> {
-        self.b
+    fn into_inner(self) -> (GreenNodeBuilder<'cache, 'i, EraTokenKind>, EraMacroMap) {
+        (self.b, self.macro_place.1)
     }
 
     fn set_is_panicking(&mut self, is_panicking: bool) {
@@ -102,11 +170,14 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
     }
 
     fn next_token_with_newline(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
-        let l = &mut *self.l;
         loop {
             // SAFETY: This requires the Polonius borrow checker.
-            let result: EraLexerNextResult = unsafe { std::mem::transmute(l.read(mode)) };
+            let result: EraLexerNextResult = unsafe { std::mem::transmute(self.l.read(mode)) };
+            let start_pos = self.b.document_len().into();
             self.b.token(result.token.kind, result.lexeme);
+            let end_pos = self.b.document_len().into();
+            self.macro_place
+                .handle_macro_token(&result, start_pos, end_pos);
             if !matches!(result.token.kind, Token::WhiteSpace | Token::Comment) {
                 break result;
             }
@@ -114,40 +185,83 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
     }
 
     fn peek_token(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
-        let l = &mut *self.l;
         loop {
             // SAFETY: This requires the Polonius borrow checker.
-            let result: EraLexerNextResult = unsafe { std::mem::transmute(l.peek(mode)) };
+            let result: EraLexerNextResult = unsafe { std::mem::transmute(self.l.peek(mode)) };
             if !matches!(result.token.kind, Token::WhiteSpace | Token::Comment) {
                 break result;
             }
-            let result = l.read(mode);
+            let result = self.l.read(mode);
+            let start_pos = self.b.document_len().into();
             self.b.token(result.token.kind, result.lexeme);
+            let end_pos = self.b.document_len().into();
+            self.macro_place
+                .handle_macro_token(&result, start_pos, end_pos);
         }
     }
 
     fn bump(&mut self) -> EraLexerNextResult {
         let result = self.l.bump();
+        let start_pos = self.b.document_len().into();
         self.b.token(result.token.kind, result.lexeme);
+        let end_pos = self.b.document_len().into();
+        self.macro_place
+            .handle_macro_token(&result, start_pos, end_pos);
         result
     }
 
     fn bump_as(&mut self, kind: Token) -> EraLexerNextResult {
         let result = self.l.bump();
+        let start_pos = self.b.document_len().into();
         self.b.token(kind, result.lexeme);
+        let end_pos = self.b.document_len().into();
+        self.macro_place
+            .handle_macro_token(&result, start_pos, end_pos);
         result
     }
 
     fn previous_token(&self) -> Token {
         self.l.previous_token()
     }
+
+    // fn close_over_macro(&mut self) -> bool {
+    //     if !self.macro_place.is_closed_over() {
+    //         return false;
+    //     }
+    //     let Some((macro_span, covering_span)) = self.macro_place.0.take() else {
+    //         return false;
+    //     };
+
+    //     // Replace current node with a macro node
+    //     let node = self.b.pop_last_child().unwrap().into_node().unwrap();
+    //     let start_pos = self.b.document_len().into();
+    //     // TODO: Should be handled by parent covering node
+    //     assert!(
+    //         covering_span.start() >= start_pos,
+    //         "macro covering span starts before node"
+    //     );
+    //     let covering_span = SrcSpan::with_ends(SrcPos(start_pos), covering_span.end());
+    //     if node.kind() == Token::Invalid.into_raw() {
+    //         self.b.start_node(Token::Invalid);
+    //     } else {
+    //         self.b.start_node(Token::MacroNode);
+    //     }
+    //     self.b
+    //         .token(Token::MacroNode, self.l.get_src_span(covering_span));
+    //     self.b.finish_node();
+
+    //     // Insert macro node into map
+    //     self.macro_map.insert(covering_span, node);
+
+    //     true
+    // }
 }
 
 struct EraParserSite<'a, 'b, 'ctx, 'cache, 'i, Callback> {
     o: EraParserOuter<'a, 'b, 'ctx, 'cache, 'i, Callback>,
     base_diag: Diagnostic<'a>,
     // eat_syncs: Vec<(Mode, Token)>,
-    local_str_vars: HashSet<Ascii<ArcStr>>,
+    local_str_vars: HashSet<Ascii<ArcStr>, fxhash::FxBuildHasher>,
 }
 
 impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
@@ -164,15 +278,15 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             o,
             base_diag,
             // eat_syncs: Vec::new(),
-            local_str_vars: HashSet::new(),
+            local_str_vars: HashSet::default(),
         }
     }
 
-    fn into_builder(self) -> GreenNodeBuilder<'cache, 'i, EraTokenKind> {
-        self.o.into_builder()
+    fn into_inner(self) -> (GreenNodeBuilder<'cache, 'i, EraTokenKind>, EraMacroMap) {
+        self.o.into_inner()
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     fn program(&mut self) -> ParseResult<()> {
         self.o.b.start_node(Token::Program);
         self.skip_newline();
@@ -204,10 +318,12 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             self.o.set_is_panicking(false);
         }
         self.o.b.finish_node();
+        // TODO: Force close over macros at EOF?
+        // self.o.close_over_macro();
         Ok(())
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     fn declaration(&mut self, cp: Checkpoint) -> ParseResult<()> {
         if self.o.peek_token(Mode::Normal).token.kind == Token::NumberSign {
             self.sharp_declaration(cp)
@@ -216,7 +332,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         }
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     fn sharp_declaration(&mut self, cp: Checkpoint) -> ParseResult<()> {
         self.eat(Mode::Normal, Token::NumberSign)?;
 
@@ -293,7 +409,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn var_declaration(&mut self, is_str: bool) -> ParseResult<()> {
         let (name, name_span) = loop {
             let token = self.o.peek_token(Mode::SharpDecl).token;
@@ -365,7 +481,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     fn func_declaration(&mut self, cp: Checkpoint) -> ParseResult<()> {
         self.eat(Mode::Normal, Token::At)?;
 
@@ -457,7 +573,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     ///
     /// Parses a statement or syncs to end of line, with avoidance of `@` and `<EOF>`.
     fn safe_statement(&mut self) -> ControlFlow<()> {
@@ -483,6 +599,9 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         if self.statement().is_err() {
             _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
         } else {
+            // TODO: Macro
+            // self.o.close_over_macro();
+
             // NOTE: We try to avoid consuming newlines such as `@func` unexpectedly.
             if self.o.l.previous_token() != Token::LineBreak {
                 // After a successful statement, a newline is expected.
@@ -493,7 +612,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         ControlFlow::Continue(())
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     fn statement(&mut self) -> ParseResult<()> {
         use EraCmdArgFmt as CmdArg;
 
@@ -861,7 +980,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_strdata(&mut self) -> ParseResult<()> {
         if self.try_eat(Mode::Normal, Token::LineBreak).is_none() {
             // var expression
@@ -880,7 +999,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_printdata(&mut self) -> ParseResult<()> {
         if self.try_eat(Mode::Normal, Token::LineBreak).is_none() {
             // var expression
@@ -899,7 +1018,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_printdata_data(&mut self) {
         self.o.b.start_node(Token::StmtList);
         loop {
@@ -981,7 +1100,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         }
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_if(&mut self, start_span: SrcSpan) -> ParseResult<()> {
         let mut can_else = true;
 
@@ -1042,7 +1161,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_sif(&mut self) -> ParseResult<()> {
         // Condition
         _ = self.safe_expression(true, Terminal::LineBreak.into());
@@ -1066,7 +1185,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_selectcase(&mut self) -> ParseResult<()> {
         let mut can_else = true;
 
@@ -1133,7 +1252,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_selectcase_case(&mut self) -> ParseResult<()> {
         if self.o.peek_token(Mode::Normal).token.kind == Token::LineBreak {
             return Ok(());
@@ -1241,7 +1360,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_while(&mut self) -> ParseResult<()> {
         // Condition
         _ = self.safe_expression(true, Terminal::LineBreak.into());
@@ -1278,7 +1397,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_repeat(&mut self) -> ParseResult<()> {
         // Count
         _ = self.safe_expression(true, Terminal::LineBreak.into());
@@ -1315,7 +1434,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_for(&mut self) -> ParseResult<()> {
         // <var, start, end, step>
         self.o.b.start_node(Token::ExprList);
@@ -1356,7 +1475,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_do_loop(&mut self) -> ParseResult<()> {
         // Body
         _ = self.expect_sync_to_newline();
@@ -1393,7 +1512,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     fn stmt_call_args(&mut self) {
         self.o.b.start_node(Token::ExprList);
         let token = self.o.peek_token(Mode::Normal).token.kind;
@@ -1411,7 +1530,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         self.o.b.finish_node();
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_call_nameform(&mut self) -> ParseResult<()> {
         // Function name
         loop {
@@ -1460,7 +1579,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_call(&mut self) -> ParseResult<()> {
         // Function name
         if self.eat(Mode::Normal, Token::Identifier).is_err() {
@@ -1473,7 +1592,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_callform(&mut self) -> ParseResult<()> {
         // Function name
         self.o.b.start_node(Token::StringForm);
@@ -1488,7 +1607,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_tryccall(&mut self) -> ParseResult<()> {
         let mut can_catch = true;
 
@@ -1543,7 +1662,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_tryccallform(&mut self) -> ParseResult<()> {
         let mut can_catch = true;
 
@@ -1600,7 +1719,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn stmt_times(&mut self) -> ParseResult<()> {
         if self
             .safe_expression(true, Terminal::LineBreak.into())
@@ -1623,7 +1742,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     ///
     /// Generates a node of type `ExprList` containing the arguments of a command.
     fn command_arg(&mut self, arg_fmt: EraCmdArgFmt) -> ParseResult<()> {
@@ -1678,7 +1797,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn raw_string(&mut self) -> ParseResult<()> {
         loop {
             let token = self.o.peek_token(Mode::RawStr).token;
@@ -1700,7 +1819,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     fn stmt_expression(&mut self) -> ParseResult<()> {
         let cp = self.o.b.checkpoint();
 
@@ -1729,12 +1848,12 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     fn expression(&mut self, pure: bool) -> ParseResult<Token> {
         self.expression_bp(0, pure, Terminal::LineBreak.into())
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     ///
     /// Like `expression`, but guarantees that an Invalid node is created if it fails.
     fn safe_expression(
@@ -1750,7 +1869,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(token)
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     ///
     /// Like `expression_bp`, but guarantees that an Invalid node is created if it fails.
     fn safe_expression_bp(
@@ -1767,7 +1886,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(token)
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     fn expression_bp(
         &mut self,
         min_bp: u8,
@@ -1797,11 +1916,20 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         match first.kind {
             Token::IntLiteral => _ = self.o.bump(),
             Token::StringLiteral => _ = self.o.bump(),
-            Token::StringFormStart | Token::DoubleQuote => {
+            Token::StringFormStart => {
                 // TODO: Handle escape characters for StringForm (both expression and raw)
                 self.o.b.start_node(Token::StringForm);
                 _ = self.o.bump();
                 if self.expression_strform().is_err() {
+                    _ = self.sync_to(terminals | Terminal::DoubleQuote);
+                }
+                self.o.b.finish_node();
+            }
+            Token::DoubleQuote => {
+                // TODO: Handle escape characters for StringForm (both expression and raw)
+                self.o.b.start_node(Token::StringForm);
+                _ = self.o.bump();
+                if self.plain_expression_strform().is_err() {
                     _ = self.sync_to(terminals | Terminal::DoubleQuote);
                 }
                 self.o.b.finish_node();
@@ -1980,14 +2108,14 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(last_processed_token)
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn expression_paren(&mut self) -> ParseResult<()> {
         self.expression(true)?;
         self.eat(Mode::Normal, Token::RParen)?;
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     ///
     /// Parses residual of expressions like `(arg1, arg2)`.
     fn paren_expr_list(&mut self) -> ParseResult<()> {
@@ -2042,22 +2170,22 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     ///
     /// Parses residual of expressions like `, var1, var2`.
     fn comma_expr_list_limit(&mut self, min_bp: u8, size_limit: u64) -> ParseResult<u64> {
         assert!(size_limit > 0, "size limit must be greater than 0");
         let mut count = 0;
         loop {
-            // // Handle min_bp
-            // if min_bp != 0 {
-            //     let token = self.o.peek_token(Mode::Normal).token;
-            //     if let Some((l_bp, _)) = infix_binding_power(token.kind) {
-            //         if l_bp < min_bp {
-            //             break;
-            //         }
-            //     }
-            // }
+            // Handle min_bp
+            if min_bp != 0 {
+                let token = self.o.peek_token(Mode::Normal).token;
+                if let Some((l_bp, _)) = infix_binding_power(token.kind) {
+                    if l_bp < min_bp {
+                        break;
+                    }
+                }
+            }
 
             match self.o.peek_token(Mode::Normal).token.kind {
                 Token::Comma => {
@@ -2108,22 +2236,30 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
 
                 // If no comma, must be end of expression list
                 if self.try_eat(Mode::Normal, Token::Comma).is_none() {
-                    break;
+                    return Ok(count);
                 }
             }
+        }
+
+        let previous_is_comma = count > 0;
+        if count < size_limit && previous_is_comma {
+            // We want more expressions, and the last one was a comma
+            self.o.b.start_node(Token::EmptyExpr);
+            self.o.b.finish_node();
+            count += 1;
         }
 
         Ok(count)
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     ///
     /// Parses residual of expressions like `, var1, var2`.
     fn comma_expr_list(&mut self, min_bp: u8) -> ParseResult<u64> {
         self.comma_expr_list_limit(min_bp, u64::MAX)
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     ///
     /// Parses residual of expressions like `'string content`. May break at comma.
     fn quote_raw_strform(&mut self) -> ParseResult<()> {
@@ -2173,7 +2309,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE OWN}
+    /// `{NODE OWN}`
     fn raw_strform(&mut self) -> ParseResult<()> {
         self.o.b.start_node(Token::StringForm);
         if self.raw_strform_inner().is_err() {
@@ -2183,7 +2319,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn raw_strform_inner(&mut self) -> ParseResult<()> {
         loop {
             let token = self.o.peek_token(Mode::RawStrForm).token;
@@ -2231,10 +2367,20 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn expression_strform(&mut self) -> ParseResult<()> {
+        self.expression_strform_inner(Mode::StrForm)
+    }
+
+    /// `{NODE BORROW}`
+    fn plain_expression_strform(&mut self) -> ParseResult<()> {
+        self.expression_strform_inner(Mode::PlainStr)
+    }
+
+    /// `{NODE BORROW}`
+    fn expression_strform_inner(&mut self, mode: Mode) -> ParseResult<()> {
         loop {
-            let token = self.o.peek_token(Mode::StrForm).token;
+            let token = self.o.peek_token(mode).token;
             match token.kind {
                 Token::PlainStringLiteral => _ = self.o.bump(),
                 Token::LBrace => {
@@ -2282,7 +2428,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn ternary_strform(&mut self) -> ParseResult<()> {
         // cond
         let cp = self.o.b.checkpoint();
@@ -2412,7 +2558,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         Ok(())
     }
 
-    /// {NODE BORROW}
+    /// `{NODE BORROW}`
     fn strform_interp_part(&mut self, terminal: EraTerminalTokenKind) -> ParseResult<()> {
         let mode = if terminal == Terminal::Percentage {
             Mode::InlineNormal
@@ -2588,7 +2734,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
 
     fn expect_sync_to_newline(&mut self) -> ParseResult<()> {
         let token = self.o.peek_token(Mode::Normal).token;
-        if token.kind != Token::LineBreak && self.o.l.previous_token() != Token::LineBreak {
+        if token.kind != Token::LineBreak && !self.o.l.at_start_of_line() {
             // if token.kind != Token::LineBreak {
             let mut diag = self.base_diag.clone();
             diag.span_err(

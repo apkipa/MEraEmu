@@ -25,6 +25,7 @@ pub enum EraLexerMode {
     RawStrForm, // Unquoted string form
     /// The mode for parsing raw strings, which are unquoted.
     RawStr, // Unquoted string
+    PlainStr, // Quoted string
     // TODO: Reject comments inside StrForm properly by introducing a new EraLexerMode
     /// The mode for parsing ternary string forms.
     ///
@@ -92,14 +93,16 @@ impl<'a, 'ctx, Callback: EraCompilerCallback> EraLexer<'a, 'ctx, Callback> {
         }
     }
 
-    pub fn get_src(&self) -> &'a [u8] {
-        self.o.src
+    pub fn get_src(&self) -> &'a str {
+        // SAFETY: The source is always valid UTF-8
+        unsafe { std::str::from_utf8_unchecked(self.o.src) }
     }
 
-    pub fn get_src_span(&self, span: SrcSpan) -> &'a [u8] {
+    pub fn get_src_span(&self, span: SrcSpan) -> &'a str {
+        let src = self.get_src();
         let start = span.start().0 as usize;
         let end = span.end().0 as usize;
-        &self.o.src[start..end]
+        &src[start..end]
     }
 
     // HACK: expose ctx for now
@@ -169,6 +172,10 @@ impl<'a, 'ctx, Callback: EraCompilerCallback> EraLexer<'a, 'ctx, Callback> {
         self.i.last_token
     }
 
+    pub fn at_start_of_line(&self) -> bool {
+        self.i.last_is_newline
+    }
+
     /// Returns the positions of all newlines (start of line) in the source.
     pub fn newline_positions(&self) -> Vec<SrcPos> {
         let mut positions = vec![SrcPos(0)];
@@ -235,7 +242,9 @@ impl<'ctx> EraLexerInnerState<'ctx> {
 
         let token = {
             let mut token = site.next_token(mode);
-            site.i.last_is_newline = matches!(token, EraTokenKind::LineBreak);
+            if token != EraTokenKind::WhiteSpace {
+                site.i.last_is_newline = matches!(token, EraTokenKind::LineBreak);
+            }
             if site.i.last_is_newline && site.is_suppress_newline() {
                 token = EraTokenKind::WhiteSpace;
             }
@@ -244,6 +253,15 @@ impl<'ctx> EraLexerInnerState<'ctx> {
         site.i.last_token = token;
 
         let pos_end = site.i.src_pos;
+        let current_lexeme = site.current_lexeme();
+        debug_assert!(
+            current_lexeme.is_utf8(),
+            "lexeme is not valid UTF-8: {:?}\nSource file: {}\nOffset: {}-{}",
+            current_lexeme,
+            site.o.ctx.active_source,
+            pos_start,
+            pos_end
+        );
         let result = EraLexerNextResult {
             token: EraToken {
                 kind: token,
@@ -263,7 +281,7 @@ impl<'ctx> EraLexerInnerState<'ctx> {
             //     let lexeme = std::slice::from_raw_parts(site.cur_lexeme_start, site.cur_lexeme_len);
             //     lexeme
             // },
-            lexeme: std::mem::transmute::<_, &[u8]>(site.current_lexeme()).to_str_unchecked(),
+            lexeme: std::mem::transmute::<_, &[u8]>(current_lexeme).to_str_unchecked(),
         };
 
         result
@@ -396,71 +414,22 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
 
         let token_kind = match mode {
             Mode::Normal | Mode::SharpDecl | Mode::InlineNormal | Mode::ExpressionS => match ch {
-                // _ if is_whitespace(ch) => {
-                //     // Skip whitespace
-                //     let mut has_newline = false;
-                //     while let Some(ch) = self.peek_char() {
-                //         match ch {
-                //             b'\r' | b'\n' => {
-                //                 has_newline = true;
-                //             }
-                //             _ if is_whitespace(ch) => (),
-                //             _ => break,
-                //         }
-                //         self.next_char();
-                //     }
-
-                //     if self.is_suppress_newline() {
-                //         has_newline = false;
-                //     }
-
-                //     if has_newline {
-                //         LineBreak
-                //     } else {
-                //         WhiteSpace
-                //     }
-                // }
-                // b'\r' | b'\n' => {
-                //     while let Some(ch) = self.peek_char() {
-                //         match ch {
-                //             b'\r' | b'\n' => (),
-                //             _ if is_whitespace(ch) => (),
-                //             _ => break,
-                //         }
-                //         self.next_char();
-                //     }
-
-                //     if self.is_suppress_newline() {
-                //         WhiteSpace
-                //     } else {
-                //         LineBreak
-                //     }
-                // }
                 _ if is_whitespace(ch) => {
                     // Skip whitespace
-                    let mut has_newline = false;
                     while let Some(ch) = self.peek_char() {
                         match ch {
-                            b'\r' | b'\n' => {
-                                has_newline = true;
-                            }
                             _ if is_whitespace(ch) => (),
                             _ => break,
                         }
                         self.next_char();
                     }
 
-                    if has_newline {
-                        LineBreak
-                    } else {
-                        WhiteSpace
-                    }
+                    WhiteSpace
                 }
                 b'\r' | b'\n' => {
                     while let Some(ch) = self.peek_char() {
                         match ch {
                             b'\r' | b'\n' => (),
-                            _ if is_whitespace(ch) => (),
                             _ => break,
                         }
                         self.next_char();
@@ -604,46 +573,47 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     }
                     IntLiteral
                 }
-                b'"' => {
-                    if matches!(mode, EraLexerMode::ExpressionS) {
-                        DoubleQuote
-                    } else {
-                        // Normal string literal
-                        let mut warned_newline = false;
-                        loop {
-                            let Some(ch) = self.next_char() else {
-                                let mut diag = self.o.new_diag();
-                                diag.span_err(
-                                    Default::default(),
-                                    SrcSpan::new(
-                                        SrcPos(initial_src_pos as _),
-                                        (self.i.src_pos - initial_src_pos) as _,
-                                    ),
-                                    "unterminated string literal",
-                                );
-                                self.o.ctx.emit_diag(diag);
-                                break Invalid;
-                            };
-                            if ch == b'"' {
-                                break StringLiteral;
-                            }
-                            if ch == b'\\' {
-                                self.next_char();
-                            }
-                            if ch == b'\n' && !warned_newline {
-                                warned_newline = true;
-                                let mut diag = self.o.new_diag();
-                                diag.span_warn(
-                                    Default::default(),
-                                    SrcSpan::new(SrcPos((self.i.src_pos - 1) as _), 1),
-                                    "newline in string literal",
-                                );
-                                self.o.ctx.emit_diag(diag);
-                            }
-                        }
-                    }
-                }
-                b'[' if self.i.last_token == LineBreak => {
+                // b'"' => {
+                //     if matches!(mode, EraLexerMode::ExpressionS) {
+                //         DoubleQuote
+                //     } else {
+                //         // Normal string literal
+                //         let mut warned_newline = false;
+                //         loop {
+                //             let Some(ch) = self.next_char() else {
+                //                 let mut diag = self.o.new_diag();
+                //                 diag.span_err(
+                //                     Default::default(),
+                //                     SrcSpan::new(
+                //                         SrcPos(initial_src_pos as _),
+                //                         (self.i.src_pos - initial_src_pos) as _,
+                //                     ),
+                //                     "unterminated string literal",
+                //                 );
+                //                 self.o.ctx.emit_diag(diag);
+                //                 break Invalid;
+                //             };
+                //             if ch == b'"' {
+                //                 break StringLiteral;
+                //             }
+                //             if ch == b'\\' {
+                //                 self.next_char();
+                //             }
+                //             if ch == b'\n' && !warned_newline {
+                //                 warned_newline = true;
+                //                 let mut diag = self.o.new_diag();
+                //                 diag.span_warn(
+                //                     Default::default(),
+                //                     SrcSpan::new(SrcPos((self.i.src_pos - 1) as _), 1),
+                //                     "newline in string literal",
+                //                 );
+                //                 self.o.ctx.emit_diag(diag);
+                //             }
+                //         }
+                //     }
+                // }
+                b'"' => DoubleQuote,
+                b'[' if self.i.last_is_newline => {
                     // Special preprocessing (macro?)
 
                     trait Adhoc {
@@ -800,6 +770,17 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     PlainStringLiteral
                 }
             },
+            Mode::PlainStr => match ch {
+                b'"' => DoubleQuote,
+                _ => {
+                    if ch == b'\\' {
+                        self.next_utf8_char();
+                    } else {
+                        self.skip_char_while(|x| !matches!(x, b'"' | b'\\'));
+                    }
+                    PlainStringLiteral
+                }
+            },
             Mode::RawStrForm => match ch {
                 b'\r' | b'\n' => {
                     // if self.is_suppress_newline() {
@@ -929,6 +910,39 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
         None
     }
 
+    pub fn next_utf8_char(&mut self) -> Option<char> {
+        self.handle_replacement();
+
+        // TODO: Increment self.i.loc
+
+        // Handle alternate source
+        if !self.i.alternate_src.is_empty() {
+            let (Some(ch), size) = bstr::decode_utf8(self.i.alternate_src) else {
+                unreachable!();
+            };
+            self.has_replaced = true;
+            for i in 0..size {
+                self.append_lexeme(self.i.alternate_src.as_ptr());
+                self.i.alternate_src = &self.i.alternate_src[1..];
+            }
+            return Some(ch);
+        }
+
+        // Handle normal
+        if !self.src().is_empty() {
+            let (Some(ch), size) = bstr::decode_utf8(self.src()) else {
+                unreachable!();
+            };
+            for i in 0..size {
+                self.append_lexeme(self.src().as_ptr());
+                self.i.src_pos += 1;
+            }
+            return Some(ch);
+        }
+
+        None
+    }
+
     #[inline]
     fn src(&self) -> &'a [u8] {
         &self.o.src[self.i.src_pos..]
@@ -1010,13 +1024,15 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                 return;
             };
             // SAFETY: Source is valid UTF-8
-            let in_replace = unsafe { &rest[..end_pos].to_str_unchecked() };
+            let in_replace = unsafe { rest[..end_pos].to_str_unchecked() };
             // self.i.src = &rest[(end_pos + 2)..];
             let replace_len = 2 + end_pos + 2;
             let old_src_pos = self.i.src_pos;
             self.i.src_pos += replace_len;
             let Some(out_replace) = self.o.ctx.global_replace.get(in_replace) else {
                 // Replacement not found; skip this replacement, without emitting errors
+                self.has_replaced = true;
+
                 let mut diag = self.o.new_diag();
                 diag.span_warn(
                     Default::default(),
@@ -1026,7 +1042,8 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                 self.o.ctx.emit_diag(diag);
                 return;
             };
-            // SAFETY: The data is guaranteed to be valid, since removal of a replacement is forbidden in safe Rust.
+            // SAFETY: The data is guaranteed to be valid, since removal of a replacement is forbidden in safe Rust
+            //         according to the API contract.
             unsafe {
                 let data = &out_replace.data[..];
                 self.apply_replacement(std::mem::transmute(data), replace_len);

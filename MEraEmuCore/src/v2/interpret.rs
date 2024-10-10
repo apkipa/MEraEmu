@@ -338,8 +338,8 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
                 }
             }
             EraExprNodeKind::FunCallExpr(x) => {
-                let args = x.arguments().ok_or(EraInterpretError::Others)?;
-                let args = args
+                let args_list = x.arguments().ok_or(EraInterpretError::Others)?;
+                let args = args_list
                     .children()
                     .map(|x| {
                         let span = x.src_span();
@@ -371,6 +371,55 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
                         };
                         let arg0 = self.unwrap_int(arg0.0.coerce_int(), arg0.1)?;
                         ScalarValue::Str(routines::int_to_char(arg0).into())
+                    }
+                    "VARSIZE" => {
+                        if args.len() > 2 {
+                            let mut diag = self.make_diag();
+                            diag.span_warn(
+                                Default::default(),
+                                x.src_span(),
+                                "too many arguments to function `VARSIZE`",
+                            );
+                            self.ctx.emit_diag(diag);
+                        }
+                        let mut args = args.into_iter();
+                        let Some(var_name) = args.next() else {
+                            let mut diag = self.make_diag();
+                            diag.span_err(
+                                Default::default(),
+                                x.src_span(),
+                                "missing argument to function `VARSIZE`",
+                            );
+                            self.ctx.emit_diag(diag);
+                            return Err(EraInterpretError::Others);
+                        };
+                        let var_name = self.unwrap_str(var_name.0.coerce_str(), var_name.1)?;
+                        let Some(var_val) = self.ctx.variables.get_var(&var_name) else {
+                            return Err(EraInterpretError::VarNotFound(
+                                args_list.children().nth(0).unwrap().inner(),
+                            ));
+                        };
+                        let result = if let Some(arg) = args.next() {
+                            let dims = var_val.dims().unwrap();
+                            let var_dim = self.unwrap_int(arg.0.coerce_int(), arg.1)?;
+                            let var_dim = var_dim as usize;
+                            match dims.get(var_dim) {
+                                Some(x) => *x as _,
+                                None => {
+                                    let mut diag = self.make_diag();
+                                    diag.span_err(
+                                        Default::default(),
+                                        arg.1,
+                                        "variable dimension out of bounds",
+                                    );
+                                    self.ctx.emit_diag(diag);
+                                    return Err(EraInterpretError::Others);
+                                }
+                            }
+                        } else {
+                            *var_val.dims().unwrap().last().unwrap() as _
+                        };
+                        ScalarValue::Int(result)
                     }
                     _ => {
                         let mut diag = self.make_diag();

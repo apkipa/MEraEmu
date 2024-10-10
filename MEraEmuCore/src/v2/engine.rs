@@ -42,7 +42,8 @@ pub struct MEraEngine<Callback> {
     ctx: EraCompilerCtx<Callback>,
 }
 
-pub const MAX_CHARA_COUNT: u32 = 768;
+// TODO: Scale charas variables dynamically; use default capacity of 128 then.
+pub const MAX_CHARA_COUNT: u32 = 512;
 
 #[derive(thiserror::Error, Debug)]
 #[error("{msg}")]
@@ -1256,6 +1257,16 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                         );
                         self.ctx.emit_diag(diag);
                     }
+
+                    // Add to reverse lookup index
+                    let kind = Some(EraCsvVarKind::CsvItem);
+                    if let Some(kind) = kind {
+                        self.ctx
+                            .csv_indices
+                            .entry(Ascii::new(name))
+                            .or_default()
+                            .push((kind, index));
+                    }
                 }
 
                 // Apply initial values
@@ -1473,6 +1484,12 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         _ = self.finish_load_csv()?;
         _ = self.finish_load_erh()?;
 
+        // Load builtin source
+        {
+            const SYS_SRC: &str = include_str!("../sys_src.ERB");
+            self.load_erb("<builtin>", SYS_SRC.as_bytes())?;
+        }
+
         self.ctx.node_cache = self.node_cache;
 
         // Process .erb files
@@ -1558,8 +1575,19 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         let node_cache = &mut self.node_cache;
         let mut lexer = EraLexer::new(&mut self.ctx, content);
         let mut parser = EraParser::new(&mut lexer, node_cache, is_header);
-        let ast = parser.parse_program();
-        let newline_pos = lexer.newline_positions();
+        let (ast, macro_map) = parser.parse_program();
+        let newline_pos = {
+            let mut newline_pos = lexer.newline_positions();
+            // Fix newline positions
+            // NOTE: Newlines will never occur inside macros
+            // TODO: Optimize performance with the hint above
+            for pos in newline_pos.iter_mut() {
+                let span = SrcSpan::new(*pos, 0);
+                let span = macro_map.inverse_translate_span(span);
+                *pos = span.start();
+            }
+            newline_pos
+        };
         self.ctx.active_source = ArcStr::default();
 
         // Add source map entry
@@ -1568,8 +1596,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             filename.clone(),
             EraSourceFile {
                 filename: filename.clone(),
-                orig_root: ast,
-                macro_map: Default::default(),
+                final_root: ast,
+                macro_map,
                 defines: Default::default(),
                 is_header,
                 newline_pos,
@@ -1607,7 +1635,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         for (i, erh) in source_map.values().filter(|x| x.is_header).enumerate() {
             interp.get_ctx_mut().active_source = erh.filename.clone();
 
-            let node = cstree::syntax::SyntaxNode::<EraTokenKind>::new_root(erh.orig_root.clone());
+            let node = cstree::syntax::SyntaxNode::<EraTokenKind>::new_root(erh.final_root.clone());
             let program = EraProgramNode::cast(&node).unwrap();
             for decl in program.children() {
                 let var_info = match interp.interpret_var_decl(decl) {
