@@ -216,13 +216,39 @@ pub fn is_chara_nodim(name: &str) -> bool {
 }
 
 pub fn unwrap_str_literal(s: &str) -> String {
-    if !matches!(s.as_bytes(), [b'"', .., b'"']) {
+    if s.len() < 2 || {
+        let s = s.as_bytes();
+        [s[0], s[s.len() - 1]] != [b'"', b'"']
+    } {
         unreachable!("invalid string literal: {:?}", s);
     }
-    let s = &s[1..s.len() - 1];
-    unescape_str(s)
+    unescape_str(&s[1..s.len() - 1])
+    // if let [b'"', s @ .., b'"'] = s.as_bytes() {
+    //     unescape_str(unsafe { std::str::from_utf8_unchecked(s) })
+    // } else {
+    //     unreachable!("invalid string literal: {:?}", s);
+    // }
 }
 
 pub fn unescape_str(s: &str) -> String {
-    Vec::unescape_bytes(s).into_string_lossy()
+    // Vec::unescape_bytes(s).into_string_lossy()
+    let mut out = Vec::new();
+    let mut iter = s.bytes();
+    while let Some(c) = iter.next() {
+        if c != b'\\' {
+            out.push(c);
+            continue;
+        }
+
+        match iter.next() {
+            Some(b'n') => out.push(b'\n'),
+            Some(b'r') => out.push(b'\r'),
+            Some(b't') => out.push(b'\t'),
+            // Rest is copied verbatim (so that no invalid UTF-8 is produced)
+            Some(c) => out.push(c),
+            None => {}
+        }
+    }
+    // SAFETY: Input is valid UTF-8, and we never mess it up
+    unsafe { String::from_utf8_unchecked(out) }
 }

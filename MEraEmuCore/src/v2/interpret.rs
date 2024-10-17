@@ -1,11 +1,9 @@
 use bstr::ByteVec;
-use cstree::{
-    interning::{Resolver, TokenKey},
-    syntax::{SyntaxElement, SyntaxElementRef},
-};
+use cstree::interning::{Resolver, TokenKey};
 use smallvec::smallvec;
 
 use super::{ast::*, routines};
+use crate::util::syntax::*;
 use crate::{
     types::*,
     util::{rcstr::ArcStr, Ascii},
@@ -785,6 +783,8 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
             // self.ctx.emit_diag(diag);
             return Err(EraInterpretError::VarNotFound(token.into()));
         };
+
+        var_info.val.ensure_alloc();
 
         if self.is_const && !var_info.is_const {
             let mut diag = self.make_diag();

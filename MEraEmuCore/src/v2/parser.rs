@@ -16,10 +16,10 @@ use cstree::{
     interning::Interner,
     Syntax,
 };
-use fxhash::FxBuildHasher;
 use hashbrown::{HashMap, HashSet};
 use indexmap::IndexMap;
 use itertools::Itertools;
+use rustc_hash::FxBuildHasher;
 use EraLexerMode as Mode;
 use EraTokenKind as Token;
 
@@ -261,7 +261,7 @@ struct EraParserSite<'a, 'b, 'ctx, 'cache, 'i, Callback> {
     o: EraParserOuter<'a, 'b, 'ctx, 'cache, 'i, Callback>,
     base_diag: Diagnostic<'a>,
     // eat_syncs: Vec<(Mode, Token)>,
-    local_str_vars: HashSet<Ascii<ArcStr>, fxhash::FxBuildHasher>,
+    local_str_vars: HashSet<Ascii<ArcStr>, FxBuildHasher>,
 }
 
 impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>

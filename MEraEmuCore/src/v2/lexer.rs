@@ -1,4 +1,4 @@
-use std::result;
+use std::{hint::unreachable_unchecked, result};
 
 use bstr::ByteSlice;
 use rclite::Rc;
@@ -918,7 +918,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
         // Handle alternate source
         if !self.i.alternate_src.is_empty() {
             let (Some(ch), size) = bstr::decode_utf8(self.i.alternate_src) else {
-                unreachable!();
+                unsafe { unreachable_unchecked() };
             };
             self.has_replaced = true;
             for i in 0..size {
@@ -931,7 +931,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
         // Handle normal
         if !self.src().is_empty() {
             let (Some(ch), size) = bstr::decode_utf8(self.src()) else {
-                unreachable!();
+                unsafe { unreachable_unchecked() };
             };
             for i in 0..size {
                 self.append_lexeme(self.src().as_ptr());
@@ -1017,7 +1017,15 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
 
         // TODO: Increment self.i.loc
 
-        if let [b'[', b'[', rest @ ..] = self.src() {
+        fn split_replacement_start(src: &[u8]) -> Option<&[u8]> {
+            if src.len() < 2 {
+                return None;
+            }
+            let s: [u8; 2] = src[..2].try_into().unwrap();
+            (s == [b'[', b'[']).then_some(&src[2..])
+        }
+
+        if let Some(rest) = split_replacement_start(self.src()) {
             let search_len = memchr::memchr2(b'\r', b'\n', rest).unwrap_or(rest.len());
             let Some(end_pos) = memchr::memmem::find(&rest[..search_len], b"]]") else {
                 // Closing not found; treat as if it were not a replace, without emitting errors

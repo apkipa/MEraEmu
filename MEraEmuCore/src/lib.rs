@@ -1699,6 +1699,9 @@ mod tests {
         // let game_base_dir = r#"D:\MyData\Games\Others\1\eraTW\eratw-sub-modding-888ab0cd\"#;
         // let game_base_dir = r#"D:\MyData\Games\Others\1\eratohoK\"#;
 
+        #[cfg(feature = "dhat-heap")]
+        let _profiler = dhat::Profiler::new_heap();
+
         let errors = RefCell::new(String::new());
         let mut callback = MockEngineCallback::new(&errors);
         let mut engine = MEraEngine::new();
@@ -1890,6 +1893,9 @@ mod tests {
         let finialize_time = start_time.elapsed();
         start_time = std::time::Instant::now();
 
+        #[cfg(feature = "dhat-heap")]
+        drop(_profiler);
+
         {
             let mem_usage = engine.get_mem_usage().unwrap();
             *errors.borrow_mut() += &format!(
@@ -1940,6 +1946,10 @@ mod tests {
 
         // TODO: Redact this
         // Read from environment variable
+        let config = v2::engine::MEraEngineConfig {
+            no_src_map: std::env::var("ERA_NO_SRC_MAP").is_ok(),
+            ..Default::default()
+        };
         let game_base_dir = std::env::var("ERA_GAME_BASE_DIR").unwrap_or_else(|_| {
             r#"D:\MyData\Games\Others\1\eraTW\TW4.881画蛇添足版（04.07更新）\"#.to_owned()
             // r#"D:\MyData\Games\Others\1\eraTW\eratw-sub-modding-888ab0cd\"#.to_owned()
@@ -1948,7 +1958,7 @@ mod tests {
 
         let errors = RefCell::new(String::new());
         let mut callback = MockEngineCallback::new(&errors);
-        let mut builder = v2::engine::MEraEngineBuilder::new(&mut callback);
+        let mut builder = v2::engine::MEraEngineBuilder::new(&mut callback).with_config(config);
         builder.register_variable("WINDOW_TITLE", true, 1, true)?;
         builder.reg_int("@COLOR")?;
         builder.reg_int("@DEFCOLOR")?;
@@ -2173,6 +2183,9 @@ mod tests {
 
         let finialize_time = start_time.elapsed();
         start_time = std::time::Instant::now();
+
+        #[cfg(feature = "dhat-heap")]
+        drop(_profiler);
 
         // {
         //     let mem_usage = builder.get_mem_usage().unwrap();

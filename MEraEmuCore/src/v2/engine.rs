@@ -7,8 +7,8 @@ use std::{
 };
 
 use bstr::ByteSlice;
+use cstree::build::NodeCache;
 use either::Either;
-use fxhash::FxBuildHasher;
 use hashbrown::{HashMap, HashSet};
 use indoc::indoc;
 use itertools::Itertools;
@@ -17,6 +17,7 @@ use once_cell::sync::Lazy;
 use rclite::Rc;
 use rcstr::ArcStr;
 use regex::Regex;
+use rustc_hash::FxBuildHasher;
 use safer_ffi::derive_ReprC;
 use smallvec::smallvec;
 
@@ -25,6 +26,7 @@ use crate::{
     v2::interpret::{EraInterpretError, EraInterpreter},
 };
 
+use crate::util::syntax::*;
 use crate::util::*;
 
 #[derive(Debug)]
@@ -72,12 +74,19 @@ pub struct MEraEngineConfig {
     pub memory_limit: u64,
     /// Number of threads to use for parallel compilation. 0 means auto.
     pub threads_cnt: u32,
+    /// Whether to enable debug mode.
+    pub enable_debug: bool,
+    /// Whether to disable source map generation. This can reduce memory usage,
+    /// but will make debugging harder.
+    pub no_src_map: bool,
 }
 impl Default for MEraEngineConfig {
     fn default() -> Self {
         MEraEngineConfig {
             memory_limit: 0,
             threads_cnt: 0,
+            enable_debug: false,
+            no_src_map: false,
         }
     }
 }
@@ -1420,19 +1429,16 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             if var_desc.is_charadata {
                 var_desc.dims.insert(0, MAX_CHARA_COUNT);
             }
+            // NOTE: May need ensure_alloc() later
             let val = if var_desc.is_string {
                 Value::new_str_arr(
                     var_desc.dims,
-                    var_desc
-                        .initial_sval
-                        .unwrap_or_else(|| vec![Default::default()]),
+                    var_desc.initial_sval.unwrap_or_else(|| Vec::new()),
                 )
             } else {
                 Value::new_int_arr(
                     var_desc.dims,
-                    var_desc
-                        .initial_ival
-                        .unwrap_or_else(|| vec![Default::default()]),
+                    var_desc.initial_ival.unwrap_or_else(|| Vec::new()),
                 )
             };
             if self
@@ -1500,7 +1506,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             .filter(|x| !x.is_header)
             .map(|x| x.filename.clone())
             .collect::<Vec<_>>();
-        let mut codegen = EraCodeGenerator::new(&mut self.ctx);
+        let mut codegen = EraCodeGenerator::new(&mut self.ctx, true);
         codegen.compile_merge_many_programs(&filenames, |progress| {
             if let Some(callback) = &mut self.builder_callback {
                 callback.on_build_progress(
@@ -1512,6 +1518,12 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 );
             }
         });
+
+        if self.config.no_src_map {
+            self.ctx.source_map = Default::default();
+            let interner = self.ctx.node_cache.into_interner().unwrap();
+            self.ctx.node_cache = NodeCache::from_interner(interner);
+        }
 
         // TODO: Call `optimize_resolution` on entering VM on the interner (which populates the
         //       resolution cache Vec<&str> from DashMap), which helps speed up the VM. Requires
@@ -1596,6 +1608,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             filename.clone(),
             EraSourceFile {
                 filename: filename.clone(),
+                // compressed_text: lz4_flex::compress_prepend_size(content.as_bytes()).into(),
+                // final_root: Some(ast),
                 final_root: ast,
                 macro_map,
                 defines: Default::default(),
@@ -1635,7 +1649,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         for (i, erh) in source_map.values().filter(|x| x.is_header).enumerate() {
             interp.get_ctx_mut().active_source = erh.filename.clone();
 
-            let node = cstree::syntax::SyntaxNode::<EraTokenKind>::new_root(erh.final_root.clone());
+            let node = SyntaxNode::new_root(erh.final_root.clone());
             let program = EraProgramNode::cast(&node).unwrap();
             for decl in program.children() {
                 let var_info = match interp.interpret_var_decl(decl) {

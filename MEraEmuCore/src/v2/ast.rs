@@ -4,7 +4,6 @@ use cstree::{
     build::{GreenNodeBuilder, NodeCache},
     green::{GreenNode, GreenToken},
     interning::{Resolver, TokenKey},
-    syntax::{SyntaxElementRef, SyntaxNode, SyntaxToken},
     util::NodeOrToken,
     Syntax,
 };
@@ -12,14 +11,23 @@ use itertools::Itertools;
 use paste::paste;
 
 use crate::types::*;
+use crate::util::syntax::*;
 
 use EraTokenKind as Token;
 
-fn not_newline<D>(x: &SyntaxElementRef<'_, Token, D>) -> bool {
+// fn not_newline<D>(x: &SyntaxElementRef<'_, Token, D>) -> bool {
+//     x.as_token().map_or(true, |x| x.kind() != Token::LineBreak)
+// }
+
+// fn not_comma<D>(x: &SyntaxElementRef<'_, Token, D>) -> bool {
+//     x.as_token().map_or(true, |x| x.kind() != Token::Comma)
+// }
+
+fn not_newline(x: &SyntaxElementRef<'_, Token>) -> bool {
     x.as_token().map_or(true, |x| x.kind() != Token::LineBreak)
 }
 
-fn not_comma<D>(x: &SyntaxElementRef<'_, Token, D>) -> bool {
+fn not_comma(x: &SyntaxElementRef<'_, Token>) -> bool {
     x.as_token().map_or(true, |x| x.kind() != Token::Comma)
 }
 

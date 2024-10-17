@@ -15,10 +15,10 @@ use cstree::{
     Syntax,
 };
 use either::Either;
-use fxhash::FxBuildHasher;
 use hashbrown::HashMap;
 use indexmap::IndexMap;
 use rclite::Rc;
+use rustc_hash::FxBuildHasher;
 use safer_ffi::{derive_ReprC, prelude::VirtualPtr};
 use tinyvec::ArrayVec;
 
@@ -43,9 +43,6 @@ impl Default for SrcPos {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SrcSpan {
     start: SrcPos,
-    /// If the span is tagged (MSB is 1), then the len represents the tag (excluding
-    /// the tag bit), which is used to locate span inside the macro expansion result.
-    /// Otherwise, the len represents the length of the span.
     len: u32,
 }
 
@@ -722,7 +719,10 @@ impl EraMacroMap {
 #[derive(Debug)]
 pub struct EraSourceFile {
     pub filename: ArcStr,
-    /// The root AST node of the lossless syntax tree, with macros replaced.
+    // /// The compressed original source text. Reduces memory usage.
+    // pub compressed_text: Box<[u8]>,
+    // /// The root AST node of the lossless syntax tree, with macros replaced.
+    // pub final_root: Option<cstree::green::GreenNode>,
     pub final_root: cstree::green::GreenNode,
     /// The list of macro substitution mappings.
     pub macro_map: EraMacroMap,
@@ -730,14 +730,9 @@ pub struct EraSourceFile {
     pub defines: EraDefineScope,
     /// Whether the file is a header file.
     pub is_header: bool,
-    /// The list of newline positions.
+    /// The list of newline positions (after expansion of macros).
     pub newline_pos: Vec<SrcPos>,
 }
-
-/* TODO: Design notes:
- *
- * Macros (& replacements) can only occur and replace nodes of Expression, Statement and Item.
-*/
 
 #[derive(Debug)]
 pub struct EraCompilerCtx<Callback> {
@@ -759,7 +754,7 @@ pub struct EraCompilerCtx<Callback> {
     /// The list of CSV contextual indices. Used by CSV variable access.
     pub csv_indices: FxHashMap<Ascii<ArcStr>, Vec<(EraCsvVarKind, u32)>>,
     // NOTE: We usually never remove chunks, so we use `Vec` instead of `HashMap`.
-    pub bc_chunks: Vec<EraBcChunk>,
+    pub bc_chunks: Rc<Vec<EraBcChunk>>,
     /// The list of function entries. Note that the value is wrapped in `Option` to
     /// allow for soft deletion.
     pub func_entries: Rc<FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo>>>,
@@ -767,6 +762,27 @@ pub struct EraCompilerCtx<Callback> {
     //       This helps with concurrent interning, and also helps to eliminate the usage of `unsafe`.
     /// The node cache used for CST building.
     pub node_cache: cstree::build::NodeCache<'static>,
+}
+
+trait IndexMapExt {
+    type Key;
+    type Value;
+
+    fn get_flatten<Q>(&self, key: &Q) -> Option<&Self::Value>
+    where
+        Q: ?Sized + std::hash::Hash + indexmap::Equivalent<Self::Key>;
+}
+
+impl<K, V> IndexMapExt for IndexMap<K, Option<V>> {
+    type Key = K;
+    type Value = V;
+
+    fn get_flatten<Q>(&self, key: &Q) -> Option<&Self::Value>
+    where
+        Q: ?Sized + std::hash::Hash + indexmap::Equivalent<Self::Key>,
+    {
+        self.get(key).and_then(Option::as_ref)
+    }
 }
 
 impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
@@ -781,7 +797,7 @@ impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
             node_cache: cstree::build::NodeCache::new(),
             chara_templates: BTreeMap::new(),
             csv_indices: FxHashMap::default(),
-            bc_chunks: Vec::new(),
+            bc_chunks: Rc::new(Vec::new()),
             func_entries: Default::default(),
         }
     }
@@ -957,17 +973,28 @@ pub enum EraCompilerFileSeekMode {
 
 #[derive_ReprC]
 #[repr(u32)]
+#[non_exhaustive]
 pub enum EraExecutionBreakReason {
     /// User requested break from inside the callback.
     CallbackBreak,
-    /// User requested break from the stop flag.
+    /// User requested break from the run / stop flag.
     StopFlag,
     /// Comes from the statement `THROW`.
     CodeThrows,
     /// Comes from the instruction `FailWithMsg`.
-    IllegalInstruction,
+    FailInstruction,
     /// Comes from the instruction `DebugBreak`.
     DebugBreakInstruction,
+    /// Comes from the instruction `Quit`.
+    CodeQuit,
+    /// The execution reached the maximum number of instructions.
+    ReachedMaxInstructions,
+    /// Cannot decode or execute the instruction at this time.
+    IllegalInstruction,
+    /// Arguments to the instruction are invalid.
+    IllegalArguments,
+    /// An exception occurred during execution.
+    InternalError,
 }
 
 // Reference: https://learn.microsoft.com/en-us/dotnet/api/system.drawing.imaging.colormatrix
@@ -1226,6 +1253,7 @@ impl<'a, 'src> DiagnosticProvider<'a, 'src> {
     pub fn resolve_src_span(
         &self,
         filename: &str,
+        // mut span: SrcSpan,
         span: SrcSpan,
     ) -> Option<DiagnosticResolveSrcSpanResult> {
         use bstr::ByteSlice;
@@ -1245,7 +1273,14 @@ impl<'a, 'src> DiagnosticProvider<'a, 'src> {
             let input_span = span;
             let len = span.len();
             let resolver = self.resolver;
-            let src_file = self.src_map.get(&ArcStr::from(filename))?;
+            let src_file = self.src_map.get(filename)?;
+            let final_root_len = src_file.final_root.text_len().into();
+            // let final_root_len = {
+            //     use lz4_flex::block::uncompressed_size;
+            //     let len = uncompressed_size(&src_file.compressed_text).unwrap().0;
+            //     let span = SrcSpan::new(SrcPos(len as _), 0);
+            //     src_file.macro_map.inverse_translate_span(span).start().0
+            // };
             // NOTE: We can guarantee that `start_line` never overflows.
             let start_line = src_file
                 .newline_pos
@@ -1259,13 +1294,14 @@ impl<'a, 'src> DiagnosticProvider<'a, 'src> {
                 .newline_pos
                 .get(end_line)
                 .copied()
-                .unwrap_or_else(|| SrcPos(src_file.final_root.text_len().into()));
+                .unwrap_or_else(|| SrcPos(final_root_len));
             let snippet_span = SrcSpan::with_ends(start_pos, end_pos);
 
             // Find covering element first, then find the children elements.
-            let mut covering_snippet = String::new();
+            // if let Some(mut node) = src_file.final_root.as_ref() {
             let mut node = &src_file.final_root;
-            let mut span = SrcSpan::new(SrcPos(0), node.text_len().into());
+            let mut covering_snippet = String::new();
+            let mut span = SrcSpan::new(SrcPos(0), final_root_len);
             let mut covering_snippet_start_pos = SrcPos(0);
             if !span.contains_span(snippet_span) {
                 return None;
@@ -1334,6 +1370,12 @@ impl<'a, 'src> DiagnosticProvider<'a, 'src> {
                 loc,
                 len,
             });
+            // } else {
+            //     // Must decompress the source text.
+            //     src_offset = 0;
+            //     span = src_file.macro_map.translate_span(span);
+            //     Cow::Owned(lz4_flex::decompress_size_prepended(&src_file.compressed_text).unwrap())
+            // }
         };
 
         let start = span.start().0 as usize;
@@ -1805,6 +1847,20 @@ impl Value {
             RefFlatValue::ArrInt(x) => Some(x.borrow().dims.len()),
             RefFlatValue::ArrStr(x) => Some(x.borrow().dims.len()),
             _ => None,
+        }
+    }
+    pub fn ensure_alloc(&self) {
+        match self.as_unpacked() {
+            RefFlatValue::ArrInt(x) => x.borrow_mut().ensure_alloc(),
+            RefFlatValue::ArrStr(x) => x.borrow_mut().ensure_alloc(),
+            _ => {}
+        }
+    }
+    pub fn clear_alloc(&self) {
+        match self.as_unpacked() {
+            RefFlatValue::ArrInt(x) => x.borrow_mut().clear_alloc(),
+            RefFlatValue::ArrStr(x) => x.borrow_mut().clear_alloc(),
+            _ => {}
         }
     }
 }
@@ -2437,6 +2493,24 @@ impl CstreeGreenExt for NodeOrToken<&cstree::green::GreenNode, &cstree::green::G
             NodeOrToken::Node(x) => x.write_display::<S, _>(resolver, target),
             NodeOrToken::Token(x) => x.write_display::<S, _>(resolver, target),
         }
+    }
+}
+
+pub trait CstreeElementExt {
+    fn src_span(&self) -> SrcSpan;
+}
+
+impl<S: Syntax> CstreeElementExt for crate::util::syntax::SyntaxElement<S> {
+    fn src_span(&self) -> SrcSpan {
+        use crate::util::syntax::SyntaxElementExt;
+        self.text_range().into()
+    }
+}
+
+impl<S: Syntax> CstreeElementExt for crate::util::syntax::SyntaxElementRef<'_, S> {
+    fn src_span(&self) -> SrcSpan {
+        use crate::util::syntax::SyntaxElementExt;
+        self.text_range().into()
     }
 }
 
@@ -3676,37 +3750,68 @@ impl EraBytecodeKind {
 }
 
 #[derive(Debug, Clone)]
+struct PackedSrcSpans {
+    // (num_size, starts)
+    starts: (u8, Vec<u8>),
+    // (num_size, lens)
+    lens: (u8, Vec<u8>),
+}
+
+#[derive(Debug, Clone)]
 pub struct EraBcChunk {
     pub name: ArcStr,
     bc: Vec<u8>,
-    // TODO: Maybe compress src_spans?
-    src_spans: Vec<SrcSpan>,
+    packed_src_spans: PackedSrcSpans,
 }
 
 impl EraBcChunk {
     pub fn new(name: ArcStr, bc: Vec<u8>, src_spans: Vec<SrcSpan>) -> Self {
+        let mut bc = bc;
+        bc.shrink_to_fit();
+        let packed_src_spans = {
+            use crate::util::pack_u32_from_iter;
+            let starts = pack_u32_from_iter(src_spans.iter().map(|span| span.start().0));
+            let lens = pack_u32_from_iter(src_spans.iter().map(|span| span.len()));
+            PackedSrcSpans { starts, lens }
+        };
+
         EraBcChunk {
             name,
             bc,
-            src_spans,
+            packed_src_spans,
         }
     }
 
+    #[inline]
     pub fn get_bc(&self) -> &[u8] {
         &self.bc
     }
 
-    pub fn get_src_spans(&self) -> &[SrcSpan] {
-        &self.src_spans
-    }
-
     pub fn lookup_src(&self, idx: usize) -> Option<SrcSpan> {
-        self.src_spans.get(idx).copied()
+        use crate::util::read_packed_u32;
+        let start = {
+            let num_size = self.packed_src_spans.starts.0 as usize;
+            let range = (num_size * idx)..(num_size * (idx + 1));
+            let bytes = self.packed_src_spans.starts.1.get(range)?;
+            read_packed_u32(num_size as u8, bytes)
+        };
+        let len = {
+            let num_size = self.packed_src_spans.lens.0 as usize;
+            let range = (num_size * idx)..(num_size * (idx + 1));
+            let bytes = self.packed_src_spans.lens.1.get(range)?;
+            read_packed_u32(num_size as u8, bytes)
+        };
+        Some(SrcSpan::new(SrcPos(start), len))
     }
 
     pub fn clear(&mut self) {
         self.bc.clear();
-        self.src_spans.clear();
+        self.packed_src_spans.starts.1.clear();
+        self.packed_src_spans.lens.1.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.bc.len()
     }
 }
 

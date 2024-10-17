@@ -1,13 +1,12 @@
 use cstree::{
     interning::{InternKey, Interner, Resolver, TokenKey},
-    syntax::SyntaxNode,
     Syntax,
 };
-use fxhash::FxBuildHasher;
 use hashbrown::HashMap;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use rclite::Rc;
+use rustc_hash::{FxBuildHasher, FxHasher};
 use smallvec::smallvec;
 use yoke::Yoke;
 
@@ -16,6 +15,7 @@ use super::{
     interpret::{EraInterpretError, EraInterpreter},
     routines,
 };
+use crate::util::syntax::*;
 use crate::{
     types::*,
     util::{
@@ -35,6 +35,7 @@ type CompileResult<T> = Result<T, ()>;
 /// Generates bytecode from the AST. Also adds variables into the global pool.
 pub struct EraCodeGenerator<'ctx, Callback> {
     ctx: &'ctx mut EraCompilerCtx<Callback>,
+    trim_nodes: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -276,8 +277,8 @@ struct EraFuncPrebuildInfo {
 }
 
 impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
-    pub fn new(ctx: &'ctx mut EraCompilerCtx<Callback>) -> Self {
-        Self { ctx }
+    pub fn new(ctx: &'ctx mut EraCompilerCtx<Callback>, trim_nodes: bool) -> Self {
+        Self { ctx, trim_nodes }
     }
 
     /// Compiles given programs into bytecode chunks. Will also merge result into global context.
@@ -297,28 +298,49 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
             ),
         > = Default::default();
 
+        let bc_chunks = Rc::get_mut(&mut self.ctx.bc_chunks).unwrap();
         let sources = filenames
             .iter()
             .map(|filename| {
+                // let program = Rc::get_mut(&mut self.ctx.source_map)
+                //     .unwrap()
+                //     .get_mut(filename)
+                //     .expect("source not found");
                 let program = self.ctx.source_map.get(filename).expect("source not found");
-                let program = &program.final_root;
-                let program = SyntaxNode::new_root(program.clone());
+                // TODO: Revisit later when we use a threaded interner
+                // let program = program.final_root.get_or_insert_with(|| {
+                //     let is_header = program.is_header;
+                //     let src = lz4_flex::decompress_size_prepended(&src.compressed_text).unwrap();
+                //     let src = std::str::from_utf8(&src).unwrap();
+                //     let mut lexer = super::lexer::EraLexer::new(self.ctx, src);
+                //     let mut parser = super::parser::EraParser::new(
+                //         &mut lexer,
+                //         &mut self.ctx.node_cache,
+                //         is_header,
+                //     );
+                //     let mut root;
+                //     (root, program.macro_map) = parser.parse_program();
+                //     root
+                // });
+
+                // let program = if self.trim_nodes {
+                //     program.final_root.take()
+                // } else {
+                //     program.final_root.as_ref().cloned()
+                // };
+                // let program = program.expect("final root not set");
+                let program = program.final_root.clone();
+                let program = SyntaxNode::new_root(program);
                 let program = EraProgramNode::cast(&program)
                     .expect("invalid program")
                     .to_owned();
                 // Reuse chunk or allocate new chunk
-                let chunk_idx = self
-                    .ctx
-                    .bc_chunks
+                let chunk_idx = bc_chunks
                     .iter()
                     .position(|x| x.name == *filename)
                     .unwrap_or_else(|| {
-                        let chunk_idx = self.ctx.bc_chunks.len();
-                        self.ctx.bc_chunks.push(EraBcChunk::new(
-                            filename.clone(),
-                            Vec::new(),
-                            Vec::new(),
-                        ));
+                        let chunk_idx = bc_chunks.len();
+                        bc_chunks.push(EraBcChunk::new(filename.clone(), Vec::new(), Vec::new()));
                         chunk_idx
                     }) as u32;
                 (chunk_idx, filename, program)
@@ -327,14 +349,9 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
         let sources_iter = sources
             .iter()
             .map(|(chunk_idx, filename, program)| (*chunk_idx, *filename, program.as_ref()));
-        let _: u32 = self
-            .ctx
-            .bc_chunks
-            .len()
-            .try_into()
-            .expect("too many programs");
+        let _: u32 = bc_chunks.len().try_into().expect("too many programs");
         for (chunk_idx, _, _) in sources_iter.clone() {
-            self.ctx.bc_chunks[chunk_idx as usize].clear();
+            bc_chunks[chunk_idx as usize].clear();
         }
 
         // Prebuild functions and generate function table
@@ -388,6 +405,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
         _ = func_entries;
 
         let mut compile_units = FxIndexMap::<_, (EraBcChunkBuilder, Vec<_>)>::default();
+        let funcs_cnt = prebuild_funcs.len();
         for (name, (node, prebuild_info, _)) in prebuild_funcs {
             let func_idx = prebuild_info.func_idx;
             let chunk_idx = self
@@ -407,7 +425,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
 
         // Now start compiling functions
         let mut current_progress = 0;
-        let mut func_offsets = Vec::new();
+        let mut func_offsets = Vec::with_capacity(funcs_cnt);
         for (chunk, funcs) in compile_units.values_mut() {
             let funcs = std::mem::take(funcs);
             for (name, node, prebuild_info) in funcs {
@@ -430,6 +448,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                 // func_info.bc_offset = func_offset;
                 func_offsets.push((func_idx, func_offset));
                 EraCodeGenSite::gen_function(self, chunk, node, prebuild_info);
+                chunk.push_bc(BcKind::DebugBreak, SrcSpan::default());
             }
 
             // Update progress
@@ -450,10 +469,11 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                 .unwrap();
             func_info.bc_offset = func_offset;
         }
+        let bc_chunks = Rc::get_mut(&mut self.ctx.bc_chunks).unwrap();
         for (chunk_idx, (chunk, _)) in compile_units {
             let mut chunk = chunk.finish();
-            chunk.name = self.ctx.bc_chunks[chunk_idx as usize].name.clone();
-            self.ctx.bc_chunks[chunk_idx as usize] = chunk;
+            chunk.name = bc_chunks[chunk_idx as usize].name.clone();
+            bc_chunks[chunk_idx as usize] = chunk;
         }
     }
 }
@@ -666,43 +686,6 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
                         interp.get_ctx_mut().emit_diag(diag);
                         continue;
                     }
-                    // EraDeclItemNodeKind::EventKindDecl(decl) => {
-                    //     let Some(kind) = decl.event_kind() else {
-                    //         continue;
-                    //     };
-                    //     if event_func_kind.is_none() {
-                    //         let mut diag = interp.make_diag();
-                    //         diag.span_err(
-                    //             Default::default(),
-                    //             kind.src_span(),
-                    //             "cannot use event kind declaration in non-event function",
-                    //         );
-                    //         interp.get_ctx_mut().emit_diag(diag);
-                    //         continue;
-                    //     }
-                    //     match kind.kind() {
-                    //         Token::KwOnly => {
-                    //             event_func_kind = Some(EraEventFuncKind::Only);
-                    //         }
-                    //         Token::KwPri => {
-                    //             event_func_kind = Some(EraEventFuncKind::Pri);
-                    //         }
-                    //         Token::KwLater => {
-                    //             event_func_kind = Some(EraEventFuncKind::Later);
-                    //         }
-                    //         _ => {
-                    //             let mut diag = interp.make_diag();
-                    //             diag.span_err(
-                    //                 Default::default(),
-                    //                 kind.src_span(),
-                    //                 "invalid event kind",
-                    //             );
-                    //             interp.get_ctx_mut().emit_diag(diag);
-                    //             continue;
-                    //         }
-                    //     }
-                    //     continue;
-                    // }
                     EraDeclItemNodeKind::LocalSizeDecl(decl) => {
                         let Some(size) = decl.size() else {
                             continue;
@@ -771,7 +754,7 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
                     let var_kind = var_info.val.kind();
                     let is_const = var_decl.is_const;
                     let is_charadata = var_info.is_charadata;
-                    let mut hasher = fxhash::FxHasher32::default();
+                    let mut hasher = FxHasher::default();
                     var_info.val.inner_hash(&mut hasher);
                     let const_name = rcstr::format!("$CONSTVAL@{:x}", hasher.finish());
                     var_info.name = Ascii::new(const_name);
@@ -1101,6 +1084,8 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
                     .variables
                     .get_var_info_by_name(target.resolve_text(interp.get_ctx().interner()))
                 {
+                    global_var.val.ensure_alloc();
+
                     if global_var.is_const {
                         let mut diag = interp.make_diag();
                         diag.span_err(
@@ -1647,13 +1632,36 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
             }
             Kind::ExprStmt(stmt) => {
                 let expr = stmt.expr().ok_or(())?;
-                let expr = self.expression(expr)?;
-                match expr {
-                    ScalarValueKind::Int | ScalarValueKind::Str => {
-                        self.chunk.push_pop_all(1, stmt.src_span());
+                // NOTE: Emuera automatically fixes top-level `==` to `=`
+                match expr
+                    .as_node()
+                    .map(|x| x.node())
+                    .and_then(EraBinaryExprNode::cast)
+                {
+                    Some(node) if node.operator().ok_or(())?.kind() == Token::CmpEq => {
+                        let mut diag = self.o.ctx.make_diag();
+                        diag.span_warn(
+                            Default::default(),
+                            expr.src_span(),
+                            "`==` has no side effects, converting to assignment for compatibility with Emuera; did you misspell?",
+                        );
+                        self.o.ctx.emit_diag(diag);
+
+                        let lhs = node.lhs().ok_or(())?;
+                        let rhs = node.rhs().ok_or(())?;
+                        let lhs = self.expr_to_var_opt_idx(lhs)?;
+                        self.var_idx_set(lhs, |this| this.expression(rhs), false)?;
                     }
-                    ScalarValueKind::Void => (),
-                    ScalarValueKind::Empty => unreachable!("empty expression"),
+                    _ => {
+                        let expr = self.expression(expr)?;
+                        match expr {
+                            ScalarValueKind::Int | ScalarValueKind::Str => {
+                                self.chunk.push_pop_all(1, stmt_span);
+                            }
+                            ScalarValueKind::Void => (),
+                            ScalarValueKind::Empty => unreachable!("empty expression"),
+                        }
+                    }
                 }
             }
             Kind::RowAssignStmt(stmt) => {
@@ -4888,6 +4896,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
 
         if let Some(var_idx) = self.o.ctx.variables.get_var_idx(name_str) {
             let var_info = self.o.ctx.variables.get_var_info(var_idx).unwrap();
+            var_info.val.ensure_alloc();
             self.chunk
                 .push_bc(BcKind::LoadVarWW { idx: var_idx as _ }, var_span);
             Ok(EraIdVariableInfo {
@@ -5250,6 +5259,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
         let var_kind = var_info.val.kind().to_scalar();
 
         // Load variable
+        var_info.val.ensure_alloc();
         self.chunk.push_bc(
             BcKind::LoadVarWW {
                 idx: var_idx.try_into().unwrap(),
@@ -5276,6 +5286,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
         let var_kind = var_info.val.kind().to_scalar();
 
         // Load variable
+        var_info.val.ensure_alloc();
         self.chunk.push_bc(
             BcKind::LoadVarWW {
                 idx: var_idx.try_into().unwrap(),

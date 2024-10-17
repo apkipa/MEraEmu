@@ -3,7 +3,9 @@ pub mod dhashmap;
 pub mod html;
 pub mod io;
 pub mod number;
+pub mod random;
 pub mod rcstr;
+pub mod syntax;
 
 use std::{borrow::Borrow, fmt::Display, hash::Hash, ops::Deref, rc::Rc};
 
@@ -299,4 +301,44 @@ where
     }
     let (out, _) = scopeguard::ScopeGuard::into_inner(out);
     Ok(unsafe { core::mem::transmute_copy(&out) })
+}
+
+pub fn pack_u32_from_iter(iter: impl Iterator<Item = u32> + Clone) -> (u8, Vec<u8>) {
+    let mut count = 0;
+    let max = iter.clone().inspect(|_| count += 1).max().unwrap_or(0);
+    let bits = u32::BITS - max.leading_zeros();
+    let num_size = if bits <= 8 {
+        1
+    } else if bits <= 16 {
+        2
+    } else if bits <= 24 {
+        3
+    } else {
+        4
+    };
+    let mut bytes = Vec::with_capacity(num_size as usize * count);
+    for num in iter {
+        if 0 < num_size {
+            bytes.push((num >> 0) as u8);
+        }
+        if 1 < num_size {
+            bytes.push((num >> 8) as u8);
+        }
+        if 2 < num_size {
+            bytes.push((num >> 16) as u8);
+        }
+        if 3 < num_size {
+            bytes.push((num >> 24) as u8);
+        }
+    }
+    (num_size, bytes)
+}
+
+pub fn read_packed_u32(num_size: u8, data: &[u8]) -> u32 {
+    assert_eq!(num_size as usize, data.len());
+    let mut num = 0;
+    for i in 0..num_size {
+        num |= (data[i as usize] as u32) << (i * 8);
+    }
+    num
 }
