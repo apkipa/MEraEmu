@@ -445,7 +445,7 @@ impl SystemIntrinsicsKind {
 
 #[modular_bitfield::bitfield]
 #[repr(u8)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrintExtendedFlags {
     pub is_single: bool,
     pub use_kana: bool,

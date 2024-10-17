@@ -1,3 +1,6 @@
+use std::io::{Seek, Write};
+
+use binrw::{binrw, parser, writer, BinReaderExt, BinResult, BinWriterExt, Endian};
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
 use itertools::Itertools;
 
@@ -121,4 +124,95 @@ impl<T: std::io::Write> CSharpBinaryWriter for T {
         }
         Ok(())
     }
+}
+
+#[parser(reader)]
+pub fn read_var_i32() -> BinResult<i32> {
+    const BYTES_COUNT: usize = 32 / 7;
+    const REMAINING_BITS_COUNT: usize = 32 % 7;
+    let mut read_bits = 0;
+    let mut result: u32 = 0;
+    while read_bits < 7 * BYTES_COUNT {
+        let cur_byte = ReadBytesExt::read_u8(reader)?;
+        result += ((cur_byte & 0x7f) as u32) << read_bits;
+        if cur_byte <= 0x7f {
+            return Ok(result as _);
+        }
+        read_bits += 7;
+    }
+    // Read remaining bits
+    let cur_byte = ReadBytesExt::read_u8(reader)?;
+    if cur_byte > ((1 << REMAINING_BITS_COUNT) - 1) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad VarI32").into());
+    }
+    result += (cur_byte as u32) << read_bits;
+    Ok(result as _)
+}
+
+#[writer(writer)]
+pub fn write_var_i32(val: i32) -> BinResult<()> {
+    let mut val = val as u32;
+    while val > 0x7f {
+        WriteBytesExt::write_u8(writer, (val | 0x80) as _)?;
+        val >>= 7;
+    }
+    WriteBytesExt::write_u8(writer, val as _)?;
+    Ok(())
+}
+
+#[parser(reader, endian)]
+pub fn read_utf16_string() -> BinResult<String> {
+    let bytes_len = read_var_i32(reader, endian, ())?;
+    if bytes_len < 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("bad string length (got {bytes_len})"),
+        )
+        .into());
+    }
+    let bytes_len = bytes_len as u32;
+    if bytes_len % 2 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("bad string length (got {bytes_len})"),
+        )
+        .into());
+    }
+    if bytes_len == 0 {
+        return Ok(String::new());
+    }
+    let str_len = bytes_len / 2;
+    let result: Result<String, _> = (0..str_len)
+        .map(|_| reader.read_type::<u16>(endian))
+        .process_results(|x| char::decode_utf16(x).collect())?;
+    let Ok(result) = result else {
+        return Err(
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "bad UTF-16 string").into(),
+        );
+    };
+    Ok(result)
+}
+
+pub fn write_utf16_str<W>(val: &str, writer: &mut W, endian: Endian) -> BinResult<()>
+where
+    W: Write + Seek,
+{
+    let bytes_cnt = val.encode_utf16().count() * 2;
+    write_var_i32(
+        bytes_cnt
+            .try_into()
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "string too long"))?,
+        writer,
+        endian,
+        (),
+    )?;
+    for word in val.encode_utf16() {
+        writer.write_type::<u16>(&word, endian)?;
+    }
+    Ok(())
+}
+
+#[writer(writer, endian)]
+pub fn write_utf16_string(val: &String) -> BinResult<()> {
+    write_utf16_str(val, writer, endian)
 }
