@@ -1,13 +1,21 @@
 pub mod ascii;
 pub mod dhashmap;
 pub mod html;
+pub mod interning;
 pub mod io;
 pub mod number;
 pub mod random;
 pub mod rcstr;
 pub mod syntax;
 
-use std::{borrow::Borrow, fmt::Display, hash::Hash, ops::Deref, rc::Rc};
+use std::{
+    borrow::Borrow,
+    fmt::Display,
+    hash::Hash,
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+    rc::Rc,
+};
 
 /// An ASCII-caseless string slice type.
 #[derive(Debug)]
@@ -341,4 +349,40 @@ pub fn read_packed_u32(num_size: u8, data: &[u8]) -> u32 {
         num |= (data[i as usize] as u32) << (i * 8);
     }
     num
+}
+
+/// A RAII pointer to a heap-allocated value.
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct BoxPtr<T>(NonNull<T>);
+
+impl<T> From<Box<T>> for BoxPtr<T> {
+    fn from(value: Box<T>) -> Self {
+        unsafe {
+            let ptr = Box::into_raw(value);
+            Self(NonNull::new_unchecked(ptr))
+        }
+    }
+}
+
+impl<T> Deref for BoxPtr<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl<T> DerefMut for BoxPtr<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.0.as_mut() }
+    }
+}
+
+impl<T> Drop for BoxPtr<T> {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = Box::from_raw(self.0.as_ptr());
+        }
+    }
 }

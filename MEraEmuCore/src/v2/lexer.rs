@@ -1,9 +1,9 @@
-use std::{hint::unreachable_unchecked, result};
+use std::hint::unreachable_unchecked;
 
 use bstr::ByteSlice;
 use rclite::Rc;
 
-use crate::types::*;
+use crate::{types::*, util::rcstr::ArcStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EraLexerMode {
@@ -55,41 +55,49 @@ pub struct EraLexerNextResult<'a> {
 }
 
 #[derive(Debug)]
-pub struct EraLexer<'a, 'ctx, Callback> {
-    o: EraLexerOuterState<'a, 'ctx, Callback>,
-    i: EraLexerInnerState<'ctx>,
+pub struct EraLexer<'a> {
+    o: EraLexerOuterState<'a>,
+    i: EraLexerInnerState,
     // NOTE: 'static is used to avoid lifetime issues with self-referential structs.
     next_i: Option<(
         EraLexerMode,
         EraLexerNextResult<'static>,
-        EraLexerInnerState<'ctx>,
+        EraLexerInnerState,
     )>,
-    // HACK: For StableDeref of lexeme
-    cart: Vec<u8>,
 }
 
 #[derive(Debug)]
-struct EraLexerOuterState<'a, 'ctx, Callback> {
+struct EraLexerOuterState<'a> {
     src: &'a [u8],
-    ctx: &'ctx mut EraCompilerCtx<Callback>,
+    strs: [arcstr::ArcStr; 2],
+    // HACK: For StableDeref of lexeme
+    cart: Vec<u8>,
+    filename: ArcStr,
 }
 
-impl<'a, 'ctx, Callback: EraCompilerCallback> EraLexerOuterState<'a, 'ctx, Callback> {
-    pub fn new_diag(&self) -> Diagnostic<'a> {
-        Diagnostic::with_src(self.ctx.active_source.clone(), self.src)
+impl<'a> EraLexerOuterState<'a> {
+    fn new_diag(&self) -> Diagnostic<'a> {
+        Diagnostic::with_src(self.filename.clone(), self.src)
+    }
+
+    fn emit_diag(&self, diag: Diagnostic, callback: &mut dyn EraCompilerCallback) {
+        let provider = DiagnosticProvider::new(&diag, None, None);
+        callback.emit_diag(&provider);
+        diag.cancel();
     }
 }
 
-impl<'a, 'ctx, Callback: EraCompilerCallback> EraLexer<'a, 'ctx, Callback> {
-    pub fn new(ctx: &'ctx mut EraCompilerCtx<Callback>, src: &'a str) -> Self {
+impl<'a> EraLexer<'a> {
+    pub fn new(filename: ArcStr, src: &'a str) -> Self {
         Self {
             o: EraLexerOuterState {
                 src: src.as_bytes(),
-                ctx,
+                strs: Default::default(),
+                cart: Vec::new(),
+                filename,
             },
             i: EraLexerInnerState::new(),
             next_i: None,
-            cart: Vec::new(),
         }
     }
 
@@ -105,37 +113,22 @@ impl<'a, 'ctx, Callback: EraCompilerCallback> EraLexer<'a, 'ctx, Callback> {
         &src[start..end]
     }
 
-    // HACK: expose ctx for now
-    pub fn get_ctx(&self) -> &EraCompilerCtx<Callback> {
-        self.o.ctx
-    }
-
-    /// ## Safety
-    ///
-    /// The returned context must not be mutated in a way that causes dangling references.
-    /// For example, it is forbidden to remove an entry from the `global_replace` map.
-    pub unsafe fn get_ctx_mut(&mut self) -> &mut EraCompilerCtx<Callback> {
-        self.o.ctx
+    pub fn current_filename(&self) -> &ArcStr {
+        &self.o.filename
     }
 
     pub fn make_diag(&self) -> Diagnostic<'a> {
         self.o.new_diag()
     }
 
-    pub fn emit_diag(&mut self, diag: Diagnostic<'a>) {
-        self.o.ctx.emit_diag(diag);
-    }
-
-    pub fn push_define(&mut self, name: Box<str>, data: EraDefineData) {
-        let source_map = Rc::get_mut(&mut self.o.ctx.source_map).unwrap();
-        source_map
-            .get_mut(&self.o.ctx.active_source)
-            .map(|x| &mut x.defines)
-            .unwrap_or(&mut self.o.ctx.global_define)
-            .insert(name, data);
-    }
-
-    pub fn peek(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
+    // NOTE: We split `ctx` into finer-grained parts to avoid lifetime & ownership issues
+    pub fn peek(
+        &mut self,
+        mode: EraLexerMode,
+        callback: &mut dyn EraCompilerCallback,
+        replaces: &EraDefineScope,
+        defines: &[&EraDefineScope],
+    ) -> EraLexerNextResult {
         match &self.next_i {
             Some((nmode, ..)) if *nmode == mode => {
                 // Return the cached result
@@ -146,16 +139,25 @@ impl<'a, 'ctx, Callback: EraCompilerCallback> EraLexer<'a, 'ctx, Callback> {
 
         // Load new token
         let mut next_inner = self.i.clone();
-        let result = unsafe { next_inner.next_token(mode, &mut self.o, &mut self.cart) };
+        let result =
+            unsafe { next_inner.next_token(mode, &mut self.o, callback, replaces, defines) };
         self.next_i = Some((mode, result, next_inner));
 
         self.next_i.as_ref().unwrap().1
     }
 
-    pub fn read(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
-        _ = self.peek(mode);
+    pub fn read(
+        &mut self,
+        mode: EraLexerMode,
+        callback: &mut dyn EraCompilerCallback,
+        replaces: &EraDefineScope,
+        defines: &[&EraDefineScope],
+    ) -> EraLexerNextResult {
+        _ = self.peek(mode, callback, replaces, defines);
         let (_, result, i) = self.next_i.take().unwrap();
         self.i = i;
+        // Swap strings to avoid lifetime issues (strs[1] is used for `peek` replacement storage)
+        self.o.strs.swap(0, 1);
         result
     }
 
@@ -165,6 +167,8 @@ impl<'a, 'ctx, Callback: EraCompilerCallback> EraLexer<'a, 'ctx, Callback> {
             .take()
             .expect("cannot bump token without peeking first");
         self.i = i;
+        // Swap strings to avoid lifetime issues (strs[1] is used for `peek` replacement storage)
+        self.o.strs.swap(0, 1);
         result
     }
 
@@ -191,10 +195,10 @@ impl<'a, 'ctx, Callback: EraCompilerCallback> EraLexer<'a, 'ctx, Callback> {
 }
 
 #[derive(Debug, Clone)]
-struct EraLexerInnerState<'ctx> {
+struct EraLexerInnerState {
     src_pos: usize,
     replace_len: usize,
-    alternate_src: &'ctx [u8],
+    alternate_src: &'static [u8],
     loc: SrcLoc,
     last_token: EraTokenKind,
     last_is_newline: bool,
@@ -202,7 +206,7 @@ struct EraLexerInnerState<'ctx> {
     suppress_newline_cnt: u32,
 }
 
-impl<'ctx> EraLexerInnerState<'ctx> {
+impl EraLexerInnerState {
     fn new() -> Self {
         Self {
             src_pos: 0,
@@ -217,18 +221,22 @@ impl<'ctx> EraLexerInnerState<'ctx> {
 
     // SAFETY: The returned token has its lifetime erased, possibly attached to the cart
     //         (outer.cart) satisfying StableDeref. Special care is required for lifetime issues.
-    unsafe fn next_token<Callback: EraCompilerCallback>(
+    unsafe fn next_token(
         &mut self,
         mode: EraLexerMode,
-        outer: &mut EraLexerOuterState<'_, 'ctx, Callback>,
-        cart: &mut Vec<u8>,
+        outer: &mut EraLexerOuterState<'_>,
+        callback: &mut dyn EraCompilerCallback,
+        replaces: &EraDefineScope,
+        defines: &[&EraDefineScope],
     ) -> EraLexerNextResult<'static> {
-        cart.clear();
+        outer.cart.clear();
 
         let mut site = EraLexerInnerSite {
             o: outer,
             i: self,
-            cart,
+            callback,
+            replaces,
+            defines,
             cur_lexeme_start: std::ptr::null(),
             cur_lexeme_len: 0,
             has_replaced: false,
@@ -255,10 +263,11 @@ impl<'ctx> EraLexerInnerState<'ctx> {
         let pos_end = site.i.src_pos;
         let current_lexeme = site.current_lexeme();
         debug_assert!(
-            current_lexeme.is_utf8(),
+            current_lexeme.is_utf8()
+                && unsafe { site.o.src.to_str_unchecked().is_char_boundary(pos_end) },
             "lexeme is not valid UTF-8: {:?}\nSource file: {}\nOffset: {}-{}",
             current_lexeme,
-            site.o.ctx.active_source,
+            site.o.filename,
             pos_start,
             pos_end
         );
@@ -268,19 +277,6 @@ impl<'ctx> EraLexerInnerState<'ctx> {
                 span: SrcSpan::new(SrcPos(pos_start as _), (pos_end - pos_start) as _),
             },
             is_replaced: site.has_replaced,
-            // lexeme: if site.cur_lexeme_start.is_null() {
-            //     if site.cur_lexeme_len == 0 {
-            //         // No lexeme
-            //         b""
-            //     } else {
-            //         // HACK: Get composed lexeme from the cart
-            //         let lexeme = &cart[..];
-            //         std::mem::transmute(lexeme)
-            //     }
-            // } else {
-            //     let lexeme = std::slice::from_raw_parts(site.cur_lexeme_start, site.cur_lexeme_len);
-            //     lexeme
-            // },
             lexeme: std::mem::transmute::<_, &[u8]>(current_lexeme).to_str_unchecked(),
         };
 
@@ -288,17 +284,19 @@ impl<'ctx> EraLexerInnerState<'ctx> {
     }
 }
 
-#[derive(Debug)]
-struct EraLexerInnerSite<'a, 'ctx, 'c, Callback> {
-    o: &'c mut EraLexerOuterState<'a, 'ctx, Callback>,
-    i: &'c mut EraLexerInnerState<'ctx>,
-    cart: &'c mut Vec<u8>,
+// #[derive(Debug)]
+struct EraLexerInnerSite<'a, 'c> {
+    o: &'c mut EraLexerOuterState<'a>,
+    i: &'c mut EraLexerInnerState,
+    callback: &'c mut dyn EraCompilerCallback,
+    replaces: &'c EraDefineScope,
+    defines: &'c [&'c EraDefineScope],
     cur_lexeme_start: *const u8,
     cur_lexeme_len: usize,
     has_replaced: bool,
 }
 
-impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c, Callback> {
+impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
     pub fn next_token(&mut self, mode: EraLexerMode) -> EraTokenKind {
         use crate::util::bmatch_caseless;
         use EraLexerMode as Mode;
@@ -327,7 +325,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
             ) -> EraTokenKind;
             fn read_newline_with_space(&mut self, starts_with_newline: bool) -> EraTokenKind;
         }
-        impl<Callback: EraCompilerCallback> Adhoc for EraLexerInnerSite<'_, '_, '_, Callback> {
+        impl Adhoc for EraLexerInnerSite<'_, '_> {
             fn match_token2(
                 &mut self,
                 seconds: &[(u8, EraTokenKind)],
@@ -404,7 +402,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                             SrcSpan::new(SrcPos(initial_src_pos as _), 1),
                             "unexpected `}`",
                         );
-                        self.o.ctx.emit_diag(diag);
+                        self.o.emit_diag(diag, self.callback);
                         return Invalid;
                     }
                 }
@@ -482,16 +480,17 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                         self.next_char();
                     }
                     // SAFETY: Lexeme is valid UTF-8
-                    let lexeme = unsafe { self.current_lexeme().to_str_unchecked() };
+                    let lexeme: &'static str =
+                        unsafe { std::mem::transmute(self.current_lexeme().to_str_unchecked()) };
 
                     // Try handle `#DEFINE` replacements
                     if !self.has_replacement() {
-                        // TODO: Lookup local define in the future
-                        if let Some(define) = self.o.ctx.global_define.get(lexeme) {
-                            // SAFETY: We never remove entries from define_list, so we
-                            //         can transmute lifetimes without UB
+                        let define = self.defines.iter().find_map(|scope| scope.get(lexeme));
+                        if let Some(define) = define {
+                            // SAFETY: We put the replacement into outer storage, so it's kept alive
+                            self.o.strs[1] = define.data.clone();
                             let replace =
-                                unsafe { std::mem::transmute::<_, &str>(&define.data[..]) };
+                                unsafe { std::mem::transmute::<_, &str>(self.o.strs[1].as_str()) };
                             self.apply_replacement(replace.as_bytes(), lexeme.len());
                             // Restart read via recursion (ensures correct lexeme)
                             self.reset_lexeme();
@@ -590,7 +589,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                 //                     ),
                 //                     "unterminated string literal",
                 //                 );
-                //                 self.o.ctx.emit_diag(diag);
+                //                 self.o.emit_diag(diag, self.callback);
                 //                 break Invalid;
                 //             };
                 //             if ch == b'"' {
@@ -607,7 +606,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                 //                     SrcSpan::new(SrcPos((self.i.src_pos - 1) as _), 1),
                 //                     "newline in string literal",
                 //                 );
-                //                 self.o.ctx.emit_diag(diag);
+                //                 self.o.emit_diag(diag, self.callback);
                 //             }
                 //         }
                 //     }
@@ -619,7 +618,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     trait Adhoc {
                         fn read_fn(&mut self) -> Option<Box<[u8]>>;
                     }
-                    impl<Callback: EraCompilerCallback> Adhoc for EraLexerInnerSite<'_, '_, '_, Callback> {
+                    impl Adhoc for EraLexerInnerSite<'_, '_> {
                         fn read_fn(&mut self) -> Option<Box<[u8]>> {
                             let lexeme_start = self.cur_lexeme_len;
                             loop {
@@ -648,7 +647,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                             lexeme_span,
                             "expected `]` to close the macro line",
                         );
-                        self.o.ctx.emit_diag(diag);
+                        self.o.emit_diag(diag, self.callback);
                         return Invalid;
                     };
 
@@ -667,7 +666,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                             lexeme_span,
                             format!("unknown macro line `[{}]`", lexeme.as_bstr()),
                         );
-                        self.o.ctx.emit_diag(diag);
+                        self.o.emit_diag(diag, self.callback);
                         return Invalid;
                     }
 
@@ -690,7 +689,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                                     lexeme_span,
                                     "macro block started here",
                                 );
-                                self.o.ctx.emit_diag(diag);
+                                self.o.emit_diag(diag, self.callback);
 
                                 break;
                             };
@@ -720,13 +719,15 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                 }
                 _ => {
                     // Bad character
+                    self.skip_char_to_utf8_boundary();
+                    let len = self.i.src_pos - initial_src_pos;
                     let mut diag = self.o.new_diag();
                     diag.span_err(
                         Default::default(),
-                        SrcSpan::new(SrcPos(initial_src_pos as _), 1),
+                        SrcSpan::new(SrcPos(initial_src_pos as _), len as _),
                         format!("illegal character `{}`", std::ascii::escape_default(ch)),
                     );
-                    self.o.ctx.emit_diag(diag);
+                    self.o.emit_diag(diag, self.callback);
                     Invalid
                 }
             },
@@ -741,7 +742,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     //         SrcSpan::new(SrcPos(initial_src_pos as _), 1),
                     //         "newline is not yet supported in raw string",
                     //     );
-                    //     self.o.ctx.emit_diag(diag);
+                    //     self.o.emit_diag(diag, self.callback);
                     // }
                     self.read_newline_with_space(true)
                 }
@@ -760,7 +761,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     //         SrcSpan::new(SrcPos(initial_src_pos as _), 1),
                     //         "newline is not yet supported in raw string",
                     //     );
-                    //     self.o.ctx.emit_diag(diag);
+                    //     self.o.emit_diag(diag, self.callback);
                     // }
                     self.read_newline_with_space(true)
                 }
@@ -791,7 +792,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     //         SrcSpan::new(SrcPos(initial_src_pos as _), 1),
                     //         "newline is not yet supported in raw string form",
                     //     );
-                    //     self.o.ctx.emit_diag(diag);
+                    //     self.o.emit_diag(diag, self.callback);
                     // }
                     self.read_newline_with_space(true)
                 }
@@ -851,7 +852,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     //         SrcSpan::new(SrcPos(initial_src_pos as _), 1),
                     //         "newline is not yet supported in raw string form",
                     //     );
-                    //     self.o.ctx.emit_diag(diag);
+                    //     self.o.emit_diag(diag, self.callback);
                     // }
                     self.read_newline_with_space(true)
                 }
@@ -951,7 +952,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
     fn current_lexeme(&self) -> &[u8] {
         if self.cur_lexeme_start.is_null() {
             // HACK: Get composed lexeme from the cart
-            return &self.cart[..];
+            return &self.o.cart;
         }
 
         // SAFETY: The lexeme is guaranteed to be valid, since it is always continuous.
@@ -991,20 +992,20 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     std::slice::from_raw_parts(self.cur_lexeme_start, self.cur_lexeme_len)
                 };
                 self.cur_lexeme_start = std::ptr::null();
-                self.cart.extend_from_slice(old_lexeme);
+                self.o.cart.extend_from_slice(old_lexeme);
             }
         }
 
         if self.cur_lexeme_start.is_null() {
             // Empty lexeme, need to modify cart
-            self.cart.push(unsafe { *ch });
+            self.o.cart.push(unsafe { *ch });
         }
 
         self.cur_lexeme_len += 1;
     }
 
     fn reset_lexeme(&mut self) {
-        self.cart.clear();
+        self.o.cart.clear();
         self.cur_lexeme_start = std::ptr::null();
         self.cur_lexeme_len = 0;
         self.has_replaced = false;
@@ -1037,7 +1038,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
             let replace_len = 2 + end_pos + 2;
             let old_src_pos = self.i.src_pos;
             self.i.src_pos += replace_len;
-            let Some(out_replace) = self.o.ctx.global_replace.get(in_replace) else {
+            let Some(out_replace) = self.replaces.get(in_replace) else {
                 // Replacement not found; skip this replacement, without emitting errors
                 self.has_replaced = true;
 
@@ -1047,7 +1048,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
                     SrcSpan::new(SrcPos(old_src_pos as _), replace_len as _),
                     format!("replacement `{}` not found", in_replace),
                 );
-                self.o.ctx.emit_diag(diag);
+                self.o.emit_diag(diag, self.callback);
                 return;
             };
             // SAFETY: The data is guaranteed to be valid, since removal of a replacement is forbidden in safe Rust
@@ -1063,7 +1064,7 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
         !self.i.alternate_src.is_empty()
     }
 
-    fn apply_replacement(&mut self, replace: &'ctx [u8], replace_len: usize) {
+    fn apply_replacement(&mut self, replace: &'static [u8], replace_len: usize) {
         assert!(!self.has_replacement(), "replacement already exists");
         self.i.alternate_src = replace;
         self.i.replace_len = replace_len;
@@ -1085,6 +1086,16 @@ impl<'a, 'ctx, 'c, Callback: EraCompilerCallback> EraLexerInnerSite<'a, 'ctx, 'c
     fn skip_char_while(&mut self, mut predicate: impl FnMut(u8) -> bool) {
         while let Some(ch) = self.peek_char() {
             if !predicate(ch) {
+                break;
+            }
+            self.next_char();
+        }
+    }
+
+    fn skip_char_to_utf8_boundary(&mut self) {
+        // TODO: Optimize performance by manipulating underlying slices directly
+        while let Some(ch) = self.peek_char() {
+            if ch & 0b1100_0000 != 0b1000_0000 {
                 break;
             }
             self.next_char();

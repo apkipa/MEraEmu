@@ -1,9 +1,10 @@
-use std::ops::{ControlFlow, DerefMut};
+use std::ops::ControlFlow;
 
 use super::lexer::{EraLexer, EraLexerMode, EraLexerNextResult};
 use crate::{
     types::*,
     util::{
+        interning::ThreadedTokenInterner,
         rcstr::{self, ArcStr},
         Ascii,
     },
@@ -28,40 +29,75 @@ type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
 
 type ParseResult<T> = Result<T, ()>;
 
-pub struct EraParser<'a, 'b, 'ctx, 'i, Callback> {
-    lexer: &'b mut EraLexer<'a, 'ctx, Callback>,
-    node_cache: &'b mut NodeCache<'i>,
+pub struct EraParsedProgram {
+    pub ast: GreenNode,
+    pub macro_map: EraMacroMap,
+    pub defines: EraDefineScope,
+}
+
+pub struct EraParser<'a, 'b, 'i> {
+    callback: &'b mut dyn EraCompilerCallback,
+    lexer: &'b mut EraLexer<'a>,
+    node_cache: &'b mut NodeCache<'i, ThreadedTokenInterner>,
+    replaces: &'b EraDefineScope,
+    defines: &'b EraDefineScope,
+    is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
     is_header: bool,
 }
 
-impl<'a, 'b, 'ctx, 'i, Callback: EraCompilerCallback> EraParser<'a, 'b, 'ctx, 'i, Callback> {
+impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
     pub fn new(
-        lexer: &'b mut EraLexer<'a, 'ctx, Callback>,
-        node_cache: &'b mut NodeCache<'i>,
+        callback: &'b mut dyn EraCompilerCallback,
+        lexer: &'b mut EraLexer<'a>,
+        node_cache: &'b mut NodeCache<'i, ThreadedTokenInterner>,
+        replaces: &'b EraDefineScope,
+        defines: &'b EraDefineScope,
+        is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
         is_header: bool,
     ) -> Self {
         EraParser {
+            callback,
             lexer,
             node_cache,
+            replaces,
+            defines,
+            is_str_var_fn,
             is_header,
         }
     }
 
-    pub fn parse_program(&mut self) -> (GreenNode, EraMacroMap) {
+    pub fn parse_program(&mut self) -> EraParsedProgram {
         let builder = GreenNodeBuilder::with_cache(self.node_cache);
-        let mut site = EraParserSite::new(self.lexer, builder, self.is_header);
+        let mut site = EraParserSite::new(
+            self.callback,
+            self.lexer,
+            builder,
+            self.replaces,
+            self.defines,
+            self.is_str_var_fn,
+            self.is_header,
+        );
         // NOTE: We use error-tolerant parsing here, so theoretically this should never fail.
         site.program().unwrap();
-        let (builder, macro_map) = site.into_inner();
-        (builder.finish().0, macro_map)
+        let (builder, macro_map, defines) = site.into_inner();
+        EraParsedProgram {
+            ast: builder.finish().0,
+            macro_map,
+            defines,
+        }
     }
 }
 
-struct EraParserOuter<'a, 'b, 'ctx, 'cache, 'i, Callback> {
+struct EraParserOuter<'a, 'b, 'cache, 'i> {
+    callback: &'b mut dyn EraCompilerCallback,
     // lexer
-    l: &'b mut EraLexer<'a, 'ctx, Callback>,
+    l: &'b mut EraLexer<'a>,
     // builder
-    b: GreenNodeBuilder<'cache, 'i, EraTokenKind>,
+    b: GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+    replaces: &'b EraDefineScope,
+    defines: &'b EraDefineScope,
+    local_defines: EraDefineScope,
+    is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
     is_header: bool,
     is_panicking: bool,
     macro_place: EraParserMacroPlace<'a>,
@@ -124,27 +160,40 @@ impl EraParserMacroPlace<'_> {
     }
 }
 
-impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
-    EraParserOuter<'a, 'b, 'ctx, 'cache, 'i, Callback>
-{
+impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
     fn new(
-        l: &'b mut EraLexer<'a, 'ctx, Callback>,
-        b: GreenNodeBuilder<'cache, 'i, EraTokenKind>,
+        callback: &'b mut dyn EraCompilerCallback,
+        l: &'b mut EraLexer<'a>,
+        b: GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+        replaces: &'b EraDefineScope,
+        defines: &'b EraDefineScope,
+        is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
         is_header: bool,
     ) -> Self {
         let mut macro_place = EraParserMacroPlace::default();
         macro_place.2 = l.get_src();
         EraParserOuter {
+            callback,
             l,
             b,
+            replaces,
+            defines,
+            local_defines: Default::default(),
+            is_str_var_fn,
             is_header,
             is_panicking: false,
             macro_place,
         }
     }
 
-    fn into_inner(self) -> (GreenNodeBuilder<'cache, 'i, EraTokenKind>, EraMacroMap) {
-        (self.b, self.macro_place.1)
+    fn into_inner(
+        self,
+    ) -> (
+        GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+        EraMacroMap,
+        EraDefineScope,
+    ) {
+        (self.b, self.macro_place.1, self.local_defines)
     }
 
     fn set_is_panicking(&mut self, is_panicking: bool) {
@@ -156,7 +205,9 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             diag.cancel();
             return;
         }
-        self.l.emit_diag(diag);
+        let provider = DiagnosticProvider::new(&diag, None, None);
+        self.callback.emit_diag(&provider);
+        diag.cancel();
     }
 
     fn next_token(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
@@ -172,7 +223,14 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
     fn next_token_with_newline(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
         loop {
             // SAFETY: This requires the Polonius borrow checker.
-            let result: EraLexerNextResult = unsafe { std::mem::transmute(self.l.read(mode)) };
+            let result: EraLexerNextResult = unsafe {
+                std::mem::transmute(self.l.read(
+                    mode,
+                    self.callback,
+                    self.replaces,
+                    &[self.defines, &self.local_defines],
+                ))
+            };
             let start_pos = self.b.document_len().into();
             self.b.token(result.token.kind, result.lexeme);
             let end_pos = self.b.document_len().into();
@@ -187,11 +245,23 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
     fn peek_token(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
         loop {
             // SAFETY: This requires the Polonius borrow checker.
-            let result: EraLexerNextResult = unsafe { std::mem::transmute(self.l.peek(mode)) };
+            let result: EraLexerNextResult = unsafe {
+                std::mem::transmute(self.l.peek(
+                    mode,
+                    self.callback,
+                    self.replaces,
+                    &[self.defines, &self.local_defines],
+                ))
+            };
             if !matches!(result.token.kind, Token::WhiteSpace | Token::Comment) {
                 break result;
             }
-            let result = self.l.read(mode);
+            let result = self.l.read(
+                mode,
+                self.callback,
+                self.replaces,
+                &[self.defines, &self.local_defines],
+            );
             let start_pos = self.b.document_len().into();
             self.b.token(result.token.kind, result.lexeme);
             let end_pos = self.b.document_len().into();
@@ -257,23 +327,25 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
     // }
 }
 
-struct EraParserSite<'a, 'b, 'ctx, 'cache, 'i, Callback> {
-    o: EraParserOuter<'a, 'b, 'ctx, 'cache, 'i, Callback>,
+struct EraParserSite<'a, 'b, 'cache, 'i> {
+    o: EraParserOuter<'a, 'b, 'cache, 'i>,
     base_diag: Diagnostic<'a>,
     // eat_syncs: Vec<(Mode, Token)>,
     local_str_vars: HashSet<Ascii<ArcStr>, FxBuildHasher>,
 }
 
-impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
-    EraParserSite<'a, 'b, 'ctx, 'cache, 'i, Callback>
-{
+impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
     fn new(
-        l: &'b mut EraLexer<'a, 'ctx, Callback>,
-        b: GreenNodeBuilder<'cache, 'i, EraTokenKind>,
+        callback: &'b mut dyn EraCompilerCallback,
+        l: &'b mut EraLexer<'a>,
+        b: GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+        replaces: &'b EraDefineScope,
+        defines: &'b EraDefineScope,
+        is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
         is_header: bool,
     ) -> Self {
         let base_diag = l.make_diag();
-        let o = EraParserOuter::new(l, b, is_header);
+        let o = EraParserOuter::new(callback, l, b, replaces, defines, is_str_var_fn, is_header);
         EraParserSite {
             o,
             base_diag,
@@ -282,7 +354,13 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         }
     }
 
-    fn into_inner(self) -> (GreenNodeBuilder<'cache, 'i, EraTokenKind>, EraMacroMap) {
+    fn into_inner(
+        self,
+    ) -> (
+        GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+        EraMacroMap,
+        EraDefineScope,
+    ) {
         self.o.into_inner()
     }
 
@@ -465,18 +543,29 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
 
     fn define_declaration(&mut self) -> ParseResult<()> {
         let in_def = self.eat(Mode::Normal, Token::Identifier)?;
-        let (in_def, in_def_span) = (in_def.lexeme.to_owned().into_boxed_str(), in_def.token.span);
-        let out_def = self
-            .eat(Mode::RawStr, Token::PlainStringLiteral)?
-            .lexeme
-            .to_owned()
-            .into_boxed_str();
+        let (in_def, in_def_span) = (ArcStr::from(in_def.lexeme), in_def.token.span);
+        let out_def =
+            arcstr::ArcStr::from(self.eat(Mode::RawStr, Token::PlainStringLiteral)?.lexeme);
         let define_data = EraDefineData {
-            filename: self.o.l.get_ctx().active_source.clone(),
+            filename: self.o.l.current_filename().clone(),
             span: in_def_span,
-            data: out_def,
+            data: out_def.clone(),
         };
-        self.o.l.push_define(in_def, define_data);
+        // dbg!((&in_def, &define_data));
+        if let Some(prev_def) = self.o.local_defines.insert(in_def.clone(), define_data) {
+            let mut diag = self.base_diag.clone();
+            diag.span_err(
+                Default::default(),
+                in_def_span,
+                format!("redefinition of macro `{}`", in_def,),
+            );
+            diag.span_note(
+                Default::default(),
+                prev_def.span,
+                "previous definition here",
+            );
+            self.o.emit_diag(diag);
+        }
 
         Ok(())
     }
@@ -666,7 +755,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         trait Adhoc {
             fn r(&mut self) -> &mut Self;
         }
-        impl<Callback: EraCompilerCallback> Adhoc for EraParserSite<'_, '_, '_, '_, '_, Callback> {
+        impl Adhoc for EraParserSite<'_, '_, '_, '_> {
             fn r(&mut self) -> &mut Self {
                 _ = self.o.bump_as(Token::KwIdent);
                 self
@@ -2449,7 +2538,7 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
             fn parse_mid(&mut self) -> ParseResult<()>;
             fn parse_right(&mut self) -> ParseResult<()>;
         }
-        impl<Callback: EraCompilerCallback> Adhoc for EraParserSite<'_, '_, '_, '_, '_, Callback> {
+        impl Adhoc for EraParserSite<'_, '_, '_, '_> {
             fn parse_mid(&mut self) -> ParseResult<()> {
                 loop {
                     let token = self.o.peek_token(Mode::TernaryStrForm).token;
@@ -2587,15 +2676,8 @@ impl<'a, 'b, 'ctx, 'cache, 'i, Callback: EraCompilerCallback>
         self.o.set_is_panicking(false);
     }
 
-    fn is_var_str(&self, name: &str) -> bool {
-        self.local_str_vars.contains(Ascii::new_str(name))
-            || self
-                .o
-                .l
-                .get_ctx()
-                .variables
-                .get_var(name)
-                .map_or(false, |x| x.kind().is_str())
+    fn is_var_str(&mut self, name: &str) -> bool {
+        self.local_str_vars.contains(Ascii::new_str(name)) || (self.o.is_str_var_fn)(name)
     }
 
     // fn synchronize_to(&mut self, token: Token) {

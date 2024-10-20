@@ -11,6 +11,7 @@ use cstree::build::NodeCache;
 use either::Either;
 use hashbrown::{HashMap, HashSet};
 use indoc::indoc;
+use interning::ThreadedTokenInterner;
 use itertools::Itertools;
 use num_ordinal::{ordinal0, Ordinal, Osize};
 use once_cell::sync::Lazy;
@@ -42,6 +43,7 @@ struct InitialVarDesc {
 
 pub struct MEraEngine<Callback> {
     ctx: EraCompilerCtx<Callback>,
+    node_cache: BoxPtr<NodeCache<'static, ThreadedTokenInterner>>,
 }
 
 // TODO: Scale charas variables dynamically; use default capacity of 128 then.
@@ -93,7 +95,11 @@ impl Default for MEraEngineConfig {
 
 pub use crate::types::EraCompilerHostFile as MEraEngineHostFile;
 
-use super::{codegen::EraCodeGenerator, lexer::EraLexer, parser::EraParser};
+use super::{
+    codegen::EraCodeGenerator,
+    lexer::EraLexer,
+    parser::{EraParsedProgram, EraParser},
+};
 
 pub trait MEraEngineSysCallback {
     /// Callback for script errors.
@@ -668,7 +674,7 @@ pub struct MEraEngineBuilder<SysCallback, BuilderCallback> {
     config: MEraEngineConfig,
     watching_vars: HashSet<Ascii<ArcStr>, FxBuildHasher>,
     initial_vars: Option<HashMap<Ascii<ArcStr>, InitialVarDesc, FxBuildHasher>>,
-    node_cache: cstree::build::NodeCache<'static>,
+    node_cache: BoxPtr<NodeCache<'static, ThreadedTokenInterner>>,
     /// Whether the headers have been compiled.
     is_header_finished: bool,
     erh_count: usize,
@@ -677,14 +683,16 @@ pub struct MEraEngineBuilder<SysCallback, BuilderCallback> {
 
 impl<T: MEraEngineSysCallback> MEraEngineBuilder<T, EmptyCallback> {
     pub fn new(callback: T) -> MEraEngineBuilder<T, EmptyCallback> {
-        let ctx = EraCompilerCtx::new(callback);
+        let mut node_cache: BoxPtr<_> =
+            Box::new(NodeCache::from_interner(ThreadedTokenInterner::new())).into();
+        let ctx = unsafe { EraCompilerCtx::new(callback, std::mem::transmute(&mut *node_cache)) };
         let mut this = MEraEngineBuilder {
             ctx,
             builder_callback: Default::default(),
             config: Default::default(),
             watching_vars: Default::default(),
             initial_vars: Some(Default::default()),
-            node_cache: Default::default(),
+            node_cache,
             is_header_finished: false,
             erh_count: 0,
             erb_count: 0,
@@ -1473,10 +1481,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
         self.is_header_finished = true;
 
-        // HACK: Set up node cache
-        std::mem::swap(&mut self.node_cache, &mut self.ctx.node_cache);
         let result = self.finish_load_erh_inner();
-        std::mem::swap(&mut self.node_cache, &mut self.ctx.node_cache);
         self.ctx.active_source = ArcStr::default();
 
         result
@@ -1496,7 +1501,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             self.load_erb("<builtin>", SYS_SRC.as_bytes())?;
         }
 
-        self.ctx.node_cache = self.node_cache;
+        self.node_cache.interner_mut().optimize_lookup();
 
         // Process .erb files
         let filenames = self
@@ -1506,7 +1511,11 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             .filter(|x| !x.is_header)
             .map(|x| x.filename.clone())
             .collect::<Vec<_>>();
-        let mut codegen = EraCodeGenerator::new(&mut self.ctx, true);
+        let mut codegen = EraCodeGenerator::new(
+            &mut self.ctx,
+            self.config.no_src_map,
+            !self.config.no_src_map,
+        );
         codegen.compile_merge_many_programs(&filenames, |progress| {
             if let Some(callback) = &mut self.builder_callback {
                 callback.on_build_progress(
@@ -1519,10 +1528,16 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             }
         });
 
+        self.node_cache.interner_mut().optimize_lookup();
+
         if self.config.no_src_map {
-            self.ctx.source_map = Default::default();
-            let interner = self.ctx.node_cache.into_interner().unwrap();
-            self.ctx.node_cache = NodeCache::from_interner(interner);
+            // let src_map = Rc::get_mut(&mut self.ctx.source_map).unwrap();
+            // for (_, src_file) in src_map {
+            //     src_file.final_root = None;
+            // }
+            // TODO: Reset node_cache when upstream is ready
+            // let interner = self.ctx.node_cache.into_interner().unwrap();
+            // self.ctx.node_cache = NodeCache::from_interner(interner);
         }
 
         // TODO: Call `optimize_resolution` on entering VM on the interner (which populates the
@@ -1531,7 +1546,10 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
         // TODO: Handle watching variables
 
-        Ok(MEraEngine { ctx: self.ctx })
+        Ok(MEraEngine {
+            ctx: self.ctx,
+            node_cache: self.node_cache,
+        })
     }
 
     pub fn register_variable(
@@ -1584,20 +1602,43 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
         // Parse ERB file into AST
         self.ctx.active_source = filename.clone();
-        let node_cache = &mut self.node_cache;
-        let mut lexer = EraLexer::new(&mut self.ctx, content);
-        let mut parser = EraParser::new(&mut lexer, node_cache, is_header);
-        let (ast, macro_map) = parser.parse_program();
+        // let node_cache = &mut self.node_cache;
+        let mut lexer = EraLexer::new(filename.clone(), content);
+        let mut is_str_var_fn = |x: &str| {
+            self.ctx
+                .variables
+                .get_var(x)
+                .map_or(false, |x| x.kind().is_str())
+        };
+        let mut parser = EraParser::new(
+            &mut self.ctx.callback,
+            &mut lexer,
+            self.ctx.node_cache,
+            &self.ctx.global_replace,
+            &self.ctx.global_define,
+            &mut is_str_var_fn,
+            is_header,
+        );
+        let EraParsedProgram {
+            ast,
+            macro_map,
+            defines,
+        } = parser.parse_program();
+        if is_header {
+            // Merge defines into global defines
+            // TODO: Warn about redefinitions
+            self.ctx.global_define.extend(defines);
+        }
         let newline_pos = {
             let mut newline_pos = lexer.newline_positions();
-            // Fix newline positions
-            // NOTE: Newlines will never occur inside macros
-            // TODO: Optimize performance with the hint above
-            for pos in newline_pos.iter_mut() {
-                let span = SrcSpan::new(*pos, 0);
-                let span = macro_map.inverse_translate_span(span);
-                *pos = span.start();
-            }
+            // // Fix newline positions
+            // // NOTE: Newlines will never occur inside macros
+            // // TODO: Optimize performance with the hint above
+            // for pos in newline_pos.iter_mut() {
+            //     let span = SrcSpan::new(*pos, 0);
+            //     let span = macro_map.inverse_translate_span(span);
+            //     *pos = span.start();
+            // }
             newline_pos
         };
         self.ctx.active_source = ArcStr::default();
@@ -1609,8 +1650,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             EraSourceFile {
                 filename: filename.clone(),
                 // compressed_text: lz4_flex::compress_prepend_size(content.as_bytes()).into(),
-                // final_root: Some(ast),
-                final_root: ast,
+                compressed_text: None,
+                final_root: Some(ast),
                 macro_map,
                 defines: Default::default(),
                 is_header,
@@ -1649,7 +1690,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         for (i, erh) in source_map.values().filter(|x| x.is_header).enumerate() {
             interp.get_ctx_mut().active_source = erh.filename.clone();
 
-            let node = SyntaxNode::new_root(erh.final_root.clone());
+            let final_root = erh.final_root.as_ref().unwrap().clone();
+            let node = SyntaxNode::new_root(final_root);
             let program = EraProgramNode::cast(&node).unwrap();
             for decl in program.children() {
                 let var_info = match interp.interpret_var_decl(decl) {

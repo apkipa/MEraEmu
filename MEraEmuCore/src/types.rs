@@ -22,7 +22,7 @@ use rustc_hash::FxBuildHasher;
 use safer_ffi::{derive_ReprC, prelude::VirtualPtr};
 use tinyvec::ArrayVec;
 
-use crate::util::{rcstr::ArcStr, Ascii};
+use crate::util::{interning::ThreadedTokenInterner, rcstr::ArcStr, Ascii};
 
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
@@ -575,7 +575,8 @@ pub struct EraToken {
 pub struct EraDefineData {
     pub filename: ArcStr,
     pub span: SrcSpan,
-    pub data: Box<str>,
+    // HACK: Ensure StableDeref by disabling SSO
+    pub data: arcstr::ArcStr,
 }
 
 /// A `#define` list, lexically scoped.
@@ -585,7 +586,7 @@ pub struct EraDefineData {
 // }
 #[derive(Debug, Default)]
 pub struct EraDefineScope {
-    defines: FxHashMap<Box<str>, EraDefineData>,
+    defines: FxHashMap<ArcStr, EraDefineData>,
 }
 
 impl EraDefineScope {
@@ -595,12 +596,16 @@ impl EraDefineScope {
         }
     }
 
-    pub fn insert(&mut self, key: Box<str>, data: EraDefineData) {
-        self.defines.insert(key, data);
+    pub fn insert(&mut self, key: ArcStr, data: EraDefineData) -> Option<EraDefineData> {
+        self.defines.insert(key, data)
     }
 
     pub fn get(&self, key: &str) -> Option<&EraDefineData> {
         self.defines.get(key)
+    }
+
+    pub fn extend(&mut self, other: EraDefineScope) {
+        self.defines.extend(other.defines);
     }
 }
 
@@ -714,23 +719,39 @@ impl EraMacroMap {
         let new_start_pos = span.start().0.wrapping_add_signed(-delta);
         SrcSpan::new(SrcPos(new_start_pos), span.len())
     }
+
+    pub fn translate_pos(&self, pos: SrcPos) -> SrcPos {
+        self.translate_span(SrcSpan::new(pos, 0)).start()
+    }
+
+    pub fn inverse_translate_pos(&self, pos: SrcPos) -> SrcPos {
+        self.inverse_translate_span(SrcSpan::new(pos, 0)).start()
+    }
+
+    /// Translates given source text to the original source text.
+    pub fn translate_source(&self, src: &str) -> String {
+        let mut result = String::new();
+        for (from_span, text) in self.mappings.iter() {
+            // TODO...
+        }
+        result
+    }
 }
 
 #[derive(Debug)]
 pub struct EraSourceFile {
     pub filename: ArcStr,
-    // /// The compressed original source text. Reduces memory usage.
-    // pub compressed_text: Box<[u8]>,
-    // /// The root AST node of the lossless syntax tree, with macros replaced.
-    // pub final_root: Option<cstree::green::GreenNode>,
-    pub final_root: cstree::green::GreenNode,
+    /// The compressed original source text. Reduces memory usage.
+    pub compressed_text: Option<Box<[u8]>>,
+    /// The root AST node of the lossless syntax tree, with macros replaced.
+    pub final_root: Option<cstree::green::GreenNode>,
     /// The list of macro substitution mappings.
     pub macro_map: EraMacroMap,
     /// The list of `#define`'s.
     pub defines: EraDefineScope,
     /// Whether the file is a header file.
     pub is_header: bool,
-    /// The list of newline positions (after expansion of macros).
+    /// The list of newline positions (before expansion of macros).
     pub newline_pos: Vec<SrcPos>,
 }
 
@@ -761,7 +782,7 @@ pub struct EraCompilerCtx<Callback> {
     // TODO: Always use `&'i ThreadedRodeo`. We also need to implement a `ThreadedNodeCache` later.
     //       This helps with concurrent interning, and also helps to eliminate the usage of `unsafe`.
     /// The node cache used for CST building.
-    pub node_cache: cstree::build::NodeCache<'static>,
+    pub node_cache: &'static mut cstree::build::NodeCache<'static, ThreadedTokenInterner>,
 }
 
 trait IndexMapExt {
@@ -786,7 +807,10 @@ impl<K, V> IndexMapExt for IndexMap<K, Option<V>> {
 }
 
 impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
-    pub fn new(callback: Callback) -> Self {
+    pub fn new(
+        callback: Callback,
+        node_cache: &'static mut cstree::build::NodeCache<'static, ThreadedTokenInterner>,
+    ) -> Self {
         EraCompilerCtx {
             callback,
             global_replace: EraDefineScope::new(),
@@ -794,7 +818,7 @@ impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
             source_map: Default::default(),
             active_source: ArcStr::default(),
             variables: EraVarPool::new(),
-            node_cache: cstree::build::NodeCache::new(),
+            node_cache,
             chara_templates: BTreeMap::new(),
             csv_indices: FxHashMap::default(),
             bc_chunks: Rc::new(Vec::new()),
@@ -807,24 +831,28 @@ impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
     }
 
     pub fn emit_diag(&mut self, diag: Diagnostic) {
-        let provider = DiagnosticProvider::new(&diag, &self.source_map, self.node_cache.interner());
+        let provider = DiagnosticProvider::new(
+            &diag,
+            Some(&self.source_map),
+            Some(self.node_cache.interner()),
+        );
         self.callback.emit_diag(&provider);
         diag.cancel();
     }
 
-    pub fn interner(&self) -> &TokenInterner {
+    pub fn interner(&self) -> &ThreadedTokenInterner {
         self.node_cache.interner()
     }
 
-    pub fn interner_mut(&mut self) -> &mut TokenInterner {
-        self.node_cache.interner_mut()
-    }
+    // pub fn interner_mut(&mut self) -> &mut ThreadedTokenInterner {
+    //     self.node_cache.interner_mut()
+    // }
 
     /// # Safety
     ///
     /// You must ensure that the returned reference is not used after the `EraCompilerCtx` is dropped.
     /// [`lasso::Rodeo`] guarantees that the strings are not deallocated until the interner is dropped.
-    pub unsafe fn resolve_static_str(&self, key: TokenKey) -> &'static str {
+    pub fn resolve_static_str(&self, key: TokenKey) -> &'static str {
         unsafe { std::mem::transmute(self.interner().resolve(key)) }
     }
 }
@@ -1122,15 +1150,15 @@ pub struct Diagnostic<'a> {
 }
 
 impl<'a> Diagnostic<'a> {
-    pub fn new() -> Diagnostic<'static> {
+    pub const fn new() -> Diagnostic<'static> {
         Diagnostic {
-            filename: ArcStr::default(),
+            filename: ArcStr::new(),
             src: &[],
             entries: Vec::new(),
         }
     }
 
-    pub fn with_file(filename: ArcStr) -> Diagnostic<'a> {
+    pub const fn with_file(filename: ArcStr) -> Diagnostic<'a> {
         Diagnostic {
             filename,
             src: &[],
@@ -1154,21 +1182,35 @@ impl<'a> Diagnostic<'a> {
         self.filename.clone()
     }
 
+    pub fn span_entry(&mut self, mut entry: DiagnosticEntry) -> &mut Self {
+        entry.filename = self.conv_filename(entry.filename);
+        self.entries.push(entry);
+        self
+    }
+
     // NOTE: Use empty filename to refer to `self.filename`.
+    pub fn span_msg(
+        &mut self,
+        filename: ArcStr,
+        span: SrcSpan,
+        level: DiagnosticLevel,
+        message: impl Into<String>,
+    ) -> &mut Self {
+        self.span_entry(DiagnosticEntry {
+            level,
+            filename,
+            span,
+            message: message.into(),
+        })
+    }
+
     pub fn span_err(
         &mut self,
         filename: ArcStr,
         span: SrcSpan,
         message: impl Into<String>,
     ) -> &mut Self {
-        let filename = self.conv_filename(filename);
-        self.entries.push(DiagnosticEntry {
-            level: DiagnosticLevel::Error,
-            filename,
-            span,
-            message: message.into(),
-        });
-        self
+        self.span_msg(filename, span, DiagnosticLevel::Error, message)
     }
 
     pub fn span_warn(
@@ -1177,14 +1219,7 @@ impl<'a> Diagnostic<'a> {
         span: SrcSpan,
         message: impl Into<String>,
     ) -> &mut Self {
-        let filename = self.conv_filename(filename);
-        self.entries.push(DiagnosticEntry {
-            level: DiagnosticLevel::Warning,
-            filename,
-            span,
-            message: message.into(),
-        });
-        self
+        self.span_msg(filename, span, DiagnosticLevel::Warning, message)
     }
 
     pub fn span_note(
@@ -1193,14 +1228,7 @@ impl<'a> Diagnostic<'a> {
         span: SrcSpan,
         message: impl Into<String>,
     ) -> &mut Self {
-        let filename = self.conv_filename(filename);
-        self.entries.push(DiagnosticEntry {
-            level: DiagnosticLevel::Note,
-            filename,
-            span,
-            message: message.into(),
-        });
-        self
+        self.span_msg(filename, span, DiagnosticLevel::Note, message)
     }
 
     fn conv_filename(&self, filename: ArcStr) -> ArcStr {
@@ -1228,15 +1256,15 @@ impl Drop for Diagnostic<'_> {
 
 pub struct DiagnosticProvider<'a, 'src> {
     diag: &'a Diagnostic<'src>,
-    src_map: &'a FxIndexMap<ArcStr, EraSourceFile>,
-    resolver: &'a TokenInterner,
+    src_map: Option<&'a FxIndexMap<ArcStr, EraSourceFile>>,
+    resolver: Option<&'a ThreadedTokenInterner>,
 }
 
 impl<'a, 'src> DiagnosticProvider<'a, 'src> {
     pub fn new(
         diag: &'a Diagnostic<'src>,
-        src_map: &'a FxIndexMap<ArcStr, EraSourceFile>,
-        resolver: &'a TokenInterner,
+        src_map: Option<&'a FxIndexMap<ArcStr, EraSourceFile>>,
+        resolver: Option<&'a ThreadedTokenInterner>,
     ) -> Self {
         DiagnosticProvider {
             diag,
@@ -1253,129 +1281,128 @@ impl<'a, 'src> DiagnosticProvider<'a, 'src> {
     pub fn resolve_src_span(
         &self,
         filename: &str,
-        // mut span: SrcSpan,
         span: SrcSpan,
     ) -> Option<DiagnosticResolveSrcSpanResult> {
         use bstr::ByteSlice;
 
-        let src_offset;
         let src = if filename.is_empty() {
             if self.diag.filename.is_empty() {
                 return None;
             }
-            src_offset = 0;
             Cow::Borrowed(self.diag.src)
         } else if self.diag.filename.as_str() == filename && !self.diag.src.is_empty() {
-            src_offset = 0;
             Cow::Borrowed(self.diag.src)
         } else {
-            // Only resolve necessary lines from CST to improve performance.
             let input_span = span;
             let len = span.len();
-            let resolver = self.resolver;
-            let src_file = self.src_map.get(filename)?;
-            let final_root_len = src_file.final_root.text_len().into();
-            // let final_root_len = {
-            //     use lz4_flex::block::uncompressed_size;
-            //     let len = uncompressed_size(&src_file.compressed_text).unwrap().0;
-            //     let span = SrcSpan::new(SrcPos(len as _), 0);
-            //     src_file.macro_map.inverse_translate_span(span).start().0
-            // };
-            // NOTE: We can guarantee that `start_line` never overflows.
-            let start_line = src_file
-                .newline_pos
-                .partition_point(|&pos| pos <= span.start())
-                - 1;
-            let end_line = src_file
-                .newline_pos
-                .partition_point(|&pos| pos <= span.end());
-            let start_pos = src_file.newline_pos[start_line];
-            let end_pos = src_file
-                .newline_pos
-                .get(end_line)
-                .copied()
-                .unwrap_or_else(|| SrcPos(final_root_len));
-            let snippet_span = SrcSpan::with_ends(start_pos, end_pos);
+            let src_file = self.src_map?.get(filename)?;
 
-            // Find covering element first, then find the children elements.
-            // if let Some(mut node) = src_file.final_root.as_ref() {
-            let mut node = &src_file.final_root;
-            let mut covering_snippet = String::new();
-            let mut span = SrcSpan::new(SrcPos(0), final_root_len);
-            let mut covering_snippet_start_pos = SrcPos(0);
-            if !span.contains_span(snippet_span) {
-                return None;
-            }
-            'outer: loop {
-                for i in node.children() {
-                    let i_len = i.text_len().into();
-                    span = SrcSpan::new(span.start(), i_len);
-                    if span.contains_span(snippet_span) {
-                        // Enter the covering element.
-                        node = match i {
-                            NodeOrToken::Node(n) => n,
-                            NodeOrToken::Token(t) => {
-                                covering_snippet += t.resolve_text::<EraTokenKind, _>(resolver);
-                                break 'outer;
-                            }
-                        };
-                        continue 'outer;
-                    }
-                    if span.intersects(snippet_span) {
-                        if covering_snippet.is_empty() {
-                            covering_snippet_start_pos = span.start();
-                        }
-                        i.write_display::<EraTokenKind, _>(resolver, &mut covering_snippet)
-                            .unwrap();
-                    } else if !covering_snippet.is_empty() {
-                        break 'outer;
-                    }
-                    span = SrcSpan::new(span.end(), 0);
+            if let (Some(final_root), Some(resolver)) = (&src_file.final_root, self.resolver) {
+                // Only resolve necessary lines from CST to improve performance.
+                let final_root_len = {
+                    let len = final_root.text_len().into();
+                    let span = SrcSpan::new(SrcPos(len), 0);
+                    src_file.macro_map.translate_span(span).start().0
+                };
+                // NOTE: We can guarantee that `start_line` never overflows.
+                let start_line = src_file
+                    .newline_pos
+                    .partition_point(|&pos| pos <= span.start())
+                    - 1;
+                let end_line = src_file
+                    .newline_pos
+                    .partition_point(|&pos| pos <= span.end());
+                let start_pos = src_file.newline_pos[start_line];
+                let end_pos = src_file
+                    .newline_pos
+                    .get(end_line)
+                    .copied()
+                    .unwrap_or_else(|| SrcPos(final_root_len));
+                let snippet_span = SrcSpan::with_ends(start_pos, end_pos);
+
+                // HACK: Fix src pos from original to CST (should replace text to original instead)
+                let input_span = src_file.macro_map.inverse_translate_span(input_span);
+                let len = input_span.len();
+                let snippet_span = src_file.macro_map.inverse_translate_span(snippet_span);
+
+                // Find covering element first, then find the children elements.
+                // if let Some(mut node) = src_file.final_root.as_ref() {
+                let mut node = final_root;
+                let mut covering_snippet = String::new();
+                let mut span = SrcSpan::new(SrcPos(0), final_root_len);
+                let mut covering_snippet_start_pos = SrcPos(0);
+                if !span.contains_span(snippet_span) {
+                    return None;
                 }
+                'outer: loop {
+                    for i in node.children() {
+                        let i_len = i.text_len().into();
+                        span = SrcSpan::new(span.start(), i_len);
+                        if span.contains_span(snippet_span) {
+                            // Enter the covering element.
+                            node = match i {
+                                NodeOrToken::Node(n) => n,
+                                NodeOrToken::Token(t) => {
+                                    covering_snippet += t.resolve_text::<EraTokenKind, _>(resolver);
+                                    break 'outer;
+                                }
+                            };
+                            continue 'outer;
+                        }
+                        if span.intersects(snippet_span) {
+                            if covering_snippet.is_empty() {
+                                covering_snippet_start_pos = span.start();
+                            }
+                            i.write_display::<EraTokenKind, _>(resolver, &mut covering_snippet)
+                                .unwrap();
+                        } else if !covering_snippet.is_empty() {
+                            break 'outer;
+                        }
+                        span = SrcSpan::new(span.end(), 0);
+                    }
+                }
+
+                // Trim the covering snippet to the actual snippet.
+                // if cfg!(debug_assertions) {
+                //     println!(
+                //         "covering_snippet: {:?}, len: {} -> {}",
+                //         covering_snippet,
+                //         covering_snippet.len(),
+                //         snippet_span.len()
+                //     );
+                // }
+                let covering_snippet_span =
+                    SrcSpan::new(covering_snippet_start_pos, covering_snippet.len() as _);
+                covering_snippet.replace_range(
+                    (covering_snippet.len()
+                        - ((covering_snippet_span.end().0 - snippet_span.end().0) as usize))..,
+                    "",
+                );
+                covering_snippet.replace_range(
+                    ..(snippet_span.start().0 - covering_snippet_start_pos.0) as usize,
+                    "",
+                );
+                while covering_snippet.ends_with(['\r', '\n']) {
+                    covering_snippet.pop();
+                }
+
+                let offset = (input_span.start().0 - snippet_span.start().0) as _;
+                let loc = SrcLoc {
+                    line: (start_line + 1) as _,
+                    col: covering_snippet[..offset as usize].chars().count() as _,
+                };
+
+                return Some(DiagnosticResolveSrcSpanResult {
+                    snippet: covering_snippet,
+                    offset,
+                    loc,
+                    len,
+                });
+            } else {
+                // Must decompress the entire source text.
+                let src = src_file.compressed_text.as_ref()?;
+                Cow::Owned(lz4_flex::decompress_size_prepended(src).unwrap())
             }
-
-            // Trim the covering snippet to the actual snippet.
-            // if cfg!(debug_assertions) {
-            //     println!(
-            //         "covering_snippet: {:?}, len: {} -> {}",
-            //         covering_snippet,
-            //         covering_snippet.len(),
-            //         snippet_span.len()
-            //     );
-            // }
-            let covering_snippet_span =
-                SrcSpan::new(covering_snippet_start_pos, covering_snippet.len() as _);
-            covering_snippet.replace_range(
-                (covering_snippet.len()
-                    - ((covering_snippet_span.end().0 - snippet_span.end().0) as usize))..,
-                "",
-            );
-            covering_snippet.replace_range(
-                ..(snippet_span.start().0 - covering_snippet_start_pos.0) as usize,
-                "",
-            );
-            while covering_snippet.ends_with(['\r', '\n']) {
-                covering_snippet.pop();
-            }
-
-            let offset = (input_span.start().0 - snippet_span.start().0) as _;
-            let loc = SrcLoc {
-                line: (start_line + 1) as _,
-                col: covering_snippet[..offset as usize].chars().count() as _,
-            };
-
-            return Some(DiagnosticResolveSrcSpanResult {
-                snippet: covering_snippet,
-                offset,
-                loc,
-                len,
-            });
-            // } else {
-            //     // Must decompress the source text.
-            //     src_offset = 0;
-            //     span = src_file.macro_map.translate_span(span);
-            //     Cow::Owned(lz4_flex::decompress_size_prepended(&src_file.compressed_text).unwrap())
-            // }
         };
 
         let start = span.start().0 as usize;
@@ -2430,6 +2457,15 @@ pub trait CstreeGreenExt {
     ) -> std::fmt::Result
     where
         R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized;
+
+    fn display<'r, S: Syntax, R>(&self, resolver: &'r R) -> String
+    where
+        R: cstree::interning::Resolver<cstree::interning::TokenKey> + ?Sized,
+    {
+        let mut buf = String::new();
+        self.write_display::<S, _>(resolver, &mut buf).unwrap();
+        buf
+    }
 }
 
 impl CstreeGreenExt for cstree::green::GreenToken {
