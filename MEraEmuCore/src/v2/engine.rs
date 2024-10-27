@@ -1472,6 +1472,10 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         self.load_erb_inner(filename, content, true)
     }
 
+    pub fn cst_load_erh(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
+        self.cst_load_erb_inner(filename, content, true)
+    }
+
     pub fn finish_load_erh(&mut self) -> Result<(), MEraEngineError> {
         if self.is_header_finished {
             return Ok(());
@@ -1497,6 +1501,10 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
     pub fn load_erb(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
         self.load_erb_inner(filename, content, false)
+    }
+
+    pub fn cst_load_erb(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
+        self.cst_load_erb_inner(filename, content, false)
     }
 
     pub fn build(mut self) -> Result<MEraEngine<T>, MEraEngineError> {
@@ -1526,7 +1534,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         // Load builtin source
         {
             const SYS_SRC: &str = include_str!("../sys_src.ERB");
-            self.load_erb("<builtin>", SYS_SRC.as_bytes())?;
+            self.cst_load_erb("<builtin>", SYS_SRC.as_bytes())?;
         }
 
         self.node_cache.interner_mut().optimize_lookup();

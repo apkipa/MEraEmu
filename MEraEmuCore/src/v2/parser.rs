@@ -849,8 +849,8 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
             let start_pos = result.token.span.start().0;
             // self.b.token(result.token.kind, result.lexeme);
             let end_pos = result.token.span.end().0;
-            self.macro_place
-                .handle_macro_token(&result, start_pos, end_pos);
+            // self.macro_place
+            //     .handle_macro_token(&result, start_pos, end_pos);
             if !matches!(result.token.kind, Token::WhiteSpace | Token::Comment) {
                 break result;
             }
@@ -882,8 +882,8 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
             let start_pos = result.token.span.start().0;
             // self.b.token(result.token.kind, result.lexeme);
             let end_pos = result.token.span.end().0;
-            self.macro_place
-                .handle_macro_token(&result, start_pos, end_pos);
+            // self.macro_place
+            //     .handle_macro_token(&result, start_pos, end_pos);
         }
     }
 
@@ -892,8 +892,8 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
         let start_pos = result.token.span.start().0;
         // self.b.token(result.token.kind, result.lexeme);
         let end_pos = result.token.span.end().0;
-        self.macro_place
-            .handle_macro_token(&result, start_pos, end_pos);
+        // self.macro_place
+        //     .handle_macro_token(&result, start_pos, end_pos);
         result
     }
 
@@ -902,8 +902,8 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
         let start_pos = result.token.span.start().0;
         // self.b.token(kind, result.lexeme);
         let end_pos = result.token.span.end().0;
-        self.macro_place
-            .handle_macro_token(&result, start_pos, end_pos);
+        // self.macro_place
+        //     .handle_macro_token(&result, start_pos, end_pos);
         result
     }
 
@@ -1789,6 +1789,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         pure: bool,
         terminals: enumset::EnumSet<EraTerminalTokenKind>,
     ) -> ParseResult<EraNodeRef> {
+        // NOTE: Skipping whitespace may affect generation of macro mappings. Use with caution.
+        self.o.l.skip_whitespace(Mode::Normal);
+
         // HACK: Support special break_at symbols
         let lexer_mode = if terminals.contains(Terminal::Percentage) {
             // HACK: Do not parse `%value%=2` as `%value` and `%=2`
@@ -2338,6 +2341,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
 
     fn statement(&mut self) -> ParseResult<EraNodeRef> {
         use EraCmdArgFmt as CmdArg;
+
+        self.o.l.skip_whitespace(Mode::Normal);
 
         let span = self.o.l.current_src_span();
         let token = self.o.peek_token(Mode::Normal);
