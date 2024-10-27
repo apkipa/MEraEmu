@@ -1,6 +1,7 @@
 use std::ops::ControlFlow;
 
-use super::lexer::{EraLexer, EraLexerMode, EraLexerNextResult};
+use crate::util::SmallSlice;
+use crate::v2::lexer::{EraLexer, EraLexerMode, EraLexerNextResult};
 use crate::{
     types::*,
     util::{
@@ -10,27 +11,642 @@ use crate::{
     },
     v2::routines,
 };
-use bstr::ByteSlice;
-use cstree::{
-    build::{Checkpoint, GreenNodeBuilder, NodeCache},
-    green::GreenNode,
-    interning::Interner,
-    Syntax,
-};
+
+use cstree::interning::{Interner, Resolver, TokenKey};
+use enumset::EnumSet;
 use hashbrown::{HashMap, HashSet};
 use indexmap::IndexMap;
-use itertools::Itertools;
 use rustc_hash::FxBuildHasher;
 use EraLexerMode as Mode;
 use EraTokenKind as Token;
 
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+type FxHashSet<K> = HashSet<K, FxBuildHasher>;
 type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
 
 type ParseResult<T> = Result<T, ()>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(align(4))]
+pub struct EraLiteralI64(pub [u8; 8]);
+
+impl From<i64> for EraLiteralI64 {
+    fn from(value: i64) -> Self {
+        Self(value.to_le_bytes())
+    }
+}
+
+impl From<EraLiteralI64> for i64 {
+    fn from(value: EraLiteralI64) -> Self {
+        i64::from_le_bytes(value.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(align(4))]
+pub struct EraLiteralF64(pub [u8; 8]);
+
+impl From<f64> for EraLiteralF64 {
+    fn from(value: f64) -> Self {
+        Self(value.to_le_bytes())
+    }
+}
+
+impl From<EraLiteralF64> for f64 {
+    fn from(value: EraLiteralF64) -> Self {
+        f64::from_le_bytes(value.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EraNodeRef(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EraExtraDataRef(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(align(2))]
+pub struct Pad2<T>(pub T);
+
+impl<T> From<T> for Pad2<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+// impl<T> From<Pad2<T>> for T {
+//     fn from(value: Pad2<T>) -> Self {
+//         value.0
+//     }
+// }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(align(4))]
+pub struct Pad4<T>(pub T);
+
+impl<T> From<T> for Pad4<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
+// impl<T> From<Pad4<T>> for T {
+//     fn from(value: Pad4<T>) -> Self {
+//         value.0
+//     }
+// }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EraExtraDataRefWithLen {
+    pub len: u32,
+    pub data: EraExtraDataRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EraSmallExtraData {
+    pub len: u32,
+    /// When `len` is 1, this is the data stored directly. When `len` is larger,
+    /// this is a reference to the extra data.
+    pub data_or_ref: u32,
+}
+
+// TODO: Maybe We don't need `List*` nodes most of the time?
+
+// NOTE: Vec<T> is [len, T...]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraNode {
+    Invalid,
+    Empty,
+
+    // (len, [children...])
+    Program(EraExtraDataRefWithLen),
+
+    VarModifier(EraTokenKind),
+
+    ExprPreUnary(Token, EraNodeRef),
+    ExprPostUnary(EraNodeRef, Token),
+    ExprBinary(EraNodeRef, EraSmallTokenKind, EraNodeRef),
+    // (cond, [then, else])
+    ExprTernary(EraNodeRef, EraExtraDataRef),
+    // (name, args_list)
+    ExprFunCall(EraNodeRef, EraNodeRef),
+    // BinaryAdd(EraNodeRef, EraNodeRef),
+    // BinarySub(EraNodeRef, EraNodeRef),
+    // BinaryMul(EraNodeRef, EraNodeRef),
+    // BinaryDiv(EraNodeRef, EraNodeRef),
+    // BinaryMod(EraNodeRef, EraNodeRef),
+    // BinaryBitAnd(EraNodeRef, EraNodeRef),
+    // BinaryBitOr(EraNodeRef, EraNodeRef),
+    // BinaryBitXor(EraNodeRef, EraNodeRef),
+    // UnaryBitNot(EraNodeRef),
+    // BinaryBitShiftL(EraNodeRef, EraNodeRef),
+    // BinaryBitShiftR(EraNodeRef, EraNodeRef),
+    // UnaryLogicalNot(EraNodeRef),
+    // BinaryLogicalAnd(EraNodeRef, EraNodeRef),
+    // BinaryLogicalOr(EraNodeRef, EraNodeRef),
+    // BinaryCmpEq(EraNodeRef, EraNodeRef),
+    // BinaryCmpNEq(EraNodeRef, EraNodeRef),
+    // BinaryCmpLT(EraNodeRef, EraNodeRef),
+    // BinaryCmpGT(EraNodeRef, EraNodeRef),
+    // BinaryCmpLEq(EraNodeRef, EraNodeRef),
+    // BinaryCmpGEq(EraNodeRef, EraNodeRef),
+    // BinaryAssign(EraNodeRef, EraNodeRef),
+    // BinaryExprAssign(EraNodeRef, EraNodeRef),
+    // BinaryAddAssign(EraNodeRef, EraNodeRef),
+    // BinarySubAssign(EraNodeRef, EraNodeRef),
+    // BinaryMulAssign(EraNodeRef, EraNodeRef),
+    // BinaryDivAssign(EraNodeRef, EraNodeRef),
+    // BinaryModAssign(EraNodeRef, EraNodeRef),
+    // BinaryBitAndAssign(EraNodeRef, EraNodeRef),
+    // BinaryBitOrAssign(EraNodeRef, EraNodeRef),
+    // BinaryBitXorAssign(EraNodeRef, EraNodeRef),
+    // UnaryIncrement(EraNodeRef),
+    // UnaryDecrement(EraNodeRef),
+    ExprParen(EraNodeRef),
+    // ([var, indices...])
+    ExprVarIdx(EraSmallExtraData),
+    // (var, namespace)
+    ExprVarNamespace(EraNodeRef, EraNodeRef),
+    LiteralInt(EraLiteralI64),
+    // NOTE: Use `EraLiteralI64`-encoded f64 instead for now
+    // LiteralFloat(EraLiteralF64),
+    LiteralStr(TokenKey),
+    Identifier(TokenKey),
+    // (parts_count, node_ref / [node_ref...])
+    StringForm(EraSmallExtraData),
+    // ([expr, width, alignment])
+    StringFormInterpPart(EraSmallExtraData),
+
+    ListExpr(EraExtraDataRefWithLen),
+    ListStmt(EraExtraDataRefWithLen),
+    ListSharpDecl(EraExtraDataRefWithLen),
+    ListSelectCasePred(EraExtraDataRefWithLen),
+
+    // (name, [Vec<qualifiers>, dimensions_list, initializers_list])
+    DeclVar(EraNodeRef, EraExtraDataRef),
+    DeclVarS(EraNodeRef, EraExtraDataRef),
+    DeclLocalSize(EraNodeRef),
+    DeclLocalSSize(EraNodeRef),
+    // NOTE: Macros are not handled by codegen
+    DeclDefine(EraNodeRef, EraNodeRef),
+    DeclEventKind(Pad4<EraEventFuncKind>),
+    DeclFunction,
+    DeclFunctionS,
+    DeclTransient,
+    // (name, [args_node, sharp_decls_node, stmts_node])
+    ItemFunction(EraNodeRef, EraExtraDataRef),
+
+    StmtLabel(EraNodeRef),
+    StmtNop,
+    StmtExpr(EraNodeRef),
+    // (base_assign, extra_values)
+    StmtRowAssign(EraNodeRef, EraNodeRef),
+    // (command, arguments)
+    StmtResultCmdCall(EraNodeRef, EraNodeRef),
+    // // NOTE: We squeeze out the discriminants' room for flags
+    // StmtDebugPrint(Pad2<EraPrintExtendedFlags>, EraExtraDataRefWithLen),
+    // StmtPrint(Pad2<EraPrintExtendedFlags>, EraExtraDataRefWithLen),
+    StmtDebugPrint(EraPrintExtendedFlags, EraNodeRef),
+    StmtPrint(EraPrintExtendedFlags, EraNodeRef),
+    // (dest, [Vec<data | data_list>])
+    // NOTE: data_list is of type `ListExpr`
+    StmtPrintData(Pad2<EraPrintExtendedFlags>, EraNodeRef, EraExtraDataRef),
+    // TODO: Remove this
+    // StmtPrintDataList(EraNodeRef, EraExtraDataRef),
+    StmtWait,
+    StmtForceWait,
+    StmtWaitAnyKey,
+    StmtIf(EraExtraDataRefWithLen),
+    StmtQuit,
+    // (cond, [Vec<pred_list | stmt_list>])
+    StmtSelectCase(EraNodeRef, EraExtraDataRef),
+    // (cond, stmt_list)
+    StmtWhile(EraNodeRef, EraNodeRef),
+    // (function (ident | expr), args_list)
+    StmtCall(EraNodeRef, EraNodeRef),
+    // (function (ident | expr), args_list)
+    StmtTryCall(EraNodeRef, EraNodeRef),
+    // (function (ident | expr), [args_list, then_stmts, catch_stmts])
+    StmtTryCCall(EraNodeRef, EraExtraDataRef),
+    StmtJump(EraNodeRef, EraNodeRef),
+    StmtTryJump(EraNodeRef, EraNodeRef),
+    StmtTryCJump(EraNodeRef, EraExtraDataRef),
+    // (expr_list)
+    StmtReturn(EraNodeRef),
+    StmtContinue,
+    StmtBreak,
+    StmtRestart,
+    StmtThrow(EraNodeRef),
+    // (count, stmt_list)
+    StmtRepeat(EraNodeRef, EraNodeRef),
+    StmtGoto(EraNodeRef),
+    // (var, [start, end, step (maybe Empty), stmt_list])
+    StmtFor(EraNodeRef, EraExtraDataRef),
+    // (stmt_list, cond)
+    StmtDoLoop(EraNodeRef, EraNodeRef),
+    // StmtGCreate,
+    // StmtGDispose,
+    // StmtGDrawSprite,
+    StmtSplit(EraNodeRef),
+    // (var, factor (f64))
+    StmtTimes(EraNodeRef, EraNodeRef),
+    StmtSetBit(EraNodeRef),
+    StmtClearBit(EraNodeRef),
+    StmtInvertBit(EraNodeRef),
+    StmtSetColor(EraNodeRef),
+    StmtResetColor,
+    StmtSetBgColor(EraNodeRef),
+    StmtResetBgColor,
+    StmtVarSet(EraNodeRef),
+    StmtCVarSet(EraNodeRef),
+    StmtVarSize(EraNodeRef),
+    StmtSwap(EraNodeRef),
+    StmtHtmlPrint(EraNodeRef),
+    StmtPrintButton(EraNodeRef),
+    StmtPrintButtonC(EraNodeRef),
+    StmtPrintButtonLC(EraNodeRef),
+    StmtArrayRemove(EraNodeRef),
+    StmtArraySort(EraNodeRef),
+    StmtArrayMSort(EraNodeRef),
+    StmtArrayCopy(EraNodeRef),
+    StmtArrayShift(EraNodeRef),
+    StmtInput(EraNodeRef),
+    StmtInputS(EraNodeRef),
+    StmtTInput(EraNodeRef),
+    StmtTInputS(EraNodeRef),
+    StmtOneInput(EraNodeRef),
+    StmtOneInputS(EraNodeRef),
+    StmtTOneInput(EraNodeRef),
+    StmtTOneInputS(EraNodeRef),
+    StmtReuseLastLine(EraNodeRef),
+    StmtClearLine(EraNodeRef),
+    StmtDrawLine,
+    StmtCustomDrawLine(EraNodeRef),
+    StmtTWait(EraNodeRef),
+    StmtFontStyle(EraNodeRef),
+    StmtFontBold,
+    StmtFontItalic,
+    StmtFontRegular,
+    StmtSetFont(EraNodeRef),
+    StmtStrData(EraNodeRef, EraExtraDataRef),
+    StmtPutForm(EraNodeRef),
+    StmtSkipDisp(EraNodeRef),
+    StmtBegin(EraNodeRef),
+    StmtDoTrain(EraNodeRef),
+    StmtRedraw(EraNodeRef),
+    StmtStrLen(EraNodeRef),
+    StmtStrLenU(EraNodeRef),
+    StmtAlignment(EraNodeRef),
+    StmtToolTipSetDelay(EraNodeRef),
+    StmtToolTipSetDuration(EraNodeRef),
+    StmtRandomize(EraNodeRef),
+    StmtDumpRand,
+    StmtInitRand,
+    StmtBar(EraNodeRef),
+    StmtBarL(EraNodeRef),
+    StmtAddChara(EraNodeRef),
+    StmtPickUpChara(EraNodeRef),
+    StmtDelChara(EraNodeRef),
+    StmtSwapChara(EraNodeRef),
+    StmtAddCopyChara(EraNodeRef),
+    StmtResetStain(EraNodeRef),
+    StmtSaveChara(EraNodeRef),
+    StmtLoadChara(EraNodeRef),
+    StmtSetAnimeTimer(EraNodeRef),
+    StmtHtmlTagSplit(EraNodeRef),
+    StmtPower(EraNodeRef),
+    StmtLoadData(EraNodeRef),
+    StmtSaveData(EraNodeRef),
+    // StmtCheckData(EraNodeRef),
+    StmtGetTime,
+    StmtLoadGlobal,
+    StmtSaveGlobal,
+    StmtLoadGame,
+    StmtSaveGame,
+    StmtDebugClear,
+    StmtResetData,
+
+    SelectCaseCondSingle(EraNodeRef),
+    SelectCaseCondRange(EraNodeRef, EraNodeRef),
+    SelectCaseCondOperator(Token, EraNodeRef),
+}
+
+const _ERA_NODE_SIZE_ASSERTION: [u8; std::mem::size_of::<EraNode>()] = [0; 12];
+
+#[derive(Debug, Clone)]
+pub struct EraNodeExprTernary {
+    pub cond: EraNodeRef,
+    pub then_expr: EraNodeRef,
+    pub else_expr: EraNodeRef,
+}
+
+impl EraNodeExprTernary {
+    pub fn get_from(arena: &EraNodeArena, node_ref: EraNodeRef) -> Self {
+        let EraNode::ExprTernary(cond, extra_ref) = arena.get_node(node_ref) else {
+            panic!(
+                "expected ExprTernary node, found {:?}",
+                arena.get_node(node_ref)
+            );
+        };
+        let extra_data = arena.get_extra_data_view_given_len(extra_ref, 2);
+        let then_expr = EraNodeRef(extra_data[0]);
+        let else_expr = EraNodeRef(extra_data[1]);
+        Self {
+            cond,
+            then_expr,
+            else_expr,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraNodeListExpr<'a> {
+    pub children: &'a [u32],
+}
+
+impl<'a> EraNodeListExpr<'a> {
+    pub fn get_from(arena: &'a EraNodeArena, node_ref: EraNodeRef) -> Self {
+        let EraNode::ListExpr(extra_ref) = arena.get_node(node_ref) else {
+            panic!(
+                "expected ListExpr node, found {:?}",
+                arena.get_node(node_ref)
+            );
+        };
+        let children = arena.get_extra_data_view(extra_ref);
+        Self { children }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraNodeStringFormInterpPart {
+    pub expr: EraNodeRef,
+    pub width: Option<EraNodeRef>,
+    pub alignment: Option<EraNodeRef>,
+}
+
+impl EraNodeStringFormInterpPart {
+    pub fn try_get_from(arena: &EraNodeArena, node_ref: EraNodeRef) -> Option<Self> {
+        let EraNode::StringFormInterpPart(extra_ref) = arena.get_node(node_ref) else {
+            return None;
+        };
+
+        let extra_view = arena.get_small_extra_data_view(extra_ref);
+        Some(Self {
+            expr: EraNodeRef(extra_view[0]),
+            width: extra_view.get(1).map(|&x| EraNodeRef(x)),
+            alignment: extra_view.get(2).map(|&x| EraNodeRef(x)),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraNodeDeclVarHomo<'a> {
+    pub is_string: bool,
+    pub name: EraNodeRef,
+    pub qualifiers: &'a [u32],
+    pub dimensions: EraNodeRef,
+    pub initializers: EraNodeRef,
+}
+
+impl<'a> EraNodeDeclVarHomo<'a> {
+    pub fn try_get_from(arena: &'a EraNodeArena, node_ref: EraNodeRef) -> Option<Self> {
+        let (is_string, name, extra_ref) = match arena.get_node(node_ref) {
+            EraNode::DeclVar(name, extra_ref) => (false, name, extra_ref),
+            EraNode::DeclVarS(name, extra_ref) => (true, name, extra_ref),
+            _ => return None,
+        };
+        let len = arena.get_extra_data(extra_ref);
+        let extra_data = arena.get_extra_data_view_given_len(extra_ref, len + 3);
+        let qualifiers = &extra_data[1..(len as usize + 1)];
+        let dimensions = EraNodeRef(extra_data[len as usize + 1]);
+        let initializers = EraNodeRef(extra_data[len as usize + 2]);
+        Some(Self {
+            is_string,
+            name,
+            qualifiers,
+            dimensions,
+            initializers,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct EraNodeArena {
+    /// Source spans of each node. Is of the same length as `nodes`.
+    pub spans: Vec<SrcSpan>,
+    /// Source spans of each token (if the node has one). Is of the same length as `nodes`.
+    /// For example, Node `1 + 2` would have token_span refering to the span of `+`.
+    // TODO: Maybe we can repurpose this for `BinaryExpr` as (start, EraTokenKind)?
+    pub token_spans: Vec<SrcSpan>,
+    /// All nodes in the arena.
+    pub nodes: Vec<EraNode>,
+    /// Extra data for each node.
+    pub extra_data: Vec<u32>,
+}
+
+/** Design notes:
+ *
+ * - If a node is of variable length, its parse function must not fail. This ensures that
+ *   the node buffer is recovered properly, even when the parse function encounters an error.
+ *   This way, callers can always rely on the node buffer being in a consistent state.
+ * - For normal nodes, the parse function may return `ParseResult<EraNodeRef>` to indicate
+ *   that the node might fail to construct.
+ * - When you want to fail the current node, use `?` to short-circuit.
+ *   Otherwise, manually sync instead to properly handle local failures.
+ */
+
+impl EraNodeArena {
+    pub fn new() -> Self {
+        Self {
+            spans: Vec::new(),
+            token_spans: Vec::new(),
+            nodes: Vec::new(),
+            extra_data: Vec::new(),
+        }
+    }
+
+    pub fn add_node(&mut self, node: EraNode, span: SrcSpan, token_span: SrcSpan) -> EraNodeRef {
+        // eprintln!("[DBG] {:?}", node);
+        let node_ref = EraNodeRef(self.nodes.len() as u32);
+        self.nodes.push(node);
+        self.spans.push(span);
+        self.token_spans.push(token_span);
+        node_ref
+    }
+
+    pub fn span_from_nodes(&self, start: EraNodeRef, end: EraNodeRef) -> SrcSpan {
+        let start = self.spans[start.0 as usize].start();
+        let end = self.spans[end.0 as usize].end();
+        SrcSpan::with_ends(start, end)
+    }
+
+    pub fn add_extra(&mut self, data: u32) -> EraExtraDataRef {
+        let data_ref = EraExtraDataRef(self.extra_data.len() as u32);
+        self.extra_data.push(data);
+        data_ref
+    }
+
+    pub fn extend_extra(&mut self, iter: impl IntoIterator<Item = u32>) -> (EraExtraDataRef, u32) {
+        let iter = iter.into_iter();
+        let start = self.extra_data.len() as u32;
+        let mut len = 0;
+        self.extra_data.extend(iter.inspect(|_| len += 1));
+        (EraExtraDataRef(start), len)
+    }
+
+    pub fn extend_extra_with_len(
+        &mut self,
+        iter: impl IntoIterator<Item = u32>,
+    ) -> (EraExtraDataRef, u32) {
+        let iter = iter.into_iter();
+        let start = self.extra_data.len() as u32;
+        self.extra_data.push(0);
+        let mut len = 1;
+        self.extra_data.extend(iter.inspect(|_| len += 1));
+        self.extra_data[start as usize] = len - 1;
+        (EraExtraDataRef(start), len)
+    }
+
+    pub fn make_extra_data_ref_with_len(
+        &mut self,
+        iter: impl IntoIterator<Item = u32>,
+    ) -> EraExtraDataRefWithLen {
+        let iter = iter.into_iter();
+        let (data_ref, len) = self.extend_extra(iter);
+        EraExtraDataRefWithLen {
+            len,
+            data: data_ref,
+        }
+    }
+
+    pub fn make_small_extra_data(
+        &mut self,
+        iter: impl IntoIterator<Item = u32>,
+    ) -> EraSmallExtraData {
+        let iter = iter.into_iter();
+        let start = self.extra_data.len() as u32;
+        let mut len = 0;
+        self.extra_data.extend(iter.inspect(|_| len += 1));
+        if len == 0 {
+            EraSmallExtraData {
+                len: 0,
+                data_or_ref: 0,
+            }
+        } else if len == 1 {
+            let data = self.extra_data[start as usize];
+            self.extra_data.truncate(start as usize);
+            EraSmallExtraData {
+                len: 1,
+                data_or_ref: data,
+            }
+        } else {
+            EraSmallExtraData {
+                len,
+                data_or_ref: start,
+            }
+        }
+    }
+
+    pub fn get_node(&self, node_ref: EraNodeRef) -> EraNode {
+        self.nodes[node_ref.0 as usize]
+    }
+
+    pub fn get_node_span(&self, node_ref: EraNodeRef) -> SrcSpan {
+        self.spans[node_ref.0 as usize]
+    }
+
+    pub fn get_node_token_span(&self, node_ref: EraNodeRef) -> SrcSpan {
+        self.token_spans[node_ref.0 as usize]
+    }
+
+    pub fn get_extra_data(&self, data_ref: EraExtraDataRef) -> u32 {
+        self.extra_data[data_ref.0 as usize]
+    }
+
+    pub fn get_list_extra_data(&self, data_ref: EraExtraDataRef) -> &[u32] {
+        let len = self.get_extra_data(data_ref);
+        let start = data_ref.0 as usize + 1;
+        let end = start + len as usize;
+        &self.extra_data[start..end]
+    }
+
+    pub fn get_extra_data_view(&self, data_ref: EraExtraDataRefWithLen) -> &[u32] {
+        let start = data_ref.data.0 as usize;
+        let end = start + data_ref.len as usize;
+        &self.extra_data[start..end]
+    }
+
+    pub fn get_extra_data_view_given_len(&self, data_ref: EraExtraDataRef, len: u32) -> &[u32] {
+        let start = data_ref.0 as usize;
+        let end = start + len as usize;
+        &self.extra_data[start..end]
+    }
+
+    pub fn get_small_extra_data_view(&self, data_ref: EraSmallExtraData) -> SmallSlice<u32> {
+        if data_ref.len == 0 {
+            SmallSlice::empty()
+        } else if data_ref.len == 1 {
+            SmallSlice::new_inline(data_ref.data_or_ref)
+        } else {
+            let start = data_ref.data_or_ref as usize;
+            let end = start + data_ref.len as usize;
+            SmallSlice::new(&self.extra_data[start..end])
+        }
+        // if data_ref.len == 0 {
+        //     &[]
+        // } else if data_ref.len == 1 {
+        //     std::slice::from_ref(&data_ref.data_or_ref)
+        // } else {
+        //     let start = data_ref.data_or_ref as usize;
+        //     let end = start + data_ref.len as usize;
+        //     &self.extra_data[start..end]
+        // }
+    }
+}
+
+/// A checkpoint for wrapping a node (specifically, its children).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EraNodeBuilderCheckpoint(u32);
+
+struct EraNodeBuilder<'i, I> {
+    interner: &'i I,
+    children: Vec<EraNodeRef>,
+}
+
+impl<'i, I> EraNodeBuilder<'i, I> {
+    fn with_interner(interner: &'i I) -> Self {
+        Self {
+            interner,
+            children: Vec::new(),
+        }
+    }
+
+    fn interner(&self) -> &'i I {
+        self.interner
+    }
+
+    fn checkpoint(&self) -> EraNodeBuilderCheckpoint {
+        EraNodeBuilderCheckpoint(self.children.len() as u32)
+    }
+
+    fn push_child(&mut self, child: EraNodeRef) {
+        self.children.push(child);
+    }
+
+    fn finish_node(&mut self, checkpoint: EraNodeBuilderCheckpoint) -> std::vec::Drain<EraNodeRef> {
+        assert!(
+            checkpoint.0 as usize <= self.children.len(),
+            "checkpoint out of bounds: checkpoint = {}, children.len() = {}",
+            checkpoint.0,
+            self.children.len()
+        );
+        self.children.drain((checkpoint.0 as usize)..)
+    }
+}
+
 pub struct EraParsedProgram {
-    pub ast: GreenNode,
+    pub root_node: EraNodeRef,
+    pub nodes: EraNodeArena,
     pub macro_map: EraMacroMap,
     pub defines: EraDefineScope,
 }
@@ -38,7 +654,7 @@ pub struct EraParsedProgram {
 pub struct EraParser<'a, 'b, 'i> {
     callback: &'b mut dyn EraCompilerCallback,
     lexer: &'b mut EraLexer<'a>,
-    node_cache: &'b mut NodeCache<'i, ThreadedTokenInterner>,
+    interner: &'i ThreadedTokenInterner,
     replaces: &'b EraDefineScope,
     defines: &'b EraDefineScope,
     is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
@@ -49,7 +665,7 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
     pub fn new(
         callback: &'b mut dyn EraCompilerCallback,
         lexer: &'b mut EraLexer<'a>,
-        node_cache: &'b mut NodeCache<'i, ThreadedTokenInterner>,
+        interner: &'i ThreadedTokenInterner,
         replaces: &'b EraDefineScope,
         defines: &'b EraDefineScope,
         is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
@@ -58,7 +674,7 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
         EraParser {
             callback,
             lexer,
-            node_cache,
+            interner,
             replaces,
             defines,
             is_str_var_fn,
@@ -67,7 +683,7 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
     }
 
     pub fn parse_program(&mut self) -> EraParsedProgram {
-        let builder = GreenNodeBuilder::with_cache(self.node_cache);
+        let builder = EraNodeBuilder::with_interner(self.interner);
         let mut site = EraParserSite::new(
             self.callback,
             self.lexer,
@@ -78,22 +694,23 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
             self.is_header,
         );
         // NOTE: We use error-tolerant parsing here, so theoretically this should never fail.
-        site.program().unwrap();
-        let (builder, macro_map, defines) = site.into_inner();
+        let program_root = site.program().unwrap();
+        let (node_arena, macro_map, defines) = site.into_inner();
         EraParsedProgram {
-            ast: builder.finish().0,
+            root_node: program_root,
+            nodes: node_arena,
             macro_map,
             defines,
         }
     }
 }
 
-struct EraParserOuter<'a, 'b, 'cache, 'i> {
+struct EraParserOuter<'a, 'b, 'i> {
     callback: &'b mut dyn EraCompilerCallback,
     // lexer
     l: &'b mut EraLexer<'a>,
     // builder
-    b: GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+    b: EraNodeBuilder<'i, ThreadedTokenInterner>,
     replaces: &'b EraDefineScope,
     defines: &'b EraDefineScope,
     local_defines: EraDefineScope,
@@ -101,6 +718,7 @@ struct EraParserOuter<'a, 'b, 'cache, 'i> {
     is_header: bool,
     is_panicking: bool,
     macro_place: EraParserMacroPlace<'a>,
+    node_arena: EraNodeArena,
 }
 
 // ((macro_span, covering_span, start_pos), macro_map, src)
@@ -160,11 +778,11 @@ impl EraParserMacroPlace<'_> {
     }
 }
 
-impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
+impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
     fn new(
         callback: &'b mut dyn EraCompilerCallback,
         l: &'b mut EraLexer<'a>,
-        b: GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+        b: EraNodeBuilder<'i, ThreadedTokenInterner>,
         replaces: &'b EraDefineScope,
         defines: &'b EraDefineScope,
         is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
@@ -183,17 +801,12 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
             is_header,
             is_panicking: false,
             macro_place,
+            node_arena: EraNodeArena::new(),
         }
     }
 
-    fn into_inner(
-        self,
-    ) -> (
-        GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
-        EraMacroMap,
-        EraDefineScope,
-    ) {
-        (self.b, self.macro_place.1, self.local_defines)
+    fn into_inner(self) -> (EraNodeArena, EraMacroMap, EraDefineScope) {
+        (self.node_arena, self.macro_place.1, self.local_defines)
     }
 
     fn set_is_panicking(&mut self, is_panicking: bool) {
@@ -222,6 +835,8 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
 
     fn next_token_with_newline(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
         loop {
+            // self.l.skip_whitespace(mode);
+
             // SAFETY: This requires the Polonius borrow checker.
             let result: EraLexerNextResult = unsafe {
                 std::mem::transmute(self.l.read(
@@ -231,9 +846,9 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
                     &[self.defines, &self.local_defines],
                 ))
             };
-            let start_pos = self.b.document_len().into();
-            self.b.token(result.token.kind, result.lexeme);
-            let end_pos = self.b.document_len().into();
+            let start_pos = result.token.span.start().0;
+            // self.b.token(result.token.kind, result.lexeme);
+            let end_pos = result.token.span.end().0;
             self.macro_place
                 .handle_macro_token(&result, start_pos, end_pos);
             if !matches!(result.token.kind, Token::WhiteSpace | Token::Comment) {
@@ -244,6 +859,8 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
 
     fn peek_token(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
         loop {
+            // self.l.skip_whitespace(mode);
+
             // SAFETY: This requires the Polonius borrow checker.
             let result: EraLexerNextResult = unsafe {
                 std::mem::transmute(self.l.peek(
@@ -262,9 +879,9 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
                 self.replaces,
                 &[self.defines, &self.local_defines],
             );
-            let start_pos = self.b.document_len().into();
-            self.b.token(result.token.kind, result.lexeme);
-            let end_pos = self.b.document_len().into();
+            let start_pos = result.token.span.start().0;
+            // self.b.token(result.token.kind, result.lexeme);
+            let end_pos = result.token.span.end().0;
             self.macro_place
                 .handle_macro_token(&result, start_pos, end_pos);
         }
@@ -272,9 +889,9 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
 
     fn bump(&mut self) -> EraLexerNextResult {
         let result = self.l.bump();
-        let start_pos = self.b.document_len().into();
-        self.b.token(result.token.kind, result.lexeme);
-        let end_pos = self.b.document_len().into();
+        let start_pos = result.token.span.start().0;
+        // self.b.token(result.token.kind, result.lexeme);
+        let end_pos = result.token.span.end().0;
         self.macro_place
             .handle_macro_token(&result, start_pos, end_pos);
         result
@@ -282,9 +899,9 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
 
     fn bump_as(&mut self, kind: Token) -> EraLexerNextResult {
         let result = self.l.bump();
-        let start_pos = self.b.document_len().into();
-        self.b.token(kind, result.lexeme);
-        let end_pos = self.b.document_len().into();
+        let start_pos = result.token.span.start().0;
+        // self.b.token(kind, result.lexeme);
+        let end_pos = result.token.span.end().0;
         self.macro_place
             .handle_macro_token(&result, start_pos, end_pos);
         result
@@ -293,52 +910,19 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
     fn previous_token(&self) -> Token {
         self.l.previous_token()
     }
-
-    // fn close_over_macro(&mut self) -> bool {
-    //     if !self.macro_place.is_closed_over() {
-    //         return false;
-    //     }
-    //     let Some((macro_span, covering_span)) = self.macro_place.0.take() else {
-    //         return false;
-    //     };
-
-    //     // Replace current node with a macro node
-    //     let node = self.b.pop_last_child().unwrap().into_node().unwrap();
-    //     let start_pos = self.b.document_len().into();
-    //     // TODO: Should be handled by parent covering node
-    //     assert!(
-    //         covering_span.start() >= start_pos,
-    //         "macro covering span starts before node"
-    //     );
-    //     let covering_span = SrcSpan::with_ends(SrcPos(start_pos), covering_span.end());
-    //     if node.kind() == Token::Invalid.into_raw() {
-    //         self.b.start_node(Token::Invalid);
-    //     } else {
-    //         self.b.start_node(Token::MacroNode);
-    //     }
-    //     self.b
-    //         .token(Token::MacroNode, self.l.get_src_span(covering_span));
-    //     self.b.finish_node();
-
-    //     // Insert macro node into map
-    //     self.macro_map.insert(covering_span, node);
-
-    //     true
-    // }
 }
 
-struct EraParserSite<'a, 'b, 'cache, 'i> {
-    o: EraParserOuter<'a, 'b, 'cache, 'i>,
+struct EraParserSite<'a, 'b, 'i> {
+    o: EraParserOuter<'a, 'b, 'i>,
     base_diag: Diagnostic<'a>,
-    // eat_syncs: Vec<(Mode, Token)>,
-    local_str_vars: HashSet<Ascii<ArcStr>, FxBuildHasher>,
+    local_str_vars: FxHashSet<&'i Ascii<str>>,
 }
 
-impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
+impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     fn new(
         callback: &'b mut dyn EraCompilerCallback,
         l: &'b mut EraLexer<'a>,
-        b: GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+        b: EraNodeBuilder<'i, ThreadedTokenInterner>,
         replaces: &'b EraDefineScope,
         defines: &'b EraDefineScope,
         is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
@@ -349,119 +933,278 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
         EraParserSite {
             o,
             base_diag,
-            // eat_syncs: Vec::new(),
-            local_str_vars: HashSet::default(),
+            local_str_vars: FxHashSet::default(),
         }
     }
 
-    fn into_inner(
-        self,
-    ) -> (
-        GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
-        EraMacroMap,
-        EraDefineScope,
-    ) {
+    fn into_inner(self) -> (EraNodeArena, EraMacroMap, EraDefineScope) {
         self.o.into_inner()
     }
 
-    /// `{NODE OWN}`
-    fn program(&mut self) -> ParseResult<()> {
-        self.o.b.start_node(Token::Program);
-        self.skip_newline();
-        while self.o.peek_token(Mode::Normal).token.kind != Token::Eof {
-            // Design note:
-            //
-            // If `declaration` fails, it has failed to produce a node, and we need to wrap
-            // everything in an Invalid node. If successful, it has already produced a
-            // valid node (potentially containing Invalid nodes), and no action is needed.
-            let cp = self.o.b.checkpoint();
-            if self.declaration(cp).is_err() {
-                _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
-            } else {
-                // After a successful declaration, a newline is expected.
-                _ = self.expect_sync_to_newline();
-                // let token = self.o.peek_token(Mode::Normal).token;
-                // if token.kind != Token::LineBreak {
-                //     let mut diag = self.base_diag.clone();
-                //     diag.span_err(
-                //         Default::default(),
-                //         token.span,
-                //         format!("expected newline, found {:?}", token.kind),
-                //     );
-                //     self.o.emit_diag(diag);
-                //     _ = self.sync_to(Terminal::LineBreak.into());
-                // }
+    /// Executes the given function and returns the node on success, or an Invalid node on failure.
+    /// Useful when you need a node, but don't care about its validity.
+    fn or_sync_to(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> ParseResult<EraNodeRef>,
+        terminals: EnumSet<EraTerminalTokenKind>,
+    ) -> EraNodeRef {
+        let cur_span = self.o.l.current_src_span();
+        let node = f(self).unwrap_or_else(|_| {
+            _ = self.sync_to_open(terminals);
+            let span = SrcSpan::new_covering(cur_span, self.o.l.current_src_span());
+            self.o.node_arena.add_node(EraNode::Invalid, span, span)
+        });
+        node
+    }
+
+    /// Synchronize to the next terminal token, without consuming it.
+    /// If encountered LineBreak, Err is returned. Used when you need to explicitly
+    /// clean up garbage tokens.
+    fn sync_to_open(&mut self, terminals: EnumSet<EraTerminalTokenKind>) -> ParseResult<()> {
+        let result = loop {
+            let next = self.o.peek_token(Mode::Normal).token.kind;
+            if next == Token::Eof {
+                break Err(());
             }
+            let Ok(next) = next.try_into() else {
+                _ = self.o.bump();
+                continue;
+            };
+            if terminals.contains(next) {
+                if next == Terminal::LineBreak {
+                    break Err(());
+                }
+                break Ok(());
+            }
+            _ = self.o.bump();
+        };
+
+        result
+    }
+
+    fn expect_sync_to_newline(&mut self) -> ParseResult<()> {
+        let token = self.o.peek_token(Mode::Normal).token;
+        if token.kind != Token::LineBreak && !self.o.l.at_start_of_line() {
+            let mut diag = self.base_diag.clone();
+            diag.span_err(
+                Default::default(),
+                token.span,
+                format!("expected newline, found {:?}", token.kind),
+            );
+            self.o.emit_diag(diag);
+            _ = self.sync_to_open(Terminal::LineBreak.into());
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn consume_raw(&mut self, mode: Mode, token: Token) -> ParseResult<EraLexerNextResult> {
+        let next = self.o.peek_token(mode);
+        if next.token.kind == token {
+            Ok(self.o.bump())
+        } else {
+            let mut diag = self.base_diag.clone();
+            diag.span_err(
+                Default::default(),
+                next.token.span,
+                format!("expected {:?}, found {:?}", token, next.token.kind),
+            );
+            self.o.emit_diag(diag);
+            Err(())
+        }
+    }
+
+    fn try_consume_raw(&mut self, mode: Mode, token: Token) -> Option<EraLexerNextResult> {
+        let next = self.o.peek_token(mode);
+        if next.token.kind == token {
+            Some(self.o.bump())
+        } else {
+            None
+        }
+    }
+
+    /// Eats the given token, or **complains** about the failure.
+    fn eat(&mut self, mode: Mode, token: Token) -> ParseResult<EraLexerNextResult> {
+        self.consume_raw(mode, token)
+    }
+
+    /// Eats the given token, without complaining if failed.
+    fn try_eat(&mut self, mode: Mode, token: Token) -> Option<EraLexerNextResult> {
+        self.try_consume_raw(mode, token)
+    }
+
+    /// Eats the given token, or **complains** then synchronizes to the next terminal token.
+    /// If that terminal token is the given token, it is consumed. Useful when you want to
+    /// finish the current reading and move on to next field.
+    fn eat_sync(
+        &mut self,
+        mode: Mode,
+        token: Token,
+        terminals: EnumSet<Terminal>,
+    ) -> Option<EraLexerNextResult> {
+        match self.eat(mode, token) {
+            Ok(result) => {
+                // SAFETY: This requires the Polonius borrow checker.
+                let result: EraLexerNextResult = unsafe { std::mem::transmute(result) };
+                Some(result)
+            }
+            Err(_) => {
+                _ = self.sync_to_open(terminals);
+                self.try_eat(mode, token)
+            }
+        }
+    }
+
+    // fn eat_or_sync(
+    //     &mut self,
+    //     mode: Mode,
+    //     token: Token,
+    //     terminals: EnumSet<EraTerminalTokenKind>,
+    // ) -> ParseResult<EraLexerNextResult> {
+    //     // SAFETY: This requires the Polonius borrow checker.
+    //     let result: ParseResult<EraLexerNextResult> =
+    //         unsafe { std::mem::transmute(self.eat(mode, token)) };
+    //     let Ok(result) = result else {
+    //         _ = self.sync_to(terminals);
+    //         return Err(());
+    //     };
+    //     Ok(result)
+    // }
+
+    fn skip_newline(&mut self) {
+        while self.o.peek_token(Mode::Normal).token.kind == Token::LineBreak {
+            _ = self.o.bump();
+        }
+        self.o.set_is_panicking(false);
+    }
+
+    fn is_var_str(&mut self, name: &str) -> bool {
+        self.local_str_vars.contains(Ascii::new_str(name)) || (self.o.is_str_var_fn)(name)
+    }
+
+    fn span_to_now(&self, start_span: SrcSpan) -> SrcSpan {
+        SrcSpan::new_covering(start_span, self.o.l.current_src_span())
+    }
+
+    fn make_identifier(&mut self, name: &str) -> EraNodeRef {
+        let name = self.o.b.interner().get_or_intern(name);
+        let span = self.o.l.current_src_span();
+        self.o
+            .node_arena
+            .add_node(EraNode::Identifier(name), span, span)
+    }
+
+    fn make_int_literal(&mut self, val: i64) -> EraNodeRef {
+        let span = self.o.l.current_src_span();
+        self.o
+            .node_arena
+            .add_node(EraNode::LiteralInt(val.into()), span, span)
+    }
+
+    fn make_str_literal(&mut self, val: &str) -> EraNodeRef {
+        let val = self.o.b.interner().get_or_intern(val);
+        let span = self.o.l.current_src_span();
+        self.o
+            .node_arena
+            .add_node(EraNode::LiteralStr(val), span, span)
+    }
+
+    fn make_empty(&mut self) -> EraNodeRef {
+        let span = self.o.l.current_src_span();
+        self.o.node_arena.add_node(EraNode::Empty, span, span)
+    }
+
+    /// `{NODE OWN}`
+    fn program(&mut self) -> ParseResult<EraNodeRef> {
+        let span = self.o.l.current_src_span();
+        self.skip_newline();
+        let cp = self.o.b.checkpoint();
+        while self.o.peek_token(Mode::Normal).token.kind != Token::Eof {
+            let node = self.or_sync_to(Self::declaration, Terminal::LineBreak.into());
+            self.o.b.push_child(node);
             self.skip_newline();
             self.o.set_is_panicking(false);
         }
-        self.o.b.finish_node();
         // TODO: Force close over macros at EOF?
         // self.o.close_over_macro();
-        Ok(())
+        let children = self.o.b.finish_node(cp).map(|x| x.0);
+        let data = self.o.node_arena.make_extra_data_ref_with_len(children);
+        let span = SrcSpan::new_covering(span, self.o.l.current_src_span());
+        let node = EraNode::Program(data);
+        Ok(self.o.node_arena.add_node(node, span, span))
     }
 
-    /// `{NODE OWN}`
-    fn declaration(&mut self, cp: Checkpoint) -> ParseResult<()> {
+    fn declaration(&mut self) -> ParseResult<EraNodeRef> {
         if self.o.peek_token(Mode::Normal).token.kind == Token::NumberSign {
-            self.sharp_declaration(cp)
+            self.sharp_declaration()
         } else {
-            self.func_declaration(cp)
+            self.func_declaration()
         }
     }
 
-    /// `{NODE OWN}`
-    fn sharp_declaration(&mut self, cp: Checkpoint) -> ParseResult<()> {
+    fn sharp_declaration(&mut self) -> ParseResult<EraNodeRef> {
+        let span = self.o.l.current_src_span();
+
         self.eat(Mode::Normal, Token::NumberSign)?;
 
         let token = self.o.peek_token(Mode::SharpDecl).token;
-        let result = match token.kind {
+        let node = match token.kind {
             Token::KwDim => {
                 self.o.bump();
-                self.o.b.start_node_at(cp, Token::VarDecl);
-                self.var_declaration(false)
+                self.var_declaration(false, span)?
             }
             Token::KwDimS => {
                 self.o.bump();
-                self.o.b.start_node_at(cp, Token::VarSDecl);
-                self.var_declaration(true)
+                self.var_declaration(true, span)?
             }
             Token::KwLocalSize => {
                 self.o.bump();
-                self.o.b.start_node_at(cp, Token::LocalSizeDecl);
-                self.safe_expression(true, Terminal::LineBreak.into())
-                    .map(|_| ())
+                let node = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
+                self.o
+                    .node_arena
+                    .add_node(EraNode::DeclLocalSize(node), span, span)
             }
             Token::KwLocalSSize => {
                 self.o.bump();
-                self.o.b.start_node_at(cp, Token::LocalSSizeDecl);
-                self.safe_expression(true, Terminal::LineBreak.into())
-                    .map(|_| ())
+                let node = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
+                self.o
+                    .node_arena
+                    .add_node(EraNode::DeclLocalSSize(node), span, span)
             }
             Token::KwFunction => {
                 self.o.bump();
-                self.o.b.start_node_at(cp, Token::FunctionDecl);
-                Ok(())
+                self.o
+                    .node_arena
+                    .add_node(EraNode::DeclFunction, span, span)
             }
             Token::KwFunctionS => {
                 self.o.bump();
-                self.o.b.start_node_at(cp, Token::FunctionSDecl);
-                Ok(())
+                self.o
+                    .node_arena
+                    .add_node(EraNode::DeclFunctionS, span, span)
             }
             Token::KwOnly | Token::KwPri | Token::KwLater => {
                 self.o.bump();
-                self.o.b.start_node_at(cp, Token::EventKindDecl);
-                Ok(())
+                let event_kind = match token.kind {
+                    Token::KwOnly => EraEventFuncKind::Only,
+                    Token::KwPri => EraEventFuncKind::Pri,
+                    Token::KwLater => EraEventFuncKind::Later,
+                    _ => unreachable!(),
+                };
+                self.o
+                    .node_arena
+                    .add_node(EraNode::DeclEventKind(event_kind.into()), span, span)
             }
             Token::KwDefine => {
                 self.o.bump();
-                self.o.b.start_node_at(cp, Token::DefineDecl);
-                self.define_declaration()
+                self.define_declaration(span)?
             }
             Token::KwTransient => {
                 self.o.bump();
-                self.o.b.start_node_at(cp, Token::TransientDecl);
-                Ok(())
+                self.o
+                    .node_arena
+                    .add_node(EraNode::DeclTransient, span, span)
             }
             _ => {
                 let mut diag = self.base_diag.clone();
@@ -475,30 +1218,30 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
             }
         };
 
-        // Design note:
-        //
-        // `var_declaration` borrows our started node, so we are responsible for finishing it,
-        // no matter whether it succeeded or failed.
-        if result.is_err() {
-            _ = self.sync_to(Terminal::LineBreak.into());
-        }
-        self.o.b.finish_node();
-
-        Ok(())
+        Ok(node)
     }
 
-    /// `{NODE BORROW}`
-    fn var_declaration(&mut self, is_str: bool) -> ParseResult<()> {
-        let (name, name_span) = loop {
+    fn var_declaration(&mut self, is_str: bool, span: SrcSpan) -> ParseResult<EraNodeRef> {
+        let cp = self.o.b.checkpoint();
+
+        let name_node = loop {
             let token = self.o.peek_token(Mode::SharpDecl).token;
             match token.kind {
-                Token::KwDynamic | Token::KwGlobal | Token::KwRef => _ = self.o.bump(),
-                Token::KwConst => _ = self.o.bump(),
-                Token::KwSavedata => _ = self.o.bump(),
-                Token::KwCharadata => _ = self.o.bump(),
+                Token::KwDynamic
+                | Token::KwGlobal
+                | Token::KwRef
+                | Token::KwConst
+                | Token::KwSavedata
+                | Token::KwCharadata => {
+                    _ = self.o.bump();
+                    _ = self.o.b.push_child(self.o.node_arena.add_node(
+                        EraNode::VarModifier(token.kind),
+                        token.span,
+                        token.span,
+                    ));
+                }
                 Token::Identifier => {
-                    let token = self.o.bump();
-                    break (token.lexeme, token.token.span);
+                    break self.identifier().unwrap();
                 }
                 _ => {
                     let mut diag = self.base_diag.clone();
@@ -513,35 +1256,51 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
             }
         };
 
+        let EraNode::Identifier(name) = self.o.node_arena.get_node(name_node) else {
+            unreachable!();
+        };
+        let name = self.o.b.interner().resolve(name);
+
         // HACK: For string assignment check
         if is_str {
-            self.local_str_vars.insert(Ascii::new(ArcStr::from(name)));
+            self.local_str_vars.insert(Ascii::new_str(name));
         }
 
         // Array dimensions
-        if self.try_eat(Mode::Normal, Token::Comma).is_some() {
-            self.o.b.start_node(Token::ExprList);
+        let dims_list = if self.try_eat(Mode::Normal, Token::Comma).is_some() {
             // Break at `=`
             let min_bp = infix_binding_power(Token::Assign).unwrap().1 + 2;
-            if self.comma_expr_list(min_bp).is_err() {
-                _ = self.sync_to(Terminal::LineBreak.into());
-            }
-            self.o.b.finish_node();
-        }
+            self.comma_expr_list(min_bp).unwrap()
+        } else {
+            self.empty_comma_expr_list()
+        };
 
         // Initializer
-        if self.try_eat(Mode::Normal, Token::Assign).is_some() {
-            self.o.b.start_node(Token::ExprList);
-            if self.comma_expr_list(0).is_err() {
-                _ = self.sync_to(Terminal::LineBreak.into());
-            }
-            self.o.b.finish_node();
-        }
+        let inits_list = if self.try_eat(Mode::Normal, Token::Assign).is_some() {
+            self.comma_expr_list(0).unwrap()
+        } else {
+            self.empty_comma_expr_list()
+        };
 
-        Ok(())
+        let (extra_data, _) = self
+            .o
+            .node_arena
+            .extend_extra_with_len(self.o.b.finish_node(cp).map(|x| x.0));
+        _ = self.o.node_arena.add_extra(dims_list.0);
+        _ = self.o.node_arena.add_extra(inits_list.0);
+        let span = SrcSpan::new_covering(span, self.o.l.current_src_span());
+        let constructor = if is_str {
+            EraNode::DeclVarS
+        } else {
+            EraNode::DeclVar
+        };
+        Ok(self
+            .o
+            .node_arena
+            .add_node(constructor(name_node, extra_data), span, span))
     }
 
-    fn define_declaration(&mut self) -> ParseResult<()> {
+    fn define_declaration(&mut self, span: SrcSpan) -> ParseResult<EraNodeRef> {
         let in_def = self.eat(Mode::Normal, Token::Identifier)?;
         let (in_def, in_def_span) = (ArcStr::from(in_def.lexeme), in_def.token.span);
         let out_def =
@@ -551,7 +1310,6 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
             span: in_def_span,
             data: out_def.clone(),
         };
-        // dbg!((&in_def, &define_data));
         if let Some(prev_def) = self.o.local_defines.insert(in_def.clone(), define_data) {
             let mut diag = self.base_diag.clone();
             diag.span_err(
@@ -567,44 +1325,33 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
             self.o.emit_diag(diag);
         }
 
-        Ok(())
+        // TODO: Complete define_declaration
+        let span = SrcSpan::new_covering(span, self.o.l.current_src_span());
+        let node = EraNode::DeclDefine(EraNodeRef(u32::MAX), EraNodeRef(u32::MAX));
+        Ok(self.o.node_arena.add_node(node, span, span))
     }
 
-    /// `{NODE OWN}`
-    fn func_declaration(&mut self, cp: Checkpoint) -> ParseResult<()> {
+    fn func_declaration(&mut self) -> ParseResult<EraNodeRef> {
+        let span = self.o.l.current_src_span();
+
         self.eat(Mode::Normal, Token::At)?;
 
-        // function name
-        self.eat(Mode::Normal, Token::Identifier)?;
-
-        self.o.b.start_node_at(cp, Token::FunctionItem);
+        // Function name
+        let name = self.identifier()?;
 
         // Local string vars
         self.local_str_vars.clear();
-        self.local_str_vars
-            .insert(Ascii::new(rcstr::literal!("LOCALS")));
-        self.local_str_vars
-            .insert(Ascii::new(rcstr::literal!("ARGS")));
+        self.local_str_vars.insert(Ascii::new_str("LOCALS"));
+        self.local_str_vars.insert(Ascii::new_str("ARGS"));
 
         let token = self.o.peek_token(Mode::Normal).token;
-        match token.kind {
-            Token::LParen => {
-                self.o.b.start_node(Token::ExprList);
-                _ = self.o.bump();
-                if self.paren_expr_list().is_err() {
-                    _ = self.sync_to(Terminal::RParen | Terminal::LineBreak);
-                }
-                self.o.b.finish_node();
-            }
+        let args_list = match token.kind {
+            Token::LParen => self.paren_expr_list().unwrap(),
             Token::Comma => {
-                self.o.b.start_node(Token::ExprList);
                 _ = self.o.bump();
-                if self.comma_expr_list(0).is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
-                }
-                self.o.b.finish_node();
+                self.comma_expr_list(0).unwrap()
             }
-            Token::LineBreak => (),
+            Token::LineBreak => self.empty_comma_expr_list(),
             _ => {
                 let mut diag = self.base_diag.clone();
                 diag.span_err(
@@ -613,59 +1360,134 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
                     format!("expected `(` or `,`, found {:?}", token.kind),
                 );
                 self.o.emit_diag(diag);
-                return Err(());
+
+                self.empty_comma_expr_list()
             }
-        }
+        };
 
         // Function body
-        if self.eat(Mode::Normal, Token::LineBreak).is_err() {
-            _ = self.sync_to(Terminal::LineBreak.into());
-        }
+        _ = self.eat_sync(Mode::Normal, Token::LineBreak, Terminal::LineBreak.into());
         self.skip_newline();
+
         // Local declarations (appears before statements)
-        self.o.b.start_node(Token::SharpDeclList);
-        while self.o.peek_token(Mode::Normal).token.kind == Token::NumberSign {
-            let cp = self.o.b.checkpoint();
-            if self.sharp_declaration(cp).is_err() {
-                _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
-            } else {
-                // After a successful declaration, a newline is expected.
-                // let token = self.o.peek_token(Mode::Normal).token;
-                // if token.kind != Token::LineBreak {
-                //     let mut diag = self.base_diag.clone();
-                //     diag.span_err(
-                //         Default::default(),
-                //         token.span,
-                //         format!("expected newline, found {:?}", token.kind),
-                //     );
-                //     self.o.emit_diag(diag);
-                //     _ = self.sync_to(Terminal::LineBreak.into());
-                // }
-                _ = self.expect_sync_to_newline();
-            }
-            self.skip_newline();
-        }
-        self.o.b.finish_node();
+        // let cp = self.o.b.checkpoint();
+        // while self.o.peek_token(Mode::Normal).token.kind == Token::NumberSign {
+        //     let node = self.or_sync_to(Self::sharp_declaration, Terminal::LineBreak.into());
+        //     self.o.b.push_child(node);
+        //     _ = self.eat_sync(Mode::Normal, Token::LineBreak, Terminal::LineBreak.into());
+        //     self.skip_newline();
+        // }
+        // let local_decls = self.o.b.finish_node(cp).map(|x| x.0);
+        // let local_decls = self.o.node_arena.make_extra_data_ref_with_len(local_decls);
+        // let local_decls =
+        //     self.o
+        //         .node_arena
+        //         .add_node(EraNode::ListSharpDecl(local_decls), span, span);
+        let local_decls = self.sharp_declarations_list();
+
         // Statements
-        self.o.b.start_node(Token::StmtList);
-        loop {
-            match self.safe_statement() {
-                ControlFlow::Break(()) => break,
-                ControlFlow::Continue(()) => self.skip_newline(),
-            }
-        }
-        self.o.b.finish_node();
+        let (stmts_list, _) = self.statements_list(None);
 
         // Finish function item
-        self.o.b.finish_node();
-
-        Ok(())
+        let (extra_data, _) =
+            self.o
+                .node_arena
+                .extend_extra([args_list.0, local_decls.0, stmts_list.0]);
+        let span = self.span_to_now(span);
+        let node = EraNode::ItemFunction(name, extra_data);
+        Ok(self.o.node_arena.add_node(node, span, span))
     }
 
-    /// `{NODE OWN}`
+    fn sharp_declarations_list(&mut self) -> EraNodeRef {
+        let span = self.o.l.current_src_span();
+        let cp = self.o.b.checkpoint();
+        self.skip_newline();
+        while self.o.peek_token(Mode::Normal).token.kind == Token::NumberSign {
+            let node = self.or_sync_to(Self::sharp_declaration, Terminal::LineBreak.into());
+            self.o.b.push_child(node);
+            _ = self.expect_sync_to_newline();
+            self.skip_newline();
+        }
+        let children = self.o.b.finish_node(cp).map(|x| x.0);
+        let data = self.o.node_arena.make_extra_data_ref_with_len(children);
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::ListSharpDecl(data), span, span)
+    }
+
+    /// Parses a list of statements, with optional terminal command (such as `ENDIF`).
     ///
+    /// Returns: `(node, is_terminal_cmd_found)`
+    fn statements_list(&mut self, terminal_cmd: Option<&str>) -> (EraNodeRef, bool) {
+        let span = self.o.l.current_src_span();
+        let cp = self.o.b.checkpoint();
+        self.skip_newline();
+        let found_terminal = loop {
+            // First check for terminal command
+            if let Some(cmd) = terminal_cmd {
+                let result: EraLexerNextResult<'_> = self.o.peek_token(Mode::Normal);
+                if result.token.kind == Token::Identifier && result.lexeme.eq_ignore_ascii_case(cmd)
+                {
+                    // Consume the terminal command
+                    _ = self.o.bump();
+                    break true;
+                }
+            }
+            // Then proceed as usual
+            let node = match self.safe_statement() {
+                ControlFlow::Break(()) => break false,
+                ControlFlow::Continue(node) => node,
+            };
+            self.o.b.push_child(node);
+            self.skip_newline();
+        };
+        let children = self.o.b.finish_node(cp).map(|x| x.0);
+        let data = self.o.node_arena.make_extra_data_ref_with_len(children);
+        let span = self.span_to_now(span);
+        let node = self
+            .o
+            .node_arena
+            .add_node(EraNode::ListStmt(data), span, span);
+        (node, found_terminal)
+    }
+
+    /// Parses a list of statements, with optional termination checking.
+    ///
+    /// Returns: `(node, is_user_break)`
+    fn statements_list_with<F, R>(&mut self, mut check_fn: F) -> (EraNodeRef, R)
+    where
+        R: Default,
+        F: FnMut(&mut Self) -> ControlFlow<R>,
+    {
+        let span = self.o.l.current_src_span();
+        let cp = self.o.b.checkpoint();
+        self.skip_newline();
+        let ret_val = loop {
+            // First check for terminal command
+            if let ControlFlow::Break(r) = check_fn(self) {
+                break r;
+            }
+            // Then proceed as usual
+            let node = match self.safe_statement() {
+                ControlFlow::Break(()) => break Default::default(),
+                ControlFlow::Continue(node) => node,
+            };
+            self.o.b.push_child(node);
+            self.skip_newline();
+        };
+        let children = self.o.b.finish_node(cp).map(|x| x.0);
+        let data = self.o.node_arena.make_extra_data_ref_with_len(children);
+        let span = self.span_to_now(span);
+        let node = self
+            .o
+            .node_arena
+            .add_node(EraNode::ListStmt(data), span, span);
+        (node, ret_val)
+    }
+
     /// Parses a statement or syncs to end of line, with avoidance of `@` and `<EOF>`.
-    fn safe_statement(&mut self) -> ControlFlow<()> {
+    fn safe_statement(&mut self) -> ControlFlow<(), EraNodeRef> {
         let token = self.o.peek_token(Mode::Normal).token;
         match token.kind {
             Token::At | Token::Eof => return ControlFlow::Break(()),
@@ -677,48 +1499,862 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
                     "sharp declaration should not appear within function body; ignoring",
                 );
                 self.o.emit_diag(diag);
-                _ = self.sync_to(Terminal::LineBreak.into());
 
-                return ControlFlow::Continue(());
+                let span = self.o.l.current_src_span();
+                _ = self.sync_to_open(Terminal::LineBreak.into());
+                let span = self.span_to_now(span);
+                return ControlFlow::Continue(self.o.node_arena.add_node(
+                    EraNode::Invalid,
+                    span,
+                    span,
+                ));
             }
             _ => (),
         }
 
-        let cp = self.o.b.checkpoint();
-        if self.statement().is_err() {
-            _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
-        } else {
-            // TODO: Macro
-            // self.o.close_over_macro();
+        let node = self.or_sync_to(Self::statement, Terminal::LineBreak.into());
+        _ = self.expect_sync_to_newline();
 
-            // NOTE: We try to avoid consuming newlines such as `@func` unexpectedly.
-            if self.o.l.previous_token() != Token::LineBreak {
-                // After a successful statement, a newline is expected.
-                _ = self.expect_sync_to_newline();
+        ControlFlow::Continue(node)
+    }
+
+    fn identifier(&mut self) -> ParseResult<EraNodeRef> {
+        let mut interner = self.o.b.interner();
+        let token = self.eat(Mode::Normal, Token::Identifier)?;
+        let span = token.token.span;
+        let token_key = interner.get_or_intern(token.lexeme);
+        Ok(self
+            .o
+            .node_arena
+            .add_node(EraNode::Identifier(token_key), span, span))
+    }
+
+    fn integer_literal(&mut self) -> ParseResult<EraNodeRef> {
+        let token = self.eat(Mode::Normal, Token::IntLiteral)?;
+        let span = token.token.span;
+        let val = routines::parse_int_literal(token.lexeme.as_bytes()).unwrap();
+        Ok(self
+            .o
+            .node_arena
+            .add_node(EraNode::LiteralInt(val.into()), span, span))
+    }
+
+    fn plain_string_literal(&mut self) -> ParseResult<EraNodeRef> {
+        self.eat(Mode::Normal, Token::DoubleQuote)?;
+
+        let span = self.o.l.current_src_span();
+        let mut buf = String::new();
+        loop {
+            let result = self.o.peek_token(Mode::PlainStr);
+            let token = result.token;
+            if token.kind == Token::PlainStringLiteral {
+                routines::unescape_to_sink(result.lexeme, &mut buf);
+                _ = self.o.bump();
+                continue;
+            }
+            match token.kind {
+                _ => break,
             }
         }
 
-        ControlFlow::Continue(())
+        _ = self.eat_sync(
+            Mode::PlainStr,
+            Token::DoubleQuote,
+            Terminal::DoubleQuote | Terminal::LineBreak,
+        );
+
+        let token_key = self.o.b.interner().get_or_intern(&buf);
+        let span = self.span_to_now(span);
+        Ok(self
+            .o
+            .node_arena
+            .add_node(EraNode::LiteralStr(token_key), span, span))
     }
 
-    /// `{NODE OWN}`
-    fn statement(&mut self) -> ParseResult<()> {
+    /// Parses expressions like `'string content`. May break at comma.
+    fn quote_raw_strform(&mut self) -> ParseResult<EraNodeRef> {
+        self.eat(Mode::Normal, Token::SingleQuote)?;
+
+        let span = self.o.l.current_src_span();
+        let mut buf = String::new();
+
+        loop {
+            let result = self.o.peek_token(Mode::CommaRawStr);
+            let token = result.token;
+            if token.kind == Token::PlainStringLiteral {
+                routines::unescape_to_sink(result.lexeme, &mut buf);
+                _ = self.o.bump();
+                continue;
+            }
+            match token.kind {
+                _ => break,
+            }
+        }
+
+        // NOTE: No need to sync, leave it to the caller
+
+        let token_key = self.o.b.interner().get_or_intern(&buf);
+        let span = self.span_to_now(span);
+        Ok(self
+            .o
+            .node_arena
+            .add_node(EraNode::LiteralStr(token_key), span, span))
+    }
+
+    /// Parses expression lists like `(arg1, arg2)`.
+    fn paren_expr_list(&mut self) -> ParseResult<EraNodeRef> {
+        let span = self.o.l.current_src_span();
+        let cp = self.o.b.checkpoint();
+
+        self.eat(Mode::Normal, Token::LParen)?;
+
+        if self.o.peek_token(Mode::Normal).token.kind == Token::RParen {
+            // Empty expression list
+            _ = self.o.bump();
+            let data = self
+                .o
+                .node_arena
+                .make_extra_data_ref_with_len(self.o.b.finish_node(cp).map(|x| x.0));
+            let span = SrcSpan::new_covering(span, self.o.l.current_src_span());
+            return Ok(self
+                .o
+                .node_arena
+                .add_node(EraNode::ListExpr(data), span, span));
+        }
+
+        let comma_ended = loop {
+            match self.o.peek_token(Mode::Normal).token.kind {
+                Token::RParen => break true,
+                Token::Comma => {
+                    // Empty expression
+                    self.o
+                        .b
+                        .push_child(self.o.node_arena.add_node(EraNode::Empty, span, span));
+                    _ = self.o.bump();
+                    continue;
+                }
+                _ => (),
+            }
+
+            let terminals = Terminal::Comma | Terminal::RParen | Terminal::LineBreak;
+            let node = self.or_sync_to(|s| s.expression(true), terminals);
+            self.o.b.push_child(node);
+            if self.o.peek_token(Mode::Normal).token.kind == Token::RParen
+                || self
+                    .eat_sync(Mode::Normal, Token::Comma, terminals)
+                    .is_none()
+            {
+                // No comma, must be end of expression list
+                break false;
+            }
+        };
+
+        if comma_ended {
+            // We want more expressions, and the last one was a comma
+            let span = self.o.l.current_src_span();
+            self.o
+                .b
+                .push_child(self.o.node_arena.add_node(EraNode::Empty, span, span));
+        }
+
+        _ = self.eat_sync(
+            Mode::Normal,
+            Token::RParen,
+            Terminal::RParen | Terminal::LineBreak,
+        );
+
+        let data = self
+            .o
+            .node_arena
+            .make_extra_data_ref_with_len(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = SrcSpan::new_covering(span, self.o.l.current_src_span());
+        Ok(self
+            .o
+            .node_arena
+            .add_node(EraNode::ListExpr(data), span, span))
+    }
+
+    /// Parses residual of expressions like `, var1, var2`.
+    fn comma_expr_list_limit(&mut self, min_bp: u8, size_limit: u64) -> ParseResult<EraNodeRef> {
+        assert!(size_limit > 0, "size limit must be greater than 0");
+        let span = self.o.l.current_src_span();
+        let cp = self.o.b.checkpoint();
+        let mut count = 0;
+        let comma_ended = loop {
+            // Handle min_bp
+            if min_bp != 0 {
+                let token = self.o.peek_token(Mode::Normal).token;
+                if let Some((l_bp, _)) = infix_binding_power(token.kind) {
+                    if l_bp < min_bp {
+                        break true;
+                    }
+                }
+            }
+
+            let token = self.o.peek_token(Mode::Normal).token;
+            match token.kind {
+                Token::Comma => {
+                    // Empty expression
+                    self.o.b.push_child(self.o.node_arena.add_node(
+                        EraNode::Empty,
+                        token.span,
+                        token.span,
+                    ));
+                    _ = self.o.bump();
+
+                    // Check limit
+                    count += 1;
+                    if count >= size_limit {
+                        // Too many expressions, exit early
+                        break true;
+                    }
+
+                    continue;
+                }
+                Token::LineBreak => break true,
+                _ => (),
+            }
+
+            let terminals = Terminal::Comma | Terminal::LineBreak;
+            let node = self.or_sync_to(|s| s.expression_bp(min_bp, true, terminals), terminals);
+            self.o.b.push_child(node);
+
+            if min_bp != 0 {
+                let token = self.o.peek_token(Mode::Normal).token;
+                if let Some((l_bp, _)) = infix_binding_power(token.kind) {
+                    if l_bp < min_bp {
+                        break false;
+                    }
+                }
+            }
+            if self.o.peek_token(Mode::Normal).token.kind == Token::LineBreak
+                || self
+                    .eat_sync(Mode::Normal, Token::Comma, terminals)
+                    .is_none()
+            {
+                // No comma, must be end of expression list
+                break false;
+            }
+        };
+
+        if count < size_limit && comma_ended {
+            // We want more expressions, and the last one was a comma
+            let span = self.o.l.current_src_span();
+            self.o
+                .b
+                .push_child(self.o.node_arena.add_node(EraNode::Empty, span, span));
+            count += 1;
+        }
+
+        let data = self
+            .o
+            .node_arena
+            .make_extra_data_ref_with_len(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = SrcSpan::new_covering(span, self.o.l.current_src_span());
+        Ok(self
+            .o
+            .node_arena
+            .add_node(EraNode::ListExpr(data), span, span))
+    }
+
+    /// Parses residual of expressions like `, var1, var2`.
+    fn comma_expr_list(&mut self, min_bp: u8) -> ParseResult<EraNodeRef> {
+        self.comma_expr_list_limit(min_bp, u64::MAX)
+    }
+
+    fn empty_comma_expr_list(&mut self) -> EraNodeRef {
+        let span = self.o.l.current_src_span();
+        let cp = self.o.b.checkpoint();
+        let data = self
+            .o
+            .node_arena
+            .make_extra_data_ref_with_len(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = SrcSpan::new_covering(span, self.o.l.current_src_span());
+        self.o
+            .node_arena
+            .add_node(EraNode::ListExpr(data), span, span)
+    }
+
+    fn expression(&mut self, pure: bool) -> ParseResult<EraNodeRef> {
+        self.expression_bp(0, pure, Terminal::LineBreak.into())
+    }
+
+    /// Parses an expression with given binding power.
+    ///
+    /// `pure` is used to determine whether to allow raw string literals in assignments
+    /// (i.e. whether we are parsing a statement or an expression).
+    fn expression_bp(
+        &mut self,
+        min_bp: u8,
+        pure: bool,
+        terminals: enumset::EnumSet<EraTerminalTokenKind>,
+    ) -> ParseResult<EraNodeRef> {
+        // HACK: Support special break_at symbols
+        let lexer_mode = if terminals.contains(Terminal::Percentage) {
+            // HACK: Do not parse `%value%=2` as `%value` and `%=2`
+            Mode::InlineNormal
+        } else {
+            Mode::Normal
+        };
+        let span = self.o.l.current_src_span();
+        let first = self.o.peek_token(lexer_mode);
+        let (first, first_lexeme) = (first.token, first.lexeme);
+        // Read lhs
+        let mut lhs = match first.kind {
+            Token::IntLiteral => self.integer_literal().unwrap(),
+            // TODO: Remove the branch `StringLiteral` since it's never produced by the lexer
+            Token::StringLiteral => self.plain_string_literal().unwrap(),
+            Token::StringFormStart => self.expression_strform().unwrap(),
+            Token::DoubleQuote => self.plain_string_literal().unwrap(),
+            Token::SingleQuote => self.quote_raw_strform().unwrap(),
+            Token::TernaryStrFormMarker => self.ternary_strform().unwrap(),
+            Token::LParen => {
+                _ = self.o.bump();
+                let terminals = terminals | Terminal::RParen;
+                let node = self.or_sync_to(|s| s.expression(true), terminals);
+                _ = self.eat_sync(lexer_mode, Token::RParen, terminals);
+                let span = self.span_to_now(span);
+                self.o
+                    .node_arena
+                    .add_node(EraNode::ExprParen(node), span, span)
+            }
+            Token::Identifier => self.identifier().unwrap(),
+            _ => {
+                // Handle prefix
+                if let Some(((), r_bp)) = prefix_binding_power(first.kind) {
+                    _ = self.o.bump();
+                    let node =
+                        self.or_sync_to(|s| s.expression_bp(r_bp, pure, terminals), terminals);
+                    let span = self.span_to_now(span);
+                    self.o
+                        .node_arena
+                        .add_node(EraNode::ExprPreUnary(first.kind, node), span, span)
+                } else {
+                    let mut diag = self.base_diag.clone();
+                    diag.span_err(
+                        Default::default(),
+                        first.span,
+                        format!("unexpected token in expression: {:?}", first.kind),
+                    );
+                    self.o.emit_diag(diag);
+                    return Err(());
+                }
+            }
+        };
+
+        // Got lhs, now try to read the rest
+        loop {
+            let peek_mode = lexer_mode;
+            let token = self.o.peek_token(peek_mode).token;
+
+            // HACK: Break at token
+            if let Ok(token) = token.kind.try_into() {
+                if terminals.contains(token) {
+                    break;
+                }
+            }
+
+            // Handle postfix
+            if let Some((l_bp, ())) = postfix_binding_power(token.kind) {
+                if l_bp < min_bp {
+                    break;
+                }
+
+                lhs = match token.kind {
+                    Token::LParen => {
+                        let args_list = self.paren_expr_list().unwrap();
+                        let span = self.span_to_now(span);
+                        self.o
+                            .node_arena
+                            .add_node(EraNode::ExprFunCall(lhs, args_list), span, span)
+                    }
+                    _ => {
+                        _ = self.o.bump();
+                        let span = self.span_to_now(span);
+                        self.o.node_arena.add_node(
+                            EraNode::ExprPostUnary(lhs, token.kind),
+                            span,
+                            span,
+                        )
+                    }
+                };
+
+                continue;
+            }
+
+            // Handle infix
+            if let Some((l_bp, r_bp)) = infix_binding_power(token.kind) {
+                if l_bp < min_bp {
+                    break;
+                }
+
+                lhs = match token.kind {
+                    Token::QuestionMark => {
+                        _ = self.o.bump();
+                        let then_expr = self
+                            .or_sync_to(|s| s.expression(true), terminals | Terminal::NumberSign);
+                        _ = self.eat_sync(
+                            lexer_mode,
+                            Token::NumberSign,
+                            terminals | Terminal::NumberSign,
+                        );
+                        let else_expr = self.expression_bp(r_bp, pure, terminals)?;
+                        let span = self.span_to_now(span);
+                        let (extra_data, _) =
+                            self.o.node_arena.extend_extra([then_expr.0, else_expr.0]);
+                        self.o.node_arena.add_node(
+                            EraNode::ExprTernary(lhs, extra_data),
+                            span,
+                            span,
+                        )
+                    }
+                    Token::Colon => {
+                        _ = self.o.bump();
+                        let cp = self.o.b.checkpoint();
+                        self.o.b.push_child(lhs);
+                        loop {
+                            let node = self
+                                .or_sync_to(|s| s.expression_bp(r_bp, pure, terminals), terminals);
+                            self.o.b.push_child(node);
+                            if self.try_eat(Mode::Normal, Token::Colon).is_none() {
+                                break;
+                            }
+                        }
+                        let data = self
+                            .o
+                            .node_arena
+                            .make_small_extra_data(self.o.b.finish_node(cp).map(|x| x.0));
+                        let span = self.span_to_now(span);
+                        self.o
+                            .node_arena
+                            .add_node(EraNode::ExprVarIdx(data), span, span)
+                    }
+                    Token::Assign => {
+                        _ = self.o.bump();
+                        let mut is_str_assign_mode = false;
+                        if !pure {
+                            // Check whether lhs is string variable
+                            let lhs = if let EraNode::ExprVarIdx(extra_data) =
+                                self.o.node_arena.get_node(lhs)
+                            {
+                                let children =
+                                    self.o.node_arena.get_small_extra_data_view(extra_data);
+                                EraNodeRef(children[0])
+                            } else {
+                                lhs
+                            };
+                            if let EraNode::Identifier(name) = self.o.node_arena.get_node(lhs) {
+                                let name = self.o.b.interner().resolve(name);
+                                if self.is_var_str(name) {
+                                    is_str_assign_mode = true;
+                                }
+                            }
+                        }
+                        let rhs = if is_str_assign_mode {
+                            self.raw_strform()
+                        } else {
+                            self.or_sync_to(|s| s.expression_bp(r_bp, pure, terminals), terminals)
+                        };
+                        let span = self.span_to_now(span);
+                        self.o.node_arena.add_node(
+                            EraNode::ExprBinary(lhs, token.kind.into(), rhs),
+                            span,
+                            span,
+                        )
+                    }
+                    Token::At => {
+                        _ = self.o.bump();
+                        let rhs =
+                            self.or_sync_to(|s| s.expression_bp(r_bp, pure, terminals), terminals);
+                        let span = self.span_to_now(span);
+                        self.o
+                            .node_arena
+                            .add_node(EraNode::ExprVarNamespace(lhs, rhs), span, span)
+                    }
+                    _ => {
+                        _ = self.o.bump();
+                        let rhs =
+                            self.or_sync_to(|s| s.expression_bp(r_bp, pure, terminals), terminals);
+                        let span = self.span_to_now(span);
+                        self.o.node_arena.add_node(
+                            EraNode::ExprBinary(lhs, token.kind.into(), rhs),
+                            span,
+                            span,
+                        )
+                    }
+                };
+
+                continue;
+            }
+
+            break;
+        }
+
+        Ok(lhs)
+    }
+
+    fn raw_string(&mut self) -> EraNodeRef {
+        let span = self.o.l.current_src_span();
+        let mut buf = String::new();
+        loop {
+            let result = self.o.peek_token(Mode::RawStr);
+            let token = result.token;
+            if token.kind == Token::PlainStringLiteral {
+                routines::unescape_to_sink(result.lexeme, &mut buf);
+                _ = self.o.bump();
+                continue;
+            }
+            match token.kind {
+                _ => break,
+            }
+        }
+
+        let token_key = self.o.b.interner().get_or_intern(&buf);
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::LiteralStr(token_key), span, span)
+    }
+
+    fn raw_strform(&mut self) -> EraNodeRef {
+        let mut buf = String::new();
+        let cp = self.o.b.checkpoint();
+        let span = self.o.l.current_src_span();
+        let mut literal_span = Default::default();
+        loop {
+            let result = self.o.peek_token(Mode::RawStrForm);
+            let token = result.token;
+            // Try concatenating plain string literals
+            if token.kind == Token::PlainStringLiteral {
+                if buf.is_empty() {
+                    literal_span = token.span;
+                }
+                routines::unescape_to_sink(result.lexeme, &mut buf);
+                _ = self.o.bump();
+
+                continue;
+            }
+            // Finish current string literal, prepare for expressions
+            if !buf.is_empty() {
+                let token_key = self.o.b.interner().get_or_intern(&buf);
+                let span = self.span_to_now(literal_span);
+                let node = self
+                    .o
+                    .node_arena
+                    .add_node(EraNode::LiteralStr(token_key), span, span);
+                self.o.b.push_child(node);
+                buf.clear();
+            }
+            match token.kind {
+                Token::LBrace => {
+                    let span = token.span;
+                    _ = self.o.bump();
+                    let node = self.strform_interp_part_rest(Terminal::RBrace, span);
+                    self.o.b.push_child(node);
+                }
+                Token::Percentage => {
+                    let span = token.span;
+                    _ = self.o.bump();
+                    let node = self.strform_interp_part_rest(Terminal::Percentage, span);
+                    self.o.b.push_child(node);
+                }
+                Token::TernaryStrFormMarker => {
+                    let node = self.ternary_strform().unwrap();
+                    self.o.b.push_child(node);
+                }
+                _ => break,
+            }
+        }
+
+        _ = self.expect_sync_to_newline();
+
+        let data = self
+            .o
+            .node_arena
+            .make_small_extra_data(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StringForm(data), span, span)
+    }
+
+    fn expression_strform(&mut self) -> ParseResult<EraNodeRef> {
+        let span = self.eat(Mode::Normal, Token::StringFormStart)?.token.span;
+        self.quoted_strform_rest(Mode::StrForm, span)
+    }
+
+    fn plain_expression_strform(&mut self) -> ParseResult<EraNodeRef> {
+        let span = self.eat(Mode::Normal, Token::DoubleQuote)?.token.span;
+        self.quoted_strform_rest(Mode::PlainStr, span)
+    }
+
+    /// Parses residual of quoted string form expressions (i.e. @"1{1+1}3").
+    fn quoted_strform_rest(&mut self, mode: Mode, span: SrcSpan) -> ParseResult<EraNodeRef> {
+        let mut buf = String::new();
+        let cp = self.o.b.checkpoint();
+        let mut literal_span = Default::default();
+        loop {
+            let result = self.o.peek_token(mode);
+            let token = result.token;
+            // Try concatenating plain string literals
+            if token.kind == Token::PlainStringLiteral {
+                if buf.is_empty() {
+                    literal_span = token.span;
+                }
+                routines::unescape_to_sink(result.lexeme, &mut buf);
+                _ = self.o.bump();
+
+                continue;
+            }
+            // Finish current string literal, prepare for expressions
+            if !buf.is_empty() {
+                let token_key = self.o.b.interner().get_or_intern(&buf);
+                let span = self.span_to_now(literal_span);
+                let node = self
+                    .o
+                    .node_arena
+                    .add_node(EraNode::LiteralStr(token_key), span, span);
+                self.o.b.push_child(node);
+                buf.clear();
+            }
+            match token.kind {
+                Token::LBrace => {
+                    let span = token.span;
+                    _ = self.o.bump();
+                    let node = self.strform_interp_part_rest(Terminal::RBrace, span);
+                    self.o.b.push_child(node);
+                }
+                Token::Percentage => {
+                    let span = token.span;
+                    _ = self.o.bump();
+                    let node = self.strform_interp_part_rest(Terminal::Percentage, span);
+                    self.o.b.push_child(node);
+                }
+                Token::TernaryStrFormMarker => {
+                    let node = self.ternary_strform().unwrap();
+                    self.o.b.push_child(node);
+                }
+                _ => break,
+            }
+        }
+
+        _ = self.eat_sync(
+            mode,
+            Token::DoubleQuote,
+            Terminal::DoubleQuote | Terminal::LineBreak,
+        );
+
+        let data = self
+            .o
+            .node_arena
+            .make_small_extra_data(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = self.span_to_now(span);
+        Ok(self
+            .o
+            .node_arena
+            .add_node(EraNode::StringForm(data), span, span))
+    }
+
+    fn strform_interp_part_rest(&mut self, terminal: Terminal, span: SrcSpan) -> EraNodeRef {
+        let terminal_token: Token = terminal.into();
+        let terminals = terminal | Terminal::Comma | Terminal::LineBreak;
+        let mode = if terminal == Terminal::Percentage {
+            Mode::InlineNormal
+        } else {
+            Mode::Normal
+        };
+        let cp = self.o.b.checkpoint();
+        // expr
+        let node = self.or_sync_to(|s| s.expression_bp(0, true, terminal.into()), terminals);
+        self.o.b.push_child(node);
+        // width
+        if self.o.peek_token(mode).token.kind != terminal_token
+            && self.eat_sync(mode, Token::Comma, terminals).is_some()
+        {
+            let node = self.or_sync_to(|s| s.expression_bp(0, true, terminal.into()), terminals);
+            self.o.b.push_child(node);
+        }
+        // alignment
+        if self.o.peek_token(mode).token.kind != terminal_token
+            && self.eat_sync(mode, Token::Comma, terminals).is_some()
+        {
+            // self.eat(mode, Token::Identifier)?;
+            let node = self.or_sync_to(|s| s.expression_bp(0, true, terminal.into()), terminals);
+            self.o.b.push_child(node);
+        }
+
+        _ = self.eat_sync(mode, terminal_token, terminal | Terminal::LineBreak);
+
+        let data = self
+            .o
+            .node_arena
+            .make_small_extra_data(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StringFormInterpPart(data), span, span)
+    }
+
+    fn ternary_strform(&mut self) -> ParseResult<EraNodeRef> {
+        let initial_span = self.o.l.current_src_span();
+        let mut buf = String::new();
+        let mut literal_span = Default::default();
+
+        self.eat(Mode::Normal, Token::TernaryStrFormMarker)?;
+
+        // cond
+        let terminals =
+            Terminal::QuestionMark | Terminal::TernaryStrFormMarker | Terminal::LineBreak;
+        let cond = self.or_sync_to(|s| s.expression_bp(0, true, terminals), terminals);
+        _ = self.eat_sync(Mode::Normal, Token::QuestionMark, terminals);
+
+        // then
+        let cp = self.o.b.checkpoint();
+        let span = self.o.l.current_src_span();
+        buf.clear();
+        loop {
+            let result = self.o.peek_token(Mode::TernaryStrForm);
+            let token = result.token;
+            if token.kind == Token::PlainStringLiteral {
+                if buf.is_empty() {
+                    literal_span = token.span;
+                }
+                routines::unescape_to_sink(result.lexeme, &mut buf);
+                _ = self.o.bump();
+                continue;
+            }
+            if !buf.is_empty() {
+                let token_key = self.o.b.interner().get_or_intern(&buf);
+                let span = self.span_to_now(literal_span);
+                let node = self
+                    .o
+                    .node_arena
+                    .add_node(EraNode::LiteralStr(token_key), span, span);
+                self.o.b.push_child(node);
+                buf.clear();
+            }
+            match token.kind {
+                Token::LBrace => {
+                    let span = token.span;
+                    _ = self.o.bump();
+                    let node = self.strform_interp_part_rest(Terminal::RBrace, span);
+                    self.o.b.push_child(node);
+                }
+                Token::Percentage => {
+                    let span = token.span;
+                    _ = self.o.bump();
+                    let node = self.strform_interp_part_rest(Terminal::Percentage, span);
+                    self.o.b.push_child(node);
+                }
+                // Token::NumberSign => {
+                //     _ = self.o.bump();
+                //     break;
+                // }
+                _ => break,
+            }
+        }
+
+        let data = self
+            .o
+            .node_arena
+            .make_small_extra_data(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = self.span_to_now(span);
+        let then = self
+            .o
+            .node_arena
+            .add_node(EraNode::StringForm(data), span, span);
+
+        _ = self.eat_sync(
+            Mode::TernaryStrForm,
+            Token::NumberSign,
+            Terminal::NumberSign | Terminal::TernaryStrFormMarker | Terminal::LineBreak,
+        );
+
+        // else
+        let cp = self.o.b.checkpoint();
+        let span = self.o.l.current_src_span();
+        buf.clear();
+        loop {
+            let result = self.o.peek_token(Mode::RawStrForm);
+            let token = result.token;
+            if token.kind == Token::PlainStringLiteral {
+                if buf.is_empty() {
+                    literal_span = token.span;
+                }
+                routines::unescape_to_sink(result.lexeme, &mut buf);
+                _ = self.o.bump();
+                continue;
+            }
+            if !buf.is_empty() {
+                let token_key = self.o.b.interner().get_or_intern(&buf);
+                let span = self.span_to_now(literal_span);
+                let node = self
+                    .o
+                    .node_arena
+                    .add_node(EraNode::LiteralStr(token_key), span, span);
+                self.o.b.push_child(node);
+                buf.clear();
+            }
+            match token.kind {
+                Token::LBrace => {
+                    let span = token.span;
+                    _ = self.o.bump();
+                    let node = self.strform_interp_part_rest(Terminal::RBrace, span);
+                    self.o.b.push_child(node);
+                }
+                Token::Percentage => {
+                    let span = token.span;
+                    _ = self.o.bump();
+                    let node = self.strform_interp_part_rest(Terminal::Percentage, span);
+                    self.o.b.push_child(node);
+                }
+                _ => break,
+            }
+        }
+
+        let data = self
+            .o
+            .node_arena
+            .make_small_extra_data(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = self.span_to_now(span);
+        let else_ = self
+            .o
+            .node_arena
+            .add_node(EraNode::StringForm(data), span, span);
+
+        _ = self.eat_sync(
+            Mode::RawStrForm,
+            Token::TernaryStrFormMarker,
+            Terminal::TernaryStrFormMarker | Terminal::LineBreak,
+        );
+
+        let (extra_data, _) = self.o.node_arena.extend_extra([then.0, else_.0]);
+        let span = self.span_to_now(initial_span);
+        Ok(self
+            .o
+            .node_arena
+            .add_node(EraNode::ExprTernary(cond, extra_data), span, span))
+    }
+
+    fn statement(&mut self) -> ParseResult<EraNodeRef> {
         use EraCmdArgFmt as CmdArg;
 
+        let span = self.o.l.current_src_span();
         let token = self.o.peek_token(Mode::Normal);
         let (token, lexeme) = (token.token, token.lexeme);
 
         match token.kind {
-            // Maybe commands or expressions
+            // Hold on; identifiers may be commands or expressions
             Token::Identifier => (),
             Token::Dollar => {
-                self.o.b.start_node(Token::LabelStmt);
                 _ = self.o.bump();
-                if self.eat(Mode::Normal, Token::Identifier).is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
-                }
-                self.o.b.finish_node();
-                return Ok(());
+                let label = self.identifier()?;
+                let span = self.span_to_now(span);
+                let node = self
+                    .o
+                    .node_arena
+                    .add_node(EraNode::StmtLabel(label), span, span);
+                return Ok(node);
             }
             Token::At => {
                 // TODO: Add suggestion for the most recent open block
@@ -743,53 +2379,38 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
                 return Err(());
             }
             _ => {
-                let cp = self.o.b.checkpoint();
-                if self.stmt_expression().is_err() {
-                    _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
-                }
-                return Ok(());
+                return Ok(self.stmt_expression());
             }
         }
 
-        // Handle commands or expressions
         trait Adhoc {
             fn r(&mut self) -> &mut Self;
         }
-        impl Adhoc for EraParserSite<'_, '_, '_, '_> {
+        impl Adhoc for EraParserSite<'_, '_, '_> {
             fn r(&mut self) -> &mut Self {
-                _ = self.o.bump_as(Token::KwIdent);
+                _ = self.o.bump();
                 self
             }
         }
 
         macro_rules! make {
+            // ($node:expr) => {{
+            //     _ = self.o.bump();
+            //     let node = $node;
+            //     let span = self.span_to_now(span);
+            //     self.o.node_arena.add_node(node, span, span)
+            // }};
+            // ($node:expr, $method:ident($($method_args:expr),*)) => {{
+            //     _ = self.o.bump();
+            //     let node = $node($method($($method_args),*));
+            //     let span = self.span_to_now(span);
+            //     self.o.node_arena.add_node(node, span, span)
+            // }};
             ($node:expr) => {{
-                self.o.b.start_node($node);
-                self.r();
-                self.o.b.finish_node();
-            }};
-            ($node:expr, $name:ident()) => {{
-                self.o.b.start_node($node);
-                if self.r().$name().is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
-                }
-                self.o.b.finish_node();
-            }};
-            ($node:expr, $name:ident($($args:expr),+)) => {{
-                self.o.b.start_node($node);
-                if self.r().$name($($args),+).is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
-                }
-                self.o.b.finish_node();
-            }};
-        }
-        macro_rules! make_wo_bump {
-            ($node:expr, $name:ident($($args:expr),+)) => {{
-                self.o.b.start_node($node);
-                if self.$name($($args),+).is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
-                }
-                self.o.b.finish_node();
+                _ = self.o.bump();
+                let node = $node;
+                let span = self.span_to_now(span);
+                self.o.node_arena.add_node(node, span, span)
             }};
         }
 
@@ -798,153 +2419,172 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
         const MAX_BUF_LEN: usize = 32;
         let Some(cmd) = crate::util::inline_to_ascii_uppercase::<MAX_BUF_LEN>(lexeme.as_bytes())
         else {
-            // NOTE: Cannot use `make!` because we cannot bump the token here.
-            let cp = self.o.b.checkpoint();
-            if self.stmt_expression().is_err() {
-                _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
-            }
-            return Ok(());
+            return Ok(self.stmt_expression());
         };
-        let cmd = cmd.as_bytes();
-        if let Some((arg_fmt, _)) = routines::recognize_print_cmd(cmd) {
-            make!(Token::PrintStmt, command_arg(arg_fmt));
-        } else if let Some((arg_fmt, _)) = routines::recognize_debugprint_cmd(cmd) {
-            make!(Token::DebugPrintStmt, command_arg(arg_fmt));
-        } else if let Some(_) = routines::recognize_printdata_cmd(cmd) {
-            make!(Token::PrintDataStmt, stmt_printdata());
+        let cmd = &cmd[..];
+        let node_ref = if let Some((arg_fmt, flags)) = routines::recognize_print_cmd(cmd) {
+            _ = self.o.bump();
+            let args_list = self.command_arg(arg_fmt);
+            let node = EraNode::StmtPrint(flags, args_list);
+            let span = self.span_to_now(span);
+            self.o.node_arena.add_node(node, span, span)
+        } else if let Some((arg_fmt, flags)) = routines::recognize_debugprint_cmd(cmd) {
+            make!(EraNode::StmtDebugPrint(flags, self.command_arg(arg_fmt)))
+        } else if let Some(flags) = routines::recognize_printdata_cmd(cmd) {
+            self.r().stmt_printdata(span, flags)
         } else {
             match cmd {
-                b"STRDATA" => make!(Token::StrDataStmt, stmt_strdata()),
-                b"IF" => {
-                    let start_span = self.o.bump_as(Token::KwIdent).token.span;
-                    make_wo_bump!(Token::IfStmt, stmt_if(start_span))
+                b"STRDATA" => self.r().stmt_strdata(span),
+                b"IF" => self.r().stmt_if(span),
+                b"SIF" => self.r().stmt_sif(span),
+                b"SELECTCASE" => self.r().stmt_selectcase(span),
+                b"WHILE" => self.r().stmt_while(span),
+                b"REPEAT" => self.r().stmt_repeat(span),
+                b"FOR" => self.r().stmt_for(span),
+                b"DO" => self.r().stmt_do_loop(span),
+                b"CALL" | b"CALLF" => make!(self.stmt_call_node(false, EraNode::StmtCall)),
+                b"CALLFORM" | b"CALLFORMF" => make!(self.stmt_call_node(true, EraNode::StmtCall)),
+                b"TRYCALL" | b"TRYCALLF" => make!(self.stmt_call_node(false, EraNode::StmtTryCall)),
+                b"TRYCALLFORM" | b"TRYCALLFORMF" => {
+                    make!(self.stmt_call_node(true, EraNode::StmtTryCall))
                 }
-                b"SIF" => make!(Token::IfStmt, stmt_sif()),
-                b"SELECTCASE" => make!(Token::SelectCaseStmt, stmt_selectcase()),
-                b"WHILE" => make!(Token::WhileStmt, stmt_while()),
-                b"REPEAT" => make!(Token::RepeatStmt, stmt_repeat()),
-                b"FOR" => make!(Token::ForStmt, stmt_for()),
-                b"DO" => make!(Token::DoLoopStmt, stmt_do_loop()),
-                b"CALL" | b"CALLF" => make!(Token::CallStmt, stmt_call()),
-                b"CALLFORM" | b"CALLFORMF" => make!(Token::CallStmt, stmt_callform()),
-                b"TRYCALL" | b"TRYCALLF" => make!(Token::TryCallStmt, stmt_call()),
-                b"TRYCALLFORM" | b"TRYCALLFORMF" => make!(Token::TryCallStmt, stmt_callform()),
-                b"TRYCCALL" | b"TRYCCALLF" => make!(Token::TryCCallStmt, stmt_tryccall()),
+                b"TRYCCALL" | b"TRYCCALLF" => {
+                    make!(self.stmt_tryccall_node(false, EraNode::StmtTryCCall))
+                }
                 b"TRYCCALLFORM" | b"TRYCCALLFORMF" => {
-                    make!(Token::TryCCallStmt, stmt_tryccallform())
+                    make!(self.stmt_tryccall_node(true, EraNode::StmtTryCCall))
                 }
-                b"JUMP" => make!(Token::JumpStmt, stmt_call()),
-                b"JUMPFORM" => make!(Token::JumpStmt, stmt_callform()),
-                b"TRYJUMP" => make!(Token::TryJumpStmt, stmt_call()),
-                b"TRYJUMPFORM" => make!(Token::TryJumpStmt, stmt_callform()),
-                b"TRYCJUMP" => make!(Token::TryCJumpStmt, stmt_tryccall()),
-                b"TRYCJUMPFORM" => make!(Token::TryCJumpStmt, stmt_tryccallform()),
-                b"TIMES" => make!(Token::TimesStmt, stmt_times()),
-                b"NOP" => make!(Token::NopStmt),
-                b"CONTINUE" => make!(Token::ContinueStmt),
-                b"BREAK" => make!(Token::BreakStmt),
-                b"RESTART" => make!(Token::RestartStmt),
-                b"RETURN" | b"RETURNF" => make!(Token::ReturnStmt, command_arg(CmdArg::Expression)),
-                b"THROW" => make!(Token::ThrowStmt, command_arg(CmdArg::RawStringForm)),
-                b"GOTO" => make!(Token::GotoStmt, command_arg(CmdArg::Expression)),
-                b"QUIT" => make!(Token::QuitStmt),
-                b"WAIT" => make!(Token::WaitStmt),
-                b"FORCEWAIT" => make!(Token::ForceWaitStmt),
-                b"WAITANYKEY" => make!(Token::WaitAnyKeyStmt),
-                // b"GCREATE" => make!(Token::GCreateStmt, command_arg(CmdArg::Expression)),
-                // b"GDISPOSE" => make!(Token::GDisposeStmt, command_arg(CmdArg::Expression)),
-                // b"GDRAWSPRITE" => make!(Token::GDrawSpriteStmt, command_arg(CmdArg::Expression)),
-                b"SPLIT" => make!(Token::SplitStmt, cmd_arg_limit(3, 4)),
-                b"SETBIT" => make!(Token::SetBitStmt, command_arg(CmdArg::Expression)),
-                b"CLEARBIT" => make!(Token::ClearBitStmt, command_arg(CmdArg::Expression)),
-                b"INVERTBIT" => make!(Token::InvertBitStmt, command_arg(CmdArg::Expression)),
-                b"SETCOLOR" => make!(Token::SetColorStmt, command_arg(CmdArg::Expression)),
-                b"RESETCOLOR" => make!(Token::ResetColorStmt),
-                b"SETBGCOLOR" => make!(Token::SetBgColorStmt, command_arg(CmdArg::Expression)),
-                b"RESETBGCOLOR" => make!(Token::ResetBgColorStmt),
-                b"VARSET" => make!(Token::VarSetStmt, cmd_arg_limit(1, 4)),
-                b"CVARSET" => make!(Token::CVarSetStmt, cmd_arg_limit(1, 5)),
-                b"VARSIZE" => make!(Token::VarSizeStmt, cmd_arg_limit(1, 1)),
-                b"SWAP" => make!(Token::SwapStmt, cmd_arg_limit(2, 2)),
-                b"HTML_PRINT" => make!(Token::HtmlPrintStmt, cmd_arg_limit(1, 1)),
-                b"PRINTBUTTON" => make!(Token::PrintButtonStmt, cmd_arg_limit(2, 2)),
-                b"PRINTBUTTONC" => make!(Token::PrintButtonCStmt, cmd_arg_limit(2, 2)),
-                b"PRINTBUTTONLC" => make!(Token::PrintButtonLCStmt, cmd_arg_limit(2, 2)),
-                b"ARRAYREMOVE" => make!(Token::ArrayRemoveStmt, cmd_arg_limit(3, 3)),
-                b"ARRAYSORT" => make!(Token::ArraySortStmt, cmd_arg_limit(1, 4)),
-                b"ARRAYMSORT" => make!(Token::ArrayMSortStmt, command_arg(CmdArg::Expression)),
-                b"ARRAYCOPY" => make!(Token::ArrayCopyStmt, cmd_arg_limit(2, 2)),
-                b"ARRAYSHIFT" => make!(Token::ArrayShiftStmt, cmd_arg_limit(3, 5)),
-                b"INPUT" => make!(Token::InputStmt, cmd_arg_limit(0, 3)),
-                b"INPUTS" => make!(Token::InputSStmt, cmd_arg_limit(0, 3)),
-                b"TINPUT" => make!(Token::TInputStmt, cmd_arg_limit(2, 5)),
-                b"TINPUTS" => make!(Token::TInputSStmt, cmd_arg_limit(2, 5)),
-                b"ONEINPUT" => make!(Token::OneInputStmt, cmd_arg_limit(0, 1)),
-                b"ONEINPUTS" => make!(Token::OneInputSStmt, cmd_arg_limit(0, 1)),
-                b"TONEINPUT" => make!(Token::TOneInputStmt, cmd_arg_limit(2, 5)),
-                b"TONEINPUTS" => make!(Token::TOneInputSStmt, cmd_arg_limit(2, 5)),
+                b"JUMP" => make!(self.stmt_call_node(false, EraNode::StmtJump)),
+                b"JUMPFORM" => make!(self.stmt_call_node(true, EraNode::StmtJump)),
+                b"TRYJUMP" => make!(self.stmt_call_node(false, EraNode::StmtTryJump)),
+                b"TRYJUMPFORM" => make!(self.stmt_call_node(true, EraNode::StmtTryJump)),
+                b"TRYCJUMP" => make!(self.stmt_tryccall_node(false, EraNode::StmtTryCJump)),
+                b"TRYCJUMPFORM" => make!(self.stmt_tryccall_node(true, EraNode::StmtTryCJump)),
+                b"TIMES" => make!(self.stmt_times()),
+                b"NOP" => make!(EraNode::StmtNop),
+                b"CONTINUE" => make!(EraNode::StmtContinue),
+                b"BREAK" => make!(EraNode::StmtBreak),
+                b"RESTART" => make!(EraNode::StmtRestart),
+                b"RETURN" | b"RETURNF" => {
+                    make!(EraNode::StmtReturn(self.command_arg(CmdArg::Expression)))
+                }
+                b"THROW" => make!(EraNode::StmtThrow(self.command_arg(CmdArg::RawStringForm))),
+                b"GOTO" => make!(EraNode::StmtGoto(self.command_arg(CmdArg::Expression))),
+                b"QUIT" => make!(EraNode::StmtQuit),
+                b"WAIT" => make!(EraNode::StmtWait),
+                b"FORCEWAIT" => make!(EraNode::StmtForceWait),
+                b"WAITANYKEY" => make!(EraNode::StmtWaitAnyKey),
+                // b"GCREATE" => make!(EraNode::StmtGCreate(self.command_arg(CmdArg::Expression))),
+                // b"GDISPOSE" => make!(EraNode::StmtGDispose(self.command_arg(CmdArg::Expression))),
+                // b"GDRAWSPRITE" => make!(EraNode::StmtGDrawSprite(self.command_arg(CmdArg::Expression))),
+                b"SPLIT" => make!(EraNode::StmtSplit(self.cmd_arg_limit(3, 4))),
+                b"SETBIT" => make!(EraNode::StmtSetBit(self.command_arg(CmdArg::Expression))),
+                b"CLEARBIT" => make!(EraNode::StmtClearBit(self.command_arg(CmdArg::Expression))),
+                b"INVERTBIT" => make!(EraNode::StmtInvertBit(self.command_arg(CmdArg::Expression))),
+                b"SETCOLOR" => make!(EraNode::StmtSetColor(self.command_arg(CmdArg::Expression))),
+                b"RESETCOLOR" => make!(EraNode::StmtResetColor),
+                b"SETBGCOLOR" => make!(EraNode::StmtSetBgColor(
+                    self.command_arg(CmdArg::Expression)
+                )),
+                b"RESETBGCOLOR" => make!(EraNode::StmtResetBgColor),
+                b"VARSET" => make!(EraNode::StmtVarSet(self.cmd_arg_limit(1, 4))),
+                b"CVARSET" => make!(EraNode::StmtCVarSet(self.cmd_arg_limit(1, 5))),
+                b"VARSIZE" => make!(EraNode::StmtVarSize(self.cmd_arg_limit(1, 1))),
+                b"SWAP" => make!(EraNode::StmtSwap(self.cmd_arg_limit(2, 2))),
+                b"HTML_PRINT" => make!(EraNode::StmtHtmlPrint(self.cmd_arg_limit(1, 1))),
+                b"PRINTBUTTON" => make!(EraNode::StmtPrintButton(self.cmd_arg_limit(2, 2))),
+                b"PRINTBUTTONC" => make!(EraNode::StmtPrintButtonC(self.cmd_arg_limit(2, 2))),
+                b"PRINTBUTTONLC" => make!(EraNode::StmtPrintButtonLC(self.cmd_arg_limit(2, 2))),
+                b"ARRAYREMOVE" => make!(EraNode::StmtArrayRemove(self.cmd_arg_limit(3, 3))),
+                b"ARRAYSORT" => make!(EraNode::StmtArraySort(self.cmd_arg_limit(1, 4))),
+                b"ARRAYMSORT" => make!(EraNode::StmtArrayMSort(
+                    self.command_arg(CmdArg::Expression)
+                )),
+                b"ARRAYCOPY" => make!(EraNode::StmtArrayCopy(self.cmd_arg_limit(2, 2))),
+                b"ARRAYSHIFT" => make!(EraNode::StmtArrayShift(self.cmd_arg_limit(3, 5))),
+                b"INPUT" => make!(EraNode::StmtInput(self.cmd_arg_limit(0, 3))),
+                b"INPUTS" => make!(EraNode::StmtInputS(self.cmd_arg_limit(0, 3))),
+                b"TINPUT" => make!(EraNode::StmtTInput(self.cmd_arg_limit(2, 5))),
+                b"TINPUTS" => make!(EraNode::StmtTInputS(self.cmd_arg_limit(2, 5))),
+                b"ONEINPUT" => make!(EraNode::StmtOneInput(self.cmd_arg_limit(0, 1))),
+                b"ONEINPUTS" => make!(EraNode::StmtOneInputS(self.cmd_arg_limit(0, 1))),
+                b"TONEINPUT" => make!(EraNode::StmtTOneInput(self.cmd_arg_limit(2, 5))),
+                b"TONEINPUTS" => make!(EraNode::StmtTOneInputS(self.cmd_arg_limit(2, 5))),
                 b"REUSELASTLINE" => {
-                    make!(Token::ReuseLastLineStmt, command_arg(CmdArg::RawStringForm))
+                    make!(EraNode::StmtReuseLastLine(
+                        self.command_arg(CmdArg::RawStringForm)
+                    ))
                 }
-                b"CLEARLINE" => make!(Token::ClearLineStmt, cmd_arg_limit(1, 1)),
-                b"DRAWLINE" => make!(Token::DrawLineStmt),
+                b"CLEARLINE" => make!(EraNode::StmtClearLine(self.cmd_arg_limit(1, 1))),
+                b"DRAWLINE" => make!(EraNode::StmtDrawLine),
                 b"CUSTOMDRAWLINE" => {
-                    make!(Token::CustomDrawLineStmt, command_arg(CmdArg::RawString))
+                    make!(EraNode::StmtCustomDrawLine(
+                        self.command_arg(CmdArg::RawString)
+                    ))
                 }
-                b"DRAWLINEFORM" => make!(
-                    Token::CustomDrawLineStmt,
-                    command_arg(CmdArg::RawStringForm)
-                ),
-                b"TWAIT" => make!(Token::TWaitStmt, cmd_arg_limit(2, 2)),
-                b"FONTSTYLE" => make!(Token::FontStyleStmt, cmd_arg_limit(1, 1)),
-                b"FONTBOLD" => make!(Token::FontBoldStmt),
-                b"FONTITALIC" => make!(Token::FontItalicStmt),
-                b"FONTREGULAR" => make!(Token::FontRegularStmt),
-                b"SETFONT" => make!(Token::SetFontStmt, cmd_arg_limit(1, 1)),
-                b"PUTFORM" => make!(Token::PutFormStmt, command_arg(CmdArg::RawStringForm)),
-                b"SKIPDISP" => make!(Token::SkipDispStmt, cmd_arg_limit(1, 1)),
-                b"BEGIN" => make!(Token::BeginStmt, cmd_arg_limit(1, 1)),
-                b"DOTRAIN" => make!(Token::DoTrainStmt, cmd_arg_limit(1, 1)),
-                b"REDRAW" => make!(Token::RedrawStmt, cmd_arg_limit(1, 1)),
-                b"STRLEN" => make!(Token::StrLenStmt, command_arg(CmdArg::RawString)),
-                b"STRLENFORM" => make!(Token::StrLenStmt, command_arg(CmdArg::RawStringForm)),
-                b"STRLENU" => make!(Token::StrLenUStmt, command_arg(CmdArg::RawString)),
-                b"STRLENFORMU" => make!(Token::StrLenUStmt, command_arg(CmdArg::RawStringForm)),
-                b"ALIGNMENT" => make!(Token::AlignmentStmt, cmd_arg_limit(1, 1)),
+                b"DRAWLINEFORM" => make!(EraNode::StmtCustomDrawLine(
+                    self.command_arg(CmdArg::RawStringForm)
+                )),
+                b"TWAIT" => make!(EraNode::StmtTWait(self.cmd_arg_limit(2, 2))),
+                b"FONTSTYLE" => make!(EraNode::StmtFontStyle(self.cmd_arg_limit(1, 1))),
+                b"FONTBOLD" => make!(EraNode::StmtFontBold),
+                b"FONTITALIC" => make!(EraNode::StmtFontItalic),
+                b"FONTREGULAR" => make!(EraNode::StmtFontRegular),
+                b"SETFONT" => make!(EraNode::StmtSetFont(self.cmd_arg_limit(1, 1))),
+                b"PUTFORM" => make!(EraNode::StmtPutForm(
+                    self.command_arg(CmdArg::RawStringForm)
+                )),
+                b"SKIPDISP" => make!(EraNode::StmtSkipDisp(self.cmd_arg_limit(1, 1))),
+                b"BEGIN" => make!(EraNode::StmtBegin(self.cmd_arg_limit(1, 1))),
+                b"DOTRAIN" => make!(EraNode::StmtDoTrain(self.cmd_arg_limit(1, 1))),
+                b"REDRAW" => make!(EraNode::StmtRedraw(self.cmd_arg_limit(1, 1))),
+                b"STRLEN" => make!(EraNode::StmtStrLen(self.command_arg(CmdArg::RawString))),
+                b"STRLENFORM" => {
+                    make!(EraNode::StmtStrLen(self.command_arg(CmdArg::RawStringForm)))
+                }
+                b"STRLENU" => make!(EraNode::StmtStrLenU(self.command_arg(CmdArg::RawString))),
+                b"STRLENFORMU" => make!(EraNode::StmtStrLenU(
+                    self.command_arg(CmdArg::RawStringForm)
+                )),
+                b"ALIGNMENT" => make!(EraNode::StmtAlignment(self.cmd_arg_limit(1, 1))),
                 b"TOOLTIP_SETDELAY" => {
-                    make!(Token::ToolTipSetDelayStmt, cmd_arg_limit(1, 1))
+                    make!(EraNode::StmtToolTipSetDelay(self.cmd_arg_limit(1, 1)))
                 }
                 b"TOOLTIP_SETDURATION" => {
-                    make!(Token::ToolTipSetDurationStmt, cmd_arg_limit(1, 1))
+                    make!(EraNode::StmtToolTipSetDuration(self.cmd_arg_limit(1, 1)))
                 }
-                b"RANDOMIZE" => make!(Token::RandomizeStmt, cmd_arg_limit(1, 1)),
-                b"DUMPRAND" => make!(Token::DumpRandStmt),
-                b"INITRAND" => make!(Token::InitRandStmt),
-                b"BAR" => make!(Token::BarStmt, cmd_arg_limit(3, 3)),
-                b"BARL" => make!(Token::BarLStmt, cmd_arg_limit(3, 3)),
-                b"ADDCHARA" => make!(Token::AddCharaStmt, command_arg(CmdArg::Expression)),
-                b"PICKUPCHARA" => make!(Token::PickUpCharaStmt, command_arg(CmdArg::Expression)),
-                b"DELCHARA" => make!(Token::DelCharaStmt, command_arg(CmdArg::Expression)),
-                b"SWAPCHARA" => make!(Token::SwapCharaStmt, cmd_arg_limit(2, 2)),
-                b"ADDCOPYCHARA" => make!(Token::AddCopyCharaStmt, cmd_arg_limit(1, 1)),
-                b"RESET_STAIN" => make!(Token::ResetStainStmt, cmd_arg_limit(1, 1)),
-                b"SAVECHARA" => make!(Token::SaveCharaStmt, cmd_arg_limit(3, u64::MAX)),
-                b"LOADCHARA" => make!(Token::LoadCharaStmt, cmd_arg_limit(1, 1)),
+                b"RANDOMIZE" => make!(EraNode::StmtRandomize(self.cmd_arg_limit(1, 1))),
+                b"DUMPRAND" => make!(EraNode::StmtDumpRand),
+                b"INITRAND" => make!(EraNode::StmtInitRand),
+                b"BAR" => make!(EraNode::StmtBar(self.cmd_arg_limit(3, 3))),
+                b"BARL" => make!(EraNode::StmtBarL(self.cmd_arg_limit(3, 3))),
+                b"ADDCHARA" => make!(EraNode::StmtAddChara(self.command_arg(CmdArg::Expression))),
+                b"PICKUPCHARA" => {
+                    make!(EraNode::StmtPickUpChara(
+                        self.command_arg(CmdArg::Expression)
+                    ))
+                }
+                b"DELCHARA" => make!(EraNode::StmtDelChara(self.command_arg(CmdArg::Expression))),
+                b"SWAPCHARA" => make!(EraNode::StmtSwapChara(self.cmd_arg_limit(2, 2))),
+                b"ADDCOPYCHARA" => make!(EraNode::StmtAddCopyChara(self.cmd_arg_limit(1, 1))),
+                b"RESET_STAIN" => make!(EraNode::StmtResetStain(self.cmd_arg_limit(1, 1))),
+                b"SAVECHARA" => make!(EraNode::StmtSaveChara(self.cmd_arg_limit(3, u64::MAX))),
+                b"LOADCHARA" => make!(EraNode::StmtLoadChara(self.cmd_arg_limit(1, 1))),
                 b"SETANIMETIMER" => {
-                    make!(Token::SetAnimeTimerStmt, cmd_arg_limit(1, 1))
+                    make!(EraNode::StmtSetAnimeTimer(self.cmd_arg_limit(1, 1)))
                 }
-                b"HTML_TAGSPLIT" => make!(Token::HtmlTagSplitStmt, cmd_arg_limit(1, 3)),
-                b"POWER" => make!(Token::PowerStmt, cmd_arg_limit(3, 3)),
-                b"LOADDATA" => make!(Token::LoadDataStmt, cmd_arg_limit(1, 1)),
-                b"SAVEDATA" => make!(Token::SaveDataStmt, cmd_arg_limit(2, 2)),
+                b"HTML_TAGSPLIT" => make!(EraNode::StmtHtmlTagSplit(self.cmd_arg_limit(1, 3))),
+                b"POWER" => make!(EraNode::StmtPower(self.cmd_arg_limit(3, 3))),
+                b"LOADDATA" => make!(EraNode::StmtLoadData(self.cmd_arg_limit(1, 1))),
+                b"SAVEDATA" => make!(EraNode::StmtSaveData(self.cmd_arg_limit(2, 2))),
                 // b"CHKDATA" => Cmd::CheckData(self.r().stmt_chkdata()?),
-                b"GETTIME" => make!(Token::GetTimeStmt),
-                b"LOADGLOBAL" => make!(Token::LoadGlobalStmt),
-                b"SAVEGLOBAL" => make!(Token::SaveGlobalStmt),
-                b"LOADGAME" => make!(Token::LoadGameStmt),
-                b"SAVEGAME" => make!(Token::SaveGameStmt),
-                b"DEBUGCLEAR" => make!(Token::DebugClearStmt),
-                b"RESETDATA" => make!(Token::ResetDataStmt),
+                b"GETTIME" => make!(EraNode::StmtGetTime),
+                b"LOADGLOBAL" => make!(EraNode::StmtLoadGlobal),
+                b"SAVEGLOBAL" => make!(EraNode::StmtSaveGlobal),
+                b"LOADGAME" => make!(EraNode::StmtLoadGame),
+                b"SAVEGAME" => make!(EraNode::StmtSaveGame),
+                b"DEBUGCLEAR" => make!(EraNode::StmtDebugClear),
+                b"RESETDATA" => make!(EraNode::StmtResetData),
                 b"GCREATE"
                 | b"GCREATEFROMFILE"
                 | b"GDISPOSE"
@@ -1055,104 +2695,144 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
                 | b"GETKEY"
                 | b"GETKEYTRIGGERED"
                 | b"FIND_CHARADATA"
-                | b"CHKDATA" => make!(Token::ResultCmdCallStmt, command_arg(CmdArg::Expression)),
-                _ => {
+                | b"CHKDATA" => {
                     // NOTE: Cannot use `make!` because we cannot bump the token here.
-                    let cp = self.o.b.checkpoint();
-                    if self.stmt_expression().is_err() {
-                        _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
-                    }
+                    let node = EraNode::StmtResultCmdCall(
+                        self.identifier().unwrap(),
+                        self.command_arg(CmdArg::Expression),
+                    );
+                    let span = self.span_to_now(span);
+                    self.o.node_arena.add_node(node, span, span)
+                }
+                _ => self.stmt_expression(),
+            }
+        };
+
+        Ok(node_ref)
+    }
+
+    /// Generates a node of type `ExprList` containing the arguments of a command.
+    fn command_arg(&mut self, arg_fmt: EraCmdArgFmt) -> EraNodeRef {
+        match arg_fmt {
+            EraCmdArgFmt::Expression
+            | EraCmdArgFmt::ExpressionS
+            | EraCmdArgFmt::ExpressionSForm => self.comma_expr_list(0).unwrap(),
+            EraCmdArgFmt::RawStringForm => self.raw_strform(),
+            EraCmdArgFmt::RawString => self.raw_string(),
+        }
+    }
+
+    fn cmd_arg_limit(&mut self, lower_limit: u64, upper_limit: u64) -> EraNodeRef {
+        // NOTE: arg limits are intentionally ignored for now
+        self.comma_expr_list(0).unwrap()
+    }
+
+    fn stmt_expression(&mut self) -> EraNodeRef {
+        let span = self.o.l.current_src_span();
+        let terminals = Terminal::LineBreak.into();
+        let expr = self.or_sync_to(|s| s.expression_bp(0, false, terminals), terminals);
+        // Handle special case: row assignment (e.g. `v = 1, 2, 3`)
+        let mut handle_row_assign = false;
+        if self.o.peek_token(Mode::Normal).token.kind == Token::Comma {
+            if let EraNode::ExprBinary(_, op, _) = self.o.node_arena.get_node(expr) {
+                let op: Token = op.into();
+                if matches!(op, Token::Assign | Token::ExprAssign) {
+                    handle_row_assign = true;
                 }
             }
         }
 
-        Ok(())
+        if handle_row_assign {
+            _ = self.o.bump();
+            let rhs_list = self.comma_expr_list(0).unwrap();
+            let span = self.span_to_now(span);
+            self.o
+                .node_arena
+                .add_node(EraNode::StmtRowAssign(expr, rhs_list), span, span)
+        } else {
+            let span = self.span_to_now(span);
+            self.o
+                .node_arena
+                .add_node(EraNode::StmtExpr(expr), span, span)
+        }
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_strdata(&mut self) -> ParseResult<()> {
-        if self.try_eat(Mode::Normal, Token::LineBreak).is_none() {
+    /// Parses rest of `PRINTDATA` command.
+    fn stmt_printdata(&mut self, span: SrcSpan, flags: EraPrintExtendedFlags) -> EraNodeRef {
+        let terminals = Terminal::LineBreak.into();
+        let dest = if self.try_eat(Mode::Normal, Token::LineBreak).is_none() {
             // var expression
-            if self
-                .safe_expression(true, Terminal::LineBreak.into())
-                .is_err()
-            {
-                return Ok(());
-            }
-            _ = self.expect_sync_to_newline();
-        }
+            self.or_sync_to(|s| s.expression_bp(0, true, terminals), terminals)
+        } else {
+            self.make_empty()
+        };
+
+        _ = self.expect_sync_to_newline();
 
         self.skip_newline();
-        self.stmt_printdata_data();
-
-        Ok(())
+        let data = self.stmt_printdata_data();
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StmtPrintData(flags.into(), dest, data), span, span)
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_printdata(&mut self) -> ParseResult<()> {
-        if self.try_eat(Mode::Normal, Token::LineBreak).is_none() {
+    fn stmt_strdata(&mut self, span: SrcSpan) -> EraNodeRef {
+        let terminals = Terminal::LineBreak.into();
+        let dest = if self.try_eat(Mode::Normal, Token::LineBreak).is_none() {
             // var expression
-            if self
-                .safe_expression(true, Terminal::LineBreak.into())
-                .is_err()
-            {
-                return Ok(());
-            }
-            _ = self.expect_sync_to_newline();
-        }
+            self.or_sync_to(|s| s.expression_bp(0, true, terminals), terminals)
+        } else {
+            self.make_empty()
+        };
+
+        _ = self.expect_sync_to_newline();
 
         self.skip_newline();
-        self.stmt_printdata_data();
-
-        Ok(())
+        let data = self.stmt_printdata_data();
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StmtStrData(dest, data), span, span)
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_printdata_data(&mut self) {
-        self.o.b.start_node(Token::StmtList);
+    fn stmt_printdata_data(&mut self) -> EraExtraDataRef {
+        let cp = self.o.b.checkpoint();
+
         loop {
-            if self.try_match_command("ENDDATA") {
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
+            if !self.expect_not_function_end() {
+                break;
+            }
+
+            let child = if self.try_match_command("ENDDATA") {
+                _ = self.o.bump();
                 break;
             } else if self.try_match_command("DATA") {
-                _ = self.o.bump_as(Token::KwIdent);
-                self.o.b.start_node(Token::StringForm);
-                if self.raw_string().is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
-                }
-                self.o.b.finish_node();
+                _ = self.o.bump();
+                self.raw_string()
             } else if self.try_match_command("DATAFORM") {
-                _ = self.o.bump_as(Token::KwIdent);
-                let cp = self.o.b.checkpoint();
-                if self.raw_strform().is_err() {
-                    _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
-                }
+                _ = self.o.bump();
+                self.raw_strform()
             } else if self.try_match_command("DATALIST") {
-                _ = self.o.bump_as(Token::KwIdent);
-
+                let span = self.o.l.current_src_span();
+                _ = self.o.bump();
                 _ = self.expect_sync_to_newline();
                 self.skip_newline();
-
-                self.o.b.start_node(Token::ExprList);
+                let cp = self.o.b.checkpoint();
                 loop {
-                    if self.try_match_command("ENDLIST") {
-                        self.o.b.finish_node();
-                        _ = self.o.bump_as(Token::KwIdent);
+                    if !self.expect_not_function_end() {
+                        break;
+                    }
+
+                    let child = if self.try_match_command("ENDLIST") {
+                        _ = self.o.bump();
                         break;
                     } else if self.try_match_command("DATA") {
-                        _ = self.o.bump_as(Token::KwIdent);
-                        self.o.b.start_node(Token::StringForm);
-                        if self.raw_string().is_err() {
-                            _ = self.sync_to(Terminal::LineBreak.into());
-                        }
-                        self.o.b.finish_node();
+                        _ = self.o.bump();
+                        self.raw_string()
                     } else if self.try_match_command("DATAFORM") {
-                        _ = self.o.bump_as(Token::KwIdent);
-                        let cp = self.o.b.checkpoint();
-                        if self.raw_strform().is_err() {
-                            _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
-                        }
+                        _ = self.o.bump();
+                        self.raw_strform()
                     } else {
                         let mut diag = self.base_diag.clone();
                         diag.span_err(
@@ -1161,15 +2841,21 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
                             "unknown command inside DATALIST",
                         );
                         self.o.emit_diag(diag);
-                        _ = self.sync_to(Terminal::LineBreak.into());
-                        // End early
-                        self.o.b.finish_node();
-                        break;
-                    }
-
+                        _ = self.sync_to_open(Terminal::LineBreak.into());
+                        continue;
+                    };
+                    self.o.b.push_child(child);
                     _ = self.expect_sync_to_newline();
                     self.skip_newline();
                 }
+                let data = self
+                    .o
+                    .node_arena
+                    .make_extra_data_ref_with_len(self.o.b.finish_node(cp).map(|x| x.0));
+                let span = self.span_to_now(span);
+                self.o
+                    .node_arena
+                    .add_node(EraNode::ListExpr(data), span, span)
             } else {
                 let mut diag = self.base_diag.clone();
                 diag.span_err(
@@ -1178,1849 +2864,539 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
                     "unknown command inside PRINTDATA",
                 );
                 self.o.emit_diag(diag);
-                _ = self.sync_to(Terminal::LineBreak.into());
-                // End early
-                self.o.b.finish_node();
-                break;
-            }
-
+                _ = self.sync_to_open(Terminal::LineBreak.into());
+                continue;
+            };
+            self.o.b.push_child(child);
             _ = self.expect_sync_to_newline();
             self.skip_newline();
         }
+
+        let (extra_data, _) = self
+            .o
+            .node_arena
+            .extend_extra_with_len(self.o.b.finish_node(cp).map(|x| x.0));
+
+        extra_data
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_if(&mut self, start_span: SrcSpan) -> ParseResult<()> {
+    fn stmt_if(&mut self, span: SrcSpan) -> EraNodeRef {
         let mut can_else = true;
+        let cp = self.o.b.checkpoint();
 
         // Condition
-        _ = self.safe_expression(true, Terminal::LineBreak.into());
+        let cond = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
+        self.o.b.push_child(cond);
+        _ = self.expect_sync_to_newline();
 
         // Body
-        _ = self.expect_sync_to_newline();
         self.skip_newline();
-        self.o.b.start_node(Token::StmtList);
         loop {
-            if can_else && self.try_match_command("ELSEIF") {
-                // Transition to next condition
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                _ = self.safe_expression(true, Terminal::LineBreak.into());
-                _ = self.expect_sync_to_newline();
-                self.skip_newline();
-                self.o.b.start_node(Token::StmtList);
-                continue;
+            let mut cond = None;
+            let (stmts, should_continue) = self.statements_list_with(|s| {
+                if can_else && s.try_match_command("ELSEIF") {
+                    // Transition to next condition
+                    _ = s.o.bump();
+                    cond = Some(s.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into()));
+                    _ = s.expect_sync_to_newline();
+                    ControlFlow::Break(Some(true))
+                } else if can_else && s.try_match_command("ELSE") {
+                    // Transition to else block
+                    can_else = false;
+                    _ = s.o.bump();
+                    ControlFlow::Break(Some(true))
+                } else if s.try_match_command("ENDIF") {
+                    // End of if block
+                    _ = s.o.bump();
+                    ControlFlow::Break(Some(false))
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+            self.o.b.push_child(stmts);
+            if let Some(cond) = cond {
+                self.o.b.push_child(cond);
             }
-            if can_else && self.try_match_command("ELSE") {
-                // Transition to else block
-                can_else = false;
-
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                _ = self.expect_sync_to_newline();
-                self.skip_newline();
-                self.o.b.start_node(Token::StmtList);
-                continue;
-            }
-            if self.try_match_command("ENDIF") {
-                // End of if block
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
+            let Some(should_continue) = should_continue else {
+                let mut diag = self.base_diag.clone();
+                diag.span_err(
+                    Default::default(),
+                    self.o.peek_token(Mode::Normal).token.span,
+                    "unexpected end of block in IF; did you forget to close a block?",
+                );
+                self.o.emit_diag(diag);
+                break;
+            };
+            if !should_continue {
                 break;
             }
-
-            match self.safe_statement() {
-                ControlFlow::Break(()) => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        self.o.peek_token(Mode::Normal).token.span,
-                        "unexpected end of block in IF; did you forget to close it?",
-                    );
-                    diag.span_note(Default::default(), start_span, "block started here");
-                    self.o.emit_diag(diag);
-
-                    self.o.b.finish_node();
-                    break;
-                }
-                ControlFlow::Continue(()) => self.skip_newline(),
-            }
+            _ = self.expect_sync_to_newline();
         }
-
-        Ok(())
+        let extra_data = self
+            .o
+            .node_arena
+            .make_extra_data_ref_with_len(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StmtIf(extra_data), span, span)
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_sif(&mut self) -> ParseResult<()> {
+    fn stmt_sif(&mut self, span: SrcSpan) -> EraNodeRef {
         // Condition
-        _ = self.safe_expression(true, Terminal::LineBreak.into());
+        let cond = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
+        _ = self.expect_sync_to_newline();
 
         // Body
-        _ = self.expect_sync_to_newline();
         self.skip_newline();
-        self.o.b.start_node(Token::StmtList);
-        // NOTE: `SIF` has only one statement as its body
-        if self.safe_statement().is_break() {
-            let mut diag = self.base_diag.clone();
-            diag.span_err(
-                Default::default(),
-                self.o.peek_token(Mode::Normal).token.span,
-                "unexpected end of block in SIF; did you forget to close it?",
-            );
-            self.o.emit_diag(diag);
-        }
-        self.o.b.finish_node();
+        let stmt = match self.safe_statement() {
+            ControlFlow::Break(_) => {
+                let mut diag = self.base_diag.clone();
+                diag.span_err(
+                    Default::default(),
+                    self.o.peek_token(Mode::Normal).token.span,
+                    "unexpected end of block in SIF; did you forget to close a block?",
+                );
+                self.o.emit_diag(diag);
+                self.or_sync_to(|_| Err(()), Terminal::LineBreak.into())
+            }
+            ControlFlow::Continue(stmt) => stmt,
+        };
 
-        Ok(())
+        let extra_data = self
+            .o
+            .node_arena
+            .make_extra_data_ref_with_len([cond.0, stmt.0]);
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StmtIf(extra_data), span, span)
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_selectcase(&mut self) -> ParseResult<()> {
+    fn stmt_selectcase(&mut self, span: SrcSpan) -> EraNodeRef {
         let mut can_else = true;
+        let mut last_is_case = false;
+        let cp = self.o.b.checkpoint();
 
         // Expression
-        _ = self.safe_expression(true, Terminal::LineBreak.into());
+        let expr = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
+        _ = self.expect_sync_to_newline();
 
         // Body
-        _ = self.expect_sync_to_newline();
         self.skip_newline();
-        self.o.b.start_node(Token::StmtList);
         loop {
-            if self.try_match_command("ENDSELECT") {
-                // End of select statement
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
+            let mut is_read_stmt = false;
+            let mut preds = None;
+            let (stmts, should_continue) = self.statements_list_with(|s| {
+                if s.try_match_command("ENDSELECT") {
+                    // End of select statement
+                    _ = s.o.bump();
+                    ControlFlow::Break(Some(false))
+                } else if can_else && s.try_match_command("CASE") {
+                    // Transition to next case
+                    _ = s.o.bump();
+                    preds = Some(s.stmt_selectcase_preds());
+                    ControlFlow::Break(Some(true))
+                } else if can_else && s.try_match_command("CASEELSE") {
+                    // Transition to else block
+                    can_else = false;
+                    _ = s.o.bump();
+                    ControlFlow::Break(Some(true))
+                } else {
+                    is_read_stmt = true;
+                    ControlFlow::Continue(())
+                }
+            });
+            if is_read_stmt && !last_is_case {
+                // Need to filter out statements before any cases
+                let mut diag = self.base_diag.clone();
+                diag.span_err(
+                    Default::default(),
+                    self.o.peek_token(Mode::Normal).token.span,
+                    "unreachable statements that do not belong to any case; ignoring",
+                );
+                self.o.emit_diag(diag);
+                _ = self.sync_to_open(Terminal::LineBreak.into());
+            } else {
+                self.o.b.push_child(stmts);
+            }
+            if let Some(preds) = preds {
+                self.o.b.push_child(preds);
+            }
+            let Some(should_continue) = should_continue else {
+                let mut diag = self.base_diag.clone();
+                diag.span_err(
+                    Default::default(),
+                    self.o.peek_token(Mode::Normal).token.span,
+                    "unexpected end of block in SELECTCASE; did you forget to close a block?",
+                );
+                self.o.emit_diag(diag);
+                break;
+            };
+            if !should_continue {
                 break;
             }
-
-            if can_else && self.try_match_command("CASE") {
-                // Transition to next case
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-
-                self.o.b.start_node(Token::SelectCasePredList);
-                if self.stmt_selectcase_case().is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
-                }
-                self.o.b.finish_node();
-
-                _ = self.expect_sync_to_newline();
-                self.skip_newline();
-                self.o.b.start_node(Token::StmtList);
-                continue;
-            }
-            if can_else && self.try_match_command("CASEELSE") {
-                // Transition to else block
-                can_else = false;
-
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                _ = self.expect_sync_to_newline();
-                self.skip_newline();
-                self.o.b.start_node(Token::StmtList);
-                continue;
-            }
-
-            match self.safe_statement() {
-                ControlFlow::Break(()) => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        self.o.peek_token(Mode::Normal).token.span,
-                        "unexpected end of block in SELECTCASE; did you forget to close it?",
-                    );
-                    self.o.emit_diag(diag);
-
-                    self.o.b.finish_node();
-                    break;
-                }
-                ControlFlow::Continue(()) => self.skip_newline(),
-            }
+            _ = self.expect_sync_to_newline();
+            last_is_case = true;
         }
 
-        Ok(())
+        let (extra_ref, _) = self
+            .o
+            .node_arena
+            .extend_extra_with_len(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StmtSelectCase(expr, extra_ref), span, span)
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_selectcase_case(&mut self) -> ParseResult<()> {
-        if self.o.peek_token(Mode::Normal).token.kind == Token::LineBreak {
-            return Ok(());
-        }
-
+    fn stmt_selectcase_preds(&mut self) -> EraNodeRef {
+        let terminals = Terminal::Comma | Terminal::LineBreak;
+        let cp = self.o.b.checkpoint();
+        let span = self.o.l.current_src_span();
         loop {
-            // if self.o.peek_token(Mode::Normal).token.kind == Token::Comma {
-            //     self.o.b.start_node(Token::EmptyExpr);
-            //     self.o.b.finish_node();
-            //     _ = self.o.bump();
-            //     continue;
-            // }
             match self.o.peek_token(Mode::Normal).token.kind {
                 Token::Comma => {
-                    self.o.b.start_node(Token::EmptyExpr);
-                    self.o.b.finish_node();
+                    // Empty condition
                     _ = self.o.bump();
+                    let child = self.make_empty();
+                    self.o.b.push_child(child);
                     continue;
                 }
                 Token::LineBreak => break,
                 _ => (),
             }
+
+            let span = self.o.l.current_src_span();
 
             // Condition
             if self.try_match_command("IS") {
                 // `IS <op> <expr>`
-                self.o.b.start_node(Token::SelectCaseCond);
-                _ = self.o.bump_as(Token::KwIdent); // `IS`
-                let result = (|| -> ParseResult<()> {
-                    if !matches!(
-                        self.o.peek_token(Mode::Normal).token.kind,
-                        Token::CmpEq
-                            | Token::CmpNEq
-                            | Token::CmpLT
-                            | Token::CmpGT
-                            | Token::CmpLEq
-                            | Token::CmpGEq
-                            | Token::BitAnd
-                    ) {
-                        let mut diag = self.base_diag.clone();
-                        diag.span_err(
-                            Default::default(),
-                            self.o.peek_token(Mode::Normal).token.span,
-                            "expected comparison operator in SELECTCASE",
-                        );
-                        self.o.emit_diag(diag);
-                        _ = self.sync_to(Terminal::Comma | Terminal::LineBreak);
-                        return Err(());
-                    }
+                _ = self.o.bump();
+                let token = self.o.peek_token(Mode::Normal).token;
+                if !matches!(
+                    token.kind,
+                    Token::CmpEq
+                        | Token::CmpNEq
+                        | Token::CmpLT
+                        | Token::CmpGT
+                        | Token::CmpLEq
+                        | Token::CmpGEq
+                        | Token::BitAnd
+                ) {
+                    let mut diag = self.base_diag.clone();
+                    diag.span_err(
+                        Default::default(),
+                        token.span,
+                        "expected comparison operator in SELECTCASE",
+                    );
+                    self.o.emit_diag(diag);
+                    _ = self.sync_to_open(Terminal::Comma | Terminal::LineBreak);
+                } else {
                     _ = self.o.bump();
-                    self.safe_expression(true, Terminal::Comma | Terminal::LineBreak)?;
-                    Ok(())
-                })();
-                self.o.b.finish_node();
-                if result.is_err() {
-                    if self.o.previous_token() == Token::Comma {
-                        // Reached comma
-                        continue;
-                    } else {
-                        // Reached newline
-                        return Ok(());
-                    }
+
+                    let op = token.kind;
+                    let rhs = self.or_sync_to(|s| s.expression(true), terminals);
+
+                    let span = self.span_to_now(span);
+                    let node = self.o.node_arena.add_node(
+                        EraNode::SelectCaseCondOperator(op, rhs),
+                        span,
+                        span,
+                    );
+                    self.o.b.push_child(node);
                 }
             } else {
                 // Single or range
-                let cp = self.o.b.checkpoint();
-                let result = (|| -> ParseResult<()> {
-                    self.safe_expression(true, Terminal::Comma | Terminal::LineBreak)?;
-                    if self.try_match_command("TO") {
-                        // Range
-                        self.o.b.start_node_at(cp, Token::SelectCaseRange);
-                        _ = self.o.bump_as(Token::KwIdent); // `TO`
-                        if self
-                            .safe_expression(true, Terminal::Comma | Terminal::LineBreak)
-                            .is_err()
-                        {
-                            self.o.b.finish_node();
-                            return Err(());
-                        }
-                        self.o.b.finish_node();
-                    } else {
-                        // Single
-                        self.o.b.start_node_at(cp, Token::SelectCaseSingle);
-                        self.o.b.finish_node();
-                    }
-                    Ok(())
-                })();
-                if result.is_err() {
-                    if self.o.previous_token() == Token::Comma {
-                        // Reached comma
-                        continue;
-                    } else {
-                        // Reached newline
-                        return Ok(());
-                    }
-                }
+                let lhs = self.or_sync_to(|s| s.expression(true), terminals);
+                let node = if self.try_match_command("TO") {
+                    // Range
+                    _ = self.o.bump();
+                    let rhs = self.or_sync_to(|s| s.expression(true), terminals);
+                    let span = self.span_to_now(span);
+                    self.o
+                        .node_arena
+                        .add_node(EraNode::SelectCaseCondRange(lhs, rhs), span, span)
+                } else {
+                    // Single
+                    let span = self.span_to_now(span);
+                    self.o
+                        .node_arena
+                        .add_node(EraNode::SelectCaseCondSingle(lhs), span, span)
+                };
+                self.o.b.push_child(node);
             }
 
-            // If no comma, must be end of expression list
-            if self.try_eat(Mode::Normal, Token::Comma).is_none() {
+            if self.o.peek_token(Mode::Normal).token.kind == Token::LineBreak
+                || self
+                    .eat_sync(Mode::Normal, Token::Comma, terminals)
+                    .is_none()
+            {
                 break;
             }
         }
-
-        Ok(())
+        let extra_ref = self
+            .o
+            .node_arena
+            .make_extra_data_ref_with_len(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::ListSelectCasePred(extra_ref), span, span)
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_while(&mut self) -> ParseResult<()> {
-        // Condition
-        _ = self.safe_expression(true, Terminal::LineBreak.into());
-
-        // Body
+    fn stmt_while(&mut self, span: SrcSpan) -> EraNodeRef {
+        let cond = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
         _ = self.expect_sync_to_newline();
-        self.skip_newline();
-        self.o.b.start_node(Token::StmtList);
-        loop {
-            if self.try_match_command("WEND") {
-                // End of while block
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                break;
-            }
-
-            match self.safe_statement() {
-                ControlFlow::Break(()) => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        self.o.peek_token(Mode::Normal).token.span,
-                        "unexpected end of block in WHILE; did you forget to close it?",
-                    );
-                    self.o.emit_diag(diag);
-
-                    self.o.b.finish_node();
-                    break;
-                }
-                ControlFlow::Continue(()) => self.skip_newline(),
-            }
+        let (stmts, cmd_ended) = self.statements_list(Some("WEND"));
+        if !cmd_ended {
+            let mut diag = self.base_diag.clone();
+            diag.span_err(
+                Default::default(),
+                self.o.peek_token(Mode::Normal).token.span,
+                "unexpected end of block in WHILE; did you forget to close a block?",
+            );
+            self.o.emit_diag(diag);
         }
-
-        Ok(())
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StmtWhile(cond, stmts), span, span)
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_repeat(&mut self) -> ParseResult<()> {
-        // Count
-        _ = self.safe_expression(true, Terminal::LineBreak.into());
-
-        // Body
+    fn stmt_repeat(&mut self, span: SrcSpan) -> EraNodeRef {
+        let count = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
         _ = self.expect_sync_to_newline();
-        self.skip_newline();
-        self.o.b.start_node(Token::StmtList);
-        loop {
-            if self.try_match_command("REND") {
-                // End of repeat block
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                break;
-            }
-
-            match self.safe_statement() {
-                ControlFlow::Break(()) => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        self.o.peek_token(Mode::Normal).token.span,
-                        "unexpected end of block in REPEAT; did you forget to close it?",
-                    );
-                    self.o.emit_diag(diag);
-
-                    self.o.b.finish_node();
-                    break;
-                }
-                ControlFlow::Continue(()) => self.skip_newline(),
-            }
+        let (stmts, cmd_ended) = self.statements_list(Some("REND"));
+        if !cmd_ended {
+            let mut diag = self.base_diag.clone();
+            diag.span_err(
+                Default::default(),
+                self.o.peek_token(Mode::Normal).token.span,
+                "unexpected end of block in REPEAT; did you forget to close a block?",
+            );
+            self.o.emit_diag(diag);
         }
-
-        Ok(())
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StmtRepeat(count, stmts), span, span)
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_for(&mut self) -> ParseResult<()> {
-        // <var, start, end, step>
-        self.o.b.start_node(Token::ExprList);
-        if self.comma_expr_list_limit(0, 4).is_err() {
-            _ = self.sync_to(Terminal::LineBreak.into());
-        }
-        self.o.b.finish_node();
-
-        // Body
+    fn stmt_for(&mut self, span: SrcSpan) -> EraNodeRef {
+        let terminals = Terminal::Comma | Terminal::LineBreak;
+        let var = self.or_sync_to(|s| s.expression(true), terminals);
+        self.eat_sync(Mode::Normal, Token::Comma, terminals);
+        let start = self.or_sync_to(|s| s.expression(true), terminals);
+        self.eat_sync(Mode::Normal, Token::Comma, terminals);
+        let end = self.or_sync_to(|s| s.expression(true), terminals);
+        let step = if self.next_is_newline()
+            || self
+                .eat_sync(Mode::Normal, Token::Comma, terminals)
+                .is_none()
+        {
+            self.make_empty()
+        } else {
+            self.or_sync_to(|s| s.expression(true), terminals)
+        };
         _ = self.expect_sync_to_newline();
-        self.skip_newline();
-        self.o.b.start_node(Token::StmtList);
-        loop {
-            if self.try_match_command("NEXT") {
-                // End of for block
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                break;
-            }
-
-            match self.safe_statement() {
-                ControlFlow::Break(()) => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        self.o.peek_token(Mode::Normal).token.span,
-                        "unexpected end of block in FOR; did you forget to close it?",
-                    );
-                    self.o.emit_diag(diag);
-
-                    self.o.b.finish_node();
-                    break;
-                }
-                ControlFlow::Continue(()) => self.skip_newline(),
-            }
+        let (stmts, cmd_ended) = self.statements_list(Some("NEXT"));
+        if !cmd_ended {
+            let mut diag = self.base_diag.clone();
+            diag.span_err(
+                Default::default(),
+                self.o.peek_token(Mode::Normal).token.span,
+                "unexpected end of block in FOR; did you forget to close a block?",
+            );
+            self.o.emit_diag(diag);
         }
-
-        Ok(())
+        let (extra_ref, _) = self
+            .o
+            .node_arena
+            .extend_extra([start.0, end.0, step.0, stmts.0]);
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StmtFor(var, extra_ref), span, span)
     }
 
-    /// `{NODE BORROW}`
-    fn stmt_do_loop(&mut self) -> ParseResult<()> {
-        // Body
+    fn stmt_do_loop(&mut self, span: SrcSpan) -> EraNodeRef {
         _ = self.expect_sync_to_newline();
-        self.skip_newline();
-        self.o.b.start_node(Token::StmtList);
+        let (stmts, cmd_ended) = self.statements_list(Some("LOOP"));
+        if !cmd_ended {
+            let mut diag = self.base_diag.clone();
+            diag.span_err(
+                Default::default(),
+                self.o.peek_token(Mode::Normal).token.span,
+                "unexpected end of block in DO-LOOP; did you forget to close a block?",
+            );
+            self.o.emit_diag(diag);
+        }
+        let cond = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StmtDoLoop(stmts, cond), span, span)
+    }
+
+    fn stmt_call_part(&mut self, is_form: bool) -> (EraNodeRef, EraNodeRef) {
+        let func = if is_form {
+            self.call_nameform()
+        } else {
+            self.or_sync_to(Self::identifier, Terminal::LineBreak.into())
+        };
+        let args = self.stmt_call_args();
+        (func, args)
+    }
+
+    fn stmt_call_node<F>(&mut self, is_form: bool, f: F) -> EraNode
+    where
+        F: FnOnce(EraNodeRef, EraNodeRef) -> EraNode,
+    {
+        let (func, args) = self.stmt_call_part(is_form);
+        f(func, args)
+    }
+
+    fn stmt_tryccall_node<F>(&mut self, is_form: bool, f: F) -> EraNode
+    where
+        F: FnOnce(EraNodeRef, EraExtraDataRef) -> EraNode,
+    {
+        let (func, args) = self.stmt_call_part(is_form);
+        _ = self.expect_sync_to_newline();
+
+        let (then_stmts, good) = self.statements_list(Some("CATCH"));
+        if !good {
+            let mut diag = self.base_diag.clone();
+            diag.span_err(
+                Default::default(),
+                self.o.peek_token(Mode::Normal).token.span,
+                "unexpected end of block in TRYCCALL; did you forget to close a block?",
+            );
+            self.o.emit_diag(diag);
+        }
+        let (catch_stmts, good) = self.statements_list(Some("ENDCATCH"));
+        if !good {
+            let mut diag = self.base_diag.clone();
+            diag.span_err(
+                Default::default(),
+                self.o.peek_token(Mode::Normal).token.span,
+                "unexpected end of block in TRYCCALL; did you forget to close a block?",
+            );
+            self.o.emit_diag(diag);
+        }
+
+        let (extra_data, _) = self
+            .o
+            .node_arena
+            .extend_extra([args.0, then_stmts.0, catch_stmts.0]);
+        f(func, extra_data)
+    }
+
+    fn call_nameform(&mut self) -> EraNodeRef {
+        let mut buf = String::new();
+        let cp = self.o.b.checkpoint();
+        let span = self.o.l.current_src_span();
+        let mut literal_span = Default::default();
         loop {
-            if self.try_match_command("LOOP") {
-                // End of do loop block
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                break;
-            }
-
-            match self.safe_statement() {
-                ControlFlow::Break(()) => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        self.o.peek_token(Mode::Normal).token.span,
-                        "unexpected end of block in DO LOOP; did you forget to close it?",
-                    );
-                    self.o.emit_diag(diag);
-
-                    self.o.b.finish_node();
-                    return Ok(()); // End early
+            let result = self.o.peek_token(Mode::CallForm);
+            let token = result.token;
+            // Try concatenating plain string literals
+            if token.kind == Token::PlainStringLiteral {
+                if buf.is_empty() {
+                    literal_span = token.span;
                 }
-                ControlFlow::Continue(()) => self.skip_newline(),
+                routines::unescape_to_sink(result.lexeme, &mut buf);
+                _ = self.o.bump();
+
+                continue;
+            }
+            // Finish current string literal, prepare for expressions
+            if !buf.is_empty() {
+                let token_key = self.o.b.interner().get_or_intern(&buf);
+                let span = self.span_to_now(literal_span);
+                let node = self
+                    .o
+                    .node_arena
+                    .add_node(EraNode::LiteralStr(token_key), span, span);
+                self.o.b.push_child(node);
+                buf.clear();
+            }
+            match token.kind {
+                Token::LBrace => {
+                    let span = token.span;
+                    _ = self.o.bump();
+                    let node = self.strform_interp_part_rest(Terminal::RBrace, span);
+                    self.o.b.push_child(node);
+                }
+                Token::Percentage => {
+                    let span = token.span;
+                    _ = self.o.bump();
+                    let node = self.strform_interp_part_rest(Terminal::Percentage, span);
+                    self.o.b.push_child(node);
+                }
+                _ => break,
             }
         }
 
-        // Condition
-        _ = self.safe_expression(true, Terminal::LineBreak.into());
-
-        Ok(())
+        let data = self
+            .o
+            .node_arena
+            .make_small_extra_data(self.o.b.finish_node(cp).map(|x| x.0));
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::StringForm(data), span, span)
     }
 
-    /// `{NODE OWN}`
-    fn stmt_call_args(&mut self) {
-        self.o.b.start_node(Token::ExprList);
+    fn stmt_call_args(&mut self) -> EraNodeRef {
         let token = self.o.peek_token(Mode::Normal).token.kind;
         if token == Token::Comma {
-            _ = self.o.bump();
-            if self.comma_expr_list(0).is_err() {
-                _ = self.sync_to(Terminal::LineBreak.into());
-            }
+            self.comma_expr_list(0).unwrap()
         } else if token == Token::LParen {
-            _ = self.o.bump();
-            if self.paren_expr_list().is_err() {
-                _ = self.sync_to(Terminal::LineBreak.into());
-            }
-        }
-        self.o.b.finish_node();
-    }
-
-    /// `{NODE BORROW}`
-    fn stmt_call_nameform(&mut self) -> ParseResult<()> {
-        // Function name
-        loop {
-            let token = self.o.peek_token(Mode::CallForm).token;
-            match token.kind {
-                Token::PlainStringLiteral => _ = self.o.bump(),
-                Token::LBrace => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    _ = self.o.bump();
-                    if self.strform_interp_part(Terminal::RBrace).is_err() {
-                        _ = self.sync_to(Terminal::RBrace | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                }
-                Token::Percentage => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    _ = self.o.bump();
-                    if self.strform_interp_part(Terminal::Percentage).is_err() {
-                        _ = self.sync_to(Terminal::Percentage | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                }
-                Token::TernaryStrFormMarker => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    self.o.b.start_node(Token::TernaryExpr);
-                    _ = self.o.bump();
-                    if self.ternary_strform().is_err() {
-                        _ = self.sync_to(Terminal::TernaryStrFormMarker | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                    self.o.b.finish_node();
-                }
-                Token::LParen | Token::Comma | Token::LineBreak => break,
-                _ => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        token.span,
-                        format!("unexpected token in string form: {:?}", token.kind),
-                    );
-                    self.o.emit_diag(diag);
-                    return Err(());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    fn stmt_call(&mut self) -> ParseResult<()> {
-        // Function name
-        if self.eat(Mode::Normal, Token::Identifier).is_err() {
-            _ = self.sync_to(Terminal::LineBreak.into());
-        }
-
-        // Arguments
-        self.stmt_call_args();
-
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    fn stmt_callform(&mut self) -> ParseResult<()> {
-        // Function name
-        self.o.b.start_node(Token::StringForm);
-        if self.stmt_call_nameform().is_err() {
-            _ = self.sync_to(Terminal::LineBreak.into());
-        }
-        self.o.b.finish_node();
-
-        // Arguments
-        self.stmt_call_args();
-
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    fn stmt_tryccall(&mut self) -> ParseResult<()> {
-        let mut can_catch = true;
-
-        // Function name
-        if self.eat(Mode::Normal, Token::Identifier).is_err() {
-            _ = self.sync_to(Terminal::LineBreak.into());
-        }
-
-        // Arguments
-        self.stmt_call_args();
-
-        // Then & catch body
-        _ = self.expect_sync_to_newline();
-        self.skip_newline();
-        self.o.b.start_node(Token::StmtList);
-        loop {
-            if can_catch && self.try_match_command("CATCH") {
-                // Transition to catch block
-                can_catch = false;
-
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                _ = self.expect_sync_to_newline();
-                self.skip_newline();
-                self.o.b.start_node(Token::StmtList);
-                continue;
-            }
-            if self.try_match_command("ENDCATCH") {
-                // End of try block
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                break;
-            }
-
-            match self.safe_statement() {
-                ControlFlow::Break(()) => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        self.o.peek_token(Mode::Normal).token.span,
-                        "unexpected end of block in TRYCCALL; did you forget to close it?",
-                    );
-                    self.o.emit_diag(diag);
-
-                    self.o.b.finish_node();
-                    break;
-                }
-                ControlFlow::Continue(()) => self.skip_newline(),
-            }
-        }
-
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    fn stmt_tryccallform(&mut self) -> ParseResult<()> {
-        let mut can_catch = true;
-
-        // Function name
-        self.o.b.start_node(Token::StringForm);
-        if self.stmt_call_nameform().is_err() {
-            _ = self.sync_to(Terminal::LineBreak.into());
-        }
-        self.o.b.finish_node();
-
-        // Arguments
-        self.stmt_call_args();
-
-        // Then & catch body
-        _ = self.expect_sync_to_newline();
-        self.skip_newline();
-        self.o.b.start_node(Token::StmtList);
-        loop {
-            if can_catch && self.try_match_command("CATCH") {
-                // Transition to catch block
-                can_catch = false;
-
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                _ = self.expect_sync_to_newline();
-                self.skip_newline();
-                self.o.b.start_node(Token::StmtList);
-                continue;
-            }
-            if self.try_match_command("ENDCATCH") {
-                // End of try block
-                self.o.b.finish_node();
-                _ = self.o.bump_as(Token::KwIdent);
-                break;
-            }
-
-            match self.safe_statement() {
-                ControlFlow::Break(()) => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        self.o.peek_token(Mode::Normal).token.span,
-                        "unexpected end of block in TRYCCALLFORM; did you forget to close it?",
-                    );
-                    self.o.emit_diag(diag);
-
-                    self.o.b.finish_node();
-                    break;
-                }
-                ControlFlow::Continue(()) => self.skip_newline(),
-            }
-        }
-
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    fn stmt_times(&mut self) -> ParseResult<()> {
-        if self
-            .safe_expression(true, Terminal::LineBreak.into())
-            .is_err()
-        {
-            return Ok(());
-        }
-
-        if self.eat(Mode::Normal, Token::Comma).is_err() {
-            _ = self.sync_to(Terminal::LineBreak.into());
-        }
-
-        // Factor (floating point, read as raw string instead)
-        self.o.b.start_node(Token::StringForm);
-        if self.raw_string().is_err() {
-            _ = self.sync_to(Terminal::LineBreak.into());
-        }
-        self.o.b.finish_node();
-
-        Ok(())
-    }
-
-    /// `{NODE OWN}`
-    ///
-    /// Generates a node of type `ExprList` containing the arguments of a command.
-    fn command_arg(&mut self, arg_fmt: EraCmdArgFmt) -> ParseResult<()> {
-        self.o.b.start_node(Token::ExprList);
-        match arg_fmt {
-            EraCmdArgFmt::Expression
-            | EraCmdArgFmt::ExpressionS
-            | EraCmdArgFmt::ExpressionSForm => {
-                if self.comma_expr_list(0).is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
-                }
-            }
-            EraCmdArgFmt::RawStringForm => {
-                let cp = self.o.b.checkpoint();
-                if self.raw_strform().is_err() {
-                    _ = self.sync_cp_to(Terminal::LineBreak.into(), cp);
-                }
-            }
-            EraCmdArgFmt::RawString => {
-                self.o.b.start_node(Token::StringForm);
-                if self.raw_string().is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
-                }
-                self.o.b.finish_node();
-            }
-        }
-        self.o.b.finish_node();
-        Ok(())
-    }
-
-    fn cmd_arg_limit(&mut self, lower_limit: u64, upper_limit: u64) -> ParseResult<()> {
-        self.o.b.start_node(Token::ExprList);
-        match self.comma_expr_list_limit(0, upper_limit) {
-            Ok(count) => {
-                if count < lower_limit {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        self.o.peek_token(Mode::Normal).token.span,
-                        format!("expected at least {} arguments", lower_limit),
-                    );
-                    self.o.emit_diag(diag);
-                } else if count > upper_limit {
-                    // No need to emit a diagnostic here, it is handled by the caller
-                }
-            }
-            Err(_) => {
-                _ = self.sync_to(Terminal::LineBreak.into());
-            }
-        }
-        self.o.b.finish_node();
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    fn raw_string(&mut self) -> ParseResult<()> {
-        loop {
-            let token = self.o.peek_token(Mode::RawStr).token;
-            match token.kind {
-                EraTokenKind::PlainStringLiteral => _ = self.o.bump(),
-                EraTokenKind::LineBreak => break,
-                _ => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        token.span,
-                        format!("unexpected token in raw string: {:?}", token.kind),
-                    );
-                    self.o.emit_diag(diag);
-                    return Err(());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// `{NODE OWN}`
-    fn stmt_expression(&mut self) -> ParseResult<()> {
-        let cp = self.o.b.checkpoint();
-
-        let Ok(last_token) = self.safe_expression(false, Terminal::LineBreak.into()) else {
-            return Ok(());
-        };
-
-        // Handle special case: row assignment (e.g. `v = 1, 2, 3`)
-        if matches!(last_token, Token::Assign | Token::ExprAssign) {
-            if self.o.peek_token(Mode::Normal).token.kind == Token::Comma {
-                self.o.b.start_node_at(cp, Token::RowAssignStmt);
-                self.o.b.start_node(Token::ExprList);
-                _ = self.o.bump();
-                if self.comma_expr_list(0).is_err() {
-                    _ = self.sync_to(Terminal::LineBreak.into());
-                }
-                self.o.b.finish_node();
-                self.o.b.finish_node();
-                return Ok(());
-            }
-        }
-
-        self.o.b.start_node_at(cp, Token::ExprStmt);
-        self.o.b.finish_node();
-
-        Ok(())
-    }
-
-    /// `{NODE OWN}`
-    fn expression(&mut self, pure: bool) -> ParseResult<Token> {
-        self.expression_bp(0, pure, Terminal::LineBreak.into())
-    }
-
-    /// `{NODE OWN}`
-    ///
-    /// Like `expression`, but guarantees that an Invalid node is created if it fails.
-    fn safe_expression(
-        &mut self,
-        pure: bool,
-        terminals: enumset::EnumSet<EraTerminalTokenKind>,
-    ) -> ParseResult<Token> {
-        let cp = self.o.b.checkpoint();
-        let Ok(token) = self.expression(pure) else {
-            _ = self.sync_cp_to(terminals, cp);
-            return Err(());
-        };
-        Ok(token)
-    }
-
-    /// `{NODE OWN}`
-    ///
-    /// Like `expression_bp`, but guarantees that an Invalid node is created if it fails.
-    fn safe_expression_bp(
-        &mut self,
-        min_bp: u8,
-        pure: bool,
-        terminals: enumset::EnumSet<EraTerminalTokenKind>,
-    ) -> ParseResult<Token> {
-        let cp = self.o.b.checkpoint();
-        let Ok(token) = self.expression_bp(min_bp, pure, terminals) else {
-            _ = self.sync_cp_to(terminals, cp);
-            return Err(());
-        };
-        Ok(token)
-    }
-
-    /// `{NODE OWN}`
-    fn expression_bp(
-        &mut self,
-        min_bp: u8,
-        pure: bool,
-        terminals: enumset::EnumSet<EraTerminalTokenKind>,
-    ) -> ParseResult<Token> {
-        // let lexer_mode = if self.is_expression_s_mode {
-        //     EraLexerMode::ExpressionS
-        // } else {
-        //     EraLexerMode::Normal
-        // };
-
-        let mut last_processed_token = Token::Eof;
-
-        // HACK: Support special break_at symbols
-        let lexer_mode = if terminals.contains(Terminal::Percentage) {
-            // HACK: Do not parse `%value%=2` as `%value` and `%=2`
-            Mode::InlineNormal
+            self.paren_expr_list().unwrap()
         } else {
-            Mode::Normal
-        };
-        let cp = self.o.b.checkpoint();
-        let first = self.o.peek_token(lexer_mode);
-        let (first, first_lexeme) = (first.token, first.lexeme);
-        let mut lhs_is_str_var = false;
-        // Read lhs
-        match first.kind {
-            Token::IntLiteral => _ = self.o.bump(),
-            Token::StringLiteral => _ = self.o.bump(),
-            Token::StringFormStart => {
-                // TODO: Handle escape characters for StringForm (both expression and raw)
-                self.o.b.start_node(Token::StringForm);
-                _ = self.o.bump();
-                if self.expression_strform().is_err() {
-                    _ = self.sync_to(terminals | Terminal::DoubleQuote);
-                }
-                self.o.b.finish_node();
-            }
-            Token::DoubleQuote => {
-                // TODO: Handle escape characters for StringForm (both expression and raw)
-                self.o.b.start_node(Token::StringForm);
-                _ = self.o.bump();
-                if self.plain_expression_strform().is_err() {
-                    _ = self.sync_to(terminals | Terminal::DoubleQuote);
-                }
-                self.o.b.finish_node();
-            }
-            Token::SingleQuote => {
-                self.o.b.start_node(Token::StringForm);
-                _ = self.o.bump();
-                if self.quote_raw_strform().is_err() {
-                    _ = self.sync_to(terminals);
-                }
-                self.o.b.finish_node();
-            }
-            Token::TernaryStrFormMarker => {
-                self.o.b.start_node(Token::TernaryExpr);
-                _ = self.o.bump();
-                if self.ternary_strform().is_err() {
-                    _ = self.sync_to(terminals | Terminal::TernaryStrFormMarker);
-                }
-                self.o.b.finish_node();
-            }
-            Token::LParen => {
-                self.o.b.start_node(Token::ParenExpr);
-                _ = self.o.bump();
-                // let cp = self.o.b.checkpoint();
-                // if self.expression_paren().is_err() {
-                //     self.synchronize_cp_to_n(&(terminals | Terminal::RParen).to_tokens_vec(), cp);
-                // }
-                _ = (|| -> ParseResult<()> {
-                    let terminals = terminals | Terminal::RParen;
-                    self.safe_expression(true, terminals)?;
-                    self.eat_or_sync(Mode::Normal, Token::RParen, terminals)?;
-                    Ok(())
-                })();
-                self.o.b.finish_node();
-            }
-            Token::Identifier => {
-                let first_lexeme = ArcStr::from(first_lexeme);
-                _ = self.o.bump();
-                if self.is_var_str(&first_lexeme) {
-                    lhs_is_str_var = true;
-                }
-            }
-            _ => {
-                // Handle prefix
-                if let Some(((), r_bp)) = prefix_binding_power(first.kind) {
-                    self.o.b.start_node(Token::PreUnaryExpr);
-                    _ = self.o.bump();
-                    _ = self.safe_expression_bp(r_bp, pure, terminals);
-                    self.o.b.finish_node();
-                } else {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        first.span,
-                        format!("unexpected token in expression: {:?}", first.kind),
-                    );
-                    self.o.emit_diag(diag);
-                    return Err(());
-                }
-            }
-        };
-
-        loop {
-            let peek_mode = lexer_mode;
-            let token = self.o.peek_token(peek_mode).token;
-
-            // HACK: Break at token
-            if let Ok(token) = token.kind.try_into() {
-                if terminals.contains(token) {
-                    break;
-                }
-            }
-
-            // Handle postfix
-            if let Some((l_bp, ())) = postfix_binding_power(token.kind) {
-                if l_bp < min_bp {
-                    break;
-                }
-
-                match token.kind {
-                    Token::LParen => {
-                        self.o.b.start_node_at(cp, Token::FunCallExpr);
-                        self.o.b.start_node(Token::ExprList);
-                        _ = self.o.bump();
-                        if self.paren_expr_list().is_err() {
-                            _ = self.sync_to(terminals | Terminal::RParen);
-                        }
-                        self.o.b.finish_node();
-                        self.o.b.finish_node();
-                    }
-                    _ => {
-                        self.o.b.start_node_at(cp, Token::PostUnaryExpr);
-                        _ = self.o.bump();
-                        self.o.b.finish_node();
-                    }
-                };
-
-                continue;
-            }
-
-            // Handle infix
-            if let Some((l_bp, r_bp)) = infix_binding_power(token.kind) {
-                if l_bp < min_bp {
-                    break;
-                }
-
-                last_processed_token = token.kind;
-
-                match token.kind {
-                    Token::QuestionMark => {
-                        self.o.b.start_node_at(cp, Token::TernaryExpr);
-                        _ = self.o.bump();
-                        _ = (|| -> ParseResult<()> {
-                            // let terminals = terminals | Terminal::NumberSign;
-                            self.safe_expression(true, terminals)?;
-                            self.eat_or_sync(Mode::Normal, Token::NumberSign, terminals)?;
-                            self.safe_expression_bp(r_bp, pure, terminals)?;
-                            Ok(())
-                        })();
-                        self.o.b.finish_node();
-                    }
-                    Token::Colon => {
-                        self.o.b.start_node_at(cp, Token::VarIdxExpr);
-                        _ = self.o.bump();
-                        _ = (|| -> ParseResult<()> {
-                            // let terminals = terminals | Terminal::Colon;
-                            self.safe_expression_bp(r_bp, pure, terminals)?;
-                            while self.try_eat(Mode::Normal, Token::Colon).is_some() {
-                                self.safe_expression_bp(r_bp, pure, terminals)?;
-                            }
-                            Ok(())
-                        })();
-                        self.o.b.finish_node();
-                    }
-                    Token::Assign => {
-                        self.o.b.start_node_at(cp, Token::BinaryExpr);
-                        _ = self.o.bump();
-                        let cp = self.o.b.checkpoint();
-                        if lhs_is_str_var && !pure {
-                            if self.raw_strform().is_err() {
-                                _ = self.sync_cp_to(terminals, cp);
-                            }
-                        } else {
-                            if self.expression_bp(r_bp, pure, terminals).is_err() {
-                                _ = self.sync_cp_to(terminals, cp);
-                            }
-                        }
-                        self.o.b.finish_node();
-                    }
-                    Token::At => {
-                        // HACK: Should add `@` as part of variable name
-                        self.o.b.start_node_at(cp, Token::VarNamespaceExpr);
-                        _ = self.o.bump();
-                        if self.eat(Mode::Normal, Token::Identifier).is_err() {
-                            _ = self.sync_to(terminals);
-                        }
-                        self.o.b.finish_node();
-                    }
-                    _ => {
-                        self.o.b.start_node_at(cp, Token::BinaryExpr);
-                        _ = self.o.bump();
-                        let cp = self.o.b.checkpoint();
-                        if self.expression_bp(r_bp, pure, terminals).is_err() {
-                            _ = self.sync_cp_to(terminals, cp);
-                        }
-                        self.o.b.finish_node();
-                    }
-                };
-
-                continue;
-            }
-
-            break;
+            self.empty_comma_expr_list()
         }
-
-        Ok(last_processed_token)
     }
 
-    /// `{NODE BORROW}`
-    fn expression_paren(&mut self) -> ParseResult<()> {
-        self.expression(true)?;
-        self.eat(Mode::Normal, Token::RParen)?;
-        Ok(())
+    fn stmt_times(&mut self) -> EraNode {
+        let terminals = Terminal::Comma | Terminal::LineBreak;
+        let var = self.or_sync_to(|s| s.expression(true), terminals);
+        _ = self.eat_sync(Mode::Normal, Token::Comma, terminals);
+        let factor = self.raw_string();
+        EraNode::StmtTimes(var, factor)
     }
 
-    /// `{NODE BORROW}`
-    ///
-    /// Parses residual of expressions like `(arg1, arg2)`.
-    fn paren_expr_list(&mut self) -> ParseResult<()> {
-        if self.try_eat(Mode::Normal, Token::RParen).is_some() {
-            // Empty expression list
-            return Ok(());
-        }
-
-        // NOTE: It is possible to omit expressions, i.e. `(, arg2)` is valid.
-        loop {
-            match self.o.peek_token(Mode::Normal).token.kind {
-                Token::Comma => {
-                    // Empty expression
-                    self.o.b.start_node(Token::EmptyExpr);
-                    self.o.b.finish_node();
-                    _ = self.o.bump();
-                    continue;
-                }
-                Token::RParen => break,
-                _ => (),
-            }
-
-            let cp = self.o.b.checkpoint();
-            if self.expression(true).is_err() {
-                if self
-                    .sync_cp_to(Terminal::Comma | Terminal::RParen | Terminal::LineBreak, cp)
-                    .is_err()
-                {
-                    return Ok(());
-                }
-                if self.o.l.previous_token() == Token::RParen {
-                    // Synced to end of expression list
-                    return Ok(());
-                }
-                // Otherwise, synced to comma
-            } else {
-                // If no comma, must be end of expression list
-                if self.try_eat(Mode::Normal, Token::Comma).is_none() {
-                    break;
-                }
-            }
-
-            // TODO: Remove this?
-            // // Need to handle things like `(arg1, arg2,)`
-            // if self.o.peek_token(Mode::Normal).token.kind == Token::RParen {
-            //     break;
-            // }
-        }
-
-        self.eat(Mode::Normal, Token::RParen)?;
-
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    ///
-    /// Parses residual of expressions like `, var1, var2`.
-    fn comma_expr_list_limit(&mut self, min_bp: u8, size_limit: u64) -> ParseResult<u64> {
-        assert!(size_limit > 0, "size limit must be greater than 0");
-        let mut count = 0;
-        loop {
-            // Handle min_bp
-            if min_bp != 0 {
-                let token = self.o.peek_token(Mode::Normal).token;
-                if let Some((l_bp, _)) = infix_binding_power(token.kind) {
-                    if l_bp < min_bp {
-                        break;
-                    }
-                }
-            }
-
-            match self.o.peek_token(Mode::Normal).token.kind {
-                Token::Comma => {
-                    // Empty expression
-                    self.o.b.start_node(Token::EmptyExpr);
-                    self.o.b.finish_node();
-                    _ = self.o.bump();
-
-                    // Check limit
-                    count += 1;
-                    if count >= size_limit {
-                        // Too many expressions, exit early
-                        break;
-                    }
-
-                    continue;
-                }
-                Token::LineBreak => break,
-                _ => (),
-            }
-
-            let cp = self.o.b.checkpoint();
-            if self
-                .expression_bp(min_bp, true, Terminal::Comma | Terminal::LineBreak)
-                .is_err()
-            {
-                if self
-                    .sync_cp_to(Terminal::Comma | Terminal::LineBreak, cp)
-                    .is_err()
-                {
-                    return Ok(count);
-                }
-                // Otherwise, synced to comma
-
-                // Check limit
-                count += 1;
-                if count >= size_limit {
-                    // Too many expressions, exit early
-                    break;
-                }
-            } else {
-                // Check limit
-                count += 1;
-                if count >= size_limit {
-                    // Too many expressions, exit early
-                    break;
-                }
-
-                // If no comma, must be end of expression list
-                if self.try_eat(Mode::Normal, Token::Comma).is_none() {
-                    return Ok(count);
-                }
-            }
-        }
-
-        let previous_is_comma = count > 0;
-        if count < size_limit && previous_is_comma {
-            // We want more expressions, and the last one was a comma
-            self.o.b.start_node(Token::EmptyExpr);
-            self.o.b.finish_node();
-            count += 1;
-        }
-
-        Ok(count)
-    }
-
-    /// `{NODE BORROW}`
-    ///
-    /// Parses residual of expressions like `, var1, var2`.
-    fn comma_expr_list(&mut self, min_bp: u8) -> ParseResult<u64> {
-        self.comma_expr_list_limit(min_bp, u64::MAX)
-    }
-
-    /// `{NODE BORROW}`
-    ///
-    /// Parses residual of expressions like `'string content`. May break at comma.
-    fn quote_raw_strform(&mut self) -> ParseResult<()> {
-        loop {
-            let token = self.o.peek_token(Mode::RawStrForm).token;
-            match token.kind {
-                Token::PlainStringLiteral => _ = self.o.bump(),
-                Token::LBrace => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    _ = self.o.bump();
-                    if self.strform_interp_part(Terminal::RBrace).is_err() {
-                        _ = self.sync_to(Terminal::RBrace | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                }
-                Token::Percentage => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    _ = self.o.bump();
-                    if self.strform_interp_part(Terminal::Percentage).is_err() {
-                        _ = self.sync_to(Terminal::Percentage | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                }
-                Token::TernaryStrFormMarker => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    self.o.b.start_node(Token::TernaryExpr);
-                    _ = self.o.bump();
-                    if self.ternary_strform().is_err() {
-                        _ = self.sync_to(Terminal::TernaryStrFormMarker | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                    self.o.b.finish_node();
-                }
-                Token::Comma | Token::LineBreak => break,
-                _ => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        token.span,
-                        format!("unexpected token in string form: {:?}", token.kind),
-                    );
-                    self.o.emit_diag(diag);
-                    return Err(());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// `{NODE OWN}`
-    fn raw_strform(&mut self) -> ParseResult<()> {
-        self.o.b.start_node(Token::StringForm);
-        if self.raw_strform_inner().is_err() {
-            _ = self.sync_to(Terminal::LineBreak.into());
-        }
-        self.o.b.finish_node();
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    fn raw_strform_inner(&mut self) -> ParseResult<()> {
-        loop {
-            let token = self.o.peek_token(Mode::RawStrForm).token;
-            match token.kind {
-                Token::PlainStringLiteral => _ = self.o.bump(),
-                Token::LBrace => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    _ = self.o.bump();
-                    if self.strform_interp_part(Terminal::RBrace).is_err() {
-                        _ = self.sync_to(Terminal::RBrace | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                }
-                Token::Percentage => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    _ = self.o.bump();
-                    if self.strform_interp_part(Terminal::Percentage).is_err() {
-                        _ = self.sync_to(Terminal::Percentage | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                }
-                Token::TernaryStrFormMarker => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    self.o.b.start_node(Token::TernaryExpr);
-                    _ = self.o.bump();
-                    if self.ternary_strform().is_err() {
-                        _ = self.sync_to(Terminal::TernaryStrFormMarker | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                    self.o.b.finish_node();
-                }
-                Token::LineBreak => break,
-                _ => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        token.span,
-                        format!("unexpected token in string form: {:?}", token.kind),
-                    );
-                    self.o.emit_diag(diag);
-                    return Err(());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    fn expression_strform(&mut self) -> ParseResult<()> {
-        self.expression_strform_inner(Mode::StrForm)
-    }
-
-    /// `{NODE BORROW}`
-    fn plain_expression_strform(&mut self) -> ParseResult<()> {
-        self.expression_strform_inner(Mode::PlainStr)
-    }
-
-    /// `{NODE BORROW}`
-    fn expression_strform_inner(&mut self, mode: Mode) -> ParseResult<()> {
-        loop {
-            let token = self.o.peek_token(mode).token;
-            match token.kind {
-                Token::PlainStringLiteral => _ = self.o.bump(),
-                Token::LBrace => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    _ = self.o.bump();
-                    if self.strform_interp_part(Terminal::RBrace).is_err() {
-                        _ = self.sync_to(Terminal::RBrace | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                }
-                Token::Percentage => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    _ = self.o.bump();
-                    if self.strform_interp_part(Terminal::Percentage).is_err() {
-                        _ = self.sync_to(Terminal::Percentage | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                }
-                Token::TernaryStrFormMarker => {
-                    self.o.b.start_node(Token::StringFormInterpPart);
-                    self.o.b.start_node(Token::TernaryExpr);
-                    _ = self.o.bump();
-                    if self.ternary_strform().is_err() {
-                        _ = self.sync_to(Terminal::TernaryStrFormMarker | Terminal::LineBreak);
-                    }
-                    self.o.b.finish_node();
-                    self.o.b.finish_node();
-                }
-                Token::DoubleQuote => {
-                    _ = self.o.bump();
-                    break;
-                }
-                _ => {
-                    let mut diag = self.base_diag.clone();
-                    diag.span_err(
-                        Default::default(),
-                        token.span,
-                        format!("unexpected token in string form: {:?}", token.kind),
-                    );
-                    self.o.emit_diag(diag);
-                    return Err(());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    fn ternary_strform(&mut self) -> ParseResult<()> {
-        // cond
-        let cp = self.o.b.checkpoint();
-        if self
-            .expression_bp(
-                infix_binding_power(EraTokenKind::QuestionMark).unwrap().1 + 2,
-                true,
-                Terminal::TernaryStrFormMarker | Terminal::LineBreak,
-            )
-            .is_err()
-        {
-            _ = self.sync_cp_to(Terminal::TernaryStrFormMarker | Terminal::LineBreak, cp);
-            return Ok(());
-        }
-        self.eat(Mode::Normal, Token::QuestionMark)?;
-
-        trait Adhoc {
-            fn parse_mid(&mut self) -> ParseResult<()>;
-            fn parse_right(&mut self) -> ParseResult<()>;
-        }
-        impl Adhoc for EraParserSite<'_, '_, '_, '_> {
-            fn parse_mid(&mut self) -> ParseResult<()> {
-                loop {
-                    let token = self.o.peek_token(Mode::TernaryStrForm).token;
-                    match token.kind {
-                        Token::PlainStringLiteral => _ = self.o.bump(),
-                        Token::LBrace => {
-                            self.o.b.start_node(Token::StringFormInterpPart);
-                            _ = self.o.bump();
-                            if self.strform_interp_part(Terminal::RBrace).is_err() {
-                                _ = self.sync_to(Terminal::RBrace | Terminal::LineBreak);
-                            }
-                            self.o.b.finish_node();
-                        }
-                        Token::Percentage => {
-                            self.o.b.start_node(Token::StringFormInterpPart);
-                            _ = self.o.bump();
-                            if self.strform_interp_part(Terminal::Percentage).is_err() {
-                                _ = self.sync_to(Terminal::Percentage | Terminal::LineBreak);
-                            }
-                            self.o.b.finish_node();
-                        }
-                        // Token::TernaryStrFormMarker => {
-                        //     _ = self.o.next_token(Mode::RawStrForm);
-                        //     self.o.b.start_node_at(cp, Token::StringFormInterpPart);
-                        //     self.o.b.start_node(Token::TernaryExpr);
-                        //     let cp = self.o.b.checkpoint();
-                        //     if self.ternary_strform().is_err() {
-                        //         self.synchronize_cp_to_n(&[Token::LineBreak], cp);
-                        //     }
-                        //     self.o.b.finish_node();
-                        //     self.o.b.finish_node();
-                        // }
-                        Token::NumberSign => break,
-                        _ => {
-                            let mut diag = self.base_diag.clone();
-                            diag.span_err(
-                                Default::default(),
-                                token.span,
-                                format!("unexpected token in string form: {:?}", token.kind),
-                            );
-                            self.o.emit_diag(diag);
-                            return Err(());
-                        }
-                    }
-                }
-                Ok(())
-            }
-
-            fn parse_right(&mut self) -> ParseResult<()> {
-                loop {
-                    let token = self.o.peek_token(Mode::RawStrForm).token;
-                    match token.kind {
-                        Token::PlainStringLiteral => _ = self.o.bump(),
-                        Token::LBrace => {
-                            self.o.b.start_node(Token::StringFormInterpPart);
-                            _ = self.o.bump();
-                            if self.strform_interp_part(Terminal::RBrace).is_err() {
-                                _ = self.sync_to(Terminal::RBrace | Terminal::LineBreak);
-                            }
-                            self.o.b.finish_node();
-                        }
-                        Token::Percentage => {
-                            self.o.b.start_node(Token::StringFormInterpPart);
-                            _ = self.o.bump();
-                            if self.strform_interp_part(Terminal::Percentage).is_err() {
-                                _ = self.sync_to(Terminal::Percentage | Terminal::LineBreak);
-                            }
-                            self.o.b.finish_node();
-                        }
-                        Token::TernaryStrFormMarker => break,
-                        _ => {
-                            let mut diag = self.base_diag.clone();
-                            diag.span_err(
-                                Default::default(),
-                                token.span,
-                                format!("unexpected token in string form: {:?}", token.kind),
-                            );
-                            self.o.emit_diag(diag);
-                            return Err(());
-                        }
-                    }
-                }
-                Ok(())
-            }
-        }
-
-        // mid
-        self.o.b.start_node(Token::StringForm);
-        if self.parse_mid().is_err() {
-            _ = self.sync_to(Terminal::TernaryStrFormMarker | Terminal::LineBreak);
-            self.o.b.finish_node();
-            return Ok(());
-        }
-        self.o.b.finish_node();
-        self.eat(Mode::TernaryStrForm, Token::NumberSign)?;
-        // right
-        self.o.b.start_node(Token::StringForm);
-        if self.parse_right().is_err() {
-            _ = self.sync_to(Terminal::TernaryStrFormMarker | Terminal::LineBreak);
-            self.o.b.finish_node();
-            return Ok(());
-        }
-        self.o.b.finish_node();
-        self.eat(Mode::RawStrForm, Token::TernaryStrFormMarker)?;
-
-        Ok(())
-    }
-
-    /// `{NODE BORROW}`
-    fn strform_interp_part(&mut self, terminal: EraTerminalTokenKind) -> ParseResult<()> {
-        let mode = if terminal == Terminal::Percentage {
-            Mode::InlineNormal
-        } else {
-            Mode::Normal
-        };
-        // expr
-        self.expression_bp(0, true, terminal.into())?;
-        if self.try_eat(Mode::Normal, Token::Comma).is_some() {
-            // width
-            self.expression_bp(0, true, terminal.into())?;
-        }
-        if self.try_eat(Mode::Normal, Token::Comma).is_some() {
-            // alignment
-            self.eat(Mode::Normal, Token::Identifier)?;
-        }
-        self.eat(mode, terminal.into())?;
-        Ok(())
-    }
-
-    fn skip_newline(&mut self) {
-        while self.o.peek_token(Mode::Normal).token.kind == Token::LineBreak {
-            // _ = self.o.next_token_with_newline(Mode::Normal);
-            _ = self.o.bump();
-        }
-        self.o.set_is_panicking(false);
-    }
-
-    fn is_var_str(&mut self, name: &str) -> bool {
-        self.local_str_vars.contains(Ascii::new_str(name)) || (self.o.is_str_var_fn)(name)
-    }
-
-    // fn synchronize_to(&mut self, token: Token) {
-    //     // self.o.b.start_node(Token::Invalid);
-    //     // loop {
-    //     //     let next = self.o.peek_token(Mode::Normal).token.kind;
-    //     //     if next == token || next == Token::Eof {
-    //     //         break;
-    //     //     }
-    //     //     _ = self.o.next_token(Mode::Normal);
-    //     // }
-    //     // self.o.b.finish_node();
-    //     self.synchronize_to_n(&[token]);
-    // }
-
-    // fn synchronize_to2(&mut self, token1: Token, token2: Token) {
-    //     self.synchronize_to_n(&[token1, token2]);
-    // }
-
-    // fn synchronize_to3(&mut self, token1: Token, token2: Token, token3: Token) {
-    //     self.synchronize_to_n(&[token1, token2, token3]);
-    // }
-
-    // fn synchronize_to4(&mut self, token1: Token, token2: Token, token3: Token, token4: Token) {
-    //     self.synchronize_to_n(&[token1, token2, token3, token4]);
-    // }
-
-    // fn synchronize_to_n(&mut self, tokens: &[Token]) {
-    //     self.o.b.start_node(Token::Invalid);
-    //     // NOTE: No overread check since we cannot compensate for the overread token here.
-    //     //       The caller should ensure that the tokens are not overread.
-    //     loop {
-    //         let next = self.o.peek_token(Mode::Normal).token.kind;
-    //         if tokens.contains(&next) || next == Token::Eof {
-    //             break;
-    //         }
-    //         _ = self.o.next_token(Mode::Normal);
-    //     }
-    //     self.o.b.finish_node();
-    // }
-
-    // fn synchronize_cp_to_n(&mut self, tokens: &[Token], checkpoint: cstree::build::Checkpoint) {
-    //     self.o.b.start_node_at(checkpoint, Token::Invalid);
-
-    //     // Remember to check the previous token because we may have
-    //     // overread the token that caused the error.
-    //     let prev = self.o.l.previous_token();
-    //     // NOTE: `)` should be consumed per synchronization (consider the case of parsing `5+(3+(4]))`,
-    //     //       where the first `)`, if not consumed, will cause the parser to leave out the second `)`.
-    //     if tokens
-    //         .iter()
-    //         .filter(|x| !matches!(x, Token::RParen))
-    //         .contains(&prev)
-    //     {
-    //         self.o.b.finish_node();
-    //         return;
-    //     }
-
-    //     loop {
-    //         let next = self.o.peek_token(Mode::Normal).token.kind;
-    //         if tokens.contains(&next) || next == Token::Eof {
-    //             break;
-    //         }
-    //         _ = self.o.next_token(Mode::Normal);
-    //     }
-    //     self.o.b.finish_node();
-    // }
-
-    /// Synchronize to the next terminal token. If encountered LineBreak, Err is returned.
-    fn sync_to(&mut self, terminals: enumset::EnumSet<EraTerminalTokenKind>) -> ParseResult<()> {
-        // // Remember to check the previous token because we may have
-        // // overread the token that caused the error.
-        // if terminals.contains(Terminal::LineBreak) && self.o.l.previous_token() == Token::LineBreak
-        // {
-        //     return Err(());
-        // }
-
-        let cp = self.o.b.checkpoint();
-        let mut need_build_node = false;
-        let result = loop {
-            let next = self.o.peek_token(Mode::Normal).token.kind;
-            if next == Token::Eof {
-                break Err(());
-            }
-            let Ok(next) = next.try_into() else {
-                _ = self.o.bump();
-                need_build_node = true;
-                continue;
-            };
-            if terminals.contains(next) {
-                if next == Terminal::LineBreak {
-                    break Err(());
-                }
-                // _ = self.o.bump();
-                // need_build_node = true;
-                break Ok(());
-            }
-            _ = self.o.bump();
-            need_build_node = true;
-        };
-
-        if need_build_node {
-            self.o.b.start_node_at(cp, Token::Invalid);
-            self.o.b.finish_node();
-        }
-
-        // Move terminal token outside the Invalid node
-        if result.is_ok() {
-            _ = self.o.bump();
-        }
-
-        result
-    }
-
-    fn sync_to_finish(
-        &mut self,
-        terminals: enumset::EnumSet<EraTerminalTokenKind>,
-    ) -> ParseResult<()> {
-        let result = self.sync_to(terminals);
-        if result.is_err() {
-            self.o.b.finish_node();
-        }
-        result
-    }
-
-    fn sync_cp_to(
-        &mut self,
-        terminals: enumset::EnumSet<EraTerminalTokenKind>,
-        cp: Checkpoint,
-    ) -> ParseResult<()> {
-        self.o.b.start_node_at(cp, Token::Invalid);
-        let result = self.sync_to(terminals);
-        self.o.b.finish_node();
-        result
-    }
-
-    fn expect_sync_to_newline(&mut self) -> ParseResult<()> {
+    fn is_at_function_end(&mut self) -> bool {
         let token = self.o.peek_token(Mode::Normal).token;
-        if token.kind != Token::LineBreak && !self.o.l.at_start_of_line() {
-            // if token.kind != Token::LineBreak {
+        matches!(token.kind, Token::At | Token::Eof)
+    }
+
+    fn next_is_newline(&mut self) -> bool {
+        self.o.peek_token(Mode::Normal).token.kind == Token::LineBreak
+    }
+
+    /// Returns whether not at the end of a function.
+    fn expect_not_function_end(&mut self) -> bool {
+        let token = self.o.peek_token(Mode::Normal).token;
+        if matches!(token.kind, Token::At | Token::Eof) {
             let mut diag = self.base_diag.clone();
             diag.span_err(
                 Default::default(),
                 token.span,
-                format!("expected newline, found {:?}", token.kind),
+                "unexpected end of function; did you forget to close a block?",
             );
             self.o.emit_diag(diag);
-            _ = self.sync_to(Terminal::LineBreak.into());
-            Err(())
+            false
         } else {
-            Ok(())
+            true
         }
-    }
-
-    // fn synchronize_eat_sync(&mut self) {
-    //     self.o.b.start_node(Token::Invalid);
-    //     'outer: loop {
-    //         for &(mode, token) in self.eat_syncs.iter().rev() {
-    //             if [Token::Eof, token].contains(&self.o.peek_token(mode).token.kind) {
-    //                 while let Some((_, sync_token)) = self.eat_syncs.pop() {
-    //                     if sync_token == token {
-    //                         break;
-    //                     }
-    //                 }
-    //                 break 'outer;
-    //             }
-    //         }
-    //         _ = self.o.next_token(Mode::Normal);
-    //     }
-    //     self.o.b.finish_node();
-    // }
-
-    // fn synchronize_eat_sync_cp(&mut self, checkpoint: cstree::build::Checkpoint) {
-    //     self.o.b.start_node_at(checkpoint, Token::Invalid);
-    //     'outer: loop {
-    //         for &(mode, token) in self.eat_syncs.iter().rev() {
-    //             if [Token::Eof, token].contains(&self.o.peek_token(mode).token.kind) {
-    //                 while let Some((_, sync_token)) = self.eat_syncs.pop() {
-    //                     if sync_token == token {
-    //                         break;
-    //                     }
-    //                 }
-    //                 break 'outer;
-    //             }
-    //         }
-    //         _ = self.o.next_token(Mode::Normal);
-    //     }
-    //     self.o.b.finish_node();
-    // }
-
-    fn consume_raw(&mut self, mode: Mode, token: Token) -> ParseResult<EraLexerNextResult> {
-        let next = self.o.peek_token(mode);
-        if next.token.kind == token {
-            Ok(self.o.bump())
-        } else {
-            let mut diag = self.base_diag.clone();
-            diag.span_err(
-                Default::default(),
-                next.token.span,
-                format!("expected {:?}, found {:?}", token, next.token.kind),
-            );
-            self.o.emit_diag(diag);
-            Err(())
-        }
-    }
-
-    fn try_consume_raw(&mut self, mode: Mode, token: Token) -> Option<EraLexerNextResult> {
-        let next = self.o.peek_token(mode);
-        if next.token.kind == token {
-            Some(self.o.next_token(mode))
-        } else {
-            None
-        }
-    }
-
-    // fn consume(&mut self, mode: Mode, token: Token) -> ParseResult<EraLexerNextResult> {
-    //     if let Ok(next) = self.consume_raw(Mode::Normal, token) {
-    //         Ok(next)
-    //     } else {
-    //         self.synchronize_to(Token::LineBreak);
-    //         Err(())
-    //     }
-    // }
-
-    // fn eat_push_sync(
-    //     &mut self,
-    //     eat_mode: Mode,
-    //     eat_token: Token,
-    //     end_mode: Mode,
-    //     end_token: Token,
-    // ) -> ParseResult<()> {
-    //     self.eat(eat_mode, eat_token)?;
-    //     self.eat_syncs.push((end_mode, end_token));
-    //     Ok(())
-    // }
-
-    // fn push_eat_sync(&mut self, mode: Mode, token: Token) {
-    //     self.eat_syncs.push((mode, token));
-    // }
-
-    // fn end_eat_sync(&mut self) -> ParseResult<()> {
-    //     let (mode, token) = self
-    //         .eat_syncs
-    //         .last()
-    //         .copied()
-    //         .unwrap_or((Mode::Normal, Token::Eof));
-    //     if self.eat(mode, token).is_err() {
-    //         self.synchronize_eat_sync();
-    //         Err(())
-    //     } else {
-    //         Ok(())
-    //     }
-    // }
-
-    // /// Consume a token. If failed, synchronize to the next token, producing an node
-    // /// containing the Invalid token.
-    // fn eat(&mut self, mode: Mode, token: Token) -> ParseResult<EraLexerNextResult> {
-    //     // SAFETY: This requires the Polonius borrow checker.
-    //     let result: ParseResult<EraLexerNextResult> =
-    //         unsafe { std::mem::transmute(self.consume_raw(mode, token)) };
-    //     if let Ok(next) = result {
-    //         return Ok(next);
-    //     } else {
-    //         self.synchronize_eat_sync();
-    //         self.o.b.finish_node();
-    //         Err(())
-    //     }
-    // }
-
-    // /// Same as [`Self::eat`], except that `finish_node` is not called.
-    // fn eat_wo_node(
-    //     &mut self,
-    //     mode: Mode,
-    //     token: Token,
-    //     cp: cstree::build::Checkpoint,
-    // ) -> ParseResult<EraLexerNextResult> {
-    //     // SAFETY: This requires the Polonius borrow checker.
-    //     let result: ParseResult<EraLexerNextResult> =
-    //         unsafe { std::mem::transmute(self.consume_raw(mode, token)) };
-    //     if let Ok(next) = result {
-    //         return Ok(next);
-    //     } else {
-    //         self.synchronize_eat_sync_cp(cp);
-    //         Err(())
-    //     }
-    // }
-
-    fn eat(&mut self, mode: Mode, token: Token) -> ParseResult<EraLexerNextResult> {
-        self.consume_raw(mode, token)
-    }
-
-    fn try_eat(&mut self, mode: Mode, token: Token) -> Option<EraLexerNextResult> {
-        self.try_consume_raw(mode, token)
-    }
-
-    fn eat_or_sync(
-        &mut self,
-        mode: Mode,
-        token: Token,
-        terminals: enumset::EnumSet<EraTerminalTokenKind>,
-    ) -> ParseResult<EraLexerNextResult> {
-        // SAFETY: This requires the Polonius borrow checker.
-        let result: ParseResult<EraLexerNextResult> =
-            unsafe { std::mem::transmute(self.eat(mode, token)) };
-        let Ok(result) = result else {
-            _ = self.sync_to(terminals);
-            return Err(());
-        };
-        Ok(result)
     }
 
     fn try_match_command(&mut self, cmd: &str) -> bool {
         let token = self.o.peek_token(Mode::Normal);
         token.token.kind == Token::Identifier && token.lexeme.eq_ignore_ascii_case(cmd)
     }
-
-    fn try_eat_command(&mut self, cmd: &str) -> bool {
-        let result = self.try_match_command(cmd);
-        if result {
-            _ = self.o.bump();
-        }
-        result
-    }
-
-    // /// Consume a token. If failed, synchronize to the next token, producing an Invalid
-    // /// node based on the given checkpoint.
-    // fn eat_or_sync_cp(
-    //     &mut self,
-    //     mode: Mode,
-    //     token: Token,
-    //     cp: cstree::build::Checkpoint,
-    // ) -> ParseResult<EraLexerNextResult> {
-    //     // SAFETY: This requires the Polonius borrow checker.
-    //     let result: ParseResult<EraLexerNextResult> =
-    //         unsafe { std::mem::transmute(self.consume_raw(mode, token)) };
-    //     if let Ok(next) = result {
-    //         Ok(next)
-    //     } else {
-    //         self.o.b.finish_node();
-    //         self.synchronize_eat_sync_cp(cp);
-    //         Err(())
-    //     }
-    // }
 }
 
 // Source: https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html
@@ -3074,6 +3450,8 @@ enum EraTerminalTokenKind {
     RBrace,
     Comma,
     TernaryStrFormMarker,
+    QuestionMark,
+    NumberSign,
     DoubleQuote,
 }
 
@@ -3090,6 +3468,8 @@ impl TryFrom<EraTokenKind> for EraTerminalTokenKind {
             EraTokenKind::RBrace => Ok(Self::RBrace),
             EraTokenKind::Comma => Ok(Self::Comma),
             EraTokenKind::TernaryStrFormMarker => Ok(Self::TernaryStrFormMarker),
+            EraTokenKind::QuestionMark => Ok(Self::QuestionMark),
+            EraTokenKind::NumberSign => Ok(Self::NumberSign),
             EraTokenKind::DoubleQuote => Ok(Self::DoubleQuote),
             _ => Err(()),
         }
@@ -3105,6 +3485,8 @@ impl From<EraTerminalTokenKind> for EraTokenKind {
             EraTerminalTokenKind::RBrace => Self::RBrace,
             EraTerminalTokenKind::Comma => Self::Comma,
             EraTerminalTokenKind::TernaryStrFormMarker => Self::TernaryStrFormMarker,
+            EraTerminalTokenKind::QuestionMark => Self::QuestionMark,
+            EraTerminalTokenKind::NumberSign => Self::NumberSign,
             EraTerminalTokenKind::DoubleQuote => Self::DoubleQuote,
         }
     }

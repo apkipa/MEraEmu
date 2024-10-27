@@ -100,6 +100,7 @@ scc = "2.2.2"
 sinter = "0.1.1"
 rayon = "1.10.0"
 pariter = "0.5.1"
+simdutf8 = "0.1.5"
 # snmalloc-rs = "0.3.5"
 # rpmalloc = "0.2.2"
 

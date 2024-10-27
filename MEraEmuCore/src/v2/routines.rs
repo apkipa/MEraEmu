@@ -252,3 +252,74 @@ pub fn unescape_str(s: &str) -> String {
     // SAFETY: Input is valid UTF-8, and we never mess it up
     unsafe { String::from_utf8_unchecked(out) }
 }
+
+pub fn unescape_in_place(s: &mut String) {
+    // SAFETY: Input is valid UTF-8, and we never mess it up
+    let buf = unsafe { s.as_mut_vec() };
+    let len = buf.len();
+    let mut rd = 0;
+    let mut wr = 0;
+    while rd < len {
+        if buf[rd] != b'\\' {
+            buf[wr] = buf[rd];
+            rd += 1;
+            wr += 1;
+            continue;
+        }
+
+        match buf.get(rd + 1) {
+            Some(b'n') => buf[wr] = b'\n',
+            Some(b'r') => buf[wr] = b'\r',
+            Some(b't') => buf[wr] = b'\t',
+            // Rest is copied verbatim (so that no invalid UTF-8 is produced)
+            Some(c) => buf[wr] = *c,
+            None => {}
+        }
+        rd += 2;
+        wr += 1;
+    }
+    unsafe {
+        buf.set_len(wr);
+    }
+    debug_assert!(s.as_bytes().is_utf8());
+}
+
+pub fn unescape_to_sink(input: &str, output: &mut String) {
+    let output = unsafe { output.as_mut_vec() };
+    let mut input = input.as_bytes();
+
+    while let Some(pos) = memchr::memchr(b'\\', input) {
+        output.extend_from_slice(&input[..pos]);
+        input = &input[pos..];
+        if input.len() < 2 {
+            return;
+        }
+        match input[1] {
+            b'n' => output.push(b'\n'),
+            b'r' => output.push(b'\r'),
+            b't' => output.push(b'\t'),
+            // Rest is copied verbatim (so that no invalid UTF-8 is produced)
+            _ => output.push(input[1]),
+        }
+        input = &input[2..];
+    }
+    output.extend_from_slice(input);
+
+    // let output = unsafe { output.as_mut_vec() };
+    // let mut iter = input.bytes();
+    // while let Some(c) = iter.next() {
+    //     if c != b'\\' {
+    //         output.push(c);
+    //         continue;
+    //     }
+
+    //     match iter.next() {
+    //         Some(b'n') => output.push(b'\n'),
+    //         Some(b'r') => output.push(b'\r'),
+    //         Some(b't') => output.push(b'\t'),
+    //         // Rest is copied verbatim (so that no invalid UTF-8 is produced)
+    //         Some(c) => output.push(c),
+    //         None => {}
+    //     }
+    // }
+}

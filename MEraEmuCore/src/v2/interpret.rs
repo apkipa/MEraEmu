@@ -1,9 +1,13 @@
 use bstr::ByteVec;
 use cstree::interning::{Resolver, TokenKey};
+use itertools::Itertools;
 use smallvec::smallvec;
 
-use super::{ast::*, routines};
-use crate::util::syntax::*;
+use super::parser::{
+    EraNode, EraNodeArena, EraNodeDeclVarHomo, EraNodeExprTernary, EraNodeListExpr, EraNodeRef,
+    EraNodeStringFormInterpPart,
+};
+use crate::v2::routines;
 use crate::{
     types::*,
     util::{rcstr::ArcStr, Ascii},
@@ -11,12 +15,12 @@ use crate::{
 
 use EraTokenKind as Token;
 
-pub enum EraInterpretError<'a> {
-    VarNotFound(SyntaxElementRef<'a, Token>),
+pub enum EraInterpretError {
+    VarNotFound(String, SrcSpan),
     Others,
 }
 
-type InterpretResult<'a, T> = Result<T, EraInterpretError<'a>>;
+type InterpretResult<T> = Result<T, EraInterpretError>;
 
 pub struct EraInterpretedVarDecl {
     pub name_key: TokenKey,
@@ -27,14 +31,23 @@ pub struct EraInterpretedVarDecl {
     pub is_dynamic: bool,
 }
 
-pub struct EraInterpreter<'ctx, Callback> {
+pub struct EraInterpreter<'ctx, 'n, Callback> {
     ctx: &'ctx mut EraCompilerCtx<Callback>,
+    node_arena: &'n EraNodeArena,
     is_const: bool,
 }
 
-impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
-    pub fn new(ctx: &'ctx mut EraCompilerCtx<Callback>, is_const: bool) -> Self {
-        Self { ctx, is_const }
+impl<'ctx, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'n, Callback> {
+    pub fn new(
+        ctx: &'ctx mut EraCompilerCtx<Callback>,
+        node_arena: &'n EraNodeArena,
+        is_const: bool,
+    ) -> Self {
+        Self {
+            ctx,
+            node_arena,
+            is_const,
+        }
     }
 
     pub fn get_ctx(&self) -> &EraCompilerCtx<Callback> {
@@ -46,60 +59,25 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
     }
 
     /// Interpret an expression node, with global context.
-    pub fn interpret_expression<'a>(
-        &mut self,
-        expr: EraExprNodeOrLeaf<'a>,
-    ) -> InterpretResult<'a, ScalarValue> {
+    pub fn interpret_expression(&mut self, expr: EraNodeRef) -> InterpretResult<ScalarValue> {
         if !self.is_const {
             todo!("non-const expression evaluation is not supported yet");
         }
 
-        let node = match expr {
-            EraExprNodeOrLeaf::Node(node) => node,
-            EraExprNodeOrLeaf::Leaf(leaf) => {
-                return Ok({
-                    let token = leaf.token();
-                    let text = token.resolve_text(self.ctx.node_cache.interner());
-                    match leaf.kind() {
-                        Token::IntLiteral => {
-                            let Some(val) = routines::parse_int_literal(text.as_bytes()) else {
-                                let mut diag = self.make_diag();
-                                diag.span_err(
-                                    Default::default(),
-                                    token.text_range().into(),
-                                    "invalid integer literal",
-                                );
-                                self.ctx.emit_diag(diag);
-                                return Err(EraInterpretError::Others);
-                            };
-                            ScalarValue::Int(val)
-                        }
-                        Token::StringLiteral => {
-                            // if !matches!(text.as_bytes(), [b'"', .., b'"']) {
-                            //     // Invalid string literal; this should be caught by the lexer instead
-                            //     unreachable!("invalid string literal: {:?}", text);
-                            // }
-                            // let text = &text[1..text.len() - 1];
-                            // let val = Vec::unescape_bytes(text).into_string_lossy();
-                            // ScalarValue::Str(val)
-                            ScalarValue::Str(routines::unwrap_str_literal(text))
-                        }
-                        Token::Identifier => {
-                            self.resolve_var_node_with_idx(EraIdentLeaf::cast(token).unwrap(), &[])?
-                        }
-                        _ => unreachable!("invalid leaf kind: {:?}", leaf.kind()),
-                    }
-                });
-            }
-        };
+        let expr_span = self.node_arena.get_node_span(expr);
 
-        Ok(match node.kind() {
-            EraExprNodeKind::PreUnaryExpr(x) => {
-                let op = x.operator().ok_or(EraInterpretError::Others)?;
-                let rhs = x.rhs().ok_or(EraInterpretError::Others)?;
-                let rhs_span = rhs.src_span();
+        Ok(match self.node_arena.get_node(expr) {
+            EraNode::LiteralInt(x) => ScalarValue::Int(x.into()),
+            EraNode::LiteralStr(x) => {
+                ScalarValue::Str(self.ctx.node_cache.interner().resolve(x).to_owned())
+            }
+            EraNode::Identifier(_) | EraNode::ExprVarNamespace(..) => {
+                self.resolve_var_node_with_idx(expr, &[])?
+            }
+            EraNode::ExprPreUnary(op, rhs) => {
+                let rhs_span = self.node_arena.get_node_span(rhs);
                 let rhs = self.interpret_expression(rhs)?;
-                match op.kind() {
+                match op {
                     Token::Plus => {
                         let rhs = self.unwrap_int(rhs, rhs_span)?;
                         ScalarValue::Int(rhs)
@@ -117,38 +95,35 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
                         ScalarValue::Int(!rhs)
                     }
                     _ => {
+                        let op_span = self.node_arena.get_node_token_span(expr);
                         let mut diag = self.make_diag();
-                        diag.span_err(Default::default(), op.src_span(), "invalid unary operator");
+                        diag.span_err(Default::default(), op_span, "invalid unary operator");
                         self.ctx.emit_diag(diag);
                         return Err(EraInterpretError::Others);
                     }
                 }
             }
-            EraExprNodeKind::PostUnaryExpr(x) => {
-                let op = x.operator().ok_or(EraInterpretError::Others)?;
-                let lhs = x.lhs().ok_or(EraInterpretError::Others)?;
-                let lhs_span = lhs.src_span();
+            EraNode::ExprPostUnary(lhs, op) => {
+                let lhs_span = self.node_arena.get_node_span(lhs);
                 let lhs = self.interpret_expression(lhs)?;
-                match op.kind() {
+                match op {
                     _ => {
+                        let op_span = self.node_arena.get_node_token_span(expr);
                         let mut diag = self.make_diag();
-                        diag.span_err(Default::default(), op.src_span(), "invalid unary operator");
+                        diag.span_err(Default::default(), op_span, "invalid unary operator");
                         self.ctx.emit_diag(diag);
                         return Err(EraInterpretError::Others);
                     }
                 }
             }
-            EraExprNodeKind::BinaryExpr(x) => {
-                let op = x.operator().ok_or(EraInterpretError::Others)?;
-                let lhs = x.lhs().ok_or(EraInterpretError::Others)?;
-                let rhs = x.rhs().ok_or(EraInterpretError::Others)?;
-                let lhs_span = lhs.src_span();
-                let rhs_span = rhs.src_span();
-                // NOTE: It is safe to evaluate early since we are in a const context
-                // TODO: Implement short-circuiting for logical operators
+            EraNode::ExprBinary(lhs, op, rhs) => {
+                let op = op.into();
+                let op_span = self.node_arena.get_node_token_span(expr);
+                let lhs_span = self.node_arena.get_node_span(lhs);
+                let rhs_span = self.node_arena.get_node_span(rhs);
                 let lhs = self.interpret_expression(lhs)?;
                 let rhs = self.interpret_expression(rhs)?;
-                match op.kind() {
+                match op {
                     Token::Plus => match (lhs, rhs) {
                         (ScalarValue::Int(lhs), ScalarValue::Int(rhs)) => {
                             ScalarValue::Int(lhs.wrapping_add(rhs))
@@ -160,7 +135,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
                             let mut diag = self.make_diag();
                             diag.span_err(
                                 Default::default(),
-                                op.src_span(),
+                                op_span,
                                 "invalid operand types for binary operator",
                             );
                             self.ctx.emit_diag(diag);
@@ -206,7 +181,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
                             let mut diag = self.make_diag();
                             diag.span_err(
                                 Default::default(),
-                                op.src_span(),
+                                op_span,
                                 "invalid operand types for binary operator",
                             );
                             self.ctx.emit_diag(diag);
@@ -292,114 +267,92 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
                     }
                     _ => {
                         let mut diag = self.make_diag();
-                        diag.span_err(Default::default(), op.src_span(), "invalid binary operator");
+                        diag.span_err(Default::default(), op_span, "invalid binary operator");
                         self.ctx.emit_diag(diag);
                         return Err(EraInterpretError::Others);
                     }
                 }
             }
-            EraExprNodeKind::TernaryExpr(x) => {
-                let cond = x.condition().ok_or(EraInterpretError::Others)?;
-                let true_expr = x.true_expr().ok_or(EraInterpretError::Others)?;
-                let false_expr = x.false_expr().ok_or(EraInterpretError::Others)?;
-                let cond_span = cond.src_span();
+            EraNode::ExprTernary(..) => {
+                let EraNodeExprTernary {
+                    cond,
+                    then_expr,
+                    else_expr,
+                } = EraNodeExprTernary::get_from(self.node_arena, expr);
+                let cond_span = self.node_arena.get_node_span(cond);
                 let cond = self.interpret_expression(cond)?;
                 let cond = self.unwrap_int(cond, cond_span)?;
-                let true_expr_span = true_expr.src_span();
-                let false_expr_span = false_expr.src_span();
-                let true_expr = self.interpret_expression(true_expr)?;
-                let false_expr = self.interpret_expression(false_expr)?;
-                if true_expr.kind() != false_expr.kind() {
+                let then_expr_span = self.node_arena.get_node_span(then_expr);
+                let else_expr_span = self.node_arena.get_node_span(else_expr);
+                let then_expr = self.interpret_expression(then_expr)?;
+                let else_expr = self.interpret_expression(else_expr)?;
+                if then_expr.kind() != else_expr.kind() {
                     let mut diag = self.make_diag();
                     diag.span_err(
                         Default::default(),
-                        x.src_span(),
+                        expr_span,
                         "operands to ternary operator have incompatible types",
                     );
                     diag.span_note(
                         Default::default(),
-                        true_expr_span,
-                        format!("true branch is of type {}", true_expr.kind()),
+                        then_expr_span,
+                        format!("true branch is of type {}", then_expr.kind()),
                     );
                     diag.span_note(
                         Default::default(),
-                        false_expr_span,
-                        format!("false branch is of type {}", false_expr.kind()),
+                        else_expr_span,
+                        format!("false branch is of type {}", else_expr.kind()),
                     );
                     self.ctx.emit_diag(diag);
                     return Err(EraInterpretError::Others);
                 }
                 if cond != 0 {
-                    true_expr
+                    then_expr
                 } else {
-                    false_expr
+                    else_expr
                 }
             }
-            EraExprNodeKind::FunCallExpr(x) => {
-                let args_list = x.arguments().ok_or(EraInterpretError::Others)?;
+            EraNode::ExprFunCall(name, args_list) => {
+                // Evaluate arguments first
+                let EraNodeListExpr {
+                    children: args_list,
+                } = EraNodeListExpr::get_from(self.node_arena, args_list);
                 let args = args_list
-                    .children()
-                    .map(|x| {
-                        let span = x.src_span();
+                    .iter()
+                    .map(|&x| {
+                        let x = EraNodeRef(x);
+                        let span = self.node_arena.get_node_span(x);
                         self.interpret_expression(x).map(|x| (x, span))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let name = x.name().ok_or(EraInterpretError::Others)?;
-                let name = name.resolve_text(self.ctx.node_cache.interner());
+                let name_span = self.node_arena.get_node_span(name);
+                let EraNode::Identifier(name) = self.node_arena.get_node(name) else {
+                    let mut diag = self.make_diag();
+                    diag.span_err(Default::default(), name_span, "invalid function name");
+                    self.ctx.emit_diag(diag);
+                    return Err(EraInterpretError::Others);
+                };
+                let name = self.ctx.node_cache.interner().resolve(name);
+                let args_count = args.len();
                 match name.to_ascii_uppercase().as_str() {
-                    "UNICODE" => {
-                        if args.len() > 1 {
-                            let mut diag = self.make_diag();
-                            diag.span_warn(
-                                Default::default(),
-                                x.src_span(),
-                                "too many arguments to function `UNICODE`",
-                            );
-                            self.ctx.emit_diag(diag);
-                        }
-                        let Ok([arg0]) = TryInto::<[_; 1]>::try_into(args) else {
-                            let mut diag = self.make_diag();
-                            diag.span_err(
-                                Default::default(),
-                                x.src_span(),
-                                "missing argument to function `UNICODE`",
-                            );
-                            self.ctx.emit_diag(diag);
-                            return Err(EraInterpretError::Others);
-                        };
-                        let arg0 = self.unwrap_int(arg0.0.coerce_int(), arg0.1)?;
+                    "UNICODE" if args_count == 1 => {
+                        let (arg0, arg0_span) = args.into_iter().next().unwrap();
+                        let arg0 = self.unwrap_int(arg0, arg0_span)?;
                         ScalarValue::Str(routines::int_to_char(arg0).into())
                     }
-                    "VARSIZE" => {
-                        if args.len() > 2 {
-                            let mut diag = self.make_diag();
-                            diag.span_warn(
-                                Default::default(),
-                                x.src_span(),
-                                "too many arguments to function `VARSIZE`",
-                            );
-                            self.ctx.emit_diag(diag);
-                        }
+                    "VARSIZE" if (1..2).contains(&args_count) => {
                         let mut args = args.into_iter();
-                        let Some(var_name) = args.next() else {
-                            let mut diag = self.make_diag();
-                            diag.span_err(
-                                Default::default(),
-                                x.src_span(),
-                                "missing argument to function `VARSIZE`",
-                            );
-                            self.ctx.emit_diag(diag);
-                            return Err(EraInterpretError::Others);
-                        };
-                        let var_name = self.unwrap_str(var_name.0.coerce_str(), var_name.1)?;
+                        let (var_name, var_name_span) = args.next().unwrap();
+                        let var_name = self.unwrap_str(var_name, var_name_span)?;
                         let Some(var_val) = self.ctx.variables.get_var(&var_name) else {
-                            return Err(EraInterpretError::VarNotFound(
-                                args_list.children().nth(0).unwrap().inner(),
-                            ));
+                            let mut diag = self.make_diag();
+                            diag.span_err(Default::default(), var_name_span, "variable not found");
+                            self.ctx.emit_diag(diag);
+                            return Err(EraInterpretError::VarNotFound(var_name, var_name_span));
                         };
-                        let result = if let Some(arg) = args.next() {
+                        let result = if let Some((arg, arg_span)) = args.next() {
                             let dims = var_val.dims().unwrap();
-                            let var_dim = self.unwrap_int(arg.0.coerce_int(), arg.1)?;
+                            let var_dim = self.unwrap_int(arg, arg_span)?;
                             let var_dim = var_dim as usize;
                             match dims.get(var_dim) {
                                 Some(x) => *x as _,
@@ -407,7 +360,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
                                     let mut diag = self.make_diag();
                                     diag.span_err(
                                         Default::default(),
-                                        arg.1,
+                                        arg_span,
                                         "variable dimension out of bounds",
                                     );
                                     self.ctx.emit_diag(diag);
@@ -423,73 +376,81 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
                         let mut diag = self.make_diag();
                         diag.span_err(
                             Default::default(),
-                            x.src_span(),
-                            format!("function `{name}` not defined"),
+                            name_span,
+                            format!(
+                                "function `{name}` is not defined or has no matching overloads"
+                            ),
                         );
                         self.ctx.emit_diag(diag);
                         return Err(EraInterpretError::Others);
                     }
                 }
             }
-            EraExprNodeKind::ParenExpr(x) => {
-                let expr = x.child().ok_or(EraInterpretError::Others)?;
-                self.interpret_expression(expr)?
-            }
-            EraExprNodeKind::VarIdxExpr(x) => todo!(),
-            EraExprNodeKind::VarNamespaceExpr(x) => todo!(),
-            EraExprNodeKind::EmptyExpr(_) => ScalarValue::Empty,
-            EraExprNodeKind::StringForm(x) => {
+            EraNode::ExprParen(x) => self.interpret_expression(x)?,
+            EraNode::ExprVarIdx(..) => todo!(),
+            EraNode::Empty => ScalarValue::Empty,
+            EraNode::StringForm(x) => {
+                let parts = self.node_arena.get_small_extra_data_view(x);
                 let mut result = String::new();
-                for part in x.parts() {
-                    match part {
-                        EraStringFormPartNodeOrLeaf::Node(x) => {
-                            let expr = x.expr().ok_or(EraInterpretError::Others)?;
-                            let expr_span = expr.src_span();
-                            // TODO: width, alignment support
-                            if x.width().is_some() || x.alignment().is_some() {
-                                todo!("width and alignment support in string form");
-                            }
-                            let expr = self.interpret_expression(expr)?;
-                            match expr {
-                                ScalarValue::Int(x) => {
-                                    result += itoa::Buffer::new().format(x);
-                                }
-                                ScalarValue::Str(x) => {
-                                    result += &x;
-                                }
-                                _ => {
-                                    let mut diag = self.make_diag();
-                                    diag.span_err(
-                                        Default::default(),
-                                        expr_span,
-                                        "invalid expression type in string form",
-                                    );
-                                    self.ctx.emit_diag(diag);
-                                    return Err(EraInterpretError::Others);
-                                }
-                            }
+                for part in parts.iter().map(|x| EraNodeRef(*x)) {
+                    let part_span = self.node_arena.get_node_span(part);
+                    let part = if let Some(part) =
+                        EraNodeStringFormInterpPart::try_get_from(self.node_arena, part)
+                    {
+                        // TODO: width, alignment support
+                        if part.width.is_some() || part.alignment.is_some() {
+                            let mut diag = self.make_diag();
+                            diag.span_err(
+                                Default::default(),
+                                part_span,
+                                "width and alignment are not supported yet",
+                            );
+                            self.ctx.emit_diag(diag);
+                            return Err(EraInterpretError::Others);
                         }
-                        EraStringFormPartNodeOrLeaf::Leaf(x) => {
-                            let text = x.resolve_text(self.ctx.node_cache.interner());
-                            let text = Vec::unescape_bytes(text).into_string_lossy();
-                            result += &text;
+                        part.expr
+                    } else {
+                        part
+                    };
+                    let part_span = self.node_arena.get_node_span(part);
+                    match self.interpret_expression(part)? {
+                        ScalarValue::Int(x) => result.push_str(&x.to_string()),
+                        ScalarValue::Str(x) => result.push_str(&x),
+                        x => {
+                            let mut diag = self.make_diag();
+                            diag.span_err(
+                                Default::default(),
+                                part_span,
+                                format!("invalid string part value: {:?}", x),
+                            );
+                            self.ctx.emit_diag(diag);
+                            return Err(EraInterpretError::Others);
                         }
                     }
                 }
                 ScalarValue::Str(result)
             }
-        })
-    }
-
-    pub fn interpret_expr_ok(&mut self, expr: EraExprNodeOrLeaf) -> Option<ScalarValue> {
-        match self.interpret_expression(expr) {
-            Ok(x) => Some(x),
-            Err(EraInterpretError::VarNotFound(var)) => {
-                let var_name = var.resolve_text(self.ctx.node_cache.interner());
+            _ => {
                 let mut diag = self.make_diag();
                 diag.span_err(
                     Default::default(),
-                    var.src_span(),
+                    expr_span,
+                    format!("invalid expression node: {:?}", expr),
+                );
+                self.ctx.emit_diag(diag);
+                return Err(EraInterpretError::Others);
+            }
+        })
+    }
+
+    pub fn interpret_expr_ok(&mut self, expr: EraNodeRef) -> Option<ScalarValue> {
+        match self.interpret_expression(expr) {
+            Ok(x) => Some(x),
+            Err(EraInterpretError::VarNotFound(var_name, var_span)) => {
+                let mut diag = self.make_diag();
+                diag.span_err(
+                    Default::default(),
+                    var_span,
                     format!("undefined variable `{var_name}`"),
                 );
                 self.ctx.emit_diag(diag);
@@ -499,20 +460,14 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
         }
     }
 
-    pub fn interpret_int_expr<'a>(
-        &mut self,
-        expr: EraExprNodeOrLeaf<'a>,
-    ) -> InterpretResult<'a, i64> {
-        let span = expr.src_span();
+    pub fn interpret_int_expr(&mut self, expr: EraNodeRef) -> InterpretResult<i64> {
+        let span = self.node_arena.get_node_span(expr);
         let val = self.interpret_expression(expr)?.coerce_int();
         self.unwrap_int(val, span)
     }
 
-    pub fn interpret_str_expr<'a>(
-        &mut self,
-        expr: EraExprNodeOrLeaf<'a>,
-    ) -> InterpretResult<'a, String> {
-        let span = expr.src_span();
+    pub fn interpret_str_expr(&mut self, expr: EraNodeRef) -> InterpretResult<String> {
+        let span = self.node_arena.get_node_span(expr);
         let val = self.interpret_expression(expr)?.coerce_str();
         self.unwrap_str(val, span)
     }
@@ -520,183 +475,135 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
     /// Interpret a variable declaration node, with global context. If the declaration is not
     /// a variable declaration, this function will will be a no-op and return an error
     /// `EraInterpretError::Others`.
-    pub fn interpret_var_decl<'a>(
+    pub fn interpret_var_decl(
         &mut self,
-        decl: EraDeclItemNode<'a>,
-    ) -> InterpretResult<'a, EraInterpretedVarDecl> {
-        let name_key;
-        let name_span;
-        let (is_ref, is_const, is_global, is_dynamic, is_savedata, is_charadata);
-
-        let var_val = match decl.kind() {
-            EraDeclItemNodeKind::VarDecl(decl) => {
-                (name_key, name_span) = decl
-                    .name()
-                    .map(|x| (x.token().text_key().unwrap(), x.src_span()))
-                    .ok_or(EraInterpretError::Others)?;
-                (
-                    is_ref,
-                    is_const,
-                    is_global,
-                    is_dynamic,
-                    is_savedata,
-                    is_charadata,
-                ) = (
-                    decl.is_ref(),
-                    decl.is_const(),
-                    decl.is_global(),
-                    decl.is_dynamic(),
-                    decl.is_savedata(),
-                    decl.is_charadata(),
-                );
-                let mut dims = if let Some(dims) = decl.dimensions() {
-                    let dims = dims
-                        .children()
-                        .map(|x| {
-                            let span = x.src_span();
-                            self.interpret_int_expr(x).and_then(|x| {
-                                if is_ref && x != 0 {
-                                    let mut diag = self.make_diag();
-                                    diag.span_err(
-                                        Default::default(),
-                                        span,
-                                        "REF variable dimension must be zero or omitted",
-                                    );
-                                    self.ctx.emit_diag(diag);
-                                    return Err(EraInterpretError::Others);
-                                }
-                                if !is_ref && x == 0 {
-                                    let mut diag = self.make_diag();
-                                    diag.span_err(
-                                        Default::default(),
-                                        span,
-                                        "non-REF variable dimension cannot be zero or omitted",
-                                    );
-                                    self.ctx.emit_diag(diag);
-                                    return Err(EraInterpretError::Others);
-                                }
-                                x.try_into().map_err(|_| {
-                                    let mut diag = self.make_diag();
-                                    diag.span_err(
-                                    Default::default(),
-                                    span,
-                                    "expression does not evaluate to a valid variable dimension",
-                                );
-                                    self.ctx.emit_diag(diag);
-                                    EraInterpretError::Others
-                                })
-                            })
-                        })
-                        .collect::<Result<EraVarDims, _>>()?;
-                    dims
-                } else {
-                    smallvec![if is_ref { 0 } else { 1 }]
-                };
-                let inits = if let Some(inits) = decl.initializer() {
-                    inits
-                        .children()
-                        .map(|x| self.interpret_int_expr(x).map(IntValue::new))
-                        .collect::<Result<Vec<_>, _>>()?
-                } else {
-                    Vec::new()
-                };
-
-                // HACK: Handle CHARADATA variable dimensions
-                if is_charadata {
-                    dims.insert(0, crate::v2::engine::MAX_CHARA_COUNT);
-                }
-
-                Value::new_int_arr(dims, inits)
-            }
-            EraDeclItemNodeKind::VarSDecl(decl) => {
-                (name_key, name_span) = decl
-                    .name()
-                    .map(|x| (x.token().text_key().unwrap(), x.src_span()))
-                    .ok_or(EraInterpretError::Others)?;
-                (
-                    is_ref,
-                    is_const,
-                    is_global,
-                    is_dynamic,
-                    is_savedata,
-                    is_charadata,
-                ) = (
-                    decl.is_ref(),
-                    decl.is_const(),
-                    decl.is_global(),
-                    decl.is_dynamic(),
-                    decl.is_savedata(),
-                    decl.is_charadata(),
-                );
-                let mut dims = if let Some(dims) = decl.dimensions() {
-                    let dims = dims
-                        .children()
-                        .map(|x| {
-                            let span = x.src_span();
-                            self.interpret_int_expr(x).and_then(|x| {
-                                if is_ref && x != 0 {
-                                    let mut diag = self.make_diag();
-                                    diag.span_err(
-                                        Default::default(),
-                                        span,
-                                        "REF variable dimension must be zero or omitted",
-                                    );
-                                    self.ctx.emit_diag(diag);
-                                    return Err(EraInterpretError::Others);
-                                }
-                                if !is_ref && x == 0 {
-                                    let mut diag = self.make_diag();
-                                    diag.span_err(
-                                        Default::default(),
-                                        span,
-                                        "non-REF variable dimension cannot be zero or omitted",
-                                    );
-                                    self.ctx.emit_diag(diag);
-                                    return Err(EraInterpretError::Others);
-                                }
-                                x.try_into().map_err(|_| {
-                                    let mut diag = self.make_diag();
-                                    diag.span_err(
-                                    Default::default(),
-                                    span,
-                                    "expression does not evaluate to a valid variable dimension",
-                                );
-                                    self.ctx.emit_diag(diag);
-                                    EraInterpretError::Others
-                                })
-                            })
-                        })
-                        .collect::<Result<EraVarDims, _>>()?;
-                    dims
-                } else {
-                    smallvec![if is_ref { 0 } else { 1 }]
-                };
-                let inits = if let Some(inits) = decl.initializer() {
-                    inits
-                        .children()
-                        .map(|x| self.interpret_str_expr(x).map(|x| StrValue::new(x.into())))
-                        .collect::<Result<Vec<_>, _>>()?
-                } else {
-                    Vec::new()
-                };
-
-                // HACK: Handle CHARADATA variable dimensions
-                if is_charadata {
-                    dims.insert(0, crate::v2::engine::MAX_CHARA_COUNT);
-                }
-
-                Value::new_str_arr(dims, inits)
-            }
-            // Ignore other kinds of declarations
-            _ => return Err(EraInterpretError::Others),
+        decl: EraNodeRef,
+    ) -> InterpretResult<EraInterpretedVarDecl> {
+        let decl_span = self.node_arena.get_node_span(decl);
+        let Some(EraNodeDeclVarHomo {
+            is_string,
+            name,
+            qualifiers,
+            dimensions,
+            initializers,
+        }) = EraNodeDeclVarHomo::try_get_from(self.node_arena, decl)
+        else {
+            let mut diag = self.make_diag();
+            diag.span_err(Default::default(), decl_span, "invalid declaration node");
+            self.ctx.emit_diag(diag);
+            return Err(EraInterpretError::Others);
         };
 
+        // Name
+        let name_span = self.node_arena.get_node_span(name);
+        let EraNode::Identifier(name_key) = self.node_arena.get_node(name) else {
+            unreachable!("invalid variable name node");
+        };
+
+        // Qualifiers
+        let mut is_ref = false;
+        let mut is_const = false;
+        let mut is_global = false;
+        let mut is_dynamic = false;
+        let mut is_savedata = false;
+        let mut is_charadata = false;
+        for qualifier in qualifiers.iter().map(|&x| EraNodeRef(x)) {
+            let qualifier_span = self.node_arena.get_node_span(qualifier);
+            let EraNode::VarModifier(qualifier) = self.node_arena.get_node(qualifier) else {
+                let mut diag = self.make_diag();
+                diag.span_err(
+                    Default::default(),
+                    qualifier_span,
+                    "invalid variable qualifier",
+                );
+                self.ctx.emit_diag(diag);
+                return Err(EraInterpretError::Others);
+            };
+            match qualifier {
+                Token::KwRef => {
+                    is_ref = true;
+                }
+                Token::KwConst => {
+                    is_const = true;
+                }
+                Token::KwGlobal => {
+                    is_global = true;
+                }
+                Token::KwDynamic => {
+                    is_dynamic = true;
+                }
+                Token::KwSavedata => {
+                    is_savedata = true;
+                }
+                Token::KwCharadata => {
+                    is_charadata = true;
+                }
+                _ => {
+                    let mut diag = self.make_diag();
+                    diag.span_err(
+                        Default::default(),
+                        qualifier_span,
+                        "invalid variable qualifier",
+                    );
+                    self.ctx.emit_diag(diag);
+                    return Err(EraInterpretError::Others);
+                }
+            }
+        }
+
+        // Dimensions
+        let EraNode::ListExpr(dims) = self.node_arena.get_node(dimensions) else {
+            unreachable!("invalid variable dimensions node");
+        };
+        let dims = self.node_arena.get_extra_data_view(dims);
+        let mut dims = dims
+            .iter()
+            .map(|&x| EraNodeRef(x))
+            .map(|x| {
+                let span = self.node_arena.get_node_span(x);
+                self.interpret_int_expr(x).and_then(|x| {
+                    if is_ref && x != 0 {
+                        let mut diag = self.make_diag();
+                        diag.span_err(
+                            Default::default(),
+                            span,
+                            "REF variable dimension must be zero or omitted",
+                        );
+                        self.ctx.emit_diag(diag);
+                        return Err(EraInterpretError::Others);
+                    }
+                    if !is_ref && x == 0 {
+                        let mut diag = self.make_diag();
+                        diag.span_err(
+                            Default::default(),
+                            span,
+                            "non-REF variable dimension cannot be zero or omitted",
+                        );
+                        self.ctx.emit_diag(diag);
+                        return Err(EraInterpretError::Others);
+                    }
+                    x.try_into().map_err(|_| {
+                        let mut diag = self.make_diag();
+                        diag.span_err(
+                            Default::default(),
+                            span,
+                            "expression does not evaluate to a valid variable dimension",
+                        );
+                        self.ctx.emit_diag(diag);
+                        EraInterpretError::Others
+                    })
+                })
+            })
+            .collect::<Result<EraVarDims, _>>()?;
+        if dims.is_empty() {
+            dims.push(if is_ref { 0 } else { 1 });
+        }
         if is_ref {
             if is_dynamic {
                 let mut diag = self.make_diag();
                 diag.span_err(
                     Default::default(),
-                    decl.src_span(),
+                    decl_span,
                     "REF variable cannot be DYNAMIC",
                 );
                 self.ctx.emit_diag(diag);
@@ -706,13 +613,41 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
                 let mut diag = self.make_diag();
                 diag.span_err(
                     Default::default(),
-                    decl.src_span(),
+                    decl_span,
                     "REF variable cannot be CHARADATA",
                 );
                 self.ctx.emit_diag(diag);
                 return Err(EraInterpretError::Others);
             }
         }
+        // HACK: Handle CHARADATA variable dimensions
+        if is_charadata {
+            dims.insert(0, crate::v2::engine::MAX_CHARA_COUNT);
+        }
+
+        // Initializers (& value)
+        let EraNode::ListExpr(inits) = self.node_arena.get_node(initializers) else {
+            unreachable!("invalid variable initializers node");
+        };
+        let var_val = if is_string {
+            let inits = self
+                .node_arena
+                .get_extra_data_view(inits)
+                .iter()
+                .map(|&x| EraNodeRef(x))
+                .map(|x| self.interpret_str_expr(x).map(|x| StrValue::new(x.into())))
+                .try_collect()?;
+            Value::new_str_arr(dims, inits)
+        } else {
+            let inits = self
+                .node_arena
+                .get_extra_data_view(inits)
+                .iter()
+                .map(|&x| EraNodeRef(x))
+                .map(|x| self.interpret_int_expr(x).map(IntValue::new))
+                .try_collect()?;
+            Value::new_int_arr(dims, inits)
+        };
 
         // Create variable
         Ok(EraInterpretedVarDecl {
@@ -736,7 +671,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
         Diagnostic::with_file(self.ctx.active_source.clone())
     }
 
-    fn unwrap_int(&mut self, val: ScalarValue, span: SrcSpan) -> InterpretResult<'static, i64> {
+    fn unwrap_int(&mut self, val: ScalarValue, span: SrcSpan) -> InterpretResult<i64> {
         match val {
             ScalarValue::Int(x) => Ok(x),
             _ => {
@@ -752,7 +687,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
         }
     }
 
-    fn unwrap_str(&mut self, val: ScalarValue, span: SrcSpan) -> InterpretResult<'static, String> {
+    fn unwrap_str(&mut self, val: ScalarValue, span: SrcSpan) -> InterpretResult<String> {
         match val {
             ScalarValue::Str(x) => Ok(x),
             _ => {
@@ -768,9 +703,28 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
         }
     }
 
-    fn resolve_variable_node<'a>(&mut self, name: EraIdentLeaf<'a>) -> InterpretResult<'a, Value> {
-        let token = name.token();
-        let name = name.resolve_text(self.ctx.node_cache.interner());
+    fn resolve_variable_node(&mut self, name: EraNodeRef) -> InterpretResult<Value> {
+        let name_span = self.node_arena.get_node_span(name);
+        let name_token = match self.node_arena.get_node(name) {
+            EraNode::Identifier(x) => x,
+            EraNode::ExprVarNamespace(..) => {
+                let mut diag = self.make_diag();
+                diag.span_err(
+                    Default::default(),
+                    name_span,
+                    "namespaced variable not yet supported",
+                );
+                self.ctx.emit_diag(diag);
+                return Err(EraInterpretError::Others);
+            }
+            _ => {
+                let mut diag = self.make_diag();
+                diag.span_err(Default::default(), name_span, "invalid variable name node");
+                self.ctx.emit_diag(diag);
+                return Err(EraInterpretError::Others);
+            }
+        };
+        let name = self.ctx.node_cache.interner().resolve(name_token);
 
         let Some(var_info) = self.ctx.variables.get_var_info_by_name(name) else {
             // NOTE: Don't emit diagnostics here; let the caller decide and retry
@@ -781,7 +735,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
             //     format!("variable `{}` not found", name),
             // );
             // self.ctx.emit_diag(diag);
-            return Err(EraInterpretError::VarNotFound(token.into()));
+            return Err(EraInterpretError::VarNotFound(name.into(), name_span));
         };
 
         var_info.val.ensure_alloc();
@@ -790,7 +744,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
             let mut diag = self.make_diag();
             diag.span_err(
                 Default::default(),
-                token.text_range().into(),
+                name_span,
                 format!("variable `{name}` cannot be used in constant context"),
             );
             self.ctx.emit_diag(diag);
@@ -800,23 +754,19 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
         Ok(var_info.val.clone())
     }
 
-    fn resolve_var_node_with_idx<'a>(
+    fn resolve_var_node_with_idx(
         &mut self,
-        name: EraIdentLeaf<'a>,
+        name: EraNodeRef,
         idxs: &[u32],
-    ) -> InterpretResult<'a, ScalarValue> {
-        let token = name.token();
+    ) -> InterpretResult<ScalarValue> {
+        let name_span = self.node_arena.get_node_span(name);
 
         match self.resolve_variable_node(name)?.as_unpacked() {
             RefFlatValue::ArrInt(x) => {
                 let x = x.borrow();
                 let Some(x) = x.get(idxs) else {
                     let mut diag = self.make_diag();
-                    diag.span_err(
-                        Default::default(),
-                        token.text_range().into(),
-                        "index out of bounds",
-                    );
+                    diag.span_err(Default::default(), name_span, "index out of bounds");
                     self.ctx.emit_diag(diag);
                     return Err(EraInterpretError::Others);
                 };
@@ -826,11 +776,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
                 let x = x.borrow();
                 let Some(x) = x.get(idxs) else {
                     let mut diag = self.make_diag();
-                    diag.span_err(
-                        Default::default(),
-                        token.text_range().into(),
-                        "index out of bounds",
-                    );
+                    diag.span_err(Default::default(), name_span, "index out of bounds");
                     self.ctx.emit_diag(diag);
                     return Err(EraInterpretError::Others);
                 };

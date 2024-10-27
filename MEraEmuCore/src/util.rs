@@ -12,6 +12,7 @@ use std::{
     borrow::Borrow,
     fmt::Display,
     hash::Hash,
+    mem::ManuallyDrop,
     ops::{Deref, DerefMut},
     ptr::NonNull,
     rc::Rc,
@@ -384,5 +385,75 @@ impl<T> Drop for BoxPtr<T> {
         unsafe {
             let _ = Box::from_raw(self.0.as_ptr());
         }
+    }
+}
+
+union DataUnion2<T, U> {
+    t: ManuallyDrop<T>,
+    u: ManuallyDrop<U>,
+}
+
+pub struct SmallSlice<'a, T> {
+    data: DataUnion2<T, *const T>,
+    len: usize,
+    _marker: std::marker::PhantomData<&'a T>,
+}
+
+impl std::fmt::Debug for SmallSlice<'_, u32> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_slice().fmt(f)
+    }
+}
+
+impl<'a> SmallSlice<'a, u32> {
+    pub fn new(data: &'a [u32]) -> Self {
+        let len = data.len();
+        if len == 1 {
+            Self::new_inline(data[0])
+        } else {
+            Self {
+                data: DataUnion2 {
+                    u: ManuallyDrop::new(data.as_ptr()),
+                },
+                len,
+                _marker: std::marker::PhantomData,
+            }
+        }
+    }
+
+    pub fn new_inline(data: u32) -> Self {
+        Self {
+            data: DataUnion2 {
+                t: ManuallyDrop::new(data),
+            },
+            len: 1,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            data: DataUnion2 {
+                u: ManuallyDrop::new(NonNull::dangling().as_ptr()),
+            },
+            len: 0,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u32] {
+        if self.len == 1 {
+            std::slice::from_ref(unsafe { &self.data.t })
+        } else {
+            unsafe { std::slice::from_raw_parts(*self.data.u, self.len) }
+        }
+    }
+}
+
+impl Deref for SmallSlice<'_, u32> {
+    type Target = [u32];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
     }
 }

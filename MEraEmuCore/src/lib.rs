@@ -1,5 +1,6 @@
 mod bytecode;
 mod compiler;
+pub mod cst;
 mod csv;
 mod engine;
 mod lexer;
@@ -1213,8 +1214,6 @@ mod tests {
 
             let mut errors = self.errors.borrow_mut();
 
-            const PRINT_TO_STDOUT: bool = false;
-
             for entry in diag.get_entries() {
                 let (noun, color) = if entry.level == types::DiagnosticLevel::Error {
                     self.err_cnt += 1;
@@ -1225,7 +1224,19 @@ mod tests {
                 } else {
                     ("note", Color::BrightCyan)
                 };
-                let mut resolved = diag.resolve_src_span(&entry.filename, entry.span).unwrap();
+                let Some(mut resolved) = diag.resolve_src_span(&entry.filename, entry.span) else {
+                    let msg = format!(
+                        "{}: {}: {}\nSnippet info not available\n",
+                        entry.filename, noun, entry.message,
+                    )
+                    .color(color);
+                    if PRINT_TO_STDOUT {
+                        print!("{}", msg);
+                    } else {
+                        *errors += &msg.to_string();
+                    }
+                    continue;
+                };
                 let mut snippet_prefix_bytes = resolved
                     .snippet
                     .char_indices()
@@ -1618,6 +1629,8 @@ mod tests {
             QUIT
             PRINTFORM not printed
     "#};
+
+    const PRINT_TO_STDOUT: bool = false;
 
     #[test]
     fn basic_engine() -> anyhow::Result<()> {

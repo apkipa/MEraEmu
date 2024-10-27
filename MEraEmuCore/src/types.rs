@@ -68,12 +68,20 @@ impl SrcSpan {
     pub fn new(start: SrcPos, len: u32) -> SrcSpan {
         SrcSpan { start, len }
     }
+    pub fn empty() -> SrcSpan {
+        Default::default()
+    }
     pub fn with_ends(start: SrcPos, end: SrcPos) -> SrcSpan {
         assert!(start <= end, "end position is before start position");
         SrcSpan {
             start,
             len: end.0 - start.0,
         }
+    }
+    pub fn new_covering(span1: SrcSpan, span2: SrcSpan) -> SrcSpan {
+        let start = span1.start().min(span2.start());
+        let end = span1.end().max(span2.end());
+        SrcSpan::with_ends(start, end)
     }
     pub fn start(&self) -> SrcPos {
         self.start
@@ -113,6 +121,23 @@ pub struct SrcLoc {
 impl Default for SrcLoc {
     fn default() -> Self {
         SrcLoc { line: 1, col: 0 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EraSmallTokenKind {
+    kind: u16,
+}
+
+impl From<EraTokenKind> for EraSmallTokenKind {
+    fn from(kind: EraTokenKind) -> Self {
+        EraSmallTokenKind { kind: kind as _ }
+    }
+}
+
+impl From<EraSmallTokenKind> for EraTokenKind {
+    fn from(kind: EraSmallTokenKind) -> Self {
+        unsafe { std::mem::transmute(kind.kind as u32) }
     }
 }
 
@@ -741,11 +766,17 @@ impl EraMacroMap {
 #[derive(Debug)]
 pub struct EraSourceFile {
     pub filename: ArcStr,
+    /// The original source text. Reduces memory usage.
+    pub text: Option<String>,
     /// The compressed original source text. Reduces memory usage.
     pub compressed_text: Option<Box<[u8]>>,
     /// The root AST node of the lossless syntax tree, with macros replaced.
-    pub final_root: Option<cstree::green::GreenNode>,
-    /// The list of macro substitution mappings.
+    pub cst_root: Option<cstree::green::GreenNode>,
+    pub ast_data: Option<(
+        crate::v2::parser::EraNodeRef,
+        crate::v2::parser::EraNodeArena,
+    )>,
+    /// The list of macro substitution mappings (from CST to original text).
     pub macro_map: EraMacroMap,
     /// The list of `#define`'s.
     pub defines: EraDefineScope,
@@ -1297,7 +1328,7 @@ impl<'a, 'src> DiagnosticProvider<'a, 'src> {
             let len = span.len();
             let src_file = self.src_map?.get(filename)?;
 
-            if let (Some(final_root), Some(resolver)) = (&src_file.final_root, self.resolver) {
+            if let (Some(final_root), Some(resolver)) = (&src_file.cst_root, self.resolver) {
                 // Only resolve necessary lines from CST to improve performance.
                 let final_root_len = {
                     let len = final_root.text_len().into();
@@ -1398,6 +1429,8 @@ impl<'a, 'src> DiagnosticProvider<'a, 'src> {
                     loc,
                     len,
                 });
+            } else if let Some(text) = &src_file.text {
+                Cow::Borrowed(text.as_bytes())
             } else {
                 // Must decompress the entire source text.
                 let src = src_file.compressed_text.as_ref()?;

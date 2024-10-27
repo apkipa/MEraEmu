@@ -1,6 +1,10 @@
 use cstree::interning::{InternKey, Interner, Resolver, TokenKey};
 use rustc_hash::FxBuildHasher;
 
+use std::mem::MaybeUninit;
+
+// static mut rodeo: MaybeUninit<lasso::Rodeo<TokenKey, FxBuildHasher>> = MaybeUninit::uninit();
+
 #[derive(Debug)]
 pub struct ThreadedTokenInterner {
     rodeo: lasso::ThreadedRodeo<TokenKey, FxBuildHasher>,
@@ -16,6 +20,9 @@ impl Default for ThreadedTokenInterner {
 
 impl ThreadedTokenInterner {
     pub fn new() -> Self {
+        // unsafe {
+        //     rodeo.write(lasso::Rodeo::with_hasher(Default::default()));
+        // }
         Self {
             rodeo: lasso::ThreadedRodeo::with_hasher(Default::default()),
             strings: Vec::new(),
@@ -43,6 +50,7 @@ impl Resolver<TokenKey> for ThreadedTokenInterner {
             .get(key.into_u32() as usize)
             .copied()
             .or_else(|| self.rodeo.try_resolve(&key))
+        // unsafe { rodeo.assume_init_mut().try_resolve(&key) }
     }
 
     #[inline]
@@ -51,6 +59,7 @@ impl Resolver<TokenKey> for ThreadedTokenInterner {
             .get(key.into_u32() as usize)
             .copied()
             .unwrap_or_else(|| self.rodeo.resolve(&key))
+        // unsafe { rodeo.assume_init_mut().resolve(&key) }
     }
 }
 
@@ -60,11 +69,13 @@ impl Interner<TokenKey> for ThreadedTokenInterner {
     #[inline]
     fn try_get_or_intern(&mut self, text: &str) -> Result<TokenKey, Self::Error> {
         self.rodeo.try_get_or_intern(text)
+        // unsafe { rodeo.assume_init_mut().try_get_or_intern(text) }
     }
 
     #[inline]
     fn get_or_intern(&mut self, text: &str) -> TokenKey {
         self.rodeo.get_or_intern(text)
+        // unsafe { rodeo.assume_init_mut().get_or_intern(text) }
     }
 }
 
@@ -75,6 +86,7 @@ impl Resolver<TokenKey> for &ThreadedTokenInterner {
             .get(key.into_u32() as usize)
             .copied()
             .or_else(|| self.rodeo.try_resolve(&key))
+        // unsafe { rodeo.assume_init_mut().try_resolve(&key) }
     }
 
     #[inline]
@@ -83,6 +95,7 @@ impl Resolver<TokenKey> for &ThreadedTokenInterner {
             .get(key.into_u32() as usize)
             .copied()
             .unwrap_or_else(|| self.rodeo.resolve(&key))
+        // unsafe { rodeo.assume_init_mut().resolve(&key) }
     }
 }
 
@@ -92,10 +105,12 @@ impl Interner<TokenKey> for &ThreadedTokenInterner {
     #[inline]
     fn try_get_or_intern(&mut self, text: &str) -> Result<TokenKey, Self::Error> {
         self.rodeo.try_get_or_intern(text)
+        // unsafe { rodeo.assume_init_mut().try_get_or_intern(text) }
     }
 
     #[inline]
     fn get_or_intern(&mut self, text: &str) -> TokenKey {
         self.rodeo.get_or_intern(text)
+        // unsafe { rodeo.assume_init_mut().get_or_intern(text) }
     }
 }

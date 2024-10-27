@@ -14,9 +14,8 @@ use super::{
     ast::*,
     interpret::{EraInterpretError, EraInterpreter},
     parser::EraParsedProgram,
-    routines,
 };
-use crate::util::syntax::*;
+use crate::v2::routines;
 use crate::{
     types::*,
     util::{
@@ -24,6 +23,7 @@ use crate::{
         Ascii,
     },
 };
+use crate::{util::syntax::*, v2::lexer::EraLexer};
 
 use EraBytecodeKind as BcKind;
 use EraTokenKind as Token;
@@ -388,7 +388,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                     .unwrap()
                     .get_mut(filename)
                     .expect("source not found");
-                program.final_root.get_or_insert_with(|| {
+                program.cst_root.get_or_insert_with(|| {
                     let is_header = program.is_header;
                     let compressed = program
                         .compressed_text
@@ -396,7 +396,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                         .expect("compressed text not set");
                     let src = lz4_flex::decompress_size_prepended(compressed).unwrap();
                     let src = std::str::from_utf8(&src).unwrap();
-                    let mut lexer = super::lexer::EraLexer::new(program.filename.clone(), src);
+                    let mut lexer = EraLexer::new(program.filename.clone(), src, false);
                     let mut is_str_var_fn = |x: &str| {
                         self.ctx
                             .variables
@@ -425,7 +425,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                     // TODO: Maybe distribute work to another thread?
                     program.compressed_text.get_or_insert_with(|| {
                         let src = program
-                            .final_root
+                            .cst_root
                             .as_ref()
                             .unwrap()
                             .display::<Token, _>(self.ctx.node_cache.interner());
@@ -433,9 +433,9 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                         let compressed = lz4_flex::compress_prepend_size(src.as_bytes());
                         compressed.into()
                     });
-                    program.final_root.take()
+                    program.cst_root.take()
                 } else {
-                    program.final_root.as_ref().cloned()
+                    program.cst_root.as_ref().cloned()
                 };
                 let program = program.expect("final root not set");
                 let program = SyntaxNode::new_root(program);
@@ -3371,10 +3371,10 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
                     }
 
                     // Finialize CASE jumps
+                    jp_else = Some(self.chunk.push_jump(preds_span));
                     for jp_body in jp_bodies {
                         jp_body.complete_here(self.chunk);
                     }
-                    jp_else = Some(self.chunk.push_jump(preds_span));
 
                     // Pop stack early to prevent unbalanced stack
                     self.chunk.push_pop_all(1, preds_span);

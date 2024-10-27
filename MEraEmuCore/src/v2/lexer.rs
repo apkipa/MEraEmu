@@ -73,6 +73,7 @@ struct EraLexerOuterState<'a> {
     // HACK: For StableDeref of lexeme
     cart: Vec<u8>,
     filename: ArcStr,
+    skip_whitespace: bool,
 }
 
 impl<'a> EraLexerOuterState<'a> {
@@ -88,13 +89,14 @@ impl<'a> EraLexerOuterState<'a> {
 }
 
 impl<'a> EraLexer<'a> {
-    pub fn new(filename: ArcStr, src: &'a str) -> Self {
+    pub fn new(filename: ArcStr, src: &'a str, skip_whitespace: bool) -> Self {
         Self {
             o: EraLexerOuterState {
                 src: src.as_bytes(),
                 strs: Default::default(),
                 cart: Vec::new(),
                 filename,
+                skip_whitespace,
             },
             i: EraLexerInnerState::new(),
             next_i: None,
@@ -172,12 +174,56 @@ impl<'a> EraLexer<'a> {
         result
     }
 
+    pub fn skip_whitespace(&mut self, mode: EraLexerMode) {
+        use EraLexerMode::*;
+
+        // Skip whitespace only when not reading string literals
+        if !matches!(mode, Normal | SharpDecl | InlineNormal) {
+            return;
+        }
+
+        while let [ch, rest @ ..] = self.i.alternate_src {
+            if !is_whitespace(*ch) {
+                break;
+            }
+            self.i.alternate_src = rest;
+            self.next_i = None;
+        }
+        if self.i.alternate_src.is_empty() {
+            while let Some([ch, rest @ ..]) = self.o.src.get(self.i.src_pos..) {
+                if !is_whitespace(*ch) {
+                    break;
+                }
+                if *ch == b';' {
+                    // Skip comments
+                    let pos = memchr::memchr2(b'\r', b'\n', rest);
+                    self.i.src_pos += pos.unwrap_or(rest.len());
+                }
+
+                self.i.src_pos += 1;
+                self.next_i = None;
+            }
+        }
+    }
+
     pub fn previous_token(&self) -> EraTokenKind {
         self.i.last_token
     }
 
     pub fn at_start_of_line(&self) -> bool {
         self.i.last_is_newline
+    }
+
+    /// Returns the current source span. If the lexer is in the middle of a replacement,
+    /// the span will be the replaced text. Otherwise, the span will be empty.
+    pub fn current_src_span(&self) -> SrcSpan {
+        let pos_start = if self.i.has_replacement() {
+            self.i.src_pos - self.i.replace_len
+        } else {
+            self.i.src_pos
+        };
+        let pos_end = self.i.src_pos;
+        SrcSpan::new(SrcPos(pos_start as _), (pos_end - pos_start) as _)
     }
 
     /// Returns the positions of all newlines (start of line) in the source.
@@ -199,7 +245,7 @@ struct EraLexerInnerState {
     src_pos: usize,
     replace_len: usize,
     alternate_src: &'static [u8],
-    loc: SrcLoc,
+    // loc: SrcLoc,
     last_token: EraTokenKind,
     last_is_newline: bool,
     /// The number of pushed newline suppressions, introduced by `{` and ended by `}`.
@@ -212,11 +258,15 @@ impl EraLexerInnerState {
             src_pos: 0,
             replace_len: 0,
             alternate_src: b"",
-            loc: SrcLoc { line: 1, col: 0 },
+            // loc: SrcLoc { line: 1, col: 0 },
             last_token: EraTokenKind::LineBreak,
             last_is_newline: true,
             suppress_newline_cnt: 0,
         }
+    }
+
+    fn has_replacement(&self) -> bool {
+        !self.alternate_src.is_empty()
     }
 
     // SAFETY: The returned token has its lifetime erased, possibly attached to the cart
