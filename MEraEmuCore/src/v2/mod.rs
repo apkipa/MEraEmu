@@ -1,3 +1,4 @@
+pub mod codegen;
 pub mod engine;
 pub mod interpret;
 pub mod lexer;

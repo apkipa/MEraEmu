@@ -16,6 +16,7 @@ use cstree::interning::{Interner, Resolver, TokenKey};
 use enumset::EnumSet;
 use hashbrown::{HashMap, HashSet};
 use indexmap::IndexMap;
+use rclite::Arc;
 use rustc_hash::FxBuildHasher;
 use EraLexerMode as Mode;
 use EraTokenKind as Token;
@@ -55,6 +56,39 @@ impl From<f64> for EraLiteralF64 {
 impl From<EraLiteralF64> for f64 {
     fn from(value: EraLiteralF64) -> Self {
         f64::from_le_bytes(value.0)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraArcNodeRef(pub EraNodeRef, pub Arc<EraNodeArena>);
+
+impl EraArcNodeRef {
+    pub fn new(node_ref: EraNodeRef, arena: Arc<EraNodeArena>) -> Self {
+        Self(node_ref, arena)
+    }
+
+    pub fn node_ref(&self) -> EraNodeRef {
+        self.0
+    }
+
+    pub fn arena(&self) -> &Arc<EraNodeArena> {
+        &self.1
+    }
+
+    pub fn get(&self) -> EraNode {
+        self.1.get_node(self.0)
+    }
+
+    pub fn get_span(&self) -> SrcSpan {
+        self.1.get_node_span(self.0)
+    }
+
+    pub fn get_token_span(&self) -> SrcSpan {
+        self.1.get_node_token_span(self.0)
+    }
+
+    pub fn clone_with_node(&self, node: EraNodeRef) -> Self {
+        Self(node, self.1.clone())
     }
 }
 
@@ -385,6 +419,10 @@ pub struct EraNodeStringFormInterpPart {
 }
 
 impl EraNodeStringFormInterpPart {
+    pub fn get_from(arena: &EraNodeArena, node_ref: EraNodeRef) -> Self {
+        Self::try_get_from(arena, node_ref).expect("expected StringFormInterpPart node")
+    }
+
     pub fn try_get_from(arena: &EraNodeArena, node_ref: EraNodeRef) -> Option<Self> {
         let EraNode::StringFormInterpPart(extra_ref) = arena.get_node(node_ref) else {
             return None;
@@ -426,6 +464,115 @@ impl<'a> EraNodeDeclVarHomo<'a> {
             qualifiers,
             dimensions,
             initializers,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraNodeItemFunction {
+    pub name: EraNodeRef,
+    pub args: EraNodeRef,
+    pub sharp_decls: EraNodeRef,
+    pub stmts: EraNodeRef,
+}
+
+impl EraNodeItemFunction {
+    pub fn try_get_from(arena: &EraNodeArena, node_ref: EraNodeRef) -> Option<Self> {
+        let EraNode::ItemFunction(name, extra_ref) = arena.get_node(node_ref) else {
+            return None;
+        };
+        let extra_data = arena.get_extra_data_view_given_len(extra_ref, 3);
+        let args = EraNodeRef(extra_data[0]);
+        let sharp_decls = EraNodeRef(extra_data[1]);
+        let stmts = EraNodeRef(extra_data[2]);
+        Some(Self {
+            name,
+            args,
+            sharp_decls,
+            stmts,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraNodeExprVarIdx<'a> {
+    pub var_indices: SmallSlice<'a, u32>,
+}
+
+impl<'a> EraNodeExprVarIdx<'a> {
+    pub fn try_get_from(arena: &'a EraNodeArena, node_ref: EraNodeRef) -> Option<Self> {
+        let EraNode::ExprVarIdx(extra_ref) = arena.get_node(node_ref) else {
+            return None;
+        };
+        let extra_data = arena.get_small_extra_data_view(extra_ref);
+        assert!(extra_data.len() >= 1);
+        Some(Self {
+            var_indices: extra_data,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraNodeStmtTryCCallHomo {
+    pub name: EraNodeRef,
+    pub args: EraNodeRef,
+    pub then_stmts: EraNodeRef,
+    pub catch_stmts: EraNodeRef,
+}
+
+impl EraNodeStmtTryCCallHomo {
+    pub fn get_from(arena: &EraNodeArena, node_ref: EraNodeRef) -> Self {
+        Self::try_get_from(arena, node_ref).expect("expected StmtTryCCallHomo node")
+    }
+
+    pub fn try_get_from(arena: &EraNodeArena, node_ref: EraNodeRef) -> Option<Self> {
+        let (EraNode::StmtTryCCall(name, extra_ref) | EraNode::StmtTryCJump(name, extra_ref)) =
+            arena.get_node(node_ref)
+        else {
+            return None;
+        };
+        let extra_data = arena.get_extra_data_view_given_len(extra_ref, 3);
+        let args = EraNodeRef(extra_data[0]);
+        let then_stmts = EraNodeRef(extra_data[1]);
+        let catch_stmts = EraNodeRef(extra_data[2]);
+        Some(Self {
+            name,
+            args,
+            then_stmts,
+            catch_stmts,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EraNodeStmtFor {
+    pub var: EraNodeRef,
+    pub start: EraNodeRef,
+    pub end: EraNodeRef,
+    pub step: EraNodeRef,
+    pub stmts: EraNodeRef,
+}
+
+impl EraNodeStmtFor {
+    pub fn get_from(arena: &EraNodeArena, node_ref: EraNodeRef) -> Self {
+        Self::try_get_from(arena, node_ref).expect("expected StmtFor node")
+    }
+
+    pub fn try_get_from(arena: &EraNodeArena, node_ref: EraNodeRef) -> Option<Self> {
+        let EraNode::StmtFor(var, extra_ref) = arena.get_node(node_ref) else {
+            return None;
+        };
+        let extra_data = arena.get_extra_data_view_given_len(extra_ref, 4);
+        let start = EraNodeRef(extra_data[0]);
+        let end = EraNodeRef(extra_data[1]);
+        let step = EraNodeRef(extra_data[2]);
+        let stmts = EraNodeRef(extra_data[3]);
+        Some(Self {
+            var,
+            start,
+            end,
+            step,
+            stmts,
         })
     }
 }
@@ -1540,9 +1687,10 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     }
 
     fn plain_string_literal(&mut self) -> ParseResult<EraNodeRef> {
+        let span = self.o.l.current_src_span();
+
         self.eat(Mode::Normal, Token::DoubleQuote)?;
 
-        let span = self.o.l.current_src_span();
         let mut buf = String::new();
         loop {
             let result = self.o.peek_token(Mode::PlainStr);
@@ -1954,6 +2102,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                             }
                         }
                         let rhs = if is_str_assign_mode {
+                            // NOTE: Emuera strips leading whitespace in string assignment.
+                            self.o.l.skip_whitespace(Mode::Normal);
                             self.raw_strform()
                         } else {
                             self.or_sync_to(|s| s.expression_bp(r_bp, pure, terminals), terminals)
@@ -2474,7 +2624,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                     make!(EraNode::StmtReturn(self.command_arg(CmdArg::Expression)))
                 }
                 b"THROW" => make!(EraNode::StmtThrow(self.command_arg(CmdArg::RawStringForm))),
-                b"GOTO" => make!(EraNode::StmtGoto(self.command_arg(CmdArg::Expression))),
+                b"GOTO" => make!(self.stmt_goto()?),
                 b"QUIT" => make!(EraNode::StmtQuit),
                 b"WAIT" => make!(EraNode::StmtWait),
                 b"FORCEWAIT" => make!(EraNode::StmtForceWait),
@@ -2718,12 +2868,34 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
 
     /// Generates a node of type `ExprList` containing the arguments of a command.
     fn command_arg(&mut self, arg_fmt: EraCmdArgFmt) -> EraNodeRef {
+        let span = self.o.l.current_src_span();
         match arg_fmt {
             EraCmdArgFmt::Expression
             | EraCmdArgFmt::ExpressionS
-            | EraCmdArgFmt::ExpressionSForm => self.comma_expr_list(0).unwrap(),
-            EraCmdArgFmt::RawStringForm => self.raw_strform(),
-            EraCmdArgFmt::RawString => self.raw_string(),
+            | EraCmdArgFmt::ExpressionSForm => {
+                // HACK: Do not return an ExprList([Empty]) if the next token is a line break,
+                //       i.e. the command has no arguments.
+                if self.o.peek_token(Mode::Normal).token.kind == Token::LineBreak {
+                    return self.empty_comma_expr_list();
+                }
+                self.comma_expr_list(0).unwrap()
+            }
+            EraCmdArgFmt::RawStringForm => {
+                let arg = self.raw_strform();
+                let data = self.o.node_arena.make_extra_data_ref_with_len([arg.0]);
+                let span = self.span_to_now(span);
+                self.o
+                    .node_arena
+                    .add_node(EraNode::ListExpr(data), span, span)
+            }
+            EraCmdArgFmt::RawString => {
+                let arg = self.raw_string();
+                let data = self.o.node_arena.make_extra_data_ref_with_len([arg.0]);
+                let span = self.span_to_now(span);
+                self.o
+                    .node_arena
+                    .add_node(EraNode::ListExpr(data), span, span)
+            }
         }
     }
 
@@ -2954,24 +3126,32 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
 
         // Body
         self.skip_newline();
-        let stmt = match self.safe_statement() {
-            ControlFlow::Break(_) => {
-                let mut diag = self.base_diag.clone();
-                diag.span_err(
-                    Default::default(),
-                    self.o.peek_token(Mode::Normal).token.span,
-                    "unexpected end of block in SIF; did you forget to close a block?",
-                );
-                self.o.emit_diag(diag);
-                self.or_sync_to(|_| Err(()), Terminal::LineBreak.into())
-            }
-            ControlFlow::Continue(stmt) => stmt,
+        let stmts = {
+            let span = self.o.l.current_src_span();
+            let stmt = match self.safe_statement() {
+                ControlFlow::Break(_) => {
+                    let mut diag = self.base_diag.clone();
+                    diag.span_err(
+                        Default::default(),
+                        self.o.peek_token(Mode::Normal).token.span,
+                        "unexpected end of block in SIF; did you forget to close a block?",
+                    );
+                    self.o.emit_diag(diag);
+                    self.or_sync_to(|_| Err(()), Terminal::LineBreak.into())
+                }
+                ControlFlow::Continue(stmt) => stmt,
+            };
+            let stmts = self.o.node_arena.make_extra_data_ref_with_len([stmt.0]);
+            let span = self.span_to_now(span);
+            self.o
+                .node_arena
+                .add_node(EraNode::ListStmt(stmts), span, span)
         };
 
         let extra_data = self
             .o
             .node_arena
-            .make_extra_data_ref_with_len([cond.0, stmt.0]);
+            .make_extra_data_ref_with_len([cond.0, stmts.0]);
         let span = self.span_to_now(span);
         self.o
             .node_arena
@@ -3012,17 +3192,20 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                     ControlFlow::Continue(())
                 }
             });
-            if is_read_stmt && !last_is_case {
+            if !last_is_case {
                 // Need to filter out statements before any cases
-                let mut diag = self.base_diag.clone();
-                diag.span_err(
-                    Default::default(),
-                    self.o.peek_token(Mode::Normal).token.span,
-                    "unreachable statements that do not belong to any case; ignoring",
-                );
-                self.o.emit_diag(diag);
-                _ = self.sync_to_open(Terminal::LineBreak.into());
+                if is_read_stmt {
+                    let mut diag = self.base_diag.clone();
+                    diag.span_err(
+                        Default::default(),
+                        self.o.peek_token(Mode::Normal).token.span,
+                        "unreachable statements that do not belong to any case; ignoring",
+                    );
+                    self.o.emit_diag(diag);
+                    // _ = self.sync_to_open(Terminal::LineBreak.into());
+                }
             } else {
+                // Also push empty statements list to ease the processing
                 self.o.b.push_child(stmts);
             }
             if let Some(preds) = preds {
@@ -3356,6 +3539,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     fn stmt_call_args(&mut self) -> EraNodeRef {
         let token = self.o.peek_token(Mode::Normal).token.kind;
         if token == Token::Comma {
+            _ = self.o.bump();
             self.comma_expr_list(0).unwrap()
         } else if token == Token::LParen {
             self.paren_expr_list().unwrap()
@@ -3368,8 +3552,14 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         let terminals = Terminal::Comma | Terminal::LineBreak;
         let var = self.or_sync_to(|s| s.expression(true), terminals);
         _ = self.eat_sync(Mode::Normal, Token::Comma, terminals);
+        self.o.l.skip_whitespace(Mode::Normal);
         let factor = self.raw_string();
         EraNode::StmtTimes(var, factor)
+    }
+
+    fn stmt_goto(&mut self) -> ParseResult<EraNode> {
+        let label = self.identifier()?;
+        Ok(EraNode::StmtGoto(label))
     }
 
     fn is_at_function_end(&mut self) -> bool {

@@ -472,6 +472,18 @@ impl<'ctx, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'n, Callback>
         self.unwrap_str(val, span)
     }
 
+    pub fn interpret_int_expr_ok(&mut self, expr: EraNodeRef) -> Option<i64> {
+        let span = self.node_arena.get_node_span(expr);
+        let val = self.interpret_expr_ok(expr)?.coerce_int();
+        self.unwrap_int(val, span).ok()
+    }
+
+    pub fn interpret_str_expr_ok(&mut self, expr: EraNodeRef) -> Option<String> {
+        let span = self.node_arena.get_node_span(expr);
+        let val = self.interpret_expr_ok(expr)?.coerce_str();
+        self.unwrap_str(val, span).ok()
+    }
+
     /// Interpret a variable declaration node, with global context. If the declaration is not
     /// a variable declaration, this function will will be a no-op and return an error
     /// `EraInterpretError::Others`.
@@ -489,7 +501,7 @@ impl<'ctx, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'n, Callback>
         }) = EraNodeDeclVarHomo::try_get_from(self.node_arena, decl)
         else {
             let mut diag = self.make_diag();
-            diag.span_err(Default::default(), decl_span, "invalid declaration node");
+            diag.span_err(Default::default(), decl_span, "not a variable declaration");
             self.ctx.emit_diag(diag);
             return Err(EraInterpretError::Others);
         };

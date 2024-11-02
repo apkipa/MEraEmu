@@ -96,7 +96,7 @@ impl Default for MEraEngineConfig {
 
 pub use crate::types::EraCompilerHostFile as MEraEngineHostFile;
 
-use super::lexer::EraLexer;
+use super::{codegen::EraCodeGenerator, lexer::EraLexer};
 use crate::cst;
 
 pub trait MEraEngineSysCallback {
@@ -1519,7 +1519,44 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
         self.node_cache.interner_mut().optimize_lookup();
 
-        // TODO...
+        // Process .erb files
+        let filenames = self
+            .ctx
+            .source_map
+            .values()
+            .filter(|x| !x.is_header)
+            .map(|x| x.filename.clone())
+            .collect::<Vec<_>>();
+        let mut codegen = EraCodeGenerator::new(
+            &mut self.ctx,
+            self.config.no_src_map,
+            !self.config.no_src_map,
+        );
+        codegen.compile_merge_many_programs(&filenames, |progress| {
+            if let Some(callback) = &mut self.builder_callback {
+                callback.on_build_progress(
+                    "erb",
+                    &MEraEngineBuildProgress {
+                        current: progress,
+                        total: self.erb_count,
+                    },
+                );
+            }
+        });
+
+        self.node_cache.interner_mut().optimize_lookup();
+
+        if self.config.no_src_map {
+            // let src_map = Rc::get_mut(&mut self.ctx.source_map).unwrap();
+            // for (_, src_file) in src_map {
+            //     src_file.final_root = None;
+            // }
+            // TODO: Reset node_cache when upstream is ready
+            // let interner = self.ctx.node_cache.into_interner().unwrap();
+            // self.ctx.node_cache = NodeCache::from_interner(interner);
+        }
+
+        // TODO: Handle watching variables
 
         Ok(MEraEngine {
             ctx: self.ctx,
@@ -1635,9 +1672,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         let content = content
             .strip_prefix("\u{feff}".as_bytes())
             .unwrap_or(content);
-        // let content = content.to_str_lossy();
         let content = simdutf8::basic::from_utf8(content)
-            .map_or_else(|_| content.to_str_lossy(), |s| Cow::Borrowed(s));
+            .map_or_else(|_| String::from_utf8_lossy(content), |s| Cow::Borrowed(s));
         let filename = ArcStr::from(filename);
 
         // Parse ERB file into AST
@@ -1667,10 +1703,29 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         } = parser.parse_program();
         if is_header {
             // Merge defines into global defines
-            // TODO: Warn about redefinitions
-            self.ctx.global_define.extend(defines);
+            let mut errors = Vec::new();
+            self.ctx
+                .global_define
+                .extend(defines, |name, new_define, old_define| {
+                    let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
+                    diag.span_err(
+                        Default::default(),
+                        new_define.span,
+                        format!("redefinition of macro `{name}`"),
+                    );
+                    diag.span_note(
+                        old_define.filename.clone(),
+                        old_define.span,
+                        "previous definition here",
+                    );
+                    errors.push(diag);
+                });
+            for diag in errors {
+                self.ctx.emit_diag(diag);
+            }
         }
-        let newline_pos = lexer.newline_positions();
+        // let newline_pos = lexer.newline_positions();
+        let newline_pos = Vec::new();
         self.ctx.active_source = ArcStr::default();
 
         // Add source map entry
@@ -1755,8 +1810,26 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         } = parser.parse_program();
         if is_header {
             // Merge defines into global defines
-            // TODO: Warn about redefinitions
-            self.ctx.global_define.extend(defines);
+            let mut errors = Vec::new();
+            self.ctx
+                .global_define
+                .extend(defines, |name, new_define, old_define| {
+                    let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
+                    diag.span_err(
+                        Default::default(),
+                        new_define.span,
+                        format!("redefinition of macro `{name}`"),
+                    );
+                    diag.span_note(
+                        old_define.filename.clone(),
+                        old_define.span,
+                        "previous definition here",
+                    );
+                    errors.push(diag);
+                });
+            for diag in errors {
+                self.ctx.emit_diag(diag);
+            }
         }
         let newline_pos = {
             let mut newline_pos = lexer.newline_positions();

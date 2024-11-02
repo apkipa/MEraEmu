@@ -629,8 +629,32 @@ impl EraDefineScope {
         self.defines.get(key)
     }
 
-    pub fn extend(&mut self, other: EraDefineScope) {
-        self.defines.extend(other.defines);
+    /// Extends the current scope with the given scope.
+    /// If a collision occurs, the `on_collision` callback is called.
+    /// The callback is called with the macro name, the new and the old data.
+    pub fn extend<F>(&mut self, other: EraDefineScope, mut on_collision: F)
+    where
+        F: FnMut(&str, &EraDefineData, &EraDefineData),
+    {
+        let extend_len = other.defines.len();
+        let reserve_len = if self.defines.is_empty() {
+            extend_len
+        } else {
+            (extend_len + 1) / 2
+        };
+        self.defines.reserve(reserve_len);
+        for (key, data) in other.defines {
+            use hashbrown::hash_map::Entry::*;
+            match self.defines.entry(key) {
+                Occupied(mut entry) => {
+                    on_collision(entry.key(), &data, entry.get());
+                    entry.insert(data);
+                }
+                Vacant(entry) => {
+                    entry.insert(data);
+                }
+            }
+        }
     }
 }
 
@@ -1260,6 +1284,10 @@ impl<'a> Diagnostic<'a> {
         message: impl Into<String>,
     ) -> &mut Self {
         self.span_msg(filename, span, DiagnosticLevel::Note, message)
+    }
+
+    pub fn emit_to<Callback: EraCompilerCallback>(self, ctx: &mut EraCompilerCtx<Callback>) {
+        ctx.emit_diag(self);
     }
 
     fn conv_filename(&self, filename: ArcStr) -> ArcStr {

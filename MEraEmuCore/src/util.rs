@@ -405,6 +405,30 @@ impl std::fmt::Debug for SmallSlice<'_, u32> {
     }
 }
 
+impl<'a> Clone for SmallSlice<'a, u32> {
+    fn clone(&self) -> Self {
+        unsafe {
+            if self.len == 1 {
+                Self {
+                    data: DataUnion2 {
+                        t: ManuallyDrop::new(*self.data.t),
+                    },
+                    len: self.len,
+                    _marker: std::marker::PhantomData,
+                }
+            } else {
+                Self {
+                    data: DataUnion2 {
+                        u: ManuallyDrop::new(*self.data.u),
+                    },
+                    len: self.len,
+                    _marker: std::marker::PhantomData,
+                }
+            }
+        }
+    }
+}
+
 impl<'a> SmallSlice<'a, u32> {
     pub fn new(data: &'a [u32]) -> Self {
         let len = data.len();
