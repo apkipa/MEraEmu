@@ -782,6 +782,7 @@ impl EraMacroMap {
         let mut result = String::new();
         for (from_span, text) in self.mappings.iter() {
             // TODO...
+            todo!()
         }
         result
     }
@@ -811,7 +812,7 @@ pub struct EraSourceFile {
 }
 
 #[derive(Debug)]
-pub struct EraCompilerCtx<Callback> {
+pub struct EraCompilerCtx<'i, Callback> {
     // TODO: Wrap callback in Mutex; this makes it easier for concurrent access, while also
     //       ensuring zero overhead for single-threaded access (i.e. &mut Ctx).
     pub callback: Callback,
@@ -833,11 +834,11 @@ pub struct EraCompilerCtx<Callback> {
     pub bc_chunks: Rc<Vec<EraBcChunk>>,
     /// The list of function entries. Note that the value is wrapped in `Option` to
     /// allow for soft deletion.
-    pub func_entries: Rc<FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo>>>,
+    pub func_entries: Rc<FxIndexMap<&'i Ascii<str>, Option<EraFuncInfo<'i>>>>,
     // TODO: Always use `&'i ThreadedRodeo`. We also need to implement a `ThreadedNodeCache` later.
     //       This helps with concurrent interning, and also helps to eliminate the usage of `unsafe`.
     /// The node cache used for CST building.
-    pub node_cache: &'static mut cstree::build::NodeCache<'static, ThreadedTokenInterner>,
+    pub node_cache: cstree::build::NodeCache<'i, &'i ThreadedTokenInterner>,
 }
 
 trait IndexMapExt {
@@ -861,11 +862,8 @@ impl<K, V> IndexMapExt for IndexMap<K, Option<V>> {
     }
 }
 
-impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
-    pub fn new(
-        callback: Callback,
-        node_cache: &'static mut cstree::build::NodeCache<'static, ThreadedTokenInterner>,
-    ) -> Self {
+impl<'i, Callback: EraCompilerCallback> EraCompilerCtx<'i, Callback> {
+    pub fn new(callback: Callback, interner: &'i ThreadedTokenInterner) -> Self {
         EraCompilerCtx {
             callback,
             global_replace: EraDefineScope::new(),
@@ -873,7 +871,7 @@ impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
             source_map: Default::default(),
             active_source: ArcStr::default(),
             variables: EraVarPool::new(),
-            node_cache,
+            node_cache: cstree::build::NodeCache::from_interner(interner),
             chara_templates: BTreeMap::new(),
             csv_indices: FxHashMap::default(),
             bc_chunks: Rc::new(Vec::new()),
@@ -895,7 +893,7 @@ impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
         diag.cancel();
     }
 
-    pub fn interner(&self) -> &ThreadedTokenInterner {
+    pub fn interner(&self) -> &'i ThreadedTokenInterner {
         self.node_cache.interner()
     }
 
@@ -903,12 +901,16 @@ impl<Callback: EraCompilerCallback> EraCompilerCtx<Callback> {
     //     self.node_cache.interner_mut()
     // }
 
-    /// # Safety
-    ///
-    /// You must ensure that the returned reference is not used after the `EraCompilerCtx` is dropped.
-    /// [`lasso::Rodeo`] guarantees that the strings are not deallocated until the interner is dropped.
-    pub fn resolve_static_str(&self, key: TokenKey) -> &'static str {
-        unsafe { std::mem::transmute(self.interner().resolve(key)) }
+    // /// # Safety
+    // ///
+    // /// You must ensure that the returned reference is not used after the `EraCompilerCtx` is dropped.
+    // /// [`lasso::Rodeo`] guarantees that the strings are not deallocated until the interner is dropped.
+    // pub fn resolve_static_str(&self, key: TokenKey) -> &'static str {
+    //     unsafe { std::mem::transmute(self.interner().resolve(key)) }
+    // }
+
+    pub fn resolve_str(&self, key: TokenKey) -> &'i str {
+        self.interner().resolve(key)
     }
 }
 
@@ -3948,18 +3950,18 @@ pub struct EraFuncFrameVarInfo {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct EraFuncFrameInfo {
+pub struct EraFuncFrameInfo<'i> {
     /// Argument slots for the function.
     pub args: Vec<EraFuncFrameArgInfo>,
     /// Declared variables in the function scope.
-    pub vars: FxIndexMap<&'static Ascii<str>, EraFuncFrameVarInfo>,
+    pub vars: FxIndexMap<&'i Ascii<str>, EraFuncFrameVarInfo>,
 }
 
 #[derive(Debug, Clone)]
-pub struct EraFuncInfo {
+pub struct EraFuncInfo<'i> {
     pub name: TokenKey,
     pub name_span: SrcSpan,
-    pub frame_info: EraFuncFrameInfo,
+    pub frame_info: EraFuncFrameInfo<'i>,
     pub chunk_idx: u32,
     pub bc_offset: u32,
     pub ret_kind: ScalarValueKind,

@@ -35,8 +35,8 @@ type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
 type CompileResult<T> = Result<T, ()>;
 
 /// Generates bytecode from the AST. Also adds variables into the global pool.
-pub struct EraCodeGenerator<'ctx, Callback> {
-    ctx: &'ctx mut EraCompilerCtx<Callback>,
+pub struct EraCodeGenerator<'ctx, 'i, Callback> {
+    ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
     trim_nodes: bool,
     keep_src: bool,
 }
@@ -266,10 +266,10 @@ impl EraBcChunkBuilder {
     }
 }
 
-pub struct EraCodeCompilation {
-    pub bc_chunks: Vec<EraBcChunk>,
-    pub func_entries: FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo>>,
-}
+// pub struct EraCodeCompilation {
+//     pub bc_chunks: Vec<EraBcChunk>,
+//     pub func_entries: FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo>>,
+// }
 
 /// Describes the destination of an parameter in a function prototype.
 struct EraFuncArgsBinding {
@@ -289,8 +289,12 @@ struct EraFuncPrebuildInfo {
     dyn_vars: Vec<(u32, SrcSpan)>,
 }
 
-impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
-    pub fn new(ctx: &'ctx mut EraCompilerCtx<Callback>, trim_nodes: bool, keep_src: bool) -> Self {
+impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callback> {
+    pub fn new(
+        ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
+        trim_nodes: bool,
+        keep_src: bool,
+    ) -> Self {
         Self {
             ctx,
             trim_nodes,
@@ -307,8 +311,8 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
         mut progress_callback: impl FnMut(usize),
     ) {
         let mut prebuild_funcs: FxIndexMap<
-            &'static Ascii<str>,
-            (EraArcNodeRef, EraFuncPrebuildInfo, Option<EraFuncInfo>),
+            &'i Ascii<str>,
+            (EraArcNodeRef, EraFuncPrebuildInfo, Option<EraFuncInfo<'i>>),
         > = Default::default();
 
         let bc_chunks = Rc::get_mut(&mut self.ctx.bc_chunks).unwrap();
@@ -402,7 +406,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                                     .ctx
                                     .func_entries
                                     .get(Ascii::new_str(name))
-                                    .map(|x| x.as_ref().unwrap())
+                                    .map(|x: &Option<EraFuncInfo<'_>>| x.as_ref().unwrap())
                             });
                         func_info.map(|x| {
                             let filename = site.o.ctx.bc_chunks[x.chunk_idx as usize].name.clone();
@@ -412,7 +416,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                 else {
                     continue;
                 };
-                let name = unsafe { site.o.ctx.resolve_static_str(prebuild_info.name) };
+                let name = site.o.ctx.resolve_str(prebuild_info.name);
                 func_info.chunk_idx = chunk_idx;
                 // eprintln!("[Add func {}, span={:?}]", name, func_info.name_span);
                 let item = EraArcNodeRef::new(item_ref, arena.clone());
@@ -504,16 +508,16 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
     }
 }
 
-struct EraCodeGenPrebuildSite<'o, 'ctx, Callback> {
-    o: &'o mut EraCodeGenerator<'ctx, Callback>,
+struct EraCodeGenPrebuildSite<'o, 'ctx, 'i, Callback> {
+    o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>,
     var_local_size: u32,
     var_locals_size: u32,
     var_arg_size: u32,
     var_args_size: u32,
 }
 
-impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, Callback> {
-    fn new(o: &'o mut EraCodeGenerator<'ctx, Callback>) -> Self {
+impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, 'i, Callback> {
+    fn new(o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>) -> Self {
         let var_local_size = o.ctx.variables.get_var("LOCAL").unwrap().dims().unwrap()[0];
         let var_locals_size = o.ctx.variables.get_var("LOCALS").unwrap().dims().unwrap()[0];
         let var_arg_size = o.ctx.variables.get_var("ARG").unwrap().dims().unwrap()[0];
@@ -534,7 +538,7 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
         arena: &EraNodeArena,
         node: &EraNodeItemFunction,
         lookup_func_fn: impl Fn(&mut Self, &str) -> Option<(ArcStr, SrcSpan)>,
-    ) -> CompileResult<(EraFuncPrebuildInfo, EraFuncInfo)> {
+    ) -> CompileResult<(EraFuncPrebuildInfo, EraFuncInfo<'i>)> {
         let filename = self.o.ctx.active_source.clone();
         let make_diag_fn = || Diagnostic::with_file(filename.clone());
 
@@ -607,6 +611,7 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
             ret_kind: ScalarValueKind::Void,
             is_transient: false,
         };
+        let interner = self.o.ctx.interner();
         let mut interp = EraInterpreter::new(self.o.ctx, arena, true);
 
         let mut add_frame_var_or_diag = |interp: &mut EraInterpreter<Callback>,
@@ -614,7 +619,7 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
                                          var_info: EraFuncFrameVarInfo|
          -> CompileResult<()> {
             let name_span = var_info.span;
-            let name_str = unsafe { interp.get_ctx().resolve_static_str(name) };
+            let name_str = interner.resolve(name);
             if func_info
                 .frame_info
                 .vars
@@ -677,14 +682,17 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
                 EraNode::DeclFunctionS => {
                     func_info.ret_kind = ScalarValueKind::Str;
                 }
-                EraNode::DeclEventKind(_) if event_func_kind.is_none() => {
-                    let mut diag = make_diag_fn();
-                    diag.span_err(
-                        Default::default(),
-                        decl_span,
-                        "cannot use event kind declaration in non-event function",
-                    );
-                    diag.emit_to(interp.get_ctx_mut());
+                EraNode::DeclEventKind(_) => {
+                    // Ignore event kind as we have already processed it
+                    if event_func_kind.is_none() {
+                        let mut diag = make_diag_fn();
+                        diag.span_err(
+                            Default::default(),
+                            decl_span,
+                            "cannot use event kind declaration in non-event function",
+                        );
+                        diag.emit_to(interp.get_ctx_mut());
+                    }
                 }
                 EraNode::DeclLocalSize(size) => {
                     let size_span = arena.get_node_span(size);
@@ -1201,13 +1209,15 @@ struct EraLoopStructCodeMetadata {
     break_cp: EraBcChunkCheckpoint,
 }
 
-struct EraCodeGenSite<'o, 'ctx, 'b, 'arena, Callback> {
-    o: &'o mut EraCodeGenerator<'ctx, Callback>,
+struct EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, Callback> {
+    o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>,
     filename: ArcStr,
     chunk: &'b mut EraBcChunkBuilder,
     arena: &'arena EraNodeArena,
-    cur_func:
-        Yoke<&'static EraFuncInfo, &'static FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo>>>,
+    cur_func: Yoke<
+        &'static EraFuncInfo<'static>,
+        &'static FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo<'static>>>,
+    >,
     /// The position where the function body starts. Used by `RESTART`.
     body_start_pos: EraBcChunkCheckpoint,
     /// The scope generation ID allocation counter. Used to prevent invalid `GOTO`'s
@@ -1217,7 +1227,7 @@ struct EraCodeGenSite<'o, 'ctx, 'b, 'arena, Callback> {
     /// The scope stack balances. Used to store the balance of the scope stack at each scope.
     scope_stack_balances: Vec<u32>,
     /// GOTO labels. Used to store the position of labels for `GOTO` jumps.
-    goto_labels: FxHashMap<&'static Ascii<str>, EraGotoLabelInfo>,
+    goto_labels: FxHashMap<&'i Ascii<str>, EraGotoLabelInfo>,
     /// GOTO jumps. Used to store unfinished `GOTO` jumps, which will be resolved when the function
     /// ends.
     pending_goto_jumps: Vec<EraGotoJumpInfo>,
@@ -1228,8 +1238,8 @@ struct EraCodeGenSite<'o, 'ctx, 'b, 'arena, Callback> {
     cur_loop_struct: Option<EraLoopStructCodeQueue>,
 }
 
-impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
-    EraCodeGenSite<'o, 'ctx, 'b, 'arena, Callback>
+impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
+    EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, Callback>
 {
     fn allocate_scope_id(&mut self, parent_scope: u32, stack_size: u32) -> u32 {
         let id = self.scope_generation_id;
@@ -1247,7 +1257,7 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
     /// never fails, since `prebuild_function` should have already checked for errors which would
     /// prevent the function from being compiled.
     fn gen_function(
-        o: &'o mut EraCodeGenerator<'ctx, Callback>,
+        o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>,
         filename: ArcStr,
         chunk: &'b mut EraBcChunkBuilder,
         node: EraArcNodeRef,
@@ -1479,7 +1489,7 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
                     diag.emit_to(self.o.ctx);
                     return Err(());
                 };
-                let label_str = unsafe { self.o.ctx.resolve_static_str(label) };
+                let label_str = self.o.ctx.resolve_str(label);
                 if let Some(previous_label) = self.goto_labels.insert(
                     Ascii::new_str(label_str),
                     EraGotoLabelInfo {
@@ -1540,7 +1550,7 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
             EraNode::StmtResultCmdCall(cmd, args) => {
                 let cmd_span = self.arena.get_node_span(cmd);
                 let cmd = self.unwrap_identifier(cmd)?;
-                let cmd = self.o.ctx.resolve_static_str(cmd);
+                let cmd = self.o.ctx.resolve_str(cmd);
                 self.builtin_func_call(cmd, cmd_span, args, true)?;
             }
             EraNode::StmtDebugPrint(flags, args) => {
@@ -1984,7 +1994,7 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
                 if let EraExprOrSpan::Expr(ordering) = ordering {
                     let ordering_span = self.arena.get_node_span(ordering);
                     let ordering = self.unwrap_identifier(ordering)?;
-                    let ordering = self.o.ctx.resolve_static_str(ordering);
+                    let ordering = self.o.ctx.resolve_str(ordering);
                     if ordering.eq_ignore_ascii_case("FORWARD") {
                         is_ascending = true;
                     } else if ordering.eq_ignore_ascii_case("BACK") {
@@ -2197,11 +2207,7 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
                 let ([procedure], []) = self.unpack_list_expr(args)?;
                 let proc_span = self.arena.get_node_span(procedure);
                 let procedure = self.unwrap_identifier(procedure)?;
-                let procedure = self
-                    .o
-                    .ctx
-                    .resolve_static_str(procedure)
-                    .to_ascii_uppercase();
+                let procedure = self.o.ctx.resolve_str(procedure).to_ascii_uppercase();
                 let (func_name, reset_exec) = match procedure.as_bytes() {
                     b"FIRST" => ("SYSPROC_BEGIN_FIRST", false),
                     b"TITLE" => ("SYSPROC_BEGIN_TITLE", false),
@@ -2286,11 +2292,7 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
                 let ([alignment], []) = self.unpack_list_expr(args)?;
                 let align_span = self.arena.get_node_span(alignment);
                 let alignment = self.unwrap_identifier(alignment)?;
-                let alignment = self
-                    .o
-                    .ctx
-                    .resolve_static_str(alignment)
-                    .to_ascii_uppercase();
+                let alignment = self.o.ctx.resolve_str(alignment).to_ascii_uppercase();
                 let alignment = match alignment.as_bytes() {
                     b"LEFT" => EraAlignmentKind::Left,
                     b"CENTER" => EraAlignmentKind::Center,
@@ -3078,7 +3080,7 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
         if let EraNode::Identifier(name_key) = self.arena.get_node(name) {
             // Prefer static function call
             let name_span = self.arena.get_node_span(name);
-            let name_str = unsafe { self.o.ctx.resolve_static_str(name_key) };
+            let name_str = self.o.ctx.resolve_str(name_key);
             let result = self.static_func_call(name_str, name_span, args, false)?;
             if result.is_value() {
                 self.chunk.push_pop_all(1, stmt_span);
@@ -3107,7 +3109,7 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
         if let EraNode::Identifier(name_key) = self.arena.get_node(name) {
             // Prefer static function call
             let name_span = self.arena.get_node_span(name);
-            let name_str = unsafe { self.o.ctx.resolve_static_str(name_key) };
+            let name_str = self.o.ctx.resolve_str(name_key);
             let result = self.static_func_call(name_str, name_span, args, true)?;
             if result.is_value() {
                 self.chunk.push_pop_all(1, stmt_span);
@@ -3140,7 +3142,7 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
         if let EraNode::Identifier(name_key) = self.arena.get_node(name) {
             // Prefer static function call
             let name_span = self.arena.get_node_span(name);
-            let name_str = unsafe { self.o.ctx.resolve_static_str(name_key) };
+            let name_str = self.o.ctx.resolve_str(name_key);
             let result = self.static_func_call(name_str, name_span, args, true)?;
             if result.is_value() {
                 self.chunk.push_pop_all(1, stmt_span);
@@ -4449,7 +4451,7 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
             EraNode::ExprFunCall(name, args) => {
                 let name_span = self.arena.get_node_span(name);
                 let name = self.unwrap_identifier(name)?;
-                let name = self.o.ctx.resolve_static_str(name);
+                let name = self.o.ctx.resolve_str(name);
                 self.static_func_call(name, name_span, args, false)
             }
             _ => {
@@ -5604,33 +5606,33 @@ impl<'o, 'ctx, 'b, 'arena, Callback: EraCompilerCallback>
     ) -> CompileResult<ScalarValueKind> {
         use std::ops::{Deref, DerefMut};
 
-        struct Site<'this, 'o, 'ctx, 'b, 'arena, 'name, Callback> {
-            this: &'this mut EraCodeGenSite<'o, 'ctx, 'b, 'arena, Callback>,
+        struct Site<'this, 'o, 'ctx, 'i, 'b, 'arena, 'name, Callback> {
+            this: &'this mut EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, Callback>,
             ret_kind: ScalarValueKind,
             name: &'name str,
             name_span: SrcSpan,
             assign_to_result: bool,
         }
 
-        impl<'this, 'o, 'ctx, 'b, 'arena, Callback> Deref
-            for Site<'this, 'o, 'ctx, 'b, 'arena, '_, Callback>
+        impl<'this, 'o, 'ctx, 'i, 'b, 'arena, Callback> Deref
+            for Site<'this, 'o, 'ctx, 'i, 'b, 'arena, '_, Callback>
         {
-            type Target = EraCodeGenSite<'o, 'ctx, 'b, 'arena, Callback>;
+            type Target = EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, Callback>;
 
             fn deref(&self) -> &Self::Target {
                 self.this
             }
         }
 
-        impl<'this, 'o, 'ctx, 'b, 'arena, Callback> DerefMut
-            for Site<'this, 'o, 'ctx, 'b, 'arena, '_, Callback>
+        impl<'this, 'o, 'ctx, 'i, 'b, 'arena, Callback> DerefMut
+            for Site<'this, 'o, 'ctx, 'i, 'b, 'arena, '_, Callback>
         {
             fn deref_mut(&mut self) -> &mut Self::Target {
                 self.this
             }
         }
 
-        impl<'arena, Callback: EraCompilerCallback> Site<'_, '_, '_, '_, 'arena, '_, Callback> {
+        impl<'arena, Callback: EraCompilerCallback> Site<'_, '_, '_, '_, '_, 'arena, '_, Callback> {
             fn result(&mut self) -> CompileResult<()> {
                 self.ret_kind = ScalarValueKind::Int;
                 if !self.assign_to_result {

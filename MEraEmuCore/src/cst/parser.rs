@@ -38,7 +38,7 @@ pub struct EraParsedProgram {
 pub struct EraParser<'a, 'b, 'i> {
     callback: &'b mut dyn EraCompilerCallback,
     lexer: &'b mut EraLexer<'a>,
-    node_cache: &'b mut NodeCache<'i, ThreadedTokenInterner>,
+    node_cache: &'b mut NodeCache<'i, &'i ThreadedTokenInterner>,
     replaces: &'b EraDefineScope,
     defines: &'b EraDefineScope,
     is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
@@ -49,7 +49,7 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
     pub fn new(
         callback: &'b mut dyn EraCompilerCallback,
         lexer: &'b mut EraLexer<'a>,
-        node_cache: &'b mut NodeCache<'i, ThreadedTokenInterner>,
+        node_cache: &'b mut NodeCache<'i, &'i ThreadedTokenInterner>,
         replaces: &'b EraDefineScope,
         defines: &'b EraDefineScope,
         is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
@@ -93,7 +93,7 @@ struct EraParserOuter<'a, 'b, 'cache, 'i> {
     // lexer
     l: &'b mut EraLexer<'a>,
     // builder
-    b: GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+    b: GreenNodeBuilder<'cache, 'i, EraTokenKind, &'i ThreadedTokenInterner>,
     replaces: &'b EraDefineScope,
     defines: &'b EraDefineScope,
     local_defines: EraDefineScope,
@@ -164,7 +164,7 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
     fn new(
         callback: &'b mut dyn EraCompilerCallback,
         l: &'b mut EraLexer<'a>,
-        b: GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+        b: GreenNodeBuilder<'cache, 'i, EraTokenKind, &'i ThreadedTokenInterner>,
         replaces: &'b EraDefineScope,
         defines: &'b EraDefineScope,
         is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
@@ -189,7 +189,7 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
     fn into_inner(
         self,
     ) -> (
-        GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+        GreenNodeBuilder<'cache, 'i, EraTokenKind, &'i ThreadedTokenInterner>,
         EraMacroMap,
         EraDefineScope,
     ) {
@@ -338,7 +338,7 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
     fn new(
         callback: &'b mut dyn EraCompilerCallback,
         l: &'b mut EraLexer<'a>,
-        b: GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+        b: GreenNodeBuilder<'cache, 'i, EraTokenKind, &'i ThreadedTokenInterner>,
         replaces: &'b EraDefineScope,
         defines: &'b EraDefineScope,
         is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
@@ -357,7 +357,7 @@ impl<'a, 'b, 'cache, 'i> EraParserSite<'a, 'b, 'cache, 'i> {
     fn into_inner(
         self,
     ) -> (
-        GreenNodeBuilder<'cache, 'i, EraTokenKind, ThreadedTokenInterner>,
+        GreenNodeBuilder<'cache, 'i, EraTokenKind, &'i ThreadedTokenInterner>,
         EraMacroMap,
         EraDefineScope,
     ) {

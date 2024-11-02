@@ -4,7 +4,7 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     ops::{ControlFlow, DerefMut},
-    sync::atomic::AtomicBool,
+    sync::{atomic::AtomicBool, Arc},
 };
 
 use bstr::ByteSlice;
@@ -43,8 +43,9 @@ struct InitialVarDesc {
 }
 
 pub struct MEraEngine<Callback> {
-    ctx: EraCompilerCtx<Callback>,
-    node_cache: BoxPtr<NodeCache<'static, ThreadedTokenInterner>>,
+    ctx: EraCompilerCtx<'static, Callback>,
+    interner: Arc<ThreadedTokenInterner>,
+    backup_interner: Arc<ThreadedTokenInterner>,
 }
 
 // TODO: Scale charas variables dynamically; use default capacity of 128 then.
@@ -667,12 +668,13 @@ pub trait MEraEngineBuilderCallback {
 impl MEraEngineBuilderCallback for EmptyCallback {}
 
 pub struct MEraEngineBuilder<SysCallback, BuilderCallback> {
-    ctx: EraCompilerCtx<SysCallback>,
+    ctx: EraCompilerCtx<'static, SysCallback>,
     builder_callback: Option<BuilderCallback>,
     config: MEraEngineConfig,
     watching_vars: HashSet<Ascii<ArcStr>, FxBuildHasher>,
     initial_vars: Option<HashMap<Ascii<ArcStr>, InitialVarDesc, FxBuildHasher>>,
-    node_cache: BoxPtr<NodeCache<'static, ThreadedTokenInterner>>,
+    interner: Arc<ThreadedTokenInterner>,
+    backup_interner: Arc<ThreadedTokenInterner>,
     /// Whether the headers have been compiled.
     is_header_finished: bool,
     erh_count: usize,
@@ -681,16 +683,16 @@ pub struct MEraEngineBuilder<SysCallback, BuilderCallback> {
 
 impl<T: MEraEngineSysCallback> MEraEngineBuilder<T, EmptyCallback> {
     pub fn new(callback: T) -> MEraEngineBuilder<T, EmptyCallback> {
-        let mut node_cache: BoxPtr<_> =
-            Box::new(NodeCache::from_interner(ThreadedTokenInterner::new())).into();
-        let ctx = unsafe { EraCompilerCtx::new(callback, std::mem::transmute(&mut *node_cache)) };
+        let interner = Arc::new(ThreadedTokenInterner::new());
+        let ctx = unsafe { EraCompilerCtx::new(callback, std::mem::transmute(&*interner)) };
         let mut this = MEraEngineBuilder {
             ctx,
             builder_callback: Default::default(),
             config: Default::default(),
             watching_vars: Default::default(),
             initial_vars: Some(Default::default()),
-            node_cache,
+            interner,
+            backup_interner: Default::default(),
             is_header_finished: false,
             erh_count: 0,
             erb_count: 0,
@@ -714,7 +716,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             config: self.config,
             watching_vars: self.watching_vars,
             initial_vars: self.initial_vars,
-            node_cache: self.node_cache,
+            interner: self.interner,
+            backup_interner: self.backup_interner,
             is_header_finished: self.is_header_finished,
             erh_count: self.erh_count,
             erb_count: self.erb_count,
@@ -1517,7 +1520,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             self.load_erb("<builtin>", SYS_SRC.as_bytes())?;
         }
 
-        self.node_cache.interner_mut().optimize_lookup();
+        self.optimize_interner();
 
         // Process .erb files
         let filenames = self
@@ -1544,7 +1547,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             }
         });
 
-        self.node_cache.interner_mut().optimize_lookup();
+        self.optimize_interner();
 
         if self.config.no_src_map {
             // let src_map = Rc::get_mut(&mut self.ctx.source_map).unwrap();
@@ -1560,7 +1563,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
         Ok(MEraEngine {
             ctx: self.ctx,
-            node_cache: self.node_cache,
+            interner: self.interner,
+            backup_interner: self.backup_interner,
         })
     }
 
@@ -1574,7 +1578,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             self.cst_load_erb("<builtin>", SYS_SRC.as_bytes())?;
         }
 
-        self.node_cache.interner_mut().optimize_lookup();
+        self.optimize_interner();
 
         // Process .erb files
         let filenames = self
@@ -1601,7 +1605,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             }
         });
 
-        self.node_cache.interner_mut().optimize_lookup();
+        self.optimize_interner();
 
         if self.config.no_src_map {
             // let src_map = Rc::get_mut(&mut self.ctx.source_map).unwrap();
@@ -1621,7 +1625,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
         Ok(MEraEngine {
             ctx: self.ctx,
-            node_cache: self.node_cache,
+            interner: self.interner,
+            backup_interner: self.backup_interner,
         })
     }
 
@@ -1654,6 +1659,27 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             self.watching_vars.insert(Ascii::new(name));
         }
         Ok(())
+    }
+
+    fn optimize_interner(&mut self) {
+        // let mut s = scopeguard::guard(self, |s| {
+        //     let interner: &'static ThreadedTokenInterner =
+        //         unsafe { std::mem::transmute(&*s.interner) };
+        //     s.ctx.node_cache = NodeCache::from_interner(interner);
+        // });
+        // let s = &mut *s;
+        // {
+        //     // Avoid dangling reference
+        //     let interner: &'static ThreadedTokenInterner =
+        //         unsafe { std::mem::transmute(&*s.backup_interner) };
+        //     s.ctx.node_cache = NodeCache::from_interner(interner);
+        // }
+        // if let Some(interner) = Arc::get_mut(&mut s.interner) {
+        //     interner.optimize_lookup();
+        // }
+        unsafe {
+            self.interner.optimize_lookup_unchecked();
+        }
     }
 
     fn load_erb_inner(
@@ -1797,7 +1823,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         let mut parser = cst::parser::EraParser::new(
             &mut self.ctx.callback,
             &mut lexer,
-            self.ctx.node_cache,
+            &mut self.ctx.node_cache,
             &self.ctx.global_replace,
             &self.ctx.global_define,
             &mut is_str_var_fn,

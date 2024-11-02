@@ -110,8 +110,8 @@ impl GreenDiagnostic {
 }
 
 /// Generates bytecode from the AST. Also adds variables into the global pool.
-pub struct EraCodeGenerator<'ctx, Callback> {
-    ctx: &'ctx mut EraCompilerCtx<Callback>,
+pub struct EraCodeGenerator<'ctx, 'i, Callback> {
+    ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
     trim_nodes: bool,
     keep_src: bool,
 }
@@ -332,10 +332,10 @@ impl EraBcChunkBuilder {
     }
 }
 
-pub struct EraCodeCompilation {
-    pub bc_chunks: Vec<EraBcChunk>,
-    pub func_entries: FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo>>,
-}
+// pub struct EraCodeCompilation {
+//     pub bc_chunks: Vec<EraBcChunk>,
+//     pub func_entries: FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo>>,
+// }
 
 struct EraFuncArgsBinding {
     target: TokenKey,
@@ -354,8 +354,12 @@ struct EraFuncPrebuildInfo {
     dyn_vars: Vec<(u32, SrcSpan)>,
 }
 
-impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
-    pub fn new(ctx: &'ctx mut EraCompilerCtx<Callback>, trim_nodes: bool, keep_src: bool) -> Self {
+impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callback> {
+    pub fn new(
+        ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
+        trim_nodes: bool,
+        keep_src: bool,
+    ) -> Self {
         Self {
             ctx,
             trim_nodes,
@@ -372,7 +376,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
         mut progress_callback: impl FnMut(usize),
     ) {
         let mut prebuild_funcs: FxIndexMap<
-            &'static Ascii<str>,
+            &'i Ascii<str>,
             (
                 EraFunctionItemNode,
                 EraFuncPrebuildInfo,
@@ -406,7 +410,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                     let mut parser = super::parser::EraParser::new(
                         &mut self.ctx.callback,
                         &mut lexer,
-                        self.ctx.node_cache,
+                        &mut self.ctx.node_cache,
                         &self.ctx.global_replace,
                         &self.ctx.global_define,
                         &mut is_str_var_fn,
@@ -491,7 +495,7 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
                         else {
                             continue;
                         };
-                        let name = unsafe { site.o.ctx.resolve_static_str(prebuild_info.name) };
+                        let name = site.o.ctx.resolve_str(prebuild_info.name);
                         func_info.chunk_idx = chunk_idx;
                         // eprintln!("[Add func {}, span={:?}]", name, func_info.name_span);
                         prebuild_funcs
@@ -586,16 +590,16 @@ impl<'ctx, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, Callback> {
     }
 }
 
-struct EraCodeGenPrebuildSite<'o, 'ctx, Callback> {
-    o: &'o mut EraCodeGenerator<'ctx, Callback>,
+struct EraCodeGenPrebuildSite<'o, 'ctx, 'i, Callback> {
+    o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>,
     var_local_size: u32,
     var_locals_size: u32,
     var_arg_size: u32,
     var_args_size: u32,
 }
 
-impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, Callback> {
-    fn new(o: &'o mut EraCodeGenerator<'ctx, Callback>) -> Self {
+impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, 'i, Callback> {
+    fn new(o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>) -> Self {
         let var_local_size = o.ctx.variables.get_var("LOCAL").unwrap().dims().unwrap()[0];
         let var_locals_size = o.ctx.variables.get_var("LOCALS").unwrap().dims().unwrap()[0];
         let var_arg_size = o.ctx.variables.get_var("ARG").unwrap().dims().unwrap()[0];
@@ -615,7 +619,7 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
         &mut self,
         node: EraFunctionItemNode,
         lookup_func_fn: impl Fn(&mut Self, &str) -> Option<(ArcStr, SrcSpan)>,
-    ) -> CompileResult<(EraFuncPrebuildInfo, EraFuncInfo)> {
+    ) -> CompileResult<(EraFuncPrebuildInfo, EraFuncInfo<'i>)> {
         let filename = self.o.ctx.active_source.clone();
         let make_diag_fn = || GreenDiagnostic::new(filename.clone());
 
@@ -708,14 +712,15 @@ impl<'o, 'ctx, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, C
             ret_kind: ScalarValueKind::Void,
             is_transient: false,
         };
+        let interner = self.o.ctx.interner();
         let mut interp = EraInterpreter::new(self.o.ctx, true);
 
-        let mut add_frame_var_or_diag = |interp: &mut EraInterpreter<'_, Callback>,
+        let mut add_frame_var_or_diag = |interp: &mut EraInterpreter<Callback>,
                                          name: TokenKey,
                                          var_info: EraFuncFrameVarInfo|
          -> CompileResult<()> {
             let name_span = var_info.span;
-            let name_str = unsafe { interp.get_ctx().resolve_static_str(name) };
+            let name_str = interner.resolve(name);
             if func_info
                 .frame_info
                 .vars
@@ -1339,12 +1344,14 @@ struct EraLoopStructCodeMetadata {
     break_cp: EraBcChunkCheckpoint,
 }
 
-struct EraCodeGenSite<'o, 'ctx, 'b, Callback> {
-    o: &'o mut EraCodeGenerator<'ctx, Callback>,
+struct EraCodeGenSite<'o, 'ctx, 'i, 'b, Callback> {
+    o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>,
     filename: ArcStr,
     chunk: &'b mut EraBcChunkBuilder,
-    cur_func:
-        Yoke<&'static EraFuncInfo, &'static FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo>>>,
+    cur_func: Yoke<
+        &'static EraFuncInfo<'static>,
+        &'static FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo<'static>>>,
+    >,
     /// The position where the function body starts. Used by `RESTART`.
     body_start_pos: EraBcChunkCheckpoint,
     /// The scope generation ID allocation counter. Used to prevent invalid `GOTO`'s
@@ -1354,7 +1361,7 @@ struct EraCodeGenSite<'o, 'ctx, 'b, Callback> {
     /// The scope stack balances. Used to store the balance of the scope stack at each scope.
     scope_stack_balances: Vec<u32>,
     /// GOTO labels. Used to store the position of labels for `GOTO` jumps.
-    goto_labels: FxHashMap<&'static Ascii<str>, EraGotoLabelInfo>,
+    goto_labels: FxHashMap<&'i Ascii<str>, EraGotoLabelInfo>,
     /// GOTO jumps. Used to store unfinished `GOTO` jumps, which will be resolved when the function
     /// ends.
     pending_goto_jumps: Vec<EraGotoJumpInfo>,
@@ -1365,7 +1372,7 @@ struct EraCodeGenSite<'o, 'ctx, 'b, Callback> {
     cur_loop_struct: Option<EraLoopStructCodeQueue>,
 }
 
-impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, Callback> {
+impl<'o, 'ctx, 'i, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'i, 'b, Callback> {
     fn allocate_scope_id(&mut self, parent_scope: u32, stack_size: u32) -> u32 {
         let id = self.scope_generation_id;
         self.scope_generation_id += 1;
@@ -1382,7 +1389,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
     /// never fails, since `prebuild_function` should have already checked for errors which would
     /// prevent the function from being compiled.
     fn gen_function(
-        o: &'o mut EraCodeGenerator<'ctx, Callback>,
+        o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>,
         filename: ArcStr,
         chunk: &'b mut EraBcChunkBuilder,
         node: OwnedEraFunctionItemNode,
@@ -1737,7 +1744,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
             Kind::LabelStmt(stmt) => {
                 let label = stmt.label().ok_or(())?;
                 let label_span = label.src_span();
-                let label_str = unsafe { self.o.ctx.resolve_static_str(label.text_key()) };
+                let label_str = self.o.ctx.resolve_str(label.text_key());
                 self.goto_labels.insert(
                     Ascii::new_str(label_str),
                     EraGotoLabelInfo {
@@ -1791,7 +1798,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
             Kind::ResultCmdCallStmt(stmt) => {
                 let cmd = stmt.command().ok_or(())?;
                 let cmd_span = cmd.src_span();
-                let cmd_str = unsafe { self.o.ctx.resolve_static_str(cmd.text_key()) };
+                let cmd_str = self.o.ctx.resolve_str(cmd.text_key());
                 let args = stmt.arguments().ok_or(())?;
                 self.builtin_func_call(cmd_str, cmd_span, args, true)?;
             }
@@ -3472,7 +3479,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
 
         if let Ok(name) = TryInto::<EraIdentLeaf>::try_into(name) {
             // Prefer static function call
-            let name_str = unsafe { self.o.ctx.resolve_static_str(name.text_key()) };
+            let name_str = self.o.ctx.resolve_str(name.text_key());
             let result = self.static_func_call(name_str, name.src_span(), args, false)?;
             if result.is_value() {
                 self.chunk.push_pop_all(1, stmt.src_span());
@@ -3493,7 +3500,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
 
         if let Ok(name) = TryInto::<EraIdentLeaf>::try_into(name) {
             // Prefer static function call
-            let name_str = unsafe { self.o.ctx.resolve_static_str(name.text_key()) };
+            let name_str = self.o.ctx.resolve_str(name.text_key());
             let result = self.static_func_call(name_str, name.src_span(), args, true)?;
             if result.is_value() {
                 self.chunk.push_pop_all(1, stmt.src_span());
@@ -3514,7 +3521,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
 
         if let Ok(name) = TryInto::<EraIdentLeaf>::try_into(name) {
             // Prefer static function call
-            let name_str = unsafe { self.o.ctx.resolve_static_str(name.text_key()) };
+            let name_str = self.o.ctx.resolve_str(name.text_key());
             let result = self.static_func_call(name_str, name.src_span(), args, true)?;
             if result.is_value() {
                 self.chunk.push_pop_all(1, stmt.src_span());
@@ -4972,7 +4979,7 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
                 let name = expr.name().ok_or(())?;
                 let name_span = name.src_span();
                 let args = expr.arguments().ok_or(())?;
-                let name = unsafe { self.o.ctx.resolve_static_str(name.text_key()) };
+                let name = self.o.ctx.resolve_str(name.text_key());
                 self.static_func_call(name, name_span, args, false)?
             } // _ => unimplemented!("unsupported expression node `{:?}`", node.kind()),
         })
@@ -6147,29 +6154,29 @@ impl<'o, 'ctx, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, 'b, C
     ) -> CompileResult<ScalarValueKind> {
         use std::ops::{Deref, DerefMut};
 
-        struct Site<'this, 'o, 'ctx, 'b, 'name, Callback> {
-            this: &'this mut EraCodeGenSite<'o, 'ctx, 'b, Callback>,
+        struct Site<'this, 'o, 'ctx, 'i, 'b, 'name, Callback> {
+            this: &'this mut EraCodeGenSite<'o, 'ctx, 'i, 'b, Callback>,
             ret_kind: ScalarValueKind,
             name: &'name str,
             name_span: SrcSpan,
             assign_to_result: bool,
         }
 
-        impl<'this, 'o, 'ctx, 'b, Callback> Deref for Site<'this, 'o, 'ctx, 'b, '_, Callback> {
-            type Target = EraCodeGenSite<'o, 'ctx, 'b, Callback>;
+        impl<'this, 'o, 'ctx, 'i, 'b, Callback> Deref for Site<'this, 'o, 'ctx, 'i, 'b, '_, Callback> {
+            type Target = EraCodeGenSite<'o, 'ctx, 'i, 'b, Callback>;
 
             fn deref(&self) -> &Self::Target {
                 self.this
             }
         }
 
-        impl<'this, 'o, 'ctx, 'b, Callback> DerefMut for Site<'this, 'o, 'ctx, 'b, '_, Callback> {
+        impl<'this, 'o, 'ctx, 'i, 'b, Callback> DerefMut for Site<'this, 'o, 'ctx, 'i, 'b, '_, Callback> {
             fn deref_mut(&mut self) -> &mut Self::Target {
                 self.this
             }
         }
 
-        impl<Callback: EraCompilerCallback> Site<'_, '_, '_, '_, '_, Callback> {
+        impl<Callback: EraCompilerCallback> Site<'_, '_, '_, '_, '_, '_, Callback> {
             fn result(&mut self) -> CompileResult<()> {
                 self.ret_kind = ScalarValueKind::Int;
                 if !self.assign_to_result {

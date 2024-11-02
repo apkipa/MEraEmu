@@ -1706,6 +1706,44 @@ mod tests {
     }
 
     #[test]
+    fn test_miri() -> anyhow::Result<()> {
+        let main_erb = "@SYSTEM_TITLE()\nPRINTFORM Hello, world!";
+        let errors = RefCell::new(String::new());
+        let mut callback = MockEngineCallback::new(&errors);
+        let mut builder = v2::engine::MEraEngineBuilder::new(&mut callback);
+        builder.register_variable("WINDOW_TITLE", true, 1, true)?;
+        // builder.finish_load_csv()?;
+        // builder.finish_load_erh()?;
+        builder.load_erb("main.erb", main_erb.as_bytes())?;
+        let engine = builder.build()?;
+        // engine.register_global_var("WINDOW_TITLE", true, 1, true)?;
+        // _ = engine.load_erb("main.erb", main_erb.as_bytes());
+        // _ = engine.finialize_load_srcs();
+        // let stop_flag = AtomicBool::new(false);
+        // _ = engine.do_execution(&stop_flag, 1024 * 1024);
+        // assert!(engine.get_is_halted());
+        // drop(engine);
+        {
+            let errors = errors.borrow();
+            if errors.contains("error:") {
+                panic!(
+                    "compile output:\n{errors}\nexec output:\n{}",
+                    callback.output
+                );
+            }
+            if !errors.is_empty() {
+                println!("compile output:\n{errors}");
+            }
+        }
+        // assert_eq!(
+        //     &callback.output,
+        //     "(5050)[0,0,0,3][0,3,2,2]Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135[;&]"
+        // );
+
+        Ok(())
+    }
+
+    #[test]
     fn assembled_game() -> anyhow::Result<()> {
         // TODO: Redact this
         let game_base_dir = r#"D:\MyData\Games\Others\1\eraTW\TW4.881画蛇添足版（04.07更新）\"#;

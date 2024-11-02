@@ -31,15 +31,15 @@ pub struct EraInterpretedVarDecl {
     pub is_dynamic: bool,
 }
 
-pub struct EraInterpreter<'ctx, 'n, Callback> {
-    ctx: &'ctx mut EraCompilerCtx<Callback>,
+pub struct EraInterpreter<'ctx, 'i, 'n, Callback> {
+    ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
     node_arena: &'n EraNodeArena,
     is_const: bool,
 }
 
-impl<'ctx, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'n, Callback> {
+impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, Callback> {
     pub fn new(
-        ctx: &'ctx mut EraCompilerCtx<Callback>,
+        ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
         node_arena: &'n EraNodeArena,
         is_const: bool,
     ) -> Self {
@@ -50,11 +50,11 @@ impl<'ctx, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'n, Callback>
         }
     }
 
-    pub fn get_ctx(&self) -> &EraCompilerCtx<Callback> {
+    pub fn get_ctx(&self) -> &EraCompilerCtx<'i, Callback> {
         self.ctx
     }
 
-    pub fn get_ctx_mut(&mut self) -> &mut EraCompilerCtx<Callback> {
+    pub fn get_ctx_mut(&mut self) -> &mut EraCompilerCtx<'i, Callback> {
         self.ctx
     }
 

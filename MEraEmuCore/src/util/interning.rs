@@ -1,7 +1,7 @@
 use cstree::interning::{InternKey, Interner, Resolver, TokenKey};
 use rustc_hash::FxBuildHasher;
 
-use std::mem::MaybeUninit;
+use std::{cell::UnsafeCell, mem::MaybeUninit};
 
 // static mut rodeo: MaybeUninit<lasso::Rodeo<TokenKey, FxBuildHasher>> = MaybeUninit::uninit();
 
@@ -9,7 +9,7 @@ use std::mem::MaybeUninit;
 pub struct ThreadedTokenInterner {
     rodeo: lasso::ThreadedRodeo<TokenKey, FxBuildHasher>,
     // For faster lookup
-    strings: Vec<&'static str>,
+    strings: UnsafeCell<Vec<&'static str>>,
 }
 
 impl Default for ThreadedTokenInterner {
@@ -25,28 +25,45 @@ impl ThreadedTokenInterner {
         // }
         Self {
             rodeo: lasso::ThreadedRodeo::with_hasher(Default::default()),
-            strings: Vec::new(),
+            strings: UnsafeCell::new(Vec::new()),
         }
     }
 
     pub fn optimize_lookup(&mut self) {
+        // SAFETY: We uniquely borrow `self` and ensure that no other borrows exist.
+        unsafe {
+            self.optimize_lookup_unchecked();
+        }
+    }
+
+    /// # Safety
+    ///
+    /// Caller must ensure that the `ThreadedTokenInterner` is not accessed concurrently.
+    pub unsafe fn optimize_lookup_unchecked(&self) {
+        let strings = &mut *self.strings.get();
+
         let rodeo_len = self.rodeo.len();
-        if self.strings.len() == rodeo_len {
+        if strings.len() == rodeo_len {
             return;
         }
 
-        self.strings.resize(rodeo_len, "");
+        strings.resize(rodeo_len, "");
         for (k, v) in self.rodeo.iter() {
             // SAFETY: Self-referential strings
-            self.strings[k.into_u32() as usize] = unsafe { std::mem::transmute(v) };
+            strings[k.into_u32() as usize] = unsafe { std::mem::transmute(v) };
         }
+    }
+
+    fn get_strings(&self) -> &Vec<&'static str> {
+        // SAFETY: We ensure that no other borrows exist.
+        unsafe { &*self.strings.get() }
     }
 }
 
 impl Resolver<TokenKey> for ThreadedTokenInterner {
     #[inline]
     fn try_resolve(&self, key: TokenKey) -> Option<&str> {
-        self.strings
+        self.get_strings()
             .get(key.into_u32() as usize)
             .copied()
             .or_else(|| self.rodeo.try_resolve(&key))
@@ -55,7 +72,7 @@ impl Resolver<TokenKey> for ThreadedTokenInterner {
 
     #[inline]
     fn resolve(&self, key: TokenKey) -> &str {
-        self.strings
+        self.get_strings()
             .get(key.into_u32() as usize)
             .copied()
             .unwrap_or_else(|| self.rodeo.resolve(&key))
@@ -82,7 +99,7 @@ impl Interner<TokenKey> for ThreadedTokenInterner {
 impl Resolver<TokenKey> for &ThreadedTokenInterner {
     #[inline]
     fn try_resolve(&self, key: TokenKey) -> Option<&str> {
-        self.strings
+        self.get_strings()
             .get(key.into_u32() as usize)
             .copied()
             .or_else(|| self.rodeo.try_resolve(&key))
@@ -91,7 +108,7 @@ impl Resolver<TokenKey> for &ThreadedTokenInterner {
 
     #[inline]
     fn resolve(&self, key: TokenKey) -> &str {
-        self.strings
+        self.get_strings()
             .get(key.into_u32() as usize)
             .copied()
             .unwrap_or_else(|| self.rodeo.resolve(&key))

@@ -28,21 +28,21 @@ pub struct EraInterpretedVarDecl {
     pub is_dynamic: bool,
 }
 
-pub struct EraInterpreter<'ctx, Callback> {
-    ctx: &'ctx mut EraCompilerCtx<Callback>,
+pub struct EraInterpreter<'ctx, 'i, Callback> {
+    ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
     is_const: bool,
 }
 
-impl<'ctx, Callback: EraCompilerCallback> EraInterpreter<'ctx, Callback> {
-    pub fn new(ctx: &'ctx mut EraCompilerCtx<Callback>, is_const: bool) -> Self {
+impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback> {
+    pub fn new(ctx: &'ctx mut EraCompilerCtx<'i, Callback>, is_const: bool) -> Self {
         Self { ctx, is_const }
     }
 
-    pub fn get_ctx(&self) -> &EraCompilerCtx<Callback> {
+    pub fn get_ctx(&self) -> &EraCompilerCtx<'i, Callback> {
         self.ctx
     }
 
-    pub fn get_ctx_mut(&mut self) -> &mut EraCompilerCtx<Callback> {
+    pub fn get_ctx_mut(&mut self) -> &mut EraCompilerCtx<'i, Callback> {
         self.ctx
     }
 

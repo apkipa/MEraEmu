@@ -305,14 +305,14 @@ impl EraVirtualMachineState {
     }
 }
 
-pub struct EraVirtualMachine<'ctx, 's, Callback> {
-    ctx: &'ctx mut EraCompilerCtx<Callback>,
+pub struct EraVirtualMachine<'ctx, 'i, 's, Callback> {
+    ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
     state: &'s mut EraVirtualMachineState,
 }
 
-impl<'ctx, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 's, Callback> {
+impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's, Callback> {
     pub fn new(
-        ctx: &'ctx mut EraCompilerCtx<Callback>,
+        ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
         state: &'s mut EraVirtualMachineState,
     ) -> Self {
         Self { ctx, state }
@@ -362,8 +362,8 @@ impl<'ctx, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 's, Callba
     }
 }
 
-struct EraVmExecSite<'ctx, 's, Callback> {
-    ctx: &'ctx mut EraCompilerCtx<Callback>,
+struct EraVmExecSite<'ctx, 'i, 's, Callback> {
+    ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
     i: &'s mut EraVirtualMachineStateInner,
     stack: TailVecRef<'s, Value>,
     cur_chunk: &'ctx EraBcChunk,
@@ -371,7 +371,7 @@ struct EraVmExecSite<'ctx, 's, Callback> {
     prev_frames: &'s [EraFuncExecFrame],
 }
 
-impl<Callback> Deref for EraVmExecSite<'_, '_, Callback> {
+impl<Callback> Deref for EraVmExecSite<'_, '_, '_, Callback> {
     type Target = EraVirtualMachineStateInner;
 
     fn deref(&self) -> &Self::Target {
@@ -379,13 +379,13 @@ impl<Callback> Deref for EraVmExecSite<'_, '_, Callback> {
     }
 }
 
-impl<Callback> DerefMut for EraVmExecSite<'_, '_, Callback> {
+impl<Callback> DerefMut for EraVmExecSite<'_, '_, '_, Callback> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.i
     }
 }
 
-impl<Callback: EraCompilerCallback> EraVmExecSite<'_, '_, Callback> {
+impl<Callback: EraCompilerCallback> EraVmExecSite<'_, '_, '_, Callback> {
     pub fn cur_filename(&self) -> ArcStr {
         self.cur_chunk.name.clone()
     }
@@ -399,7 +399,7 @@ impl<Callback: EraCompilerCallback> EraVmExecSite<'_, '_, Callback> {
 
 const MAX_CALL_DEPTH: usize = 1024;
 
-impl<'ctx, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 's, Callback> {
+impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's, Callback> {
     fn execute_inner(
         &mut self,
         run_flag: &AtomicBool,
