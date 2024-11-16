@@ -475,9 +475,9 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                     .get_len()
                     .try_into()
                     .expect("function offset overflow");
-                // func_info.bc_offset = func_offset;
-                func_offsets.push((func_idx, func_offset));
                 EraCodeGenSite::gen_function(self, filename, chunk, node, prebuild_info);
+                let func_size = chunk.get_len() - func_offset as usize;
+                func_offsets.push((func_idx, func_offset, func_size as _));
                 chunk.push_bc(BcKind::DebugBreak, SrcSpan::default());
             }
 
@@ -490,7 +490,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
 
         // Finialize bytecode chunks
         let func_entries = Rc::get_mut(&mut self.ctx.func_entries).unwrap();
-        for (func_idx, func_offset) in func_offsets {
+        for (func_idx, func_offset, func_size) in func_offsets {
             let func_info = func_entries
                 .get_index_mut(func_idx as _)
                 .unwrap()
@@ -498,6 +498,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                 .as_mut()
                 .unwrap();
             func_info.bc_offset = func_offset;
+            func_info.bc_size = func_size;
         }
         let bc_chunks = Rc::get_mut(&mut self.ctx.bc_chunks).unwrap();
         for (chunk_idx, (chunk, _)) in compile_units {
@@ -608,6 +609,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
             frame_info: Default::default(),
             chunk_idx: 0,
             bc_offset: 0,
+            bc_size: 0,
             ret_kind: ScalarValueKind::Void,
             is_transient: false,
         };
@@ -1692,7 +1694,6 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     // Assign
                     self.chunk.push_bc(
                         BcKind::RowAssign {
-                            dims_cnt: 1,
                             vals_cnt: rhs_count,
                         },
                         stmt_span,
@@ -1918,7 +1919,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             }
             EraNode::StmtVarSet(args) => {
                 let ([target], [value, start_index, end_index]) = self.unpack_list_expr(args)?;
-                let target = self.norm_var(target)?;
+                let target = self.norm_var_idx(target, true)?;
                 self.expr_or_default(value, target)?;
                 self.int_expr_or(start_index, 0)?;
                 self.int_expr_or(end_index, -1)?;
@@ -1983,7 +1984,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             }
             EraNode::StmtArrayRemove(args) => {
                 let ([target, start_index, count], []) = self.unpack_list_expr(args)?;
-                let target = self.norm_var(target)?;
+                let target = self.norm_var_idx(target, true)?;
                 self.int_expr(start_index)?;
                 self.int_expr(count)?;
                 self.chunk.push_bc(BcKind::ArrayRemove, stmt_span);
@@ -2015,7 +2016,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 } else {
                     BcKind::ArraySortDesc
                 };
-                let target = self.norm_var(target)?;
+                let target = self.norm_var_idx(target, true)?;
                 self.int_expr_or(start_index, 0)?;
                 self.int_expr_or(count, -1)?;
                 self.chunk.push_bc(bc, stmt_span);
@@ -2033,6 +2034,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     return Err(());
                 };
                 // TODO: Do deeper dimensions checking
+                // NOTE: Emuera ignores indices on arrays for ARRAYMSORT
                 let primary = EraNodeRef(args[0]);
                 let primary = self.norm_var(primary)?;
                 let mut subs_cnt = 0;
@@ -2078,7 +2080,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             EraNode::StmtArrayShift(args) => {
                 let ([target, shift_count, value], [start_index, target_count]) =
                     self.unpack_list_expr(args)?;
-                let target = self.norm_var(target)?;
+                let target = self.norm_var_idx(target, true)?;
                 self.int_expr(shift_count)?;
                 self.expr_or_default(value.into(), target)?;
                 self.int_expr_or(start_index, 0)?;
@@ -2621,18 +2623,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
 
         // Load target
         let target_span = self.arena.get_node_span(target);
-        let target = self.var_mdidx(target, true)?;
-        let EraIdVariableKind::Normal(target_kind) = target.kind else {
-            let mut diag = self.make_diag();
-            diag.span_err(
-                Default::default(),
-                target_span,
-                "cannot assign to pseudo-variable",
-            );
-            diag.emit_to(self.o.ctx);
-            return Err(());
-        };
-        let target_kind = target_kind.to_scalar();
+        let target_kind = self.norm_var_idx(target, true)?;
 
         // Load rhs
         let mut rhs_count = 0;
@@ -2672,7 +2663,6 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         // Assign
         self.chunk.push_bc(
             BcKind::RowAssign {
-                dims_cnt: target.dims_cnt,
                 vals_cnt: rhs_count,
             },
             stmt_span,
@@ -5543,8 +5533,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
          * are REF candidates (i.e. variable name plus optional indices), we push values as
          * (Array, FlatIndex) pair. FlatIndex is needed for VM to resolve the pack to scalar
          * values, in case the actual parameter is not REF. If expressions only evaluate to
-         * pure values, we push the pair (Value, 0). In case of empty argument, we push the
-         * pair (0, 1). (Note the second zero, which indicates that the value is omitted.)
+         * scalar values, we push the pair (Scalar, 0). In case of empty argument, we push a
+         * pair (0, 1). (Note the second `1`, which indicates that the value is omitted.)
          */
         // TODO: Maybe we can convert dynamic function call into `eval` call, which is more
         //       flexible and can support built-in functions as well.
@@ -6159,8 +6149,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let [arr, value, start_idx, end_idx, complete_match] =
                     site.unpack_opt_args(args, 2)?;
                 unwrap!(arr, value);
-                // let arr = site.expr_to_var(arr)?;
-                let arr = site.norm_var(arr)?;
+                let arr = site.norm_var_idx(arr, true)?;
                 site.expr_or_default(value.into(), arr)?;
                 apply_args!(
                     name_span,
@@ -6181,7 +6170,6 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 site.result()?;
                 let [chara_var, value, start_id, end_id] = site.unpack_opt_args(args, 2)?;
                 unwrap!(chara_var, value);
-                // let chara_var = site.expr_to_var_opt_idx(chara_var)?;
                 let chara_var = site.norm_var_idx(chara_var, false)?;
                 site.expr_or_default(value.into(), chara_var)?;
                 apply_args!(

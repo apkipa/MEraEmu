@@ -709,6 +709,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
             frame_info: Default::default(),
             chunk_idx: 0,
             bc_offset: 0,
+            bc_size: 0,
             ret_kind: ScalarValueKind::Void,
             is_transient: false,
         };
@@ -1959,7 +1960,6 @@ impl<'o, 'ctx, 'i, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, '
                     // Assign
                     self.chunk.push_bc(
                         BcKind::RowAssign {
-                            dims_cnt: 1,
                             vals_cnt: rhs_count,
                         },
                         stmt_span,
@@ -2949,7 +2949,6 @@ impl<'o, 'ctx, 'i, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, '
         // Assign
         self.chunk.push_bc(
             BcKind::RowAssign {
-                dims_cnt: target.dims_cnt,
                 vals_cnt: rhs_count,
             },
             stmt.src_span(),

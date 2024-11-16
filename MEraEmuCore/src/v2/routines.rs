@@ -323,3 +323,35 @@ pub fn unescape_to_sink(input: &str, output: &mut String) {
     //     }
     // }
 }
+
+pub fn format_radix(mut num: i64, radix: u32) -> Option<String> {
+    // TODO: Optimize the implementation (do not allocate a Vec)
+    if radix < 2 || radix > 36 {
+        return None;
+    }
+    let radix = radix as i64;
+    let mut buf = Vec::new();
+    if num == i64::MIN {
+        return Some("-9223372036854775808".to_owned());
+    }
+    if num < 0 {
+        buf.push(b'-');
+        num = -num;
+    }
+    let mut digits = Vec::new();
+    while num > 0 {
+        digits.push((num % radix) as u8);
+        num /= radix;
+    }
+    if digits.is_empty() {
+        digits.push(0);
+    }
+    for &digit in digits.iter().rev() {
+        buf.push(match digit {
+            0..=9 => b'0' + digit,
+            10..=35 => b'a' + digit - 10,
+            _ => unreachable!(),
+        });
+    }
+    Some(String::from_utf8(buf).unwrap())
+}

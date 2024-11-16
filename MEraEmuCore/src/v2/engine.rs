@@ -8,7 +8,7 @@ use std::{
 };
 
 use bstr::ByteSlice;
-use cstree::build::NodeCache;
+use cstree::{build::NodeCache, interning::Resolver};
 use either::Either;
 use hashbrown::{HashMap, HashSet};
 use indoc::indoc;
@@ -21,6 +21,7 @@ use rcstr::ArcStr;
 use regex::Regex;
 use rustc_hash::FxBuildHasher;
 use safer_ffi::derive_ReprC;
+use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 
 use crate::{
@@ -28,8 +29,17 @@ use crate::{
     types::*,
 };
 
+use super::{
+    codegen::EraCodeGenerator,
+    lexer::EraLexer,
+    vm::{EraExecIp, EraFuncExecFrame, EraVirtualMachine, EraVirtualMachineState},
+};
+use crate::cst;
+
 use crate::util::syntax::*;
 use crate::util::*;
+
+pub use crate::types::EraCompilerHostFile as MEraEngineHostFile;
 
 #[derive(Debug)]
 struct InitialVarDesc {
@@ -45,13 +55,13 @@ struct InitialVarDesc {
 pub struct MEraEngine<Callback> {
     ctx: EraCompilerCtx<'static, Callback>,
     interner: Arc<ThreadedTokenInterner>,
-    backup_interner: Arc<ThreadedTokenInterner>,
+    vm_state: EraVirtualMachineState,
 }
 
 // TODO: Scale charas variables dynamically; use default capacity of 128 then.
 pub const MAX_CHARA_COUNT: u32 = 512;
 
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Serialize, Deserialize)]
 #[error("{msg}")]
 pub struct MEraEngineError {
     pub msg: String,
@@ -69,6 +79,11 @@ impl From<anyhow::Error> for MEraEngineError {
 impl From<String> for MEraEngineError {
     fn from(value: String) -> Self {
         Self::new(value)
+    }
+}
+impl From<MEraEngineError> for String {
+    fn from(value: MEraEngineError) -> Self {
+        value.msg
     }
 }
 
@@ -94,11 +109,6 @@ impl Default for MEraEngineConfig {
         }
     }
 }
-
-pub use crate::types::EraCompilerHostFile as MEraEngineHostFile;
-
-use super::{codegen::EraCodeGenerator, lexer::EraLexer};
-use crate::cst;
 
 pub trait MEraEngineSysCallback {
     /// Callback for script errors.
@@ -581,38 +591,6 @@ impl<T: MEraEngineSysCallback> EraCompilerCallback for T {
 }
 
 #[derive_ReprC]
-#[repr(C)]
-#[derive(Default, Debug, Clone)]
-pub struct EraExecIpInfo {
-    chunk: u32,
-    offset: u32,
-}
-
-#[derive_ReprC]
-#[repr(C)]
-#[derive(Default, Debug, Clone)]
-pub struct EraFuncInfo {
-    pub entry: EraExecIpInfo,
-    pub args_cnt: u32,
-}
-
-// pub struct EngineStackTraceFrame<'a> {
-//     pub file_name: &'a str,
-//     pub func_name: &'a str,
-//     pub ip: EraExecIpInfo,
-//     pub src_info: ExecSourceInfo,
-// }
-// pub struct EngineStackTrace<'a> {
-//     pub frames: Vec<EngineStackTraceFrame<'a>>,
-// }
-
-#[derive(Debug)]
-pub struct EngineMemoryUsage {
-    pub var_size: usize,
-    pub code_size: usize,
-}
-
-#[derive_ReprC]
 #[repr(u8)]
 #[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
 pub enum EraCsvLoadKind {
@@ -674,7 +652,6 @@ pub struct MEraEngineBuilder<SysCallback, BuilderCallback> {
     watching_vars: HashSet<Ascii<ArcStr>, FxBuildHasher>,
     initial_vars: Option<HashMap<Ascii<ArcStr>, InitialVarDesc, FxBuildHasher>>,
     interner: Arc<ThreadedTokenInterner>,
-    backup_interner: Arc<ThreadedTokenInterner>,
     /// Whether the headers have been compiled.
     is_header_finished: bool,
     erh_count: usize,
@@ -692,7 +669,6 @@ impl<T: MEraEngineSysCallback> MEraEngineBuilder<T, EmptyCallback> {
             watching_vars: Default::default(),
             initial_vars: Some(Default::default()),
             interner,
-            backup_interner: Default::default(),
             is_header_finished: false,
             erh_count: 0,
             erb_count: 0,
@@ -717,7 +693,6 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             watching_vars: self.watching_vars,
             initial_vars: self.initial_vars,
             interner: self.interner,
-            backup_interner: self.backup_interner,
             is_header_finished: self.is_header_finished,
             erh_count: self.erh_count,
             erb_count: self.erb_count,
@@ -1564,7 +1539,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         Ok(MEraEngine {
             ctx: self.ctx,
             interner: self.interner,
-            backup_interner: self.backup_interner,
+            vm_state: EraVirtualMachineState::new(),
         })
     }
 
@@ -1626,7 +1601,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         Ok(MEraEngine {
             ctx: self.ctx,
             interner: self.interner,
-            backup_interner: self.backup_interner,
+            vm_state: EraVirtualMachineState::new(),
         })
     }
 
@@ -1662,21 +1637,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
     }
 
     fn optimize_interner(&mut self) {
-        // let mut s = scopeguard::guard(self, |s| {
-        //     let interner: &'static ThreadedTokenInterner =
-        //         unsafe { std::mem::transmute(&*s.interner) };
-        //     s.ctx.node_cache = NodeCache::from_interner(interner);
-        // });
-        // let s = &mut *s;
-        // {
-        //     // Avoid dangling reference
-        //     let interner: &'static ThreadedTokenInterner =
-        //         unsafe { std::mem::transmute(&*s.backup_interner) };
-        //     s.ctx.node_cache = NodeCache::from_interner(interner);
-        // }
-        // if let Some(interner) = Arc::get_mut(&mut s.interner) {
-        //     interner.optimize_lookup();
-        // }
+        // SAFETY: Nope. It is NOT safe.
         unsafe {
             self.interner.optimize_lookup_unchecked();
         }
@@ -2462,5 +2423,161 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         }
 
         rows
+    }
+}
+
+// RPC-friendly types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EraFuncFrameVarInfo {
+    pub name: String,
+    pub span: SrcSpan,
+    pub is_ref: bool,
+    pub is_const: bool,
+    pub is_charadata: bool,
+    pub in_local_frame: bool,
+    /// Index of the variable in the frame.
+    pub var_idx: u32,
+    /// The type of the variable. Only `Arr*` are used for now.
+    pub var_kind: ValueKind,
+    /// The dimension count of the variable.
+    pub dims_cnt: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EraFuncFrameInfo {
+    /// Argument slots for the function.
+    pub args: Vec<EraFuncFrameArgInfo>,
+    /// Declared variables in the function scope.
+    pub vars: Vec<EraFuncFrameVarInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EraFuncInfo {
+    pub name: String,
+    pub name_span: SrcSpan,
+    pub frame_info: EraFuncFrameInfo,
+    pub chunk_idx: u32,
+    pub bc_offset: u32,
+    pub bc_size: u32,
+    pub ret_kind: ScalarValueKind,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EraEngineVersion {
+    pub version_str: &'static str,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EraEngineMemoryUsage {
+    pub var_size: usize,
+    pub code_size: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EraEngineStackTrace {
+    pub frames: Vec<EraFuncExecFrame>,
+}
+
+#[easy_jsonrpc::rpc]
+pub trait MEraEngineRpc {
+    fn reset_exec_to_ip(&mut self, ip: EraExecIp) -> Result<(), MEraEngineError>;
+    fn get_func_info(&self, name: &str) -> Option<EraFuncInfo>;
+    fn get_stack_trace(&self) -> EraEngineStackTrace;
+    fn get_file_source(&self, name: &str) -> Option<String>;
+    fn get_version(&self) -> EraEngineVersion;
+    fn get_mem_usage(&self) -> EraEngineMemoryUsage;
+}
+
+impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
+    pub fn do_execution(
+        &mut self,
+        run_flag: &AtomicBool,
+        max_inst_cnt: u64,
+    ) -> Result<EraExecutionBreakReason, MEraEngineError> {
+        let mut vm = EraVirtualMachine::new(&mut self.ctx, &mut self.vm_state);
+        Ok(vm.execute(run_flag, max_inst_cnt))
+    }
+
+    pub fn do_rpc(&mut self, request: &str) -> String {
+        use easy_jsonrpc::Handler;
+
+        let json = match serde_json::from_str::<serde_json::Value>(request) {
+            Ok(json) => json,
+            Err(_) => {
+                return r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error"},"id":null}"#
+                    .to_string();
+            }
+        };
+        match <dyn MEraEngineRpc>::handle_request(self, json) {
+            easy_jsonrpc::MaybeReply::DontReply => String::new(),
+            easy_jsonrpc::MaybeReply::Reply(reply) => reply.to_string(),
+        }
+    }
+}
+
+impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
+    fn reset_exec_to_ip(&mut self, ip: EraExecIp) -> Result<(), MEraEngineError> {
+        self.vm_state.reset_exec_to_ip(ip);
+        Ok(())
+    }
+
+    fn get_func_info(&self, name: &str) -> Option<EraFuncInfo> {
+        let i = self.ctx.interner();
+        self.ctx
+            .func_entries
+            .get(Ascii::new_str(name))
+            .and_then(Option::as_ref)
+            .map(|x| EraFuncInfo {
+                name: i.resolve(x.name).to_owned(),
+                name_span: x.name_span,
+                frame_info: EraFuncFrameInfo {
+                    args: x.frame_info.args.clone(),
+                    vars: x
+                        .frame_info
+                        .vars
+                        .values()
+                        .map(|x| EraFuncFrameVarInfo {
+                            name: i.resolve(x.name).to_owned(),
+                            span: x.span,
+                            is_ref: x.is_ref,
+                            is_const: x.is_const,
+                            is_charadata: x.is_charadata,
+                            in_local_frame: x.in_local_frame,
+                            var_idx: x.var_idx,
+                            var_kind: x.var_kind,
+                            dims_cnt: x.dims_cnt,
+                        })
+                        .collect(),
+                },
+                chunk_idx: x.chunk_idx,
+                bc_offset: x.bc_offset,
+                bc_size: x.bc_size,
+                ret_kind: x.ret_kind,
+            })
+    }
+
+    fn get_stack_trace(&self) -> EraEngineStackTrace {
+        let frames = self.vm_state.dump_exec_frames();
+        EraEngineStackTrace { frames }
+    }
+
+    fn get_file_source(&self, name: &str) -> Option<String> {
+        self.ctx
+            .source_map
+            .get(name)
+            .and_then(|x| x.text.as_ref().map(|x| x.to_string()))
+    }
+
+    fn get_version(&self) -> EraEngineVersion {
+        EraEngineVersion {
+            version_str: "MEraEngine in MEraEmuCore v0.3.0",
+        }
+    }
+
+    fn get_mem_usage(&self) -> EraEngineMemoryUsage {
+        EraEngineMemoryUsage {
+            var_size: self.ctx.variables.iter().map(|x| x.val.mem_usage()).sum(),
+            code_size: self.ctx.bc_chunks.iter().map(|x| x.mem_usage()).sum(),
+        }
     }
 }

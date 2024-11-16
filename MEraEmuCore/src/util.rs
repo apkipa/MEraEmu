@@ -3,6 +3,7 @@ pub mod dhashmap;
 pub mod html;
 pub mod interning;
 pub mod io;
+pub mod iter;
 pub mod number;
 pub mod random;
 pub mod rcstr;
@@ -479,5 +480,89 @@ impl Deref for SmallSlice<'_, u32> {
 
     fn deref(&self) -> &Self::Target {
         self.as_slice()
+    }
+}
+
+/**
+ * There are two ways to encode a sorting permutation:
+ * 1. Given data [1, 2, 0], the permutation is [2, 0, 1], where
+ *    sorted[0] = data[2], sorted[1] = data[0], sorted[2] = data[1].
+ *    (i.e. sorted[i] = data[permutation[i]])
+ * 2. Given data [1, 2, 0], the permutation is [1, 2, 0], where
+ *    sorted[1] = data[0], sorted[2] = data[1], sorted[0] = data[2].
+ *    (i.e. sorted[permutation[i]] = data[i])
+ *
+ * We use the first one here.
+ */
+
+// Source: https://stackoverflow.com/a/17074810
+pub fn apply_permutation_in_place_with_fn(
+    mut swap_fn: impl FnMut(usize, usize),
+    permutation: &[usize],
+) {
+    let mut visited = vec![false; permutation.len()];
+    for i in 0..permutation.len() {
+        if visited[i] {
+            continue;
+        }
+        let mut prev_j = i;
+        loop {
+            let j = permutation[prev_j];
+            if j == i {
+                break;
+            }
+            swap_fn(prev_j, j);
+            visited[j] = true;
+            prev_j = j;
+        }
+        visited[i] = true;
+    }
+}
+
+pub fn apply_permutation_in_place<T>(data: &mut [T], permutation: &[usize]) {
+    apply_permutation_in_place_with_fn(|i, j| data.swap(i, j), permutation);
+
+    // let mut visited = vec![false; data.len()];
+    // for i in 0..data.len() {
+    //     if visited[i] {
+    //         continue;
+    //     }
+    //     let mut prev_j = i;
+    //     loop {
+    //         let j = permutation[prev_j];
+    //         if j == i {
+    //             break;
+    //         }
+    //         data.swap(prev_j, j);
+    //         visited[j] = true;
+    //         prev_j = j;
+    //     }
+    //     visited[i] = true;
+    // }
+}
+
+pub fn swap_slice_with_stride<T>(data: &mut [T], stride: usize, i: usize, j: usize) {
+    // if i == j {
+    //     return;
+    // }
+    // let (i, j) = (i.min(j), i.max(j));
+    // let (i, j) = (i * stride, j * stride);
+    // let (slice1, slice2) = data.split_at_mut(j);
+    // slice1[i..][..stride].swap_with_slice(&mut slice2[..stride]);
+    // data.swap(1, 2);
+
+    if i == j {
+        return;
+    }
+    let (i, j) = (i * stride, j * stride);
+    {
+        // Bounds check
+        &data[i..][..stride];
+        &data[j..][..stride];
+    }
+    unsafe {
+        let slice1 = std::ptr::addr_of_mut!(data[i]);
+        let slice2 = std::ptr::addr_of_mut!(data[j]);
+        std::ptr::swap_nonoverlapping(slice1, slice2, stride);
     }
 }

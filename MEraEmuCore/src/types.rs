@@ -5,7 +5,7 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     marker::PhantomData,
-    ops::{ControlFlow, Deref},
+    ops::{ControlFlow, Deref, DerefMut},
 };
 
 use cstree::{
@@ -20,6 +20,7 @@ use indexmap::IndexMap;
 use rclite::Rc;
 use rustc_hash::FxBuildHasher;
 use safer_ffi::{derive_ReprC, prelude::VirtualPtr};
+use serde::{Deserialize, Serialize};
 use tinyvec::ArrayVec;
 
 use crate::util::{interning::ThreadedTokenInterner, rcstr::ArcStr, Ascii};
@@ -29,7 +30,7 @@ type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
 
 #[derive_ReprC]
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SrcPos(pub u32);
 
 impl Default for SrcPos {
@@ -40,7 +41,7 @@ impl Default for SrcPos {
 
 #[derive_ReprC]
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SrcSpan {
     start: SrcPos,
     len: u32,
@@ -791,7 +792,7 @@ impl EraMacroMap {
 #[derive(Debug)]
 pub struct EraSourceFile {
     pub filename: ArcStr,
-    /// The original source text. Reduces memory usage.
+    /// The original source text.
     pub text: Option<String>,
     /// The compressed original source text. Reduces memory usage.
     pub compressed_text: Option<Box<[u8]>>,
@@ -911,6 +912,39 @@ impl<'i, Callback: EraCompilerCallback> EraCompilerCtx<'i, Callback> {
 
     pub fn resolve_str(&self, key: TokenKey) -> &'i str {
         self.interner().resolve(key)
+    }
+
+    pub fn func_info_from_chunk_pos(
+        &self,
+        chunk_idx: usize,
+        bc_offset: usize,
+    ) -> Option<&EraFuncInfo<'i>> {
+        let chunks = self.bc_chunks.as_ref();
+        if chunk_idx >= chunks.len() {
+            return None;
+        }
+        let chunk_idx = chunk_idx as u32;
+        let bc_offset = bc_offset as u32;
+        self.func_entries.iter().find_map(|(name, info)| {
+            if info.is_none() {
+                return None;
+            }
+            let info = info.as_ref().unwrap();
+            if info.chunk_idx == chunk_idx
+                && (info.bc_offset..info.bc_offset + info.bc_size).contains(&bc_offset)
+            {
+                Some(info)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn get_csv_num(&self, kind: EraCsvVarKind, name: &str) -> Option<u32> {
+        self.csv_indices
+            .get(Ascii::new_str(name))
+            .and_then(|x| x.iter().find(|x| x.0 == kind))
+            .map(|x| x.1)
     }
 }
 
@@ -1048,6 +1082,39 @@ pub trait EraCompilerHostFile {
     fn seek(&mut self, pos: i64, mode: EraCompilerFileSeekMode) -> anyhow::Result<u64>;
 }
 
+impl std::io::Read for dyn EraCompilerHostFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.read(buf)
+            .map(|x| x as usize)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+}
+
+impl std::io::Write for dyn EraCompilerHostFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.write(buf)
+            .map(|_| buf.len())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+}
+
+impl std::io::Seek for dyn EraCompilerHostFile {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        let (pos, mode) = match pos {
+            std::io::SeekFrom::Start(pos) => (pos as i64, EraCompilerFileSeekMode::Start),
+            std::io::SeekFrom::End(pos) => (pos as i64, EraCompilerFileSeekMode::End),
+            std::io::SeekFrom::Current(pos) => (pos as i64, EraCompilerFileSeekMode::Current),
+        };
+        self.seek(pos, mode)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+}
+
 #[derive_ReprC]
 #[repr(u32)]
 pub enum EraCompilerFileSeekMode {
@@ -1080,6 +1147,12 @@ pub enum EraExecutionBreakReason {
     IllegalArguments,
     /// An exception occurred during execution.
     InternalError,
+}
+
+impl Default for EraExecutionBreakReason {
+    fn default() -> Self {
+        EraExecutionBreakReason::InternalError
+    }
 }
 
 // Reference: https://learn.microsoft.com/en-us/dotnet/api/system.drawing.imaging.colormatrix
@@ -1315,6 +1388,8 @@ impl Drop for Diagnostic<'_> {
     }
 }
 
+#[derive_ReprC]
+#[repr(opaque)]
 pub struct DiagnosticProvider<'a, 'src> {
     diag: &'a Diagnostic<'src>,
     src_map: Option<&'a FxIndexMap<ArcStr, EraSourceFile>>,
@@ -1553,12 +1628,12 @@ pub struct EraInputExtendedFlags {
     __: modular_bitfield::specifiers::B4,
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct IntValue {
     pub val: i64,
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StrValue {
     pub val: ArcStr,
 }
@@ -1575,6 +1650,92 @@ pub struct ArrStrValue {
     pub vals: Vec<StrValue>,
     pub dims: EraVarDims,
     pub flags: EraValueFlags,
+}
+
+pub trait ArrayLikeValue {
+    type Item;
+
+    fn flat_get(&self, idx: usize) -> Option<&Self::Item>;
+    fn flat_get_mut(&mut self, idx: usize) -> Option<&mut Self::Item>;
+    fn get_dims(&self) -> &EraVarDims;
+    fn get_flags(&self) -> &EraValueFlags;
+    fn get_vals(&self) -> &[Self::Item];
+    fn get_vals_mut(&mut self) -> &mut [Self::Item];
+
+    fn flat_get_val(&self, idx: usize) -> Option<Self::Item>;
+    fn flat_set_val(&mut self, idx: usize, val: Self::Item) -> Option<Self::Item>;
+}
+
+impl ArrayLikeValue for ArrIntValue {
+    type Item = IntValue;
+
+    fn flat_get(&self, idx: usize) -> Option<&IntValue> {
+        self.vals.get(idx)
+    }
+
+    fn flat_get_mut(&mut self, idx: usize) -> Option<&mut IntValue> {
+        self.vals.get_mut(idx)
+    }
+
+    fn get_dims(&self) -> &EraVarDims {
+        &self.dims
+    }
+
+    fn get_flags(&self) -> &EraValueFlags {
+        &self.flags
+    }
+
+    fn get_vals(&self) -> &[IntValue] {
+        &self.vals
+    }
+
+    fn get_vals_mut(&mut self) -> &mut [IntValue] {
+        &mut self.vals
+    }
+
+    fn flat_get_val(&self, idx: usize) -> Option<IntValue> {
+        self.vals.get(idx).cloned()
+    }
+
+    fn flat_set_val(&mut self, idx: usize, val: IntValue) -> Option<IntValue> {
+        self.vals.get_mut(idx).map(|x| std::mem::replace(x, val))
+    }
+}
+
+impl ArrayLikeValue for ArrStrValue {
+    type Item = StrValue;
+
+    fn flat_get(&self, idx: usize) -> Option<&StrValue> {
+        self.vals.get(idx)
+    }
+
+    fn flat_get_mut(&mut self, idx: usize) -> Option<&mut StrValue> {
+        self.vals.get_mut(idx)
+    }
+
+    fn get_dims(&self) -> &EraVarDims {
+        &self.dims
+    }
+
+    fn get_flags(&self) -> &EraValueFlags {
+        &self.flags
+    }
+
+    fn get_vals(&self) -> &[StrValue] {
+        &self.vals
+    }
+
+    fn get_vals_mut(&mut self) -> &mut [StrValue] {
+        &mut self.vals
+    }
+
+    fn flat_get_val(&self, idx: usize) -> Option<StrValue> {
+        self.vals.get(idx).cloned()
+    }
+
+    fn flat_set_val(&mut self, idx: usize, val: StrValue) -> Option<StrValue> {
+        self.vals.get_mut(idx).map(|x| std::mem::replace(x, val))
+    }
 }
 
 #[modular_bitfield::bitfield]
@@ -1712,7 +1873,7 @@ impl ArrStrValue {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, Serialize, Deserialize)]
 pub enum ValueKind {
     Int,
     Str,
@@ -1793,6 +1954,24 @@ impl RefFlatValue<'_> {
         }
     }
 }
+#[derive(Debug, PartialEq, Eq)]
+pub enum RefFlatValueMut<'a> {
+    Int(&'a mut IntValue),
+    Str(&'a mut StrValue),
+    ArrInt(&'a mut Rc<RefCell<ArrIntValue>>),
+    ArrStr(&'a mut Rc<RefCell<ArrStrValue>>),
+}
+impl RefFlatValueMut<'_> {
+    pub fn kind(&self) -> ValueKind {
+        use RefFlatValueMut::*;
+        match self {
+            Int(_) => ValueKind::Int,
+            Str(_) => ValueKind::Str,
+            ArrInt(_) => ValueKind::ArrInt,
+            ArrStr(_) => ValueKind::ArrStr,
+        }
+    }
+}
 
 impl Value {
     pub fn inner_hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -1803,6 +1982,16 @@ impl Value {
             RefFlatValue::Str(x) => x.val.hash(state),
             RefFlatValue::ArrInt(x) => x.borrow().vals.hash(state),
             RefFlatValue::ArrStr(x) => x.borrow().vals.hash(state),
+        }
+    }
+
+    pub fn mem_usage(&self) -> usize {
+        use FlatValue::*;
+        let base_size = std::mem::size_of::<Value>();
+        match &self.0 {
+            Int(_) | Str(_) => base_size,
+            ArrInt(x) => base_size + x.borrow().vals.capacity() * std::mem::size_of::<IntValue>(),
+            ArrStr(x) => base_size + x.borrow().vals.capacity() * std::mem::size_of::<StrValue>(),
         }
     }
 }
@@ -1879,6 +2068,15 @@ impl Value {
             ArrStr(x) => RefFlatValue::ArrStr(x),
         }
     }
+    pub fn as_unpacked_mut(&mut self) -> RefFlatValueMut {
+        use FlatValue::*;
+        match &mut self.0 {
+            Int(x) => RefFlatValueMut::Int(x),
+            Str(x) => RefFlatValueMut::Str(x),
+            ArrInt(x) => RefFlatValueMut::ArrInt(x),
+            ArrStr(x) => RefFlatValueMut::ArrStr(x),
+        }
+    }
     pub fn deep_clone(&self) -> Self {
         // use ptr_union::Enum4::*;
         // match self.0.clone().unpack() {
@@ -1910,6 +2108,18 @@ impl Value {
     pub fn as_str(&self) -> Option<&StrValue> {
         match self.as_unpacked() {
             RefFlatValue::Str(x) => Some(x),
+            _ => None,
+        }
+    }
+    pub fn as_int_mut(&mut self) -> Option<&mut IntValue> {
+        match self.as_unpacked_mut() {
+            RefFlatValueMut::Int(x) => Some(x),
+            _ => None,
+        }
+    }
+    pub fn as_str_mut(&mut self) -> Option<&mut StrValue> {
+        match self.as_unpacked_mut() {
+            RefFlatValueMut::Str(x) => Some(x),
             _ => None,
         }
     }
@@ -2119,7 +2329,7 @@ impl EraVarPool {
     }
 
     #[must_use]
-    pub fn get_var_by_idx(&mut self, idx: usize) -> Option<&Value> {
+    pub fn get_var_by_idx(&self, idx: usize) -> Option<&Value> {
         self.vars.get(idx).map(|x| &x.val)
     }
 
@@ -2153,6 +2363,28 @@ impl EraVarPool {
 
     pub fn normal_vars_iter(&self) -> impl Iterator<Item = &EraVarInfo> {
         self.normal_var_idxs.iter().map(|&x| &self.vars[x])
+    }
+
+    pub fn reinit_variables(&mut self) {
+        for var in &self.init_vars {
+            use RefFlatValue::*;
+            let (var, init_val) = (&self.vars[var.0], &var.1);
+            // SAFETY: d and s are guaranteed not to point to the same array in
+            //         add_var_ex()
+            match (var.val.as_unpacked(), init_val.as_unpacked()) {
+                (ArrInt(d), ArrInt(s)) => {
+                    let mut d = d.borrow_mut();
+                    let s = s.borrow();
+                    d.vals.clone_from(&s.vals);
+                }
+                (ArrStr(d), ArrStr(s)) => {
+                    let mut d = d.borrow_mut();
+                    let s = s.borrow();
+                    d.vals.clone_from(&s.vals);
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 }
 
@@ -2346,7 +2578,7 @@ impl EraCsvVarKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScalarValue {
     Int(i64),
     Str(String),
@@ -2417,7 +2649,7 @@ impl ScalarValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, Serialize, Deserialize)]
 pub enum ScalarValueKind {
     Int,
     Str,
@@ -2747,7 +2979,7 @@ pub enum EraPriBytecode {
     BuildArrIdxFromMD,
     /// `(arr: Arr, idx: Int) -> (val: Any)`
     GetArrValFlat,
-    /// `(arr: Arr, idx: Int, val: Any) -> (arr: Arr)`
+    /// `(arr: Arr, idx: Int, val: Any) -> (val: Any)`
     SetArrValFlat,
     /// `(val: Int, factor_float_encoded: Int) -> (val: Int)`
     TimesFloat,
@@ -3051,7 +3283,7 @@ pub enum EraBytecodeKind {
     GetRandomRange,
     GetRandomMax,
     // ----- ExtOp1 -----
-    RowAssign { dims_cnt: u8, vals_cnt: u8 },
+    RowAssign { vals_cnt: u8 },
     ForLoopStep,
     ExtendStrToWidth,
     HtmlPrint,
@@ -3292,10 +3524,7 @@ impl EraBytecodeKind {
             Pri::GetRandomMax => Some(GetRandomMax),
             // ----- ExtOp1 -----
             Pri::ExtOp1 => match num_traits::FromPrimitive::from_u8(get(1)?)? {
-                Ext1::RowAssign => Some(RowAssign {
-                    dims_cnt: get(2)?,
-                    vals_cnt: get(3)?,
-                }),
+                Ext1::RowAssign => Some(RowAssign { vals_cnt: get(2)? }),
                 Ext1::ForLoopStep => Some(ForLoopStep),
                 Ext1::ExtendStrToWidth => Some(ExtendStrToWidth),
                 Ext1::HtmlPrint => Some(HtmlPrint),
@@ -3595,10 +3824,9 @@ impl EraBytecodeKind {
             GetRandomMax => bytes.push(Pri::GetRandomMax as u8),
             // ----- ExtOp1 -----
             // TODO...
-            RowAssign { dims_cnt, vals_cnt } => {
+            RowAssign { vals_cnt } => {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::RowAssign as u8);
-                bytes.push(dims_cnt);
                 bytes.push(vals_cnt);
             }
             ForLoopStep => {
@@ -3912,13 +4140,19 @@ impl EraBcChunk {
     pub fn len(&self) -> usize {
         self.bc.len()
     }
+
+    pub fn mem_usage(&self) -> usize {
+        self.bc.capacity()
+            + self.packed_src_spans.starts.1.capacity()
+            + self.packed_src_spans.lens.1.capacity()
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EraFuncFrameArgInfo {
     /// The type of the argument. If it is of array type, the variable is REF-qualified.
     pub var_kind: ValueKind,
-    // /// The dimension count of the argument, if it is REF-qualified (i.e. var_kind is `Arr*`).
+    /// The dimension count of the argument, if it is REF-qualified (i.e. var_kind is `Arr*`).
     pub dims_cnt: u8,
     /// The default value of the argument.
     pub default_value: ScalarValue,
@@ -3964,6 +4198,7 @@ pub struct EraFuncInfo<'i> {
     pub frame_info: EraFuncFrameInfo<'i>,
     pub chunk_idx: u32,
     pub bc_offset: u32,
+    pub bc_size: u32,
     pub ret_kind: ScalarValueKind,
     /// Whether the function is transient. Transient functions cannot access their locals;
     /// they share the same local frame with the caller. Used by `EVAL(S)` and `EXEC`. Not
@@ -3977,4 +4212,259 @@ pub enum EraEventFuncKind {
     Pri,
     Normal,
     Later,
+}
+
+/// A multi-dimensional array with other dimensions masked. For iteration
+/// along a single dimension.
+///
+/// For example, given a 3D array with dimensions `[2, 3, 4]`, `MaskedArr` can
+/// be used to iterate along the second dimension (with `MaskedArr::new(arr, index, 1)`
+/// or `MaskedArr::new(arr, index, -2)`), with the first and third dimensions masked.
+#[derive(Debug)]
+pub struct MaskedArr<T> {
+    arr: T,
+    index_base: usize,
+    stride: usize,
+    max_len: usize,
+}
+
+impl<T> MaskedArr<T> {
+    pub fn len(&self) -> usize {
+        self.max_len
+    }
+
+    pub fn into_inner(self) -> T {
+        self.arr
+    }
+
+    pub fn iter(&self) -> MaskedArrIter<T> {
+        MaskedArrIter::new(self)
+    }
+
+    pub fn iter_mut(&mut self) -> MaskedArrIterMut<T> {
+        MaskedArrIterMut::new(self)
+    }
+}
+
+pub struct MaskedArrIter<'a, T> {
+    arr: &'a MaskedArr<T>,
+    index: usize,
+    max_len: usize,
+}
+
+impl<T, A> MaskedArr<T>
+where
+    T: Deref<Target = A>,
+    A: ArrayLikeValue,
+{
+    pub fn try_new(arr: T, index: usize, mut dim_pos: i64) -> Option<Self> {
+        let dims = arr.get_dims();
+
+        if dim_pos < 0 {
+            dim_pos = dim_pos.wrapping_add_unsigned(dims.len() as u64);
+        }
+        if dim_pos < 0 {
+            return None;
+        }
+        let dim_pos = dim_pos as usize;
+        if dim_pos >= dims.len() {
+            return None;
+        }
+
+        let stride = dims[dim_pos + 1..].iter().map(|&x| x as usize).product();
+        let max_len = dims[dim_pos] as usize;
+        let index_base = index - ((index / stride) % max_len) * stride;
+
+        if arr.flat_get(index_base).is_none() {
+            // Index out of bounds
+            return None;
+        }
+
+        Some(Self {
+            arr,
+            index_base,
+            stride,
+            max_len,
+        })
+    }
+
+    pub fn get<'a>(&'a self, index: usize) -> Option<&'a A::Item>
+    where
+        A: 'a,
+    {
+        if index >= self.max_len {
+            return None;
+        }
+        let index = self.index_base + index * self.stride;
+        self.arr.flat_get(index)
+    }
+
+    /// Gets the masked array as a slice. Only works when the stride is 1 (i.e. the
+    /// active dimension is the last dimension).
+    pub fn as_slice<'a>(&'a self) -> Option<&'a [A::Item]>
+    where
+        A: 'a,
+    {
+        if self.stride != 1 {
+            return None;
+        }
+        let start = self.index_base;
+        let end = start + self.len();
+        let vals = self.arr.get_vals();
+        Some(&vals[start..end])
+    }
+}
+
+impl<T, A> MaskedArr<T>
+where
+    T: DerefMut<Target = A>,
+    A: ArrayLikeValue,
+{
+    pub fn get_mut<'a>(&'a mut self, index: usize) -> Option<&'a mut A::Item>
+    where
+        A: 'a,
+    {
+        if index >= self.max_len {
+            return None;
+        }
+        let index = self.index_base + index * self.stride;
+        self.arr.flat_get_mut(index)
+    }
+
+    /// Gets the masked array as a slice. Only works when the stride is 1 (i.e. the
+    /// active dimension is the last dimension).
+    pub fn as_slice_mut<'a>(&'a mut self) -> Option<&'a mut [A::Item]>
+    where
+        A: 'a,
+    {
+        if self.stride != 1 {
+            return None;
+        }
+        let start = self.index_base;
+        let end = start + self.len();
+        let vals = self.arr.get_vals_mut();
+        Some(&mut vals[start..end])
+    }
+}
+
+impl<'a, T> MaskedArrIter<'a, T> {
+    pub fn new(arr: &'a MaskedArr<T>) -> Self {
+        Self {
+            arr,
+            index: 0,
+            max_len: arr.len(),
+        }
+    }
+}
+
+impl<'a, T, A> Iterator for MaskedArrIter<'a, T>
+where
+    T: Deref<Target = A>,
+    A: ArrayLikeValue + 'a,
+{
+    type Item = &'a A::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.len() == 0 {
+            return None;
+        }
+        let val = self.arr.get(self.index);
+        self.index += 1;
+        val
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.len();
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a, T, A> DoubleEndedIterator for MaskedArrIter<'a, T>
+where
+    T: Deref<Target = A>,
+    A: ArrayLikeValue + 'a,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.len() == 0 {
+            return None;
+        }
+        self.max_len -= 1;
+        self.arr.get(self.max_len)
+    }
+}
+
+impl<'a, T, A> ExactSizeIterator for MaskedArrIter<'a, T>
+where
+    T: Deref<Target = A>,
+    A: ArrayLikeValue + 'a,
+{
+    fn len(&self) -> usize {
+        self.max_len - self.index
+    }
+}
+
+pub struct MaskedArrIterMut<'a, T> {
+    arr: &'a mut MaskedArr<T>,
+    index: usize,
+    max_len: usize,
+}
+
+impl<'a, T> MaskedArrIterMut<'a, T> {
+    pub fn new(arr: &'a mut MaskedArr<T>) -> Self {
+        let max_len = arr.len();
+        Self {
+            arr,
+            index: 0,
+            max_len,
+        }
+    }
+}
+
+impl<'a, T, A> Iterator for MaskedArrIterMut<'a, T>
+where
+    T: DerefMut<Target = A>,
+    A: ArrayLikeValue + 'a,
+{
+    type Item = &'a mut A::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.len() == 0 {
+            return None;
+        }
+        let val = self.arr.get_mut(self.index);
+        self.index += 1;
+        // TODO: SAFETY
+        unsafe { val.map(|x| &mut *(x as *mut A::Item)) }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.len();
+        (remaining, Some(remaining))
+    }
+}
+
+impl<'a, T, A> DoubleEndedIterator for MaskedArrIterMut<'a, T>
+where
+    T: DerefMut<Target = A>,
+    A: ArrayLikeValue + 'a,
+{
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.len() == 0 {
+            return None;
+        }
+        self.max_len -= 1;
+        let val = self.arr.get_mut(self.max_len);
+        // TODO: SAFETY
+        unsafe { val.map(|x| &mut *(x as *mut A::Item)) }
+    }
+}
+
+impl<'a, T, A> ExactSizeIterator for MaskedArrIterMut<'a, T>
+where
+    T: DerefMut<Target = A>,
+    A: ArrayLikeValue + 'a,
+{
+    fn len(&self) -> usize {
+        self.max_len - self.index
+    }
 }

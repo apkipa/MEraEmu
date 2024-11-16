@@ -1,24 +1,41 @@
+#[cfg(feature = "legacy_v1")]
 mod bytecode;
+#[cfg(feature = "legacy_v1")]
 mod compiler;
 pub mod cst;
+#[cfg(feature = "legacy_v1")]
 mod csv;
+#[cfg(feature = "legacy_v1")]
 mod engine;
+#[cfg(feature = "legacy_v1")]
 mod lexer;
+#[cfg(feature = "legacy_v1")]
 mod parser;
+#[cfg(feature = "legacy_v1")]
 mod routine;
 pub mod types;
 mod util;
 pub mod v2;
+#[cfg(feature = "legacy_v1")]
 mod vm;
 
-use std::sync::atomic::AtomicBool;
+use std::{ops::ControlFlow, sync::atomic::AtomicBool};
 
+#[cfg(feature = "legacy_v1")]
 pub use bytecode::PrintExtendedFlags;
+#[cfg(feature = "legacy_v1")]
 use engine::ExecSourceInfo;
+#[cfg(feature = "legacy_v1")]
 pub use engine::{
     EraScriptErrorInfo, MEraEngine, MEraEngineConfig, MEraEngineError, MEraEngineSysCallback,
 };
 use safer_ffi::{prelude::*, slice, string};
+use types::*;
+use v2::engine::{
+    EmptyCallback, EraCsvLoadKind, MEraEngine, MEraEngineBuilder, MEraEngineHostFile,
+    MEraEngineSysCallback,
+};
+#[cfg(feature = "legacy_v1")]
 pub use vm::{EraColorMatrix, MEraEngineFileSeekMode};
 
 #[cfg(all(not(miri), not(feature = "dhat-heap")))]
@@ -46,54 +63,79 @@ pub fn generate_headers() -> ::std::io::Result<()> {
     }
 }
 
+// NOTE: We use two kinds of prefixes for FFI functions: `rust_` and `mee_` (MEraEmu).
+
+// ----- Start of FFI Exports -----
 #[ffi_export]
-fn delete_rust_string(s: string::String) {
+fn rust_drop_string(s: string::String) {
     drop(s);
 }
+
+#[ffi_export]
+fn rust_get_string_width(s: char_p::Ref<'_>) -> u64 {
+    use unicode_width::UnicodeWidthStr;
+    s.to_str().width() as _
+}
+
+#[ffi_export]
+fn rust_get_wstring_width(s: safer_ffi::ptr::NonNullRef<u16>) -> u64 {
+    use unicode_width::UnicodeWidthChar;
+    let mut width = 0;
+    // SAFETY: Caller must provide null-terminated wchar_t strings.
+    unsafe {
+        let s = s.as_ptr();
+        let s = ptr_iter::ConstPtrIter::read_until_default(s);
+        let s = char::decode_utf16(s);
+        for ch in s.map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER)) {
+            width += ch.width().unwrap_or(0) as u64;
+        }
+    }
+    width
+}
+
 #[derive_ReprC]
 #[repr(C)]
-struct FfiOption<T> {
-    has_value: bool,
-    value: T,
+struct RustOption<T> {
+    is_some: bool,
+    some: T,
 }
-impl<T: Default, U> From<Option<T>> for FfiOption<U>
+
+impl<T: Default, U> From<Option<T>> for RustOption<U>
 where
     T: Into<U>,
 {
     fn from(value: Option<T>) -> Self {
         match value {
-            Some(x) => FfiOption {
-                has_value: true,
-                value: x.into(),
+            Some(x) => RustOption {
+                is_some: true,
+                some: x.into(),
             },
-            None => FfiOption {
-                has_value: false,
-                value: T::default().into(),
+            None => RustOption {
+                is_some: false,
+                some: T::default().into(),
             },
         }
     }
 }
-// impl<'a> From<Option<&'a str>> for FfiOption<string::str_ref<'a>> {
-//     fn from(value: Option<&'a str>) -> Self {
-//         match value {
-//             Some(x) => FfiOption { has_value: true, value: x.into() },
-//             None => FfiOption { has_value: false, value: string::str_ref:: }
-//         }
-//     }
-// }
-impl<T> From<FfiOption<T>> for Option<T> {
-    fn from(value: FfiOption<T>) -> Self {
-        if value.has_value {
-            Some(value.value)
+
+impl<T> From<RustOption<T>> for Option<T> {
+    fn from(value: RustOption<T>) -> Self {
+        if value.is_some {
+            Some(value.some)
         } else {
             None
         }
     }
 }
-impl<T> FfiOption<T> {
-    fn map<U>(self, f: impl FnOnce(T) -> U) -> Option<U> {
-        if self.has_value {
-            Some(f(self.value))
+
+impl<T> RustOption<T> {
+    pub fn into_native(self) -> Option<T> {
+        self.into()
+    }
+
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Option<U> {
+        if self.is_some {
+            Some(f(self.some))
         } else {
             None
         }
@@ -102,53 +144,213 @@ impl<T> FfiOption<T> {
 
 #[derive_ReprC]
 #[repr(C)]
-struct MEraEngineFfiResult<T> {
-    ok: FfiOption<T>,
-    err: char_p::Raw,
+struct RustResult<T, E> {
+    is_ok: bool,
+    ok: T,
+    err: E,
 }
-impl<T> From<MEraEngineFfiResult<T>> for anyhow::Result<T> {
-    fn from(value: MEraEngineFfiResult<T>) -> Self {
-        if value.ok.has_value {
-            Ok(value.ok.value)
-        } else {
-            Err(unsafe { anyhow::anyhow!("{}", value.err.as_ref().to_str()) })
+
+impl<T1: Default, U1: Default, T2, U2> From<Result<T1, U1>> for RustResult<T2, U2>
+where
+    T1: Into<T2>,
+    U1: Into<U2>,
+{
+    fn from(value: Result<T1, U1>) -> Self {
+        match value {
+            Ok(x) => RustResult {
+                is_ok: true,
+                ok: x.into(),
+                err: U1::default().into(),
+            },
+            Err(x) => RustResult {
+                is_ok: false,
+                ok: T1::default().into(),
+                err: x.into(),
+            },
         }
     }
 }
-impl<T> MEraEngineFfiResult<T> {
-    fn map<U>(self, f: impl FnOnce(T) -> U) -> anyhow::Result<U> {
-        if self.ok.has_value {
-            Ok(f(self.ok.value))
+
+impl<T1, U1, T2, U2> From<RustResult<T1, U1>> for Result<T2, U2>
+where
+    T1: Into<T2>,
+    U1: Into<U2>,
+{
+    fn from(value: RustResult<T1, U1>) -> Self {
+        if value.is_ok {
+            Ok(value.ok.into())
+        } else {
+            Err(value.err.into())
+        }
+    }
+}
+
+impl<T, E> RustResult<T, E> {
+    pub fn into_native(self) -> Result<T, E> {
+        self.into()
+    }
+
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Result<U, E> {
+        if self.is_ok {
+            Ok(f(self.ok))
+        } else {
+            Err(self.err)
+        }
+    }
+
+    pub fn map_err<U>(self, f: impl FnOnce(E) -> U) -> Result<T, U> {
+        if self.is_ok {
+            Ok(self.ok)
+        } else {
+            Err(f(self.err))
+        }
+    }
+}
+
+#[derive_ReprC]
+#[repr(C)]
+struct RustControlFlow<B, C> {
+    is_break: bool,
+    break_value: B,
+    continue_value: C,
+}
+
+impl<B1: Default, C1: Default, B2, C2> From<ControlFlow<B1, C1>> for RustControlFlow<B2, C2>
+where
+    B1: Into<B2>,
+    C1: Into<C2>,
+{
+    fn from(value: ControlFlow<B1, C1>) -> Self {
+        match value {
+            ControlFlow::Break(x) => RustControlFlow {
+                is_break: true,
+                break_value: x.into(),
+                continue_value: C1::default().into(),
+            },
+            ControlFlow::Continue(x) => RustControlFlow {
+                is_break: false,
+                break_value: B1::default().into(),
+                continue_value: x.into(),
+            },
+        }
+    }
+}
+
+impl<B1, C1, B2, C2> From<RustControlFlow<B1, C1>> for ControlFlow<B2, C2>
+where
+    B1: Into<B2>,
+    C1: Into<C2>,
+{
+    fn from(value: RustControlFlow<B1, C1>) -> Self {
+        if value.is_break {
+            ControlFlow::Break(value.break_value.into())
+        } else {
+            ControlFlow::Continue(value.continue_value.into())
+        }
+    }
+}
+
+impl<B, C> RustControlFlow<B, C> {
+    pub fn into_native(self) -> ControlFlow<B, C> {
+        self.into()
+    }
+
+    pub fn map_break<T>(self, f: impl FnOnce(B) -> T) -> ControlFlow<T, C> {
+        if self.is_break {
+            ControlFlow::Break(f(self.break_value))
+        } else {
+            ControlFlow::Continue(self.continue_value)
+        }
+    }
+
+    pub fn map_continue<T>(self, f: impl FnOnce(C) -> T) -> ControlFlow<B, T> {
+        if self.is_break {
+            ControlFlow::Break(self.break_value)
+        } else {
+            ControlFlow::Continue(f(self.continue_value))
+        }
+    }
+}
+
+type FfiResult<T> = RustResult<T, char_p::Raw>;
+type MeeResult<T> = RustResult<T, string::String>;
+
+impl<T> FfiResult<T> {
+    // fn from(value: FfiResult<T>) -> Self {
+    //     if value.is_ok {
+    //         Ok(value.ok)
+    //     } else {
+    //         Err(unsafe { anyhow::anyhow!("{}", value.err.as_ref().to_str()) })
+    //     }
+    // }
+    pub fn into_anyhow(self) -> anyhow::Result<T> {
+        if self.is_ok {
+            Ok(self.ok)
         } else {
             Err(unsafe { anyhow::anyhow!("{}", self.err.as_ref().to_str()) })
         }
     }
 }
 
+trait ResultExt {
+    type TOk;
+    type TErr;
+    fn into_mee_result(self) -> MeeResult<Self::TOk>;
+}
+
+impl<T, E> ResultExt for Result<T, E>
+where
+    T: Default,
+    E: std::error::Error,
+{
+    type TOk = T;
+    type TErr = E;
+    fn into_mee_result(self) -> MeeResult<Self::TOk> {
+        self.map_err(|e| e.to_string()).into()
+    }
+}
+
+trait ErrorExt {
+    fn into_mee_result<T: Default>(self) -> MeeResult<T>;
+}
+
+impl<E: std::error::Error> ErrorExt for E {
+    fn into_mee_result<T: Default>(self) -> MeeResult<T> {
+        Err::<T, _>(self.to_string()).into()
+    }
+}
+
+// FIXME: Current design requires "leaking" string to the engine.
+//        Figure out a better design (either Rust side owns the
+//        string, or reads from C side before returning).
+
 #[derive_ReprC(dyn)]
-trait MEraEngineSysCallbackInterop {
-    fn on_compile_error(&mut self, info: &EraScriptErrorInfoInterop<'_>);
-    fn on_execute_error(&mut self, info: &EraScriptErrorInfoInterop<'_>);
+trait MEraEngineSysCallbackFfi {
+    /// Callback for script errors.
+    fn on_error(&mut self, diag: &DiagnosticProvider<'_, '_>);
+    /// Callback for RAND statements. Note that you should always return a fully
+    /// filled random u64; the engine will internally cache entropy to reduce
+    /// the total amount of syscalls.
     fn on_get_rand(&mut self) -> u64;
+    /// Callback for PRINT family statements.
     fn on_print(&mut self, content: string::str_ref<'_>, flags: u8);
+    //fn on_debugprint(&mut self, content: string::str_ref<'_>, flags: u8);
+    /// Callback for HTML_PRINT statements.
     fn on_html_print(&mut self, content: string::str_ref<'_>);
     fn on_wait(&mut self, any_key: bool, is_force: bool);
     fn on_twait(&mut self, duration: i64, is_force: bool);
     fn on_input_int(
         &mut self,
-        default_value: FfiOption<i64>,
+        default_value: RustOption<i64>,
         can_click: bool,
         allow_skip: bool,
-    ) -> FfiOption<i64>;
-    // FIXME: Current design requires "leaking" string to the engine.
-    //        Figure out a better design (either Rust side owns the
-    //        string, or reads from C side before returning).
+    ) -> RustControlFlow<(), RustOption<i64>>;
     fn on_input_str(
         &mut self,
         default_value: Option<string::str_ref<'_>>,
         can_click: bool,
         allow_skip: bool,
-    ) -> Option<char_p::Raw>;
+    ) -> RustControlFlow<(), Option<char_p::Raw>>;
     fn on_tinput_int(
         &mut self,
         time_limit: i64,
@@ -156,7 +358,7 @@ trait MEraEngineSysCallbackInterop {
         show_prompt: bool,
         expiry_msg: string::str_ref<'_>,
         can_click: bool,
-    ) -> FfiOption<i64>;
+    ) -> RustControlFlow<(), RustOption<i64>>;
     fn on_tinput_str(
         &mut self,
         time_limit: i64,
@@ -164,12 +366,15 @@ trait MEraEngineSysCallbackInterop {
         show_prompt: bool,
         expiry_msg: string::str_ref<'_>,
         can_click: bool,
-    ) -> Option<char_p::Raw>;
-    fn on_oneinput_int(&mut self, default_value: FfiOption<i64>) -> FfiOption<i64>;
+    ) -> RustControlFlow<(), Option<char_p::Raw>>;
+    fn on_oneinput_int(
+        &mut self,
+        default_value: RustOption<i64>,
+    ) -> RustControlFlow<(), RustOption<i64>>;
     fn on_oneinput_str(
         &mut self,
         default_value: Option<string::str_ref<'_>>,
-    ) -> Option<char_p::Raw>;
+    ) -> RustControlFlow<(), Option<char_p::Raw>>;
     fn on_toneinput_int(
         &mut self,
         time_limit: i64,
@@ -177,7 +382,7 @@ trait MEraEngineSysCallbackInterop {
         show_prompt: bool,
         expiry_msg: string::str_ref<'_>,
         can_click: bool,
-    ) -> FfiOption<i64>;
+    ) -> RustControlFlow<(), RustOption<i64>>;
     fn on_toneinput_str(
         &mut self,
         time_limit: i64,
@@ -185,33 +390,26 @@ trait MEraEngineSysCallbackInterop {
         show_prompt: bool,
         expiry_msg: string::str_ref<'_>,
         can_click: bool,
-    ) -> Option<char_p::Raw>;
+    ) -> RustControlFlow<(), Option<char_p::Raw>>;
     fn on_reuselastline(&mut self, content: string::str_ref<'_>);
     fn on_clearline(&mut self, count: i64);
-    fn on_var_get_int(&mut self, name: string::str_ref<'_>, idx: u32) -> MEraEngineFfiResult<i64>;
-    fn on_var_get_str(
-        &mut self,
-        name: string::str_ref<'_>,
-        idx: u32,
-    ) -> MEraEngineFfiResult<char_p::Raw>;
-    fn on_var_set_int(
-        &mut self,
-        name: string::str_ref<'_>,
-        idx: u32,
-        val: i64,
-    ) -> MEraEngineFfiResult<()>;
-    fn on_var_set_str(
-        &mut self,
-        name: string::str_ref<'_>,
-        idx: u32,
-        val: string::str_ref<'_>,
-    ) -> MEraEngineFfiResult<()>;
     fn on_print_button(
         &mut self,
         content: string::str_ref<'_>,
         value: string::str_ref<'_>,
         flags: u8,
     );
+    /// Callbacks for variable getters & setters. May return a string to report as execution errors.
+    fn on_var_get_int(&mut self, name: string::str_ref<'_>, idx: usize) -> FfiResult<i64>;
+    fn on_var_get_str(&mut self, name: string::str_ref<'_>, idx: usize) -> FfiResult<char_p::Raw>;
+    fn on_var_set_int(&mut self, name: string::str_ref<'_>, idx: usize, val: i64) -> FfiResult<()>;
+    fn on_var_set_str(
+        &mut self,
+        name: string::str_ref<'_>,
+        idx: usize,
+        val: string::str_ref<'_>,
+    ) -> FfiResult<()>;
+    // Graphics subsystem
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64;
     fn on_gcreatefromfile(&mut self, gid: i64, path: string::str_ref<'_>) -> i64;
     fn on_gdispose(&mut self, gid: i64) -> i64;
@@ -224,7 +422,7 @@ trait MEraEngineSysCallbackInterop {
         dest_y: i64,
         dest_width: i64,
         dest_height: i64,
-        color_matrix: Option<&crate::vm::EraColorMatrix>,
+        color_matrix: Option<&EraColorMatrix>,
     ) -> i64;
     fn on_gclear(&mut self, gid: i64, color: i64) -> i64;
     fn on_spritecreate(
@@ -245,361 +443,119 @@ trait MEraEngineSysCallbackInterop {
         gid: i64,
         x: i64,
         y: i64,
-        dimension: Pair<i64, i64>,
+        width: i64,
+        height: i64,
         offset_x: i64,
         offset_y: i64,
         delay: i64,
     ) -> i64;
     fn on_spritewidth(&mut self, name: string::str_ref<'_>) -> i64;
     fn on_spriteheight(&mut self, name: string::str_ref<'_>) -> i64;
+    // Filesystem subsystem
     fn on_open_host_file(
         &mut self,
         path: string::str_ref<'_>,
         can_write: bool,
-    ) -> MEraEngineFfiResult<VirtualPtr<dyn MEraEngineHostFileInterop>>;
-    fn on_check_host_file_exists(&mut self, path: string::str_ref<'_>)
-        -> MEraEngineFfiResult<bool>;
-    fn on_delete_host_file(&mut self, path: string::str_ref<'_>) -> MEraEngineFfiResult<()>;
+    ) -> FfiResult<VirtualPtr<dyn MEraEngineHostFileFfi>>;
+    fn on_check_host_file_exists(&mut self, path: string::str_ref<'_>) -> FfiResult<bool>;
+    fn on_delete_host_file(&mut self, path: string::str_ref<'_>) -> FfiResult<()>;
     fn on_list_host_file(
         &mut self,
         path: string::str_ref<'_>,
-    ) -> MEraEngineFfiResult<VirtualPtr<dyn MEraEngineHostFileListingInterop>>;
+    ) -> FfiResult<VirtualPtr<dyn MEraEngineHostFileListingFfi>>;
+    // Others
     fn on_check_font(&mut self, font_name: string::str_ref<'_>) -> i64;
+    // NOTE: Returns UTC timestamp (in milliseconds).
     fn on_get_host_time(&mut self) -> u64;
-    fn on_get_config_int(&mut self, name: string::str_ref<'_>) -> MEraEngineFfiResult<i64>;
-    fn on_get_config_str(&mut self, name: string::str_ref<'_>) -> MEraEngineFfiResult<char_p::Raw>;
+    fn on_get_config_int(&mut self, name: string::str_ref<'_>) -> FfiResult<i64>;
+    fn on_get_config_str(&mut self, name: string::str_ref<'_>) -> FfiResult<char_p::Raw>;
+    // NOTE: Returns { b15 = <key down>, b0 = <key triggered> }. For key codes, refer
+    //       to https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes.
     fn on_get_key_state(&mut self, key_code: i64) -> i64;
 }
 
 #[derive_ReprC(dyn)]
-trait MEraEngineHostFileInterop {
-    fn read(&mut self, buf: slice::Mut<'_, u8>) -> MEraEngineFfiResult<u64>;
-    fn write(&mut self, buf: slice::Ref<'_, u8>) -> MEraEngineFfiResult<()>;
-    fn flush(&mut self) -> MEraEngineFfiResult<()>;
-    fn truncate(&mut self) -> MEraEngineFfiResult<()>;
-    fn seek(&mut self, pos: i64, mode: MEraEngineFileSeekMode) -> MEraEngineFfiResult<()>;
-    fn tell(&mut self) -> MEraEngineFfiResult<u64>;
+trait MEraEngineHostFileFfi {
+    fn read(&mut self, buf: slice::Mut<'_, u8>) -> FfiResult<u64>;
+    fn write(&mut self, buf: slice::Ref<'_, u8>) -> FfiResult<()>;
+    fn flush(&mut self) -> FfiResult<()>;
+    fn truncate(&mut self) -> FfiResult<()>;
+    fn seek(&mut self, pos: i64, mode: EraCompilerFileSeekMode) -> FfiResult<u64>;
 }
 
 #[derive_ReprC]
 #[repr(C)]
-struct MEraEngineHostFileListingEntryInterop<'a> {
+struct MEraEngineHostFileListingEntryFfi<'a> {
     name: Option<char_p::Ref<'a>>,
     is_file: bool,
     is_dir: bool,
 }
 
 #[derive_ReprC(dyn)]
-trait MEraEngineHostFileListingInterop {
-    fn next(&mut self) -> MEraEngineHostFileListingEntryInterop<'_>;
+trait MEraEngineHostFileListingFfi {
+    fn next(&mut self) -> MEraEngineHostFileListingEntryFfi<'_>;
 }
 
-#[derive_ReprC]
-#[repr(C)]
-struct Pair<T1, T2> {
-    pub a: T1,
-    pub b: T2,
-}
-
-#[derive_ReprC]
-#[repr(C)]
-#[derive(Default, Debug)]
-struct EraExecSourceInfoInterop {
-    pub line: u32,
-    pub column: u32,
-}
-#[derive_ReprC]
-#[repr(C)]
-struct EraScriptErrorInfoInterop<'a> {
-    pub filename: string::str_ref<'a>,
-    pub src_info: EraExecSourceInfoInterop,
-    pub is_error: bool,
-    pub msg: string::str_ref<'a>,
-}
-#[derive_ReprC]
-#[repr(C)]
-struct MEraEngineErrorInterop {
-    msg: string::String,
-}
-#[derive_ReprC]
-#[repr(C)]
-struct MEraEngineResultInterop<T> {
-    ok: FfiOption<T>,
-    err: MEraEngineErrorInterop,
-}
-
-#[derive_ReprC]
-#[repr(C)]
-#[derive(Debug)]
-struct MEraEngineStackTraceFrameInterop<'a> {
-    pub file_name: string::str_ref<'a>,
-    pub func_name: string::str_ref<'a>,
-    pub ip: engine::EraExecIpInfo,
-    pub src_info: EraExecSourceInfoInterop,
-}
-#[derive_ReprC]
-#[repr(C)]
-#[derive(Debug)]
-struct MEraEngineStackTraceInterop<'a> {
-    pub frames: repr_c::Vec<MEraEngineStackTraceFrameInterop<'a>>,
-}
-impl Default for MEraEngineStackTraceInterop<'_> {
-    fn default() -> Self {
-        Self {
-            frames: Vec::new().into(),
-        }
+impl MEraEngineHostFile for VirtualPtr<dyn MEraEngineHostFileFfi> {
+    fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<u64> {
+        MEraEngineHostFileFfi::read(self, buf.into()).into_anyhow()
     }
-}
-impl<'a> From<engine::EngineStackTrace<'a>> for MEraEngineStackTraceInterop<'a> {
-    fn from(value: engine::EngineStackTrace<'a>) -> Self {
-        Self {
-            frames: value
-                .frames
-                .into_iter()
-                .map(|x| MEraEngineStackTraceFrameInterop {
-                    file_name: x.file_name.into(),
-                    func_name: x.func_name.into(),
-                    ip: x.ip,
-                    src_info: x.src_info.into(),
-                })
-                .collect::<Vec<_>>()
-                .into(),
-        }
+    fn write(&mut self, buf: &[u8]) -> anyhow::Result<()> {
+        MEraEngineHostFileFfi::write(self, buf.into()).into_anyhow()
+    }
+    fn flush(&mut self) -> anyhow::Result<()> {
+        MEraEngineHostFileFfi::flush(self).into_anyhow()
+    }
+    fn truncate(&mut self) -> anyhow::Result<()> {
+        MEraEngineHostFileFfi::truncate(self).into_anyhow()
+    }
+    fn seek(&mut self, pos: i64, mode: EraCompilerFileSeekMode) -> anyhow::Result<u64> {
+        MEraEngineHostFileFfi::seek(self, pos, mode.into()).into_anyhow()
     }
 }
 
-#[derive_ReprC]
-#[repr(opaque)]
-struct MEraEngineInterop {
-    /// Inner engine object.
-    i: MEraEngine<'static>,
-}
-
-#[ffi_export]
-fn helper_get_string_width(s: char_p::Ref<'_>) -> u64 {
-    use unicode_width::UnicodeWidthStr;
-    s.to_str().width() as _
-}
-#[ffi_export]
-fn helper_get_wstring_width(s: safer_ffi::ptr::NonNullRef<u16>) -> u64 {
-    use unicode_width::UnicodeWidthChar;
-    let mut width = 0;
-    // SAFETY: Caller must provide null-terminated wchar_t strings
-    unsafe {
-        let s = s.as_ptr();
-        let s = ptr_iter::ConstPtrIter::read_until_default(s);
-        let s = char::decode_utf16(s);
-        for ch in s.map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER)) {
-            width += ch.width().unwrap_or(0) as u64;
-        }
-    }
-    width
-}
-
-#[ffi_export]
-fn delete_engine_error(e: MEraEngineErrorInterop) {
-    drop(e);
-}
-#[ffi_export]
-fn delete_engine_stack_trace(value: MEraEngineStackTraceInterop<'_>) {
-    drop(value);
-}
-#[ffi_export]
-fn new_engine() -> repr_c::Box<MEraEngineInterop> {
-    let engine = MEraEngineInterop {
-        i: MEraEngine::new(),
-    };
-    Box::new(engine).into()
-}
-#[ffi_export]
-fn delete_engine(engine: repr_c::Box<MEraEngineInterop>) {
-    drop(engine);
-}
-#[ffi_export]
-fn engine_install_sys_callback(
-    engine: &mut MEraEngineInterop,
-    callback: VirtualPtr<dyn MEraEngineSysCallbackInterop>,
-) {
-    engine.i.install_sys_callback(Box::new(callback));
-}
-#[ffi_export]
-fn engine_load_csv(
-    engine: &mut MEraEngineInterop,
-    filename: char_p::Ref<'_>,
-    content: c_slice::Ref<'_, u8>,
-    kind: engine::EraCsvLoadKind,
-) -> MEraEngineResultInterop<()> {
-    engine.i.load_csv(filename.to_str(), &content, kind).into()
-}
-#[ffi_export]
-fn engine_load_erh(
-    engine: &mut MEraEngineInterop,
-    filename: char_p::Ref<'_>,
-    content: c_slice::Ref<'_, u8>,
-) -> MEraEngineResultInterop<u32> {
-    engine
-        .i
-        .load_erh(filename.to_str(), &content)
-        .map(|x| x as _)
-        .into()
-}
-#[ffi_export]
-fn engine_load_erb(
-    engine: &mut MEraEngineInterop,
-    filename: char_p::Ref<'_>,
-    content: c_slice::Ref<'_, u8>,
-) -> MEraEngineResultInterop<u32> {
-    engine
-        .i
-        .load_erb(filename.to_str(), &content)
-        .map(|x| x as _)
-        .into()
-}
-#[ffi_export]
-fn engine_register_global_var(
-    engine: &mut MEraEngineInterop,
-    name: char_p::Ref<'_>,
-    is_string: bool,
-    dimension: u32,
-    watch: bool,
-) -> MEraEngineResultInterop<()> {
-    engine
-        .i
-        .register_global_var(name.to_str(), is_string, dimension as _, watch)
-        .into()
-}
-#[ffi_export]
-fn engine_finialize_load_srcs(engine: &mut MEraEngineInterop) -> MEraEngineResultInterop<()> {
-    engine.i.finialize_load_srcs().into()
-}
-#[ffi_export]
-fn engine_do_execution(
-    engine: &mut MEraEngineInterop,
-    stop_flag: *mut bool,
-    max_inst_cnt: u64,
-) -> MEraEngineResultInterop<bool> {
-    let stop_flag = unsafe { AtomicBool::from_ptr(stop_flag) };
-    engine.i.do_execution(stop_flag, max_inst_cnt).into()
-}
-#[ffi_export]
-fn engine_get_is_halted(engine: &mut MEraEngineInterop) -> bool {
-    engine.i.get_is_halted()
-}
-#[ffi_export]
-fn engine_reset_exec_to_ip(
-    engine: &mut MEraEngineInterop,
-    ip: engine::EraExecIpInfo,
-) -> MEraEngineResultInterop<()> {
-    engine.i.reset_exec_to_ip(ip).into()
-}
-#[ffi_export]
-fn engine_get_func_info(
-    engine: &mut MEraEngineInterop,
-    name: char_p::Ref<'_>,
-) -> MEraEngineResultInterop<engine::EraFuncInfo> {
-    engine.i.get_func_info(name.to_str()).into()
-}
-#[ffi_export]
-fn engine_get_stack_trace(
-    engine: &mut MEraEngineInterop,
-) -> MEraEngineResultInterop<MEraEngineStackTraceInterop<'_>> {
-    engine.i.get_stack_trace().map(Into::into).into()
-}
-#[ffi_export]
-fn engine_get_version() -> string::str_ref<'static> {
-    MEraEngine::get_version().into()
-}
-
-impl<T: Default> From<Result<T, MEraEngineError>> for MEraEngineResultInterop<T> {
-    fn from(value: Result<T, MEraEngineError>) -> Self {
-        match value {
-            Ok(value) => Self {
-                ok: FfiOption {
-                    has_value: true,
-                    value,
-                },
-                err: MEraEngineErrorInterop {
-                    msg: String::new().into(),
-                },
-            },
-            Err(e) => Self {
-                ok: FfiOption {
-                    has_value: false,
-                    value: Default::default(),
-                },
-                err: MEraEngineErrorInterop { msg: e.msg.into() },
-            },
-        }
-    }
-}
-impl From<ExecSourceInfo> for EraExecSourceInfoInterop {
-    fn from(value: ExecSourceInfo) -> Self {
-        Self {
-            line: value.line,
-            column: value.column,
-        }
-    }
-}
-impl<'a> From<EraScriptErrorInfo<'a>> for EraScriptErrorInfoInterop<'a> {
-    fn from(value: EraScriptErrorInfo<'a>) -> Self {
-        Self {
-            filename: value.filename.into(),
-            src_info: value.src_info.into(),
-            is_error: value.is_error,
-            msg: value.msg.into(),
-        }
-    }
-}
-
-impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
-    fn on_compile_error(&mut self, info: &EraScriptErrorInfo) {
-        <Self as MEraEngineSysCallbackInterop>::on_compile_error(self, &info.clone().into())
-    }
-    fn on_execute_error(&mut self, info: &EraScriptErrorInfo) {
-        <Self as MEraEngineSysCallbackInterop>::on_execute_error(self, &info.clone().into())
+impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackFfi> {
+    fn on_error(&mut self, diag: &DiagnosticProvider) {
+        MEraEngineSysCallbackFfi::on_error(self, diag);
     }
     fn on_get_rand(&mut self) -> u64 {
-        <Self as MEraEngineSysCallbackInterop>::on_get_rand(self)
+        MEraEngineSysCallbackFfi::on_get_rand(self)
     }
-    fn on_print(&mut self, content: &str, flags: crate::bytecode::PrintExtendedFlags) {
-        <Self as MEraEngineSysCallbackInterop>::on_print(self, content.into(), flags.into())
+    fn on_print(&mut self, content: &str, flags: EraPrintExtendedFlags) {
+        MEraEngineSysCallbackFfi::on_print(self, content.into(), flags.into());
     }
+    //fn on_debugprint(&mut self, content: &str, flags: EraPrintExtendedFlags);
     fn on_html_print(&mut self, content: &str) {
-        <Self as MEraEngineSysCallbackInterop>::on_html_print(self, content.into())
+        MEraEngineSysCallbackFfi::on_html_print(self, content.into());
     }
     fn on_wait(&mut self, any_key: bool, is_force: bool) {
-        <Self as MEraEngineSysCallbackInterop>::on_wait(self, any_key, is_force)
+        MEraEngineSysCallbackFfi::on_wait(self, any_key, is_force);
     }
     fn on_twait(&mut self, duration: i64, is_force: bool) {
-        <Self as MEraEngineSysCallbackInterop>::on_twait(self, duration, is_force)
+        MEraEngineSysCallbackFfi::on_twait(self, duration, is_force);
     }
     fn on_input_int(
         &mut self,
         default_value: Option<i64>,
         can_click: bool,
         allow_skip: bool,
-    ) -> Option<i64> {
-        <Self as MEraEngineSysCallbackInterop>::on_input_int(
-            self,
-            default_value.into(),
-            can_click,
-            allow_skip,
-        )
-        .into()
+    ) -> ControlFlow<(), Option<i64>> {
+        MEraEngineSysCallbackFfi::on_input_int(self, default_value.into(), can_click, allow_skip)
+            .into()
     }
     fn on_input_str(
         &mut self,
         default_value: Option<&str>,
         can_click: bool,
         allow_skip: bool,
-    ) -> Option<String> {
-        <Self as MEraEngineSysCallbackInterop>::on_input_str(
+    ) -> ControlFlow<(), Option<String>> {
+        MEraEngineSysCallbackFfi::on_input_str(
             self,
             default_value.map(Into::into),
             can_click,
             allow_skip,
         )
-        .map(|x| unsafe { x.as_ref().to_string() })
+        .map_continue(|x| x.map(|x| unsafe { x.as_ref().to_string() }))
     }
     fn on_tinput_int(
         &mut self,
@@ -608,11 +564,11 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
         show_prompt: bool,
         expiry_msg: &str,
         can_click: bool,
-    ) -> Option<i64> {
-        <Self as MEraEngineSysCallbackInterop>::on_tinput_int(
+    ) -> ControlFlow<(), Option<i64>> {
+        MEraEngineSysCallbackFfi::on_tinput_int(
             self,
             time_limit,
-            default_value.into(),
+            default_value,
             show_prompt,
             expiry_msg.into(),
             can_click,
@@ -626,8 +582,8 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
         show_prompt: bool,
         expiry_msg: &str,
         can_click: bool,
-    ) -> Option<String> {
-        <Self as MEraEngineSysCallbackInterop>::on_tinput_str(
+    ) -> ControlFlow<(), Option<String>> {
+        MEraEngineSysCallbackFfi::on_tinput_str(
             self,
             time_limit,
             default_value.into(),
@@ -635,14 +591,14 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
             expiry_msg.into(),
             can_click,
         )
-        .map(|x| unsafe { x.as_ref().to_string() })
+        .map_continue(|x| x.map(|x| unsafe { x.as_ref().to_string() }))
     }
-    fn on_oneinput_int(&mut self, default_value: Option<i64>) -> Option<i64> {
-        <Self as MEraEngineSysCallbackInterop>::on_oneinput_int(self, default_value.into()).into()
+    fn on_oneinput_int(&mut self, default_value: Option<i64>) -> ControlFlow<(), Option<i64>> {
+        MEraEngineSysCallbackFfi::on_oneinput_int(self, default_value.into()).into()
     }
-    fn on_oneinput_str(&mut self, default_value: Option<&str>) -> Option<String> {
-        <Self as MEraEngineSysCallbackInterop>::on_oneinput_str(self, default_value.map(Into::into))
-            .map(|x| unsafe { x.as_ref().to_string() })
+    fn on_oneinput_str(&mut self, default_value: Option<&str>) -> ControlFlow<(), Option<String>> {
+        MEraEngineSysCallbackFfi::on_oneinput_str(self, default_value.map(Into::into))
+            .map_continue(|x| x.map(|x| unsafe { x.as_ref().to_string() }))
     }
     fn on_toneinput_int(
         &mut self,
@@ -651,11 +607,11 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
         show_prompt: bool,
         expiry_msg: &str,
         can_click: bool,
-    ) -> Option<i64> {
-        <Self as MEraEngineSysCallbackInterop>::on_toneinput_int(
+    ) -> ControlFlow<(), Option<i64>> {
+        MEraEngineSysCallbackFfi::on_toneinput_int(
             self,
             time_limit,
-            default_value.into(),
+            default_value,
             show_prompt,
             expiry_msg.into(),
             can_click,
@@ -669,8 +625,8 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
         show_prompt: bool,
         expiry_msg: &str,
         can_click: bool,
-    ) -> Option<String> {
-        <Self as MEraEngineSysCallbackInterop>::on_toneinput_str(
+    ) -> ControlFlow<(), Option<String>> {
+        MEraEngineSysCallbackFfi::on_toneinput_str(
             self,
             time_limit,
             default_value.into(),
@@ -678,58 +634,42 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
             expiry_msg.into(),
             can_click,
         )
-        .map(|x| unsafe { x.as_ref().to_string() })
+        .map_continue(|x| x.map(|x| unsafe { x.as_ref().to_string() }))
     }
     fn on_reuselastline(&mut self, content: &str) {
-        <Self as MEraEngineSysCallbackInterop>::on_reuselastline(self, content.into())
+        MEraEngineSysCallbackFfi::on_reuselastline(self, content.into());
     }
     fn on_clearline(&mut self, count: i64) {
-        <Self as MEraEngineSysCallbackInterop>::on_clearline(self, count)
+        MEraEngineSysCallbackFfi::on_clearline(self, count);
     }
-    fn on_print_button(
-        &mut self,
-        content: &str,
-        value: &str,
-        flags: crate::bytecode::PrintExtendedFlags,
-    ) {
-        <Self as MEraEngineSysCallbackInterop>::on_print_button(
-            self,
-            content.into(),
-            value.into(),
-            flags.into(),
-        )
+    fn on_print_button(&mut self, content: &str, value: &str, flags: EraPrintExtendedFlags) {
+        MEraEngineSysCallbackFfi::on_print_button(self, content.into(), value.into(), flags.into());
     }
     fn on_var_get_int(&mut self, name: &str, idx: usize) -> Result<i64, anyhow::Error> {
-        <Self as MEraEngineSysCallbackInterop>::on_var_get_int(self, name.into(), idx as _).into()
+        MEraEngineSysCallbackFfi::on_var_get_int(self, name.into(), idx).into_anyhow()
     }
     fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error> {
-        <Self as MEraEngineSysCallbackInterop>::on_var_get_str(self, name.into(), idx as _)
+        MEraEngineSysCallbackFfi::on_var_get_str(self, name.into(), idx)
+            .into_anyhow()
             .map(|x| unsafe { x.as_ref().to_string() })
     }
     fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error> {
-        <Self as MEraEngineSysCallbackInterop>::on_var_set_int(self, name.into(), idx as _, val)
-            .into()
+        MEraEngineSysCallbackFfi::on_var_set_int(self, name.into(), idx, val).into_anyhow()
     }
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error> {
-        <Self as MEraEngineSysCallbackInterop>::on_var_set_str(
-            self,
-            name.into(),
-            idx as _,
-            val.into(),
-        )
-        .into()
+        MEraEngineSysCallbackFfi::on_var_set_str(self, name.into(), idx, val.into()).into_anyhow()
     }
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_gcreate(self, gid, width, height)
+        MEraEngineSysCallbackFfi::on_gcreate(self, gid, width, height)
     }
     fn on_gcreatefromfile(&mut self, gid: i64, path: &str) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_gcreatefromfile(self, gid, path.into())
+        MEraEngineSysCallbackFfi::on_gcreatefromfile(self, gid, path.into())
     }
     fn on_gdispose(&mut self, gid: i64) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_gdispose(self, gid)
+        MEraEngineSysCallbackFfi::on_gdispose(self, gid)
     }
     fn on_gcreated(&mut self, gid: i64) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_gcreated(self, gid)
+        MEraEngineSysCallbackFfi::on_gcreated(self, gid)
     }
     fn on_gdrawsprite(
         &mut self,
@@ -739,9 +679,9 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
         dest_y: i64,
         dest_width: i64,
         dest_height: i64,
-        color_matrix: Option<&crate::vm::EraColorMatrix>,
+        color_matrix: Option<&EraColorMatrix>,
     ) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_gdrawsprite(
+        MEraEngineSysCallbackFfi::on_gdrawsprite(
             self,
             gid,
             sprite_name.into(),
@@ -753,7 +693,7 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
         )
     }
     fn on_gclear(&mut self, gid: i64, color: i64) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_gclear(self, gid, color)
+        MEraEngineSysCallbackFfi::on_gclear(self, gid, color)
     }
     fn on_spritecreate(
         &mut self,
@@ -764,29 +704,16 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
         width: i64,
         height: i64,
     ) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_spritecreate(
-            self,
-            name.into(),
-            gid,
-            x,
-            y,
-            width,
-            height,
-        )
+        MEraEngineSysCallbackFfi::on_spritecreate(self, name.into(), gid, x, y, width, height)
     }
     fn on_spritedispose(&mut self, name: &str) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_spritedispose(self, name.into())
+        MEraEngineSysCallbackFfi::on_spritedispose(self, name.into())
     }
     fn on_spritecreated(&mut self, name: &str) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_spritecreated(self, name.into())
+        MEraEngineSysCallbackFfi::on_spritecreated(self, name.into())
     }
     fn on_spriteanimecreate(&mut self, name: &str, width: i64, height: i64) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_spriteanimecreate(
-            self,
-            name.into(),
-            width,
-            height,
-        )
+        MEraEngineSysCallbackFfi::on_spriteanimecreate(self, name.into(), width, height)
     }
     fn on_spriteanimeaddframe(
         &mut self,
@@ -800,49 +727,48 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
         offset_y: i64,
         delay: i64,
     ) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_spriteanimeaddframe(
+        MEraEngineSysCallbackFfi::on_spriteanimeaddframe(
             self,
             name.into(),
             gid,
             x,
             y,
-            Pair {
-                a: width,
-                b: height,
-            },
+            width,
+            height,
             offset_x,
             offset_y,
             delay,
         )
     }
     fn on_spritewidth(&mut self, name: &str) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_spritewidth(self, name.into())
+        MEraEngineSysCallbackFfi::on_spritewidth(self, name.into())
     }
     fn on_spriteheight(&mut self, name: &str) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_spriteheight(self, name.into())
+        MEraEngineSysCallbackFfi::on_spriteheight(self, name.into())
     }
+    // Filesystem subsystem
     fn on_open_host_file(
         &mut self,
         path: &str,
         can_write: bool,
-    ) -> anyhow::Result<Box<dyn crate::vm::EraVirtualMachineHostFile>> {
-        <Self as MEraEngineSysCallbackInterop>::on_open_host_file(self, path.into(), can_write)
-            .map(|x| -> Box<dyn crate::vm::EraVirtualMachineHostFile> { Box::new(x) })
+    ) -> anyhow::Result<Box<dyn MEraEngineHostFile>> {
+        MEraEngineSysCallbackFfi::on_open_host_file(self, path.into(), can_write)
+            .into_anyhow()
+            .map(|x| -> Box<dyn MEraEngineHostFile> { Box::new(x) })
     }
     fn on_check_host_file_exists(&mut self, path: &str) -> anyhow::Result<bool> {
-        <Self as MEraEngineSysCallbackInterop>::on_check_host_file_exists(self, path.into()).into()
+        MEraEngineSysCallbackFfi::on_check_host_file_exists(self, path.into()).into_anyhow()
     }
     fn on_delete_host_file(&mut self, path: &str) -> anyhow::Result<()> {
-        <Self as MEraEngineSysCallbackInterop>::on_delete_host_file(self, path.into()).into()
+        MEraEngineSysCallbackFfi::on_delete_host_file(self, path.into()).into_anyhow()
     }
     fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
-        let file_listing: anyhow::Result<_> =
-            <Self as MEraEngineSysCallbackInterop>::on_list_host_file(self, path.into()).into();
-        let mut file_listing = file_listing?;
-        let mut files = vec![];
+        let mut file_listing: VirtualPtr<dyn MEraEngineHostFileListingFfi> =
+            MEraEngineSysCallbackFfi::on_list_host_file(self, path.into()).into_anyhow()?;
+        let mut files = Vec::new();
         loop {
             let entry = file_listing.next();
-            let MEraEngineHostFileListingEntryInterop {
+            let MEraEngineHostFileListingEntryFfi {
                 name: Some(name),
                 is_file,
                 is_dir,
@@ -858,43 +784,140 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackInterop> {
         Ok(files)
     }
     fn on_check_font(&mut self, font_name: &str) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_check_font(self, font_name.into())
+        MEraEngineSysCallbackFfi::on_check_font(self, font_name.into())
     }
     fn on_get_host_time(&mut self) -> u64 {
-        <Self as MEraEngineSysCallbackInterop>::on_get_host_time(self)
+        MEraEngineSysCallbackFfi::on_get_host_time(self)
     }
     fn on_get_config_int(&mut self, name: &str) -> anyhow::Result<i64> {
-        <Self as MEraEngineSysCallbackInterop>::on_get_config_int(self, name.into()).into()
+        MEraEngineSysCallbackFfi::on_get_config_int(self, name.into()).into_anyhow()
     }
     fn on_get_config_str(&mut self, name: &str) -> anyhow::Result<String> {
-        <Self as MEraEngineSysCallbackInterop>::on_get_config_str(self, name.into())
+        MEraEngineSysCallbackFfi::on_get_config_str(self, name.into())
+            .into_anyhow()
             .map(|x| unsafe { x.as_ref().to_string() })
     }
     fn on_get_key_state(&mut self, key_code: i64) -> i64 {
-        <Self as MEraEngineSysCallbackInterop>::on_get_key_state(self, key_code)
+        MEraEngineSysCallbackFfi::on_get_key_state(self, key_code)
     }
 }
 
-impl crate::vm::EraVirtualMachineHostFile for VirtualPtr<dyn MEraEngineHostFileInterop> {
-    fn read(&mut self, buf: &mut [u8]) -> anyhow::Result<u64> {
-        <Self as MEraEngineHostFileInterop>::read(self, buf.into()).into()
-    }
-    fn write(&mut self, buf: &[u8]) -> anyhow::Result<()> {
-        <Self as MEraEngineHostFileInterop>::write(self, buf.into()).into()
-    }
-    fn flush(&mut self) -> anyhow::Result<()> {
-        <Self as MEraEngineHostFileInterop>::flush(self).into()
-    }
-    fn truncate(&mut self) -> anyhow::Result<()> {
-        <Self as MEraEngineHostFileInterop>::truncate(self).into()
-    }
-    fn seek(&mut self, pos: i64, mode: MEraEngineFileSeekMode) -> anyhow::Result<()> {
-        <Self as MEraEngineHostFileInterop>::seek(self, pos, mode).into()
-    }
-    fn tell(&mut self) -> anyhow::Result<u64> {
-        <Self as MEraEngineHostFileInterop>::tell(self).into()
+// TODO: Support builder progress
+
+#[derive_ReprC]
+#[repr(opaque)]
+struct MEraEngineBuilderFfi {
+    i: MEraEngineBuilder<VirtualPtr<dyn MEraEngineSysCallbackFfi>, EmptyCallback>,
+}
+
+#[derive_ReprC]
+#[repr(opaque)]
+struct MEraEngineFfi {
+    i: MEraEngine<VirtualPtr<dyn MEraEngineSysCallbackFfi>>,
+}
+
+#[ffi_export]
+fn mee_new_engine_builder(
+    callback: VirtualPtr<dyn MEraEngineSysCallbackFfi>,
+) -> repr_c::Box<MEraEngineBuilderFfi> {
+    let builder = MEraEngineBuilder::new(callback);
+    Box::new(MEraEngineBuilderFfi { i: builder }).into()
+}
+
+#[ffi_export]
+fn mee_drop_engine_builder(builder: repr_c::Box<MEraEngineBuilderFfi>) {
+    drop(builder);
+}
+
+#[ffi_export]
+fn mee_drop_engine(engine: repr_c::Box<MEraEngineFfi>) {
+    drop(engine);
+}
+
+#[ffi_export]
+fn mee_build_engine(
+    builder: repr_c::Box<MEraEngineBuilderFfi>,
+) -> MeeResult<Option<repr_c::Box<MEraEngineFfi>>> {
+    let builder: Box<_> = builder.into();
+    let engine = match builder.i.build() {
+        Ok(engine) => engine,
+        Err(e) => return e.into_mee_result(),
+    };
+    let engine: repr_c::Box<MEraEngineFfi> = Box::new(MEraEngineFfi { i: engine }).into();
+    MeeResult {
+        is_ok: true,
+        ok: Some(engine),
+        err: String::new().into(),
     }
 }
+
+// TODO: Export MEraEngineConfig
+
+#[ffi_export]
+fn mee_engine_builder_load_csv(
+    builder: &mut MEraEngineBuilderFfi,
+    filename: char_p::Ref<'_>,
+    content: c_slice::Ref<'_, u8>,
+    kind: EraCsvLoadKind,
+) -> MeeResult<()> {
+    builder
+        .i
+        .load_csv(filename.to_str(), &content, kind)
+        .into_mee_result()
+}
+
+#[ffi_export]
+fn mee_engine_builder_finish_load_csv(builder: &mut MEraEngineBuilderFfi) -> MeeResult<()> {
+    builder.i.finish_load_csv().into_mee_result()
+}
+
+#[ffi_export]
+fn mee_engine_builder_load_erh(
+    builder: &mut MEraEngineBuilderFfi,
+    filename: char_p::Ref<'_>,
+    content: c_slice::Ref<'_, u8>,
+) -> MeeResult<()> {
+    builder
+        .i
+        .load_erh(filename.to_str(), &content)
+        .into_mee_result()
+}
+
+#[ffi_export]
+fn mee_engine_builder_finish_load_erh(builder: &mut MEraEngineBuilderFfi) -> MeeResult<()> {
+    builder.i.finish_load_erh().into_mee_result()
+}
+
+#[ffi_export]
+fn mee_engine_builder_load_erb(
+    builder: &mut MEraEngineBuilderFfi,
+    filename: char_p::Ref<'_>,
+    content: c_slice::Ref<'_, u8>,
+) -> MeeResult<()> {
+    builder
+        .i
+        .load_erb(filename.to_str(), &content)
+        .into_mee_result()
+}
+
+#[ffi_export]
+fn mee_engine_do_execution(
+    engine: &mut MEraEngineFfi,
+    stop_flag: &mut bool,
+    max_inst_cnt: u64,
+) -> MeeResult<EraExecutionBreakReason> {
+    let stop_flag = unsafe { AtomicBool::from_ptr(stop_flag) };
+    engine
+        .i
+        .do_execution(stop_flag, max_inst_cnt)
+        .into_mee_result()
+}
+
+#[ffi_export]
+fn mee_engine_do_rpc(engine: &mut MEraEngineFfi, request: char_p::Ref<'_>) -> string::String {
+    engine.i.do_rpc(request.to_str()).into()
+}
+// ----- End of FFI Exports -----
 
 #[cfg(test)]
 mod tests {
@@ -906,11 +929,13 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "legacy_v1")]
     trait EngineExtension {
         fn reg_int(&mut self, name: &str) -> Result<(), MEraEngineError>;
         fn reg_str(&mut self, name: &str) -> Result<(), MEraEngineError>;
     }
 
+    #[cfg(feature = "legacy_v1")]
     impl EngineExtension for MEraEngine<'_> {
         fn reg_int(&mut self, name: &str) -> Result<(), MEraEngineError> {
             self.register_global_var(name, false, 1, false)
@@ -953,6 +978,7 @@ mod tests {
             }
         }
     }
+    #[cfg(feature = "legacy_v1")]
     impl MEraEngineSysCallback for &mut MockEngineCallback<'_> {
         fn on_compile_error(&mut self, info: &EraScriptErrorInfo) {
             // TODO: Stop ignoring these warnings & errors
@@ -1632,6 +1658,7 @@ mod tests {
 
     const PRINT_TO_STDOUT: bool = false;
 
+    #[cfg(feature = "legacy_v1")]
     #[test]
     fn basic_engine() -> anyhow::Result<()> {
         let main_erb = BASIC_ENGINE_SRC;
@@ -1743,6 +1770,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "legacy_v1")]
     #[test]
     fn assembled_game() -> anyhow::Result<()> {
         // TODO: Redact this

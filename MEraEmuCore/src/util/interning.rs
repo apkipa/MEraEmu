@@ -85,14 +85,12 @@ impl Interner<TokenKey> for ThreadedTokenInterner {
 
     #[inline]
     fn try_get_or_intern(&mut self, text: &str) -> Result<TokenKey, Self::Error> {
-        self.rodeo.try_get_or_intern(text)
-        // unsafe { rodeo.assume_init_mut().try_get_or_intern(text) }
+        (&*self).try_get_or_intern(text)
     }
 
     #[inline]
     fn get_or_intern(&mut self, text: &str) -> TokenKey {
-        self.rodeo.get_or_intern(text)
-        // unsafe { rodeo.assume_init_mut().get_or_intern(text) }
+        (&*self).get_or_intern(text)
     }
 }
 
