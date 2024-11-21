@@ -30,6 +30,32 @@ using namespace Windows::System::Threading;
 template<class... Ts>
 struct overloaded : Ts... { using Ts::operator()...; };
 
+std::string to_string(DiagnosticLevel value) {
+    switch (value) {
+    case DIAGNOSTIC_LEVEL_ERROR: return "错误";
+    case DIAGNOSTIC_LEVEL_WARNING: return "警告";
+    case DIAGNOSTIC_LEVEL_NOTE: return "提示";
+    case DIAGNOSTIC_LEVEL_HELP: return "帮助";
+    case DIAGNOSTIC_LEVEL_SUGGESTION: return "建议";
+    default: return "<未知>";
+    }
+}
+
+hstring to_hstring(DiagnosticLevel value) {
+    return to_hstring(to_string(value));
+}
+
+Windows::UI::Color color_from_diagnostic_level(DiagnosticLevel level) {
+    switch (level) {
+    case DIAGNOSTIC_LEVEL_ERROR: return Colors::Red();
+    case DIAGNOSTIC_LEVEL_WARNING: return Colors::Orange();
+    case DIAGNOSTIC_LEVEL_NOTE: return Colors::Blue();
+    case DIAGNOSTIC_LEVEL_HELP: return Colors::Green();
+    case DIAGNOSTIC_LEVEL_SUGGESTION: return Colors::Purple();
+    default: return Colors::Black();
+    }
+}
+
 namespace winrt::MEraEmuWin::implementation {
     auto recur_dir_iter(hstring const& base, hstring const& dir) {
         return std::filesystem::recursive_directory_iterator((base + dir).c_str());
@@ -313,7 +339,7 @@ namespace winrt::MEraEmuWin::implementation {
         std::atomic_bool ui_is_alive{ false };
         std::atomic_bool ui_redraw_block_engine{ false };
         // Also used as an event queue indicator (?)
-        std::atomic_bool engine_stop_flag{ true };
+        std::atomic_bool engine_run_flag{ false };
         //std::atomic_bool thread_is_alive{ false };
         std::atomic<EngineThreadState> thread_state{ EngineThreadState::Died };
         std::atomic_bool thread_started{ false };
@@ -330,7 +356,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (thread_task_op) {
                 thread_task_op.Cancel();
             }
-            engine_stop_flag.store(true, std::memory_order_relaxed);
+            engine_run_flag.store(false, std::memory_order_relaxed);
             ui_is_alive.store(false, std::memory_order_relaxed);
             ui_is_alive.notify_one();
             // Abandon queued works
@@ -349,10 +375,10 @@ namespace winrt::MEraEmuWin::implementation {
             // Triggers UI update, which in turn responds to task disconnection
             queue_ui_work([] {});
             if (state == EngineThreadState::Occupied) {
-                engine_stop_flag.wait(false, std::memory_order_acquire);
+                engine_run_flag.wait(true, std::memory_order_acquire);
                 thread_task = nullptr;
-                engine_stop_flag.store(false, std::memory_order_release);
-                engine_stop_flag.notify_one();
+                engine_run_flag.store(true, std::memory_order_release);
+                engine_run_flag.notify_one();
             }
         }
         void queue_ui_work(std::move_only_function<void()> work) {
@@ -390,10 +416,10 @@ namespace winrt::MEraEmuWin::implementation {
             }
             thread_task = std::make_unique<EngineThreadTask>(kind);
             // Interrupt engine thread so that it can process queued works
-            engine_stop_flag.store(true, std::memory_order_release);
-            engine_stop_flag.notify_one();
+            engine_run_flag.store(false, std::memory_order_release);
+            engine_run_flag.notify_one();
             // SAFETY: Stop flag is reverted even when engine thread is disconnecting
-            engine_stop_flag.wait(true, std::memory_order_acquire);
+            engine_run_flag.wait(false, std::memory_order_acquire);
             // Task was processed by engine thread, we can return now
         }
         void wait_for_thread_disconnect() {
@@ -409,52 +435,57 @@ namespace winrt::MEraEmuWin::implementation {
         // SAFETY: Engine is destructed before EngineSharedData
         MEraEmuWinEngineSysCallback(EngineSharedData* sd) : m_sd(sd) {}
 
-        void on_compile_error(EraScriptErrorInfo const& info) override {
-            auto filename = to_hstring(info.filename);
-            auto src_info = info.src_info;
-            auto is_error = info.is_error;
-            auto msg = to_hstring(info.msg);
-            auto final_msg = format(L"{}({},{}): 编译{}: {}",
-                filename, src_info.line, src_info.column,
-                is_error ? L"错误" : L"警告", msg
-            );
-            auto msg_clr = is_error ? Colors::Red() : Colors::Orange();
-            m_sd->queue_ui_work([=, sd = m_sd] {
-                auto old_clr = sd->ui_ctrl->EngineForeColor();
-                sd->ui_ctrl->EngineForeColor(msg_clr);
-                sd->ui_ctrl->RoutinePrintSourceButton(
-                    final_msg, filename,
-                    src_info.line, src_info.column,
-                    ERA_PEF_IS_LINE
-                );
-                sd->ui_ctrl->EngineForeColor(old_clr);
-            });
-        }
-        void on_execute_error(EraScriptErrorInfo const& info) override {
-            auto filename = to_hstring(info.filename);
-            auto src_info = info.src_info;
-            auto is_error = info.is_error;
-            auto msg = to_hstring(info.msg);
-            auto final_msg = format(L"{}({},{}): 运行{}: {}",
-                filename, src_info.line, src_info.column,
-                is_error ? L"错误" : L"警告", msg
-            );
-            auto msg_clr = is_error ? Colors::Red() : Colors::Orange();
-            m_sd->queue_ui_work([=, sd = m_sd] {
-                auto old_clr = sd->ui_ctrl->EngineForeColor();
-                sd->ui_ctrl->EngineForeColor(msg_clr);
-                sd->ui_ctrl->RoutinePrintSourceButton(
-                    final_msg, filename,
-                    src_info.line, src_info.column,
-                    ERA_PEF_IS_LINE
-                );
-                sd->ui_ctrl->EngineForeColor(old_clr);
-            });
-            // SAFETY: Engine and callback are on the same thread
-            if (is_error) {
-                m_sd->has_execution_error = true;
+        void on_error(EraDiagnosticProvider const& provider) override {
+            auto count = provider.get_entry_count();
+            for (uint64_t i = 0; i < count; i++) {
+                auto entry = std::move(provider.get_entry(i).value());
+                auto level = entry.level;
+                auto filename = to_hstring(entry.filename);
+                auto span = entry.span;
+                auto message = to_hstring(entry.message);
+                auto msg_clr = color_from_diagnostic_level(level);
+                if (auto resolved_opt = provider.resolve_src_span(entry.filename, span)) {
+                    auto& resolved = *resolved_opt;
+                    // Convert 0-based to 1-based
+                    resolved.loc.col += 1;
+
+                    auto final_msg = format(L"{}({},{}): {}: {}",
+                        filename,
+                        resolved.loc.line, resolved.loc.col,
+                        to_hstring(level),
+                        message
+                    );
+                    m_sd->queue_ui_work([=, sd = m_sd] {
+                        auto old_clr = sd->ui_ctrl->EngineForeColor();
+                        sd->ui_ctrl->EngineForeColor(msg_clr);
+                        sd->ui_ctrl->RoutinePrintSourceButton(
+                            final_msg, filename,
+                            resolved.loc.line, resolved.loc.col,
+                            ERA_PEF_IS_LINE
+                        );
+                        sd->ui_ctrl->EngineForeColor(old_clr);
+                    });
+                    // TODO: Also print code snippet
+                }
+                else {
+                    auto final_msg = format(L"{}(<failed to resolve SrcSpan({}, {})>): {}: {}",
+                        filename,
+                        span.start, span.len,
+                        to_hstring(level),
+                        message
+                    );
+                    m_sd->queue_ui_work([=, sd = m_sd] {
+                        auto old_clr = sd->ui_ctrl->EngineForeColor();
+                        sd->ui_ctrl->EngineForeColor(msg_clr);
+                        sd->ui_ctrl->RoutinePrintSourceButton(
+                            final_msg, filename,
+                            1, 1,
+                            ERA_PEF_IS_LINE
+                        );
+                        sd->ui_ctrl->EngineForeColor(old_clr);
+                    });
+                }
             }
-            //m_sd->engine_stop_flag.store(true, std::memory_order_relaxed);
         }
         uint64_t on_get_rand() override {
             return m_rand_gen();
@@ -509,7 +540,7 @@ namespace winrt::MEraEmuWin::implementation {
             });
             return future.get();
         }
-        std::optional<int64_t> on_input_int(std::optional<int64_t> default_value, bool can_click, bool allow_skip) override {
+        ControlFlow<std::monostate, std::optional<int64_t>> on_input_int(std::optional<int64_t> default_value, bool can_click, bool allow_skip) override {
             m_tick_compensation = 0;
             int64_t time_limit{ -1 };
             try {
@@ -522,11 +553,11 @@ namespace winrt::MEraEmuWin::implementation {
                 m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
                 });
-                return future.get();
+                return { continue_tag, future.get() };
             }
-            catch (std::future_error const& e) { return std::nullopt; }
+            catch (std::future_error const& e) { return { continue_tag, std::nullopt }; }
         }
-        const char* on_input_str(std::optional<std::string_view> default_value, bool can_click, bool allow_skip) override {
+        ControlFlow<std::monostate, const char*> on_input_str(std::optional<std::string_view> default_value, bool can_click, bool allow_skip) override {
             m_tick_compensation = 0;
             int64_t time_limit{ -1 };
             try {
@@ -540,11 +571,11 @@ namespace winrt::MEraEmuWin::implementation {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
                 });
                 m_str_cache = to_string(future.get());
-                return m_str_cache.c_str();
+                return { continue_tag, m_str_cache.c_str() };
             }
-            catch (std::future_error const& e) { return nullptr; }
+            catch (std::future_error const& e) { return { continue_tag, nullptr }; }
         }
-        std::optional<int64_t> on_tinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
+        ControlFlow<std::monostate, std::optional<int64_t>> on_tinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
             try {
                 if (time_limit > 0) {
                     if (time_limit <= m_tick_compensation) {
@@ -573,11 +604,11 @@ namespace winrt::MEraEmuWin::implementation {
                 m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
                 });
-                return future.get();
+                return { continue_tag, future.get() };
             }
-            catch (std::future_error const& e) { return std::nullopt; }
+            catch (std::future_error const& e) { return { continue_tag, std::nullopt }; }
         }
-        const char* on_tinput_str(int64_t time_limit, std::string_view default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
+        ControlFlow<std::monostate, const char*> on_tinput_str(int64_t time_limit, std::string_view default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
             try {
                 if (time_limit > 0) {
                     if (time_limit <= m_tick_compensation) {
@@ -607,25 +638,25 @@ namespace winrt::MEraEmuWin::implementation {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
                 });
                 m_str_cache = to_string(future.get());
-                return m_str_cache.c_str();
+                return { continue_tag, m_str_cache.c_str() };
             }
-            catch (std::future_error const& e) { return nullptr; }
+            catch (std::future_error const& e) { return { continue_tag, nullptr }; }
         }
-        std::optional<int64_t> on_oneinput_int(std::optional<int64_t> default_value) override {
+        ControlFlow<std::monostate, std::optional<int64_t>> on_oneinput_int(std::optional<int64_t> default_value) override {
             // TODO: on_oneinput_int
-            return std::optional<int64_t>();
+            return { continue_tag, std::optional<int64_t>() };
         }
-        const char* on_oneinput_str(std::optional<std::string_view> default_value) override {
+        ControlFlow<std::monostate, const char*> on_oneinput_str(std::optional<std::string_view> default_value) override {
             // TODO: on_oneinput_str
-            return nullptr;
+            return { continue_tag, nullptr };
         }
-        std::optional<int64_t> on_toneinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
+        ControlFlow<std::monostate, std::optional<int64_t>> on_toneinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
             // TODO: on_toneinput_int
-            return std::optional<int64_t>();
+            return { continue_tag, std::optional<int64_t>() };
         }
-        const char* on_toneinput_str(int64_t time_limit, std::string_view default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
+        ControlFlow<std::monostate, const char*> on_toneinput_str(int64_t time_limit, std::string_view default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
             // TODO: on_toneinput_str
-            return nullptr;
+            return { continue_tag, nullptr };
         }
         void on_reuselastline(std::string_view content) override {
             m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content)] {
@@ -638,7 +669,7 @@ namespace winrt::MEraEmuWin::implementation {
                 sd->ui_ctrl->RoutineClearLine(count);
             });
         }
-        int64_t on_var_get_int(std::string_view name, uint32_t idx) override {
+        int64_t on_var_get_int(std::string_view name, size_t idx) override {
             if (name == "@COLOR") {
                 std::promise<uint32_t> promise;
                 auto future = promise.get_future();
@@ -764,7 +795,7 @@ namespace winrt::MEraEmuWin::implementation {
             }
             throw std::exception("no such variable");
         }
-        const char* on_var_get_str(std::string_view name, uint32_t idx) override {
+        const char* on_var_get_str(std::string_view name, size_t idx) override {
             if (name == "@FONT") {
                 std::promise<hstring> promise;
                 auto future = promise.get_future();
@@ -799,7 +830,7 @@ namespace winrt::MEraEmuWin::implementation {
             }
             throw std::exception("no such variable");
         }
-        void on_var_set_int(std::string_view name, uint32_t idx, int64_t val) override {
+        void on_var_set_int(std::string_view name, size_t idx, int64_t val) override {
             if (name == "@COLOR") {
                 m_sd->queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->EngineForeColor(to_winrt_color((uint32_t)val | 0xff000000));
@@ -853,7 +884,7 @@ namespace winrt::MEraEmuWin::implementation {
             // TODO...
             throw std::exception("no such variable");
         }
-        void on_var_set_str(std::string_view name, uint32_t idx, std::string_view val) override {
+        void on_var_set_str(std::string_view name, size_t idx, std::string_view val) override {
             if (name == "@FONT") {
                 m_sd->queue_ui_work([sd = m_sd, val = to_hstring(val)]() {
                     sd->ui_ctrl->SetCurrentFontName(val);
@@ -936,13 +967,10 @@ namespace winrt::MEraEmuWin::implementation {
                 nullptr
             ));
             check_bool((bool)fh);
-            
+
             struct Win32File : MEraEngineHostFile {
                 Win32File(file_handle fh) : m_fh(std::move(fh)) {}
-                ~Win32File() {
-                    auto pos = tell();
-                    std::format("{}", pos);
-                }
+                ~Win32File() {}
 
                 uint64_t read(std::span<uint8_t> buf) override {
                     DWORD io_bytes;
@@ -962,16 +990,16 @@ namespace winrt::MEraEmuWin::implementation {
                     //check_bool(SetFilePointer(m_fh.get(), 0, nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER);
                     check_bool(SetEndOfFile(m_fh.get()));
                 }
-                void seek(int64_t pos, MEraEngineFileSeekMode mode) override {
+                uint64_t seek(int64_t pos, EraCompilerFileSeekMode mode) override {
                     int native_mode = 0;
                     switch (mode) {
-                    case M_ERA_ENGINE_FILE_SEEK_MODE_START:
+                    case ERA_COMPILER_FILE_SEEK_MODE_START:
                         native_mode = FILE_BEGIN;
                         break;
-                    case M_ERA_ENGINE_FILE_SEEK_MODE_END:
+                    case ERA_COMPILER_FILE_SEEK_MODE_END:
                         native_mode = FILE_END;
                         break;
-                    case M_ERA_ENGINE_FILE_SEEK_MODE_CURRENT:
+                    case ERA_COMPILER_FILE_SEEK_MODE_CURRENT:
                         native_mode = FILE_CURRENT;
                         break;
                     default:
@@ -980,12 +1008,7 @@ namespace winrt::MEraEmuWin::implementation {
                     LONG high = (LONG)(pos >> 32);
                     LONG low = (LONG)pos;
                     auto r = SetFilePointer(m_fh.get(), low, &high, native_mode);
-                    //check_bool(r != INVALID_SET_FILE_POINTER);
-                }
-                uint64_t tell() override {
-                    LONG high{};
-                    auto low = SetFilePointer(m_fh.get(), 0, &high, FILE_CURRENT);
-                    //check_bool(low != INVALID_SET_FILE_POINTER);
+                    check_bool(r != INVALID_SET_FILE_POINTER);
                     return low + (static_cast<uint64_t>(high) << 32);
                 }
 
@@ -1031,7 +1054,7 @@ namespace winrt::MEraEmuWin::implementation {
         const char* on_get_config_str(std::string_view name) override {
             // TODO: on_get_config_str
             if (name == "描画インターフェース") {
-                return "Direct2D+VSIS";
+                return "Direct2D";
             }
             throw std::runtime_error(std::format("no such str config: {}", name));
         }
@@ -1082,7 +1105,8 @@ namespace winrt::MEraEmuWin::implementation {
         std::vector<EngineUIPrintLineDataButton> buttons;
 
         EngineUIPrintLineData(hstring const& txt, com_ptr<IDWriteTextFormat> const& txt_fmt) :
-            txt(txt), txt_fmt(txt_fmt) {}
+            txt(txt), txt_fmt(txt_fmt) {
+        }
 
         void update_width(EngineControl* ctrl, uint64_t width) {
             if (!txt_layout) { return ensure_layout(ctrl, width); }
@@ -1333,22 +1357,22 @@ namespace winrt::MEraEmuWin::implementation {
             try {
                 sd->ui_is_alive.wait(false, std::memory_order_acquire);
 
-                MEraEngine engine;
-                MEraEmuWinEngineSysCallback* callback;
-                {
+                MEraEngine engine{ nullptr };
+                MEraEmuWinEngineSysCallback* callback{};
+                auto builder = [&] {
                     auto callback_box = std::make_unique<MEraEmuWinEngineSysCallback>(sd.get());
                     callback = callback_box.get();
-                    engine.install_sys_callback(std::move(callback_box));
-                }
+                    return MEraEngineBuilder(std::move(callback_box));
+                }();
 
                 // Register global variables
                 // Engine -- register int
                 auto eri = [&](const char* name) {
-                    engine.register_global_var(name, false, 1, true);
+                    builder.register_variable(name, false, 1, true);
                 };
                 // Engine -- register str
                 auto ers = [&](const char* name) {
-                    engine.register_global_var(name, true, 1, true);
+                    builder.register_variable(name, true, 1, true);
                 };
                 eri("@COLOR");
                 eri("@DEFCOLOR");
@@ -1375,20 +1399,27 @@ namespace winrt::MEraEmuWin::implementation {
                 ers("SAVEDATA_TEXT");
                 eri("RANDDATA");
 
+                auto return_to_title = [&] {
+                    EraFuncInfo func_info;
+                    try {
+                        func_info = engine.get_func_info("SYSPROC_BEGIN_TITLE");
+                    }
+                    // Ignore if function does not exist
+                    catch (...) { return; }
+                    if (func_info.frame_info.args.size() != 0) {
+                        throw hresult_error(E_FAIL, L"malformed entry function");
+                    }
+                    EraExecIp ip{
+                        .chunk = func_info.chunk_idx,
+                        .offset = func_info.bc_offset,
+                    };
+                    engine.reset_exec_to_ip(ip);
+                };
+
                 auto run_ui_task = [&](std::unique_ptr<EngineThreadTask> task, bool loaded) {
                     if (!loaded) { return; }
                     if (task->kind == EngineThreadTaskKind::ReturnToTitle) {
-                        // TODO: Reset execution to title
-                        EraFuncInfo func_info;
-                        try {
-                            func_info = engine.get_func_info("SYSPROC_BEGIN_TITLE");
-                        }
-                        // Ignore if function does not exist
-                        catch (...) { return; }
-                        if (func_info.args_cnt != 0) {
-                            throw hresult_error(E_FAIL, L"malformed entry function");
-                        }
-                        engine.reset_exec_to_ip(func_info.entry);
+                        return_to_title();
                     }
                 };
 
@@ -1398,7 +1429,7 @@ namespace winrt::MEraEmuWin::implementation {
                     std::vector<std::filesystem::path> chara_csvs;
                     auto load_csv = [&](std::filesystem::path const& csv, EraCsvLoadKind kind) {
                         auto [data, size] = read_utf8_file(csv);
-                        engine.load_csv(to_string(csv.c_str()).c_str(), { data.get(), size }, kind);
+                        builder.load_csv(to_string(csv.c_str()).c_str(), { data.get(), size }, kind);
                     };
                     for (auto const& entry : recur_dir_iter(sd->game_base_dir, L"CSV")) {
                         if (!entry.is_regular_file()) { continue; }
@@ -1477,14 +1508,14 @@ namespace winrt::MEraEmuWin::implementation {
                     }
 
                     auto try_handle_thread_event = [&] {
-                        if (!sd->engine_stop_flag.load(std::memory_order_acquire)) { return; }
+                        if (sd->engine_run_flag.load(std::memory_order_acquire)) { return; }
                         if (sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Occupied) {
                             // Likely the UI side has just disconnected
                             return;
                         }
                         tenkai::cpp_utils::ScopeExit se_stop_flag([&] {
-                            sd->engine_stop_flag.store(false, std::memory_order_release);
-                            sd->engine_stop_flag.notify_one();
+                            sd->engine_run_flag.store(true, std::memory_order_release);
+                            sd->engine_run_flag.notify_one();
                             sd->thread_state.store(EngineThreadState::Vacant, std::memory_order_release);
                             sd->thread_state.notify_one();
                         });
@@ -1498,19 +1529,21 @@ namespace winrt::MEraEmuWin::implementation {
                         if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
                         try_handle_thread_event();
                         auto [data, size] = read_utf8_file(erh);
-                        engine.load_erh(to_string(erh.c_str()).c_str(), { data.get(), size });
+                        builder.load_erh(to_string(erh.c_str()).c_str(), { data.get(), size });
                     }
                     for (auto& erb : erbs) {
                         if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
                         try_handle_thread_event();
                         auto [data, size] = read_utf8_file(erb);
-                        engine.load_erb(to_string(erb.c_str()).c_str(), { data.get(), size });
+                        builder.load_erb(to_string(erb.c_str()).c_str(), { data.get(), size });
                     }
                 }
 
                 // Finialize compilation
                 if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
-                engine.finialize_load_srcs();
+                engine = builder.build();
+
+                return_to_title();
 
                 // Disable auto redraw before running VM
                 sd->queue_ui_work([sd] {
@@ -1519,11 +1552,15 @@ namespace winrt::MEraEmuWin::implementation {
 
                 // Main loop
                 while (sd->ui_is_alive.load(std::memory_order_relaxed)) {
-                    while (!engine.get_is_halted()) {
-                        if (sd->engine_stop_flag.load(std::memory_order_relaxed)) {
+                    //while (!engine.get_is_halted()) {
+                    while (true) {
+                        if (!sd->engine_run_flag.load(std::memory_order_relaxed)) {
                             break;
                         }
-                        engine.do_execution(&sd->engine_stop_flag, UINT64_MAX);
+                        auto stop_reason = engine.do_execution(&sd->engine_run_flag, UINT64_MAX);
+                        if (stop_reason != ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS) {
+                            break;
+                        }
                     }
                     callback->m_tick_compensation = 0;
                     if (sd->has_execution_error) {
@@ -1537,7 +1574,8 @@ namespace winrt::MEraEmuWin::implementation {
                         std::vector<SrcData> print_msgs;
                         auto stack_trace = engine.get_stack_trace();
                         for (const auto& frame : stack_trace.frames) {
-                            auto path = to_hstring(frame.file_name);
+                            // TODO: Stack trace
+                            /*auto path = to_hstring(frame.file_name);
                             auto msg = winrt::format(L"  {}({},{}):{}",
                                 path,
                                 frame.src_info.line,
@@ -1548,7 +1586,7 @@ namespace winrt::MEraEmuWin::implementation {
                                 path,
                                 frame.src_info.line, frame.src_info.column,
                                 std::move(msg)
-                            );
+                            );*/
                         }
                         sd->queue_ui_work([sd, msgs = std::move(print_msgs)] {
                             sd->ui_ctrl->SetSkipDisplay(0);
@@ -1562,14 +1600,14 @@ namespace winrt::MEraEmuWin::implementation {
                             sd->ui_ctrl->SetRedrawState(2);
                         });
                     }
-                    sd->engine_stop_flag.wait(false, std::memory_order_acquire);
+                    sd->engine_run_flag.wait(true, std::memory_order_acquire);
                     if (sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Occupied) {
                         // Likely the UI side has just disconnected
                         break;
                     }
                     tenkai::cpp_utils::ScopeExit se_stop_flag([&] {
-                        sd->engine_stop_flag.store(false, std::memory_order_release);
-                        sd->engine_stop_flag.notify_one();
+                        sd->engine_run_flag.store(true, std::memory_order_release);
+                        sd->engine_run_flag.notify_one();
                         sd->thread_state.store(EngineThreadState::Vacant, std::memory_order_release);
                         sd->thread_state.notify_one();
                     });
@@ -1586,7 +1624,7 @@ namespace winrt::MEraEmuWin::implementation {
                 sd->thread_exception = std::current_exception();
             }
         }, WorkItemPriority::Normal, WorkItemOptions::TimeSliced);
-        m_sd->engine_stop_flag.store(false, std::memory_order_relaxed);
+        m_sd->engine_run_flag.store(true, std::memory_order_relaxed);
         m_sd->ui_is_alive.store(true, std::memory_order_release);
         m_sd->ui_is_alive.notify_one();
 
@@ -1728,10 +1766,10 @@ namespace winrt::MEraEmuWin::implementation {
                     GetOrCreateSolidColorBrush(D2D1::ColorF::Green | 0xff000000));
                 ctx->DrawLine(D2D1::Point2F(0, dip_rt_bottom), D2D1::Point2F(1e4, dip_rt_bottom),
                     GetOrCreateSolidColorBrush(D2D1::ColorF::Yellow | 0xff000000));*/
-                /*ctx->DrawLine(D2D1::Point2F(0, offset.y), D2D1::Point2F(1e4, offset.y),
-                    GetOrCreateSolidColorBrush(D2D1::ColorF::Green | 0xff000000));
-                ctx->DrawLine(D2D1::Point2F(0, offset.y + (update_rt.bottom - update_rt.top)), D2D1::Point2F(1e4, offset.y + (update_rt.bottom - update_rt.top)),
-                    GetOrCreateSolidColorBrush(D2D1::ColorF::Yellow | 0xff000000));*/
+                    /*ctx->DrawLine(D2D1::Point2F(0, offset.y), D2D1::Point2F(1e4, offset.y),
+                        GetOrCreateSolidColorBrush(D2D1::ColorF::Green | 0xff000000));
+                    ctx->DrawLine(D2D1::Point2F(0, offset.y + (update_rt.bottom - update_rt.top)), D2D1::Point2F(1e4, offset.y + (update_rt.bottom - update_rt.top)),
+                        GetOrCreateSolidColorBrush(D2D1::ColorF::Yellow | 0xff000000));*/
             }
             // Obtain lines requiring redraws
             auto ib = begin(m_ui_lines), ie = end(m_ui_lines);
@@ -2266,7 +2304,7 @@ namespace winrt::MEraEmuWin::implementation {
             is_isolated = true;
 
             bool align_right = flags & ERA_PEF_RIGHT_PAD;
-            auto str_width = helper_get_wstring_width((const uint16_t*)content.c_str());
+            auto str_width = rust_get_wstring_width((const uint16_t*)content.c_str());
             if (str_width < m_cfg.printc_char_count) {
                 int space_cnt = m_cfg.printc_char_count - str_width;
                 if (align_right) {
@@ -2402,7 +2440,7 @@ namespace winrt::MEraEmuWin::implementation {
                     .len = line_data.txt.size() - ui_line_offset,
                     .data = EngineUIPrintLineDataButton::SourceButton{ path, line, column },
                 }
-            );
+                );
             ui_line_offset = 0;
         }
         // Apply to current composing line
@@ -2432,7 +2470,7 @@ namespace winrt::MEraEmuWin::implementation {
                     .len = line_data.txt.size() - ui_line_offset,
                     .data = EngineUIPrintLineDataButton::InputButton{ value },
                 }
-            );
+                );
             ui_line_offset = 0;
         }
         // Apply to current composing line

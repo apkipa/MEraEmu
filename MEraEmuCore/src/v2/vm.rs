@@ -305,6 +305,7 @@ pub struct EraVirtualMachineState {
 }
 
 impl EraVirtualMachineState {
+    /// Resets the execution state and instruction pointer. Global variables remain unchanged.
     pub fn reset_exec_to_ip(&mut self, ip: EraExecIp) {
         self.stack.clear();
         self.stack.push(Value::new_int(0)); // Stub value
@@ -378,21 +379,29 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
         Self { ctx, state }
     }
 
-    // Reset the execution state and instruction pointer. Global variables remain unchanged.
-    pub fn reset_exec_and_ip(&mut self, ip: EraExecIp) {
-        self.state.stack.clear();
-        self.state.frames.clear();
-        self.state.frames.push(EraFuncExecFrame {
-            stack_start: self.state.stack.len() as u32,
-            ip,
-            ret_ip: EraExecIp {
-                chunk: 0,
-                offset: 0,
-            },
-            ignore_return_value: true,
-            is_transient: false,
-        });
-        // self.state.rand_gen = SimpleUniformGenerator::new();
+    /// Returns Some(()) if the trap variable was successfully added.
+    pub fn add_trap_var(&mut self, name: &str) -> Option<()> {
+        let Some(var_idx) = self.ctx.variables.get_var_idx(name) else {
+            return None;
+        };
+        let var = self.ctx.variables.get_var_by_idx(var_idx).unwrap();
+        let addr = match var.as_unpacked() {
+            RefFlatValue::Int(_) | RefFlatValue::Str(_) => return None,
+            RefFlatValue::ArrInt(x) => {
+                x.borrow_mut().flags.set_is_trap(true);
+                Rc::as_ptr(x) as *const ()
+            }
+            RefFlatValue::ArrStr(x) => {
+                x.borrow_mut().flags.set_is_trap(true);
+                Rc::as_ptr(x) as *const ()
+            }
+        };
+        self.state.inner.trap_vars.insert(addr, var_idx as u32);
+        Some(())
+    }
+
+    pub fn state_mut(&mut self) -> &mut EraVirtualMachineState {
+        self.state
     }
 
     pub fn execute(&mut self, run_flag: &AtomicBool, max_inst_cnt: u64) -> EraExecutionBreakReason {
@@ -521,6 +530,39 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         var.as_arrstr()
             .with_context(|| format!("variable `{}` is not an array of strings", name))
     }
+
+    pub fn get_variable_name_from_ptr(&self, value: *const ()) -> Option<&str> {
+        self.ctx.variables.iter().find_map(|v| {
+            let addr = match v.val.as_unpacked() {
+                RefFlatValue::Int(_) | RefFlatValue::Str(_) => return None,
+                RefFlatValue::ArrInt(x) => Rc::as_ptr(x) as *const (),
+                RefFlatValue::ArrStr(x) => Rc::as_ptr(x) as *const (),
+            };
+            (addr == value).then(|| v.name.as_ref())
+        })
+    }
+
+    pub fn get_variable_name_from_value(&self, value: &Value) -> Option<&str> {
+        let var_addr = match value.as_unpacked() {
+            RefFlatValue::Int(_) | RefFlatValue::Str(_) => return None,
+            RefFlatValue::ArrInt(x) => Rc::as_ptr(x) as *const (),
+            RefFlatValue::ArrStr(x) => Rc::as_ptr(x) as *const (),
+        };
+        self.get_variable_name_from_ptr(var_addr)
+        // let var_addr = match value.as_unpacked() {
+        //     RefFlatValue::Int(_) | RefFlatValue::Str(_) => return None,
+        //     RefFlatValue::ArrInt(x) => Rc::as_ptr(x) as *const (),
+        //     RefFlatValue::ArrStr(x) => Rc::as_ptr(x) as *const (),
+        // };
+        // self.ctx.variables.iter().find_map(|v| {
+        //     let addr = match v.val.as_unpacked() {
+        //         RefFlatValue::Int(_) | RefFlatValue::Str(_) => return None,
+        //         RefFlatValue::ArrInt(x) => Rc::as_ptr(x) as *const (),
+        //         RefFlatValue::ArrStr(x) => Rc::as_ptr(x) as *const (),
+        //     };
+        //     (addr == var_addr).then(|| v.name.as_ref())
+        // })
+    }
 }
 
 const MAX_CALL_DEPTH: usize = 1024;
@@ -538,16 +580,6 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
 
         macro_rules! make_site {
             () => {{
-                // let Some((cur_frame, prev_frames)) = self.state.frames.split_last_mut() else {
-                //     let mut diag = self.ctx.make_diag();
-                //     diag.span_err(
-                //         rcstr::literal!("<builtin>"),
-                //         SrcSpan::new(SrcPos(0), 0),
-                //         "no function to execute",
-                //     );
-                //     self.ctx.emit_diag(diag);
-                //     return Ok(EraExecutionBreakReason::InternalError);
-                // };
                 let (cur_frame, prev_frames) = self
                     .state
                     .frames
@@ -641,6 +673,9 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
 
         let mut i = 0;
         let reason = 'vm: loop {
+            if !run_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                break EraExecutionBreakReason::StopFlag;
+            }
             if i >= max_inst_cnt {
                 break EraExecutionBreakReason::ReachedMaxInstructions;
             }
@@ -673,6 +708,9 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                 break EraExecutionBreakReason::IllegalInstruction;
             };
             let mut ip_delta = inst.bytes_len() as i32;
+
+            // dbg!((s.cur_frame.ip.offset, inst));
+            // dbg!(&s.stack);
 
             macro_rules! unpack_one_arg {
                 ($var:ident:i) => {
@@ -935,12 +973,16 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                         break EraExecutionBreakReason::InternalError;
                     }
 
+                    // Now prepare arguments for the function
+                    // WARN: The following procedure must not fail, or stack will be corrupted.
+                    s.stack.pop();
+
                     // Create a new execution frame for the function
                     let is_transient = func_info.is_transient;
                     let stack_start = if is_transient {
                         s.prev_frames.last().map_or(0, |f| f.stack_start as usize)
                     } else {
-                        slen - args_cnt - 1
+                        s.stack.inner().len() - args_cnt
                     };
                     drop_site!();
                     self.state.frames.push(EraFuncExecFrame {
@@ -950,7 +992,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                         ignore_return_value: false,
                         is_transient,
                     });
-                    self.state.stack.pop();
+                    ip_delta = 0;
                     make_site!();
                 }
                 Bc::TryCallFun { args_cnt } | Bc::TryCallFunForce { args_cnt } => {
@@ -1102,7 +1144,8 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                                         processed_args.push(val.clone());
                                     }
                                     ArgPackKind::Empty => {
-                                        processed_args.push(Value::new_int(0));
+                                        let val = param.default_value.as_int().unwrap();
+                                        processed_args.push(Value::new_int(val));
                                     }
                                     ArgPackKind::ArrIdx(arr, idx) => {
                                         let Some(arr) = arr.as_arrint() else {
@@ -1141,7 +1184,8 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                                         processed_args.push(val.clone());
                                     }
                                     ArgPackKind::Empty => {
-                                        processed_args.push(Value::new_str(ArcStr::default()));
+                                        let val = param.default_value.as_str().unwrap();
+                                        processed_args.push(Value::new_str(val.into()));
                                     }
                                     ArgPackKind::ArrIdx(arr, idx) => {
                                         let Some(arr) = arr.as_arrstr() else {
@@ -1172,7 +1216,20 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                             }
                         }
 
+                        // Check call stack depth
+                        if s.prev_frames.len() + 1 >= MAX_CALL_DEPTH {
+                            let mut diag = Diagnostic::new();
+                            diag.span_err(
+                                s.cur_filename(),
+                                s.cur_bc_span(),
+                                "maximum call depth exceeded",
+                            );
+                            s.ctx.emit_diag(diag);
+                            break EraExecutionBreakReason::InternalError;
+                        }
+
                         // Now apply the arguments and call the function
+                        // WARN: The following procedure must not fail, or stack will be corrupted.
                         let args_cnt = processed_args.len();
                         if is_force {
                             sview.replace(processed_args);
@@ -1191,24 +1248,12 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                             offset: s.cur_frame.ip.offset + ip_delta as u32,
                         };
 
-                        // Check call stack depth
-                        if s.prev_frames.len() + 1 >= MAX_CALL_DEPTH {
-                            let mut diag = Diagnostic::new();
-                            diag.span_err(
-                                s.cur_filename(),
-                                s.cur_bc_span(),
-                                "maximum call depth exceeded",
-                            );
-                            s.ctx.emit_diag(diag);
-                            break EraExecutionBreakReason::InternalError;
-                        }
-
                         // Create a new execution frame for the function
                         let is_transient = func_info.is_transient;
                         let stack_start = if is_transient {
                             s.prev_frames.last().map_or(0, |f| f.stack_start as usize)
                         } else {
-                            s.stack.len() - args_cnt
+                            s.stack.inner().len() - args_cnt
                         };
                         drop_site!();
                         self.state.frames.push(EraFuncExecFrame {
@@ -1218,6 +1263,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                             ignore_return_value: false,
                             is_transient,
                         });
+                        ip_delta = 0;
                         make_site!();
                     } else {
                         // Function does not exist
@@ -1291,6 +1337,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                         ignore_return_value: false,
                         is_transient: false,
                     });
+                    ip_delta = 0;
                     make_site!();
                 }
                 Bc::JumpWW { offset } => {
@@ -1372,7 +1419,9 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                         s.ctx.emit_diag(diag);
                         break EraExecutionBreakReason::IllegalArguments;
                     };
-                    s.stack.push(var.clone());
+                    let var = var.clone();
+                    var.ensure_alloc();
+                    s.stack.push(var);
                 }
                 Bc::Pop => {
                     s.stack.pop();
@@ -1712,10 +1761,11 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                     let val_width = a.val.width();
                     if val_width < width.val as usize {
                         let spaces = " ".repeat(width.val as usize - val_width);
-                        // left_pad means: pad to left (spaces on the right side)
+                        // NOTE: left_pad means: pad to left (spaces on the right side),
+                        //       which is somewhat unintuitive.
                         let result = match (flags.left_pad(), flags.right_pad()) {
-                            (true, false) => spaces + &a.val,
-                            (false, true) | _ => String::from(a.val.as_str()) + &spaces,
+                            (true, false) => String::from(a.val.as_str()) + &spaces,
+                            (false, true) | _ => spaces + &a.val,
                         };
                         a.val = ArcStr::from(result);
                     }
@@ -1955,6 +2005,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                     sview.replace([val]);
                 }
                 Bc::SetArrValFlat => {
+                    let slen = s.stack.len();
                     let mut sview = view_stack_or_bail!();
                     let [arr, idx, val] = sview.as_mut();
                     unpack_args!(idx:i);
@@ -1972,6 +2023,13 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                                     s.cur_bc_span(),
                                     "array index out of bounds",
                                 );
+                                if let Some(arr) = s.get_variable_name_from_ptr(arr_ptr) {
+                                    diag.span_note(
+                                        s.cur_filename(),
+                                        s.cur_bc_span(),
+                                        format!("while assigning to array `{}`", arr),
+                                    );
+                                }
                                 s.ctx.emit_diag(diag);
                                 break EraExecutionBreakReason::IllegalArguments;
                             };
@@ -2036,6 +2094,13 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                                     s.cur_bc_span(),
                                     "array index out of bounds",
                                 );
+                                if let Some(arr) = s.get_variable_name_from_ptr(arr_ptr) {
+                                    diag.span_note(
+                                        s.cur_filename(),
+                                        s.cur_bc_span(),
+                                        format!("while assigning to array `{}`", arr),
+                                    );
+                                }
                                 s.ctx.emit_diag(diag);
                                 break EraExecutionBreakReason::IllegalArguments;
                             };
@@ -2095,7 +2160,6 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                             break EraExecutionBreakReason::IllegalArguments;
                         }
                     }
-                    let slen = sview.len();
                     // Reserve the right-hand side
                     s.stack.drain(slen - 3..slen - 1);
                 }

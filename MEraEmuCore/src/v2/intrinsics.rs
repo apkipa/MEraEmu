@@ -1017,7 +1017,11 @@ pub fn for_loop_step(
         .flat_get_mut(arr_idx as _)
         .context("invalid indices into array")?;
     var.val += step;
-    Ok(var.val < end)
+    Ok(if step < 0 {
+        var.val > end
+    } else {
+        var.val < end
+    })
 }
 
 pub fn extend_str_to_width(s: ArcStr, width: i64) -> anyhow::Result<ArcStr> {

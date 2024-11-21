@@ -4491,6 +4491,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     self.chunk
                         .push_bc(BcKind::LoadLocalVar { idx: var_idx as _ }, var_span);
                 } else {
+                    let var_info = self.o.ctx.variables.get_var_info(var_idx as _).unwrap();
+                    var_info.val.ensure_alloc();
                     self.chunk
                         .push_bc(BcKind::LoadVarWW { idx: var_idx }, var_span);
                 }
@@ -4628,6 +4630,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             diag.emit_to(self.o.ctx);
                             // Push implicit 0 as last index to workaround bugs in some game code
                             append_zeros_cnt += dims_cnt - idxs_cnt;
+                            idxs_cnt = dims_cnt;
                         }
                     } else {
                         let mut diag = self.make_diag();
@@ -4642,6 +4645,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 if dims_cnt == 1 && idxs_cnt < dims_cnt {
                     // Push 0 implicitly
                     append_zeros_cnt += 1;
+                    idxs_cnt = dims_cnt;
                 }
 
                 // Compile indices
@@ -4722,7 +4726,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 if flatten_indices && dims_cnt > 1 {
                     self.chunk.push_bc(
                         BcKind::BuildArrIdxFromMD {
-                            count: dims_cnt.try_into().unwrap(),
+                            count: idxs_cnt.try_into().unwrap(),
                         },
                         node_span,
                     );
@@ -5440,8 +5444,19 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 // Fill default value if argument is omitted
                 let arg = if arg.is_empty() {
                     match target_param.var_kind {
-                        ValueKind::Int => self.chunk.push_load_imm(0, arg_span),
-                        ValueKind::Str => self.chunk.push_build_string(0, arg_span),
+                        ValueKind::Int => {
+                            let val = target_param.default_value.as_int().unwrap();
+                            self.chunk.push_load_imm(val, arg_span);
+                        }
+                        ValueKind::Str => {
+                            let val = target_param.default_value.as_str().unwrap();
+                            self.chunk.push_bc(
+                                BcKind::LoadConstStr {
+                                    idx: self.o.ctx.interner().get_or_intern(val).into_u32(),
+                                },
+                                arg_span,
+                            );
+                        }
                         _ => unreachable!(),
                     }
                     target_param.var_kind.to_scalar()
@@ -5513,17 +5528,6 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
     ) -> CompileResult<ScalarValueKind> {
         let name_span = self.arena.get_node_span(name);
         let args_span = self.arena.get_node_span(args);
-        let name = self.expression(name)?;
-        if name != ScalarValueKind::Str {
-            let mut diag = self.make_diag();
-            diag.span_err(
-                Default::default(),
-                name_span,
-                "function name must be a string",
-            );
-            diag.emit_to(self.o.ctx);
-            return Err(());
-        }
 
         /* Design notes:
          *
@@ -5539,6 +5543,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         // TODO: Maybe we can convert dynamic function call into `eval` call, which is more
         //       flexible and can support built-in functions as well.
 
+        // Push arguments
         let EraNode::ListExpr(args) = self.arena.get_node(args) else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), args_span, "expected argument list");
@@ -5565,6 +5570,19 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     self.chunk.push_load_imm(0, arg_span);
                 }
             }
+        }
+
+        // Push function name
+        let name = self.expression(name)?;
+        if name != ScalarValueKind::Str {
+            let mut diag = self.make_diag();
+            diag.span_err(
+                Default::default(),
+                name_span,
+                "function name must be a string",
+            );
+            diag.emit_to(self.o.ctx);
+            return Err(());
         }
 
         // Call function

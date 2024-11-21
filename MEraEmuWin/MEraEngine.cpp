@@ -3,7 +3,6 @@
 #include "pch.h"
 
 #include "MEraEngine.hpp"
-
 #include "Tenkai.hpp"
 
 //#pragma comment(lib, "MEraEmuCore.dll.lib")
@@ -11,32 +10,85 @@
 #define STR_VIEW(rust_str) (std::string_view{ (const char*)(rust_str).ptr, (rust_str).len })
 #define TO_SPAN(slice_like) (std::span{ (slice_like).ptr, (slice_like).len })
 #define TO_RUST_SLICE(span) { .ptr = (span).data(), .len = (span).size() }
+#define TO_RUST_STR(span) { .ptr = (uint8_t const*)(span).data(), .len = (span).size() }
 #define TO_RUST_OPTION(opt) { .has_value = (bool)(opt), .value = (opt) ? std::move(*(opt)) : {} }
 
+template<typename Ret, typename T>
+Ret to_rust_type(T val);
+
 template<typename T>
-auto unwrap_rust_result(T result) {
-    auto [ok, err] = result;
-    if (!ok.has_value) {
-        throw MEraEngineException(rust_String(std::move(err.msg)));
+auto unwrap_rust(T result) {
+    if constexpr (requires { result.is_ok; }) {
+        if (!result.is_ok) {
+            throw MEraEngineException(rust_String(result.err));
+        }
+        if constexpr (requires { result.ok; }) {
+            return result.ok;
+        }
     }
-    if constexpr (requires { ok.value; }) {
-        return ok.value;
+    else if constexpr (requires { result.is_some; }) {
+        if (!result.is_some) {
+            throw MEraEngineException("called `Option::unwrap()` on a `None` value");
+        }
+        if constexpr (requires { result.some; }) {
+            return result.some;
+        }
+    }
+    else {
+        static_assert(false, "Unsupported Rust result type (expected `Result` or `Option`)");
     }
 }
 template<typename T>
-auto from_rust_option(T opt) -> decltype(std::optional{ std::move(opt.value) }) {
-    using RetType = decltype(std::optional{ std::move(opt.value) });
-    if (opt.has_value) {
-        return RetType{ std::move(opt.value) };
+auto from_rust_option(T opt) -> decltype(std::optional{ std::move(opt.some) }) {
+    using RetType = decltype(std::optional{ std::move(opt.some) });
+    if (opt.is_some) {
+        return RetType{ std::move(opt.some) };
     }
     return RetType{ std::nullopt };
 }
 template<typename Ret, typename T>
 Ret to_rust_option(std::optional<T> opt) {
     if (opt) {
-        return { .has_value = true, .value = std::move(*opt) };
+        return { .is_some = true, .some = std::move(*opt) };
     }
-    return { .has_value = false };
+    return { .is_some = false };
+}
+template<typename Ret, typename T>
+Ret to_rust_control_flow(T val) {
+    if constexpr (std::is_same_v<T, std::nullopt_t>) {
+        return { .is_break = true };
+    }
+    return {
+        .is_break = false,
+        .continue_value = std::move(val),
+    };
+}
+template<typename Ret, typename B, typename C>
+Ret to_rust_control_flow(ControlFlow<B, C> val) {
+    if (val.is_break()) {
+        if constexpr (std::is_same_v<B, std::monostate>) {
+            return { .is_break = true };
+        }
+        else {
+            using Ty = decltype(std::declval<Ret>().break_value);
+            return {
+                .is_break = true,
+                .break_value = to_rust_type<Ty, B>(std::move(*val.as_break())),
+            };
+        }
+    }
+    else {
+        if constexpr (std::is_same_v<C, std::monostate>) {
+            return { .is_break = false };
+        }
+        else {
+            using Ty = decltype(std::declval<Ret>().continue_value);
+            return {
+                .is_break = false,
+                .continue_value = to_rust_type<Ty, C>(std::move(*val.as_continue())),
+            };
+        }
+    }
 }
 
 template<typename T>
@@ -68,25 +120,44 @@ Ret to_rust_type(T val) {
     if constexpr (std::is_same_v<T, char const*>) {
         return val;
     }
-    else {
+    else if constexpr (requires(Ret r) { r.is_some; }) {
         return to_rust_option<Ret>(std::move(val));
+    }
+    else if constexpr (requires(Ret r) { r.is_ok; }) {
+        return { .is_ok = true, .ok = std::move(val) };
+    }
+    else if constexpr (requires(Ret r) { r.is_break; }) {
+        return to_rust_control_flow<Ret>(std::move(val));
+    }
+    else {
+        static_assert(false, "Unsupported Rust type (expected `Result`, `Option`, or `ControlFlow`)");
     }
 }
 
 template<typename T, typename Functor>
 T rust_exception_boundary(Functor&& functor) noexcept {
     try {
-        if constexpr (requires(T t) { t.ok.value; }) {
-            return { .ok = { .has_value = true, .value = functor() } };
+        if constexpr (requires(T t) { t.ok; }) {
+            return { .is_ok = true, .ok = functor() };
         }
         else {
             functor();
-            return { .ok = { true } };
+            return { .is_ok = true };
         }
     }
     catch (std::exception const& e) {
         thread_local std::string ex_what{ e.what() };
-        return { .ok = { false }, .err = { ex_what.c_str() } };
+
+        // Fix vtable on exception
+        if constexpr (requires(T t) { t.ok.vtable; }) {
+            return {
+                .is_ok = { false },
+                .ok = {.vtable = {.release_vptr = [](Erased_t*) {}}},
+                .err = { ex_what.c_str() },
+            };
+        }
+
+        return { .is_ok = { false }, .err = { ex_what.c_str() } };
     }
     catch (...) {
         auto msg = "Uncaught exception at FFI boundary, aborting for safety.";
@@ -95,294 +166,312 @@ T rust_exception_boundary(Functor&& functor) noexcept {
     }
 }
 
-MEraEngine::MEraEngine() {
-    m_engine = new_engine();
+nlohmann::json make_jsonrpc(std::string_view method, nlohmann::json params, uint64_t id = 1) {
+    return {
+        { "jsonrpc", "2.0" },
+        { "method", method },
+        { "params", std::move(params) },
+        { "id", id },
+    };
 }
-MEraEngine::~MEraEngine() {
-    if (!m_engine) { return; }
-    delete_engine(m_engine);
+
+nlohmann::json unwrap_jsonrpc(std::string_view json) {
+    auto j = nlohmann::json::parse(json);
+    if (j.contains("error")) {
+        auto& err = j["error"];
+        throw MEraEngineException(err["message"].get<std::string>());
+    }
+    auto& jresult = j["result"];
+    if (jresult.contains("Err")) {
+        auto& err = jresult["Err"];
+        throw MEraEngineException(err.get<std::string>());
+    }
+    return std::move(jresult.contains("Ok") ? jresult["Ok"] : jresult);
 }
-void MEraEngine::install_sys_callback(std::unique_ptr<MEraEngineSysCallback> callback) {
-    VirtualPtr__Erased_ptr_MEraEngineSysCallbackInteropVTable_t c{
-        .ptr = (Erased_t*)callback.release(),
-        .vtable = {
-            .release_vptr = [](Erased_t* self) noexcept {
-                // Drop immediately (effectively executes `delete self;`)
-                std::unique_ptr<MEraEngineSysCallback>{ (MEraEngineSysCallback*)self };
-            },
-            .on_compile_error = [](Erased_t* self, EraScriptErrorInfoInterop_t const* info) noexcept {
-                EraScriptErrorInfo native_info{
-                    .filename = STR_VIEW(info->filename),
-                    .src_info = { info->src_info.line, info->src_info.column },
-                    .is_error = info->is_error,
-                    .msg = STR_VIEW(info->msg),
+
+std::optional<EraDiagnosticEntry> EraDiagnosticProvider::get_entry(uint64_t idx) const {
+    return from_rust_opt(mee_diag_get_entry(m_provider, idx)).transform([](auto entry) {
+        return EraDiagnosticEntry{
+            .level = (DiagnosticLevel)entry.level,
+            .filename = STR_VIEW(entry.filename),
+            .span = entry.span,
+            .message = STR_VIEW(entry.message),
+        };
+    });
+}
+
+uint64_t EraDiagnosticProvider::get_entry_count() const {
+    return mee_diag_get_entry_count(m_provider);
+}
+
+std::optional<DiagnosticResolveSrcSpanResult> EraDiagnosticProvider::resolve_src_span(std::string_view filename, SrcSpan span) const {
+    return from_rust_opt(mee_diag_resolve_src_span(m_provider, TO_RUST_STR(filename), span)).transform([](auto result) {
+        return DiagnosticResolveSrcSpanResult{
+            .snippet = rust_String(result.snippet).to_string(),
+            .offset = result.offset,
+            .loc = result.loc,
+            .len = result.len,
+        };
+    });
+}
+
+MEraEngineBuilder::MEraEngineBuilder(std::unique_ptr<MEraEngineSysCallback> callback) {
+    MEraEngineSysCallbackFfiVTable_t vtbl{
+        .release_vptr = [](Erased_t* self) noexcept {
+            delete (MEraEngineSysCallback*)self;
+        },
+        .on_error = [](Erased_t* self, DiagnosticProviderFfi_t provider) noexcept {
+            ((MEraEngineSysCallback*)self)->on_error(EraDiagnosticProvider{ provider });
+        },
+        .on_get_rand = [](Erased_t* self) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_get_rand();
+        },
+        .on_print = [](Erased_t* self, slice_ref_uint8_t content, uint8_t flags) noexcept {
+            ((MEraEngineSysCallback*)self)->on_print(STR_VIEW(content), (PrintExtendedFlags)flags);
+        },
+        .on_html_print = [](Erased_t* self, slice_ref_uint8_t content) noexcept {
+            ((MEraEngineSysCallback*)self)->on_html_print(STR_VIEW(content));
+        },
+        .on_wait = [](Erased_t* self, bool any_key, bool is_force) noexcept {
+            ((MEraEngineSysCallback*)self)->on_wait(any_key, is_force);
+        },
+        .on_twait = [](Erased_t* self, int64_t duration, bool is_force) noexcept {
+            ((MEraEngineSysCallback*)self)->on_twait(duration, is_force);
+        },
+        .on_input_int = [](Erased_t* self, RustOption_int64_t default_value, bool can_click, bool allow_skip) noexcept {
+            auto r = ((MEraEngineSysCallback*)self)->on_input_int(from_rust_type(default_value), can_click, allow_skip);
+            return to_rust_type<RustControlFlow_void_RustOption_int64_t>(r);
+        },
+        .on_input_str = [](Erased_t* self, slice_ref_uint8_t default_value, bool can_click, bool allow_skip) noexcept {
+            auto r = ((MEraEngineSysCallback*)self)->on_input_str(from_rust_opt(default_value), can_click, allow_skip);
+            return to_rust_type<RustControlFlow_void_char_const_ptr_t>(r);
+        },
+        .on_tinput_int = [](Erased_t* self, int64_t time_limit, int64_t default_value, bool show_prompt, slice_ref_uint8_t expiry_msg, bool can_click) noexcept {
+            auto r = ((MEraEngineSysCallback*)self)->on_tinput_int(time_limit, default_value, show_prompt, STR_VIEW(expiry_msg), can_click);
+            return to_rust_type<RustControlFlow_void_RustOption_int64_t>(r);
+        },
+        .on_tinput_str = [](Erased_t* self, int64_t time_limit, slice_ref_uint8_t default_value, bool show_prompt, slice_ref_uint8_t expiry_msg, bool can_click) noexcept {
+            auto r = ((MEraEngineSysCallback*)self)->on_tinput_str(time_limit, STR_VIEW(default_value), show_prompt, STR_VIEW(expiry_msg), can_click);
+            return to_rust_type<RustControlFlow_void_char_const_ptr_t>(r);
+        },
+        .on_oneinput_int = [](Erased_t* self, RustOption_int64_t default_value) noexcept {
+            auto r = ((MEraEngineSysCallback*)self)->on_oneinput_int(from_rust_type(default_value));
+            return to_rust_type<RustControlFlow_void_RustOption_int64_t>(r);
+        },
+        .on_oneinput_str = [](Erased_t* self, slice_ref_uint8_t default_value) noexcept {
+            auto r = ((MEraEngineSysCallback*)self)->on_oneinput_str(from_rust_type(default_value));
+            return to_rust_type<RustControlFlow_void_char_const_ptr_t>(r);
+        },
+        .on_toneinput_int = [](Erased_t* self, int64_t time_limit, int64_t default_value, bool show_prompt, slice_ref_uint8_t expiry_msg, bool can_click) noexcept {
+            auto r = ((MEraEngineSysCallback*)self)->on_toneinput_int(time_limit, default_value, show_prompt, STR_VIEW(expiry_msg), can_click);
+            return to_rust_type<RustControlFlow_void_RustOption_int64_t>(r);
+        },
+        .on_toneinput_str = [](Erased_t* self, int64_t time_limit, slice_ref_uint8_t default_value, bool show_prompt, slice_ref_uint8_t expiry_msg, bool can_click) noexcept {
+            auto r = ((MEraEngineSysCallback*)self)->on_toneinput_str(time_limit, STR_VIEW(default_value), show_prompt, STR_VIEW(expiry_msg), can_click);
+            return to_rust_type<RustControlFlow_void_char_const_ptr_t>(r);
+        },
+        .on_reuselastline = [](Erased_t* self, slice_ref_uint8_t content) noexcept {
+            ((MEraEngineSysCallback*)self)->on_reuselastline(STR_VIEW(content));
+        },
+        .on_clearline = [](Erased_t* self, int64_t count) noexcept {
+            ((MEraEngineSysCallback*)self)->on_clearline(count);
+        },
+        .on_print_button = [](Erased_t* self, slice_ref_uint8_t content, slice_ref_uint8_t value, uint8_t flags) noexcept {
+            ((MEraEngineSysCallback*)self)->on_print_button(STR_VIEW(content), STR_VIEW(value), (PrintExtendedFlags)flags);
+        },
+        .on_var_get_int = [](Erased_t* self, slice_ref_uint8_t name, size_t idx) noexcept {
+            return rust_exception_boundary<RustResult_int64_char_const_ptr_t>([&] {
+                return ((MEraEngineSysCallback*)self)->on_var_get_int(STR_VIEW(name), idx);
+            });
+        },
+        .on_var_get_str = [](Erased_t* self, slice_ref_uint8_t name, size_t idx) noexcept {
+            return rust_exception_boundary<RustResult_char_const_ptr_char_const_ptr_t>([&] {
+                return ((MEraEngineSysCallback*)self)->on_var_get_str(STR_VIEW(name), idx);
+            });
+        },
+        .on_var_set_int = [](Erased_t* self, slice_ref_uint8_t name, size_t idx, int64_t val) noexcept {
+            return rust_exception_boundary<RustResult_void_char_const_ptr_t>([&] {
+                return ((MEraEngineSysCallback*)self)->on_var_set_int(STR_VIEW(name), idx, val);
+            });
+        },
+        .on_var_set_str = [](Erased_t* self, slice_ref_uint8_t name, size_t idx, slice_ref_uint8_t val) noexcept {
+            return rust_exception_boundary<RustResult_void_char_const_ptr_t>([&] {
+                return ((MEraEngineSysCallback*)self)->on_var_set_str(STR_VIEW(name), idx, STR_VIEW(val));
+            });
+        },
+        .on_gcreate = [](Erased_t* self, int64_t gid, int64_t width, int64_t height) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_gcreate(gid, width, height);
+        },
+        .on_gcreatefromfile = [](Erased_t* self, int64_t gid, slice_ref_uint8_t path) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_gcreatefromfile(gid, STR_VIEW(path));
+        },
+        .on_gdispose = [](Erased_t* self, int64_t gid) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_gdispose(gid);
+        },
+        .on_gcreated = [](Erased_t* self, int64_t gid) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_gcreated(gid);
+        },
+        .on_gdrawsprite = [](Erased_t* self, int64_t gid, slice_ref_uint8_t sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const* color_matrix) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_gdrawsprite(gid, STR_VIEW(sprite_name), dest_x, dest_y, dest_width, dest_height, *color_matrix);
+        },
+        .on_gclear = [](Erased_t* self, int64_t gid, int64_t color) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_gclear(gid, color);
+        },
+        .on_spritecreate = [](Erased_t* self, slice_ref_uint8_t name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_spritecreate(STR_VIEW(name), gid, x, y, width, height);
+        },
+        .on_spritedispose = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_spritedispose(STR_VIEW(name));
+        },
+        .on_spritecreated = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_spritecreated(STR_VIEW(name));
+        },
+        .on_spriteanimecreate = [](Erased_t* self, slice_ref_uint8_t name, int64_t width, int64_t height) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_spriteanimecreate(STR_VIEW(name), width, height);
+        },
+        .on_spriteanimeaddframe = [](Erased_t* self, slice_ref_uint8_t name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height, int64_t offset_x, int64_t offset_y, int64_t delay) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_spriteanimeaddframe(STR_VIEW(name), gid, x, y, width, height, offset_x, offset_y, delay);
+        },
+        .on_spritewidth = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_spritewidth(STR_VIEW(name));
+        },
+        .on_spriteheight = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_spriteheight(STR_VIEW(name));
+        },
+        .on_open_host_file = [](Erased_t* self, slice_ref_uint8_t path, bool can_write) noexcept {
+            return rust_exception_boundary<RustResult_VirtualPtr__Erased_ptr_MEraEngineHostFileFfiVTable_char_const_ptr_t>([&] {
+                auto r = ((MEraEngineSysCallback*)self)->on_open_host_file(STR_VIEW(path), can_write);
+                MEraEngineHostFileFfiVTable_t vtable{
+                    .release_vptr = [](Erased_t* self) noexcept {
+                        delete (MEraEngineHostFile*)self;
+                    },
+                    .read = [](Erased_t* self, slice_mut_uint8_t buf) noexcept {
+                        return rust_exception_boundary<RustResult_uint64_char_const_ptr_t>([&] {
+                            return ((MEraEngineHostFile*)self)->read(TO_SPAN(buf));
+                        });
+                    },
+                    .write = [](Erased_t* self, slice_ref_uint8_t buf) noexcept {
+                        return rust_exception_boundary<RustResult_void_char_const_ptr_t>([&] {
+                            return ((MEraEngineHostFile*)self)->write(TO_SPAN(buf));
+                        });
+                    },
+                    .flush = [](Erased_t* self) noexcept {
+                        return rust_exception_boundary<RustResult_void_char_const_ptr_t>([&] {
+                            return ((MEraEngineHostFile*)self)->flush();
+                        });
+                    },
+                    .truncate = [](Erased_t* self) noexcept {
+                        return rust_exception_boundary<RustResult_void_char_const_ptr_t>([&] {
+                            return ((MEraEngineHostFile*)self)->truncate();
+                        });
+                    },
+                    .seek = [](Erased_t* self, int64_t pos, EraCompilerFileSeekMode_t mode) noexcept {
+                        return rust_exception_boundary<RustResult_uint64_char_const_ptr_t>([&] {
+                            return ((MEraEngineHostFile*)self)->seek(pos, (EraCompilerFileSeekMode)mode);
+                        });
+                    },
                 };
-                ((MEraEngineSysCallback*)self)->on_compile_error(native_info);
-            },
-            .on_execute_error = [](Erased_t* self, EraScriptErrorInfoInterop_t const* info) noexcept {
-                EraScriptErrorInfo native_info{
-                    .filename = STR_VIEW(info->filename),
-                    .src_info = { info->src_info.line, info->src_info.column },
-                    .is_error = info->is_error,
-                    .msg = STR_VIEW(info->msg),
+                return VirtualPtr__Erased_ptr_MEraEngineHostFileFfiVTable_t{
+                    .ptr = (Erased_t*)r.release(),
+                    .vtable = vtable,
                 };
-                ((MEraEngineSysCallback*)self)->on_execute_error(native_info);
-            },
-            .on_get_rand = [](Erased_t* self) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_get_rand();
-            },
-            .on_print = [](Erased_t* self, slice_ref_uint8_t content, uint8_t flags) noexcept {
-                ((MEraEngineSysCallback*)self)->on_print(STR_VIEW(content), (PrintExtendedFlags)flags);
-            },
-            .on_html_print = [](Erased_t* self, slice_ref_uint8_t content) noexcept {
-                ((MEraEngineSysCallback*)self)->on_html_print(STR_VIEW(content));
-            },
-            .on_wait = [](Erased_t* self, bool any_key, bool is_force) noexcept {
-                ((MEraEngineSysCallback*)self)->on_wait(any_key, is_force);
-            },
-            .on_twait = [](Erased_t* self, int64_t duration, bool is_force) noexcept {
-                ((MEraEngineSysCallback*)self)->on_twait(duration, is_force);
-            },
-            .on_input_int = [](Erased_t* self, FfiOption_int64_t default_value, bool can_click, bool allow_skip) noexcept {
-                auto r = ((MEraEngineSysCallback*)self)->on_input_int(from_rust_type(default_value), can_click, allow_skip);
-                return to_rust_type<FfiOption_int64_t>(r);
-            },
-            .on_input_str = [](Erased_t* self, slice_ref_uint8_t default_value, bool can_click, bool allow_skip) noexcept {
-                auto r = ((MEraEngineSysCallback*)self)->on_input_str(from_rust_opt(default_value), can_click, allow_skip);
-                return to_rust_type<char const*>(r);
-            },
-            .on_tinput_int = [](Erased_t* self, int64_t time_limit, int64_t default_value, bool show_prompt, slice_ref_uint8_t expiry_msg, bool can_click) noexcept {
-                auto r = ((MEraEngineSysCallback*)self)->on_tinput_int(time_limit, default_value, show_prompt, STR_VIEW(expiry_msg), can_click);
-                return to_rust_type<FfiOption_int64_t>(r);
-            },
-            .on_tinput_str = [](Erased_t* self, int64_t time_limit, slice_ref_uint8_t default_value, bool show_prompt, slice_ref_uint8_t expiry_msg, bool can_click) noexcept {
-                auto r = ((MEraEngineSysCallback*)self)->on_tinput_str(time_limit, STR_VIEW(default_value), show_prompt, STR_VIEW(expiry_msg), can_click);
-                return to_rust_type<char const*>(r);
-            },
-            .on_oneinput_int = [](Erased_t* self, FfiOption_int64_t default_value) noexcept {
-                auto r = ((MEraEngineSysCallback*)self)->on_oneinput_int(from_rust_type(default_value));
-                return to_rust_type<FfiOption_int64_t>(r);
-            },
-            .on_oneinput_str = [](Erased_t* self, slice_ref_uint8_t default_value) noexcept {
-                auto r = ((MEraEngineSysCallback*)self)->on_oneinput_str(from_rust_opt(default_value));
-                return to_rust_type<char const*>(r);
-            },
-            .on_toneinput_int = [](Erased_t* self, int64_t time_limit, int64_t default_value, bool show_prompt, slice_ref_uint8_t expiry_msg, bool can_click) noexcept {
-                auto r = ((MEraEngineSysCallback*)self)->on_toneinput_int(time_limit, default_value, show_prompt, STR_VIEW(expiry_msg), can_click);
-                return to_rust_type<FfiOption_int64_t>(r);
-            },
-            .on_toneinput_str = [](Erased_t* self, int64_t time_limit, slice_ref_uint8_t default_value, bool show_prompt, slice_ref_uint8_t expiry_msg, bool can_click) noexcept {
-                auto r = ((MEraEngineSysCallback*)self)->on_toneinput_str(time_limit, STR_VIEW(default_value), show_prompt, STR_VIEW(expiry_msg), can_click);
-                return to_rust_type<char const*>(r);
-            },
-            .on_reuselastline = [](Erased_t* self, slice_ref_uint8_t content) noexcept {
-                ((MEraEngineSysCallback*)self)->on_reuselastline(STR_VIEW(content));
-            },
-            .on_clearline = [](Erased_t* self, int64_t count) noexcept {
-                ((MEraEngineSysCallback*)self)->on_clearline(count);
-            },
-            .on_var_get_int = [](Erased_t* self, slice_ref_uint8_t name, uint32_t idx) noexcept {
-                return rust_exception_boundary<MEraEngineFfiResult_int64_t>([&] {
-                    return ((MEraEngineSysCallback*)self)->on_var_get_int(STR_VIEW(name), idx);
-                });
-            },
-            .on_var_get_str = [](Erased_t* self, slice_ref_uint8_t name, uint32_t idx) noexcept {
-                return rust_exception_boundary<MEraEngineFfiResult_char_const_ptr_t>([&] {
-                    return ((MEraEngineSysCallback*)self)->on_var_get_str(STR_VIEW(name), idx);
-                });
-            },
-            .on_var_set_int = [](Erased_t* self, slice_ref_uint8_t name, uint32_t idx, int64_t val) noexcept {
-                return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
-                    return ((MEraEngineSysCallback*)self)->on_var_set_int(STR_VIEW(name), idx, val);
-                });
-            },
-            .on_var_set_str = [](Erased_t* self, slice_ref_uint8_t name, uint32_t idx, slice_ref_uint8_t val) noexcept {
-                return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
-                    return ((MEraEngineSysCallback*)self)->on_var_set_str(STR_VIEW(name), idx, STR_VIEW(val));
-                });
-            },
-            .on_print_button = [](Erased_t* self, slice_ref_uint8_t content, slice_ref_uint8_t value, uint8_t flags) noexcept {
-                ((MEraEngineSysCallback*)self)->on_print_button(STR_VIEW(content), STR_VIEW(value), (PrintExtendedFlags)flags);
-            },
-            .on_gcreate = [](Erased_t* self, int64_t gid, int64_t width, int64_t height) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_gcreate(gid, width, height);
-            },
-            .on_gcreatefromfile = [](Erased_t* self, int64_t gid, slice_ref_uint8_t path) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_gcreatefromfile(gid, STR_VIEW(path));
-            },
-            .on_gdispose = [](Erased_t* self, int64_t gid) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_gdispose(gid);
-            },
-            .on_gcreated = [](Erased_t* self, int64_t gid) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_gcreated(gid);
-            },
-            .on_gdrawsprite = [](Erased_t* self, int64_t gid, slice_ref_uint8_t sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const* color_matrix) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_gdrawsprite(gid, STR_VIEW(sprite_name), dest_x, dest_y, dest_width, dest_height, *color_matrix);
-            },
-            .on_gclear = [](Erased_t* self, int64_t gid, int64_t color) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_gclear(gid, color);
-            },
-            .on_spritecreate = [](Erased_t* self, slice_ref_uint8_t name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_spritecreate(STR_VIEW(name), gid, x, y, width, height);
-            },
-            .on_spritedispose = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_spritedispose(STR_VIEW(name));
-            },
-            .on_spritecreated = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_spritecreated(STR_VIEW(name));
-            },
-            .on_spriteanimecreate = [](Erased_t* self, slice_ref_uint8_t name, int64_t width, int64_t height) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_spriteanimecreate(STR_VIEW(name), width, height);
-            },
-            .on_spriteanimeaddframe = [](Erased_t* self, slice_ref_uint8_t name, int64_t gid, int64_t x, int64_t y, Pair_int64_int64_t dimension, int64_t offset_x, int64_t offset_y, int64_t delay) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_spriteanimeaddframe(STR_VIEW(name), gid, x, y, dimension.a, dimension.b, offset_x, offset_y, delay);
-            },
-            .on_spritewidth = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_spritewidth(STR_VIEW(name));
-            },
-            .on_spriteheight = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_spriteheight(STR_VIEW(name));
-            },
-            .on_open_host_file = [](Erased_t* self, slice_ref_uint8_t path, bool can_write) noexcept {
-                auto r = rust_exception_boundary<MEraEngineFfiResult_VirtualPtr__Erased_ptr_MEraEngineHostFileInteropVTable_t>([&] {
-                    auto r = ((MEraEngineSysCallback*)self)->on_open_host_file(STR_VIEW(path), can_write);
-                    MEraEngineHostFileInteropVTable_t vtable{
-                        .release_vptr = [](Erased_t* self) noexcept {
-                            delete (MEraEngineHostFile*)self;
-                        },
-                        .read = [](Erased_t* self, slice_mut_uint8_t buf) noexcept {
-                            return rust_exception_boundary<MEraEngineFfiResult_uint64_t>([&] {
-                                return ((MEraEngineHostFile*)self)->read(TO_SPAN(buf));
-                            });
-                        },
-                        .write = [](Erased_t* self, slice_ref_uint8_t buf) noexcept {
-                            return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
-                                return ((MEraEngineHostFile*)self)->write(TO_SPAN(buf));
-                            });
-                        },
-                        .flush = [](Erased_t* self) noexcept {
-                            return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
-                                return ((MEraEngineHostFile*)self)->flush();
-                            });
-                        },
-                        .truncate = [](Erased_t* self) noexcept {
-                            return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
-                                return ((MEraEngineHostFile*)self)->truncate();
-                            });
-                        },
-                        .seek = [](Erased_t* self, int64_t pos, MEraEngineFileSeekMode_t mode) noexcept {
-                            return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
-                                return ((MEraEngineHostFile*)self)->seek(pos, (MEraEngineFileSeekMode)mode);
-                            });
-                        },
-                        .tell = [](Erased_t* self) noexcept {
-                            return rust_exception_boundary<MEraEngineFfiResult_uint64_t>([&] {
-                                return ((MEraEngineHostFile*)self)->tell();
-                            });
-                        },
-                    };
-                    return VirtualPtr__Erased_ptr_MEraEngineHostFileInteropVTable_t{
-                        .ptr = (Erased_t*)r.release(),
-                        .vtable = vtable,
-                    };
-                });
-                // Fix vtable on exception
-                if (!r.ok.has_value) {
-                    r.ok.value.vtable.release_vptr = [](Erased_t*) {};
-                }
-                return r;
-            },
-            .on_check_host_file_exists = [](Erased_t* self, slice_ref_uint8_t path) noexcept {
-                return rust_exception_boundary<MEraEngineFfiResult_bool_t>([&] {
-                    return ((MEraEngineSysCallback*)self)->on_check_host_file_exists(STR_VIEW(path));
-                });
-            },
-            .on_delete_host_file = [](Erased_t* self, slice_ref_uint8_t path) noexcept {
-                return rust_exception_boundary<MEraEngineFfiResult_void_t>([&] {
-                    // TODO: on_delete_host_file
-                    throw std::exception("not yet implemented");
-                });
-            },
-            .on_list_host_file = [](Erased_t* self, slice_ref_uint8_t path) noexcept {
-                auto r = rust_exception_boundary<MEraEngineFfiResult_VirtualPtr__Erased_ptr_MEraEngineHostFileListingInteropVTable_t>([&] {
-                    // TODO: on_list_host_file
-                    throw std::exception("not yet implemented");
-                    return VirtualPtr__Erased_ptr_MEraEngineHostFileListingInteropVTable_t{};
-                });
-                // Fix vtable on exception
-                if (!r.ok.has_value) {
-                    r.ok.value.vtable.release_vptr = [](Erased_t*) {};
-                }
-                return r;
-            },
-            // TODO: FFI callbacks...
-            .on_check_font = [](Erased_t* self, slice_ref_uint8_t font_name) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_check_font(STR_VIEW(font_name));
-            },
-            .on_get_host_time = [](Erased_t* self) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_get_host_time();
-            },
-            .on_get_config_int = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
-                return rust_exception_boundary<MEraEngineFfiResult_int64_t>([&] {
-                    return ((MEraEngineSysCallback*)self)->on_get_config_int(STR_VIEW(name));
-                });
-            },
-            .on_get_config_str = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
-                return rust_exception_boundary<MEraEngineFfiResult_char_const_ptr_t>([&] {
-                    return ((MEraEngineSysCallback*)self)->on_get_config_str(STR_VIEW(name));
-                });
-            },
-            .on_get_key_state = [](Erased_t* self, int64_t key_code) noexcept {
-                return ((MEraEngineSysCallback*)self)->on_get_key_state(key_code);
-            },
+            });
+        },
+        .on_check_host_file_exists = [](Erased_t* self, slice_ref_uint8_t path) noexcept {
+            return rust_exception_boundary<RustResult_bool_char_const_ptr_t>([&] {
+                return ((MEraEngineSysCallback*)self)->on_check_host_file_exists(STR_VIEW(path));
+            });
+        },
+        .on_delete_host_file = [](Erased_t* self, slice_ref_uint8_t path) noexcept {
+            return rust_exception_boundary<RustResult_void_char_const_ptr_t>([&] {
+                // TODO: Implement this
+                //return ((MEraEngineSysCallback*)self)->on_delete_host_file(STR_VIEW(path));
+                throw std::runtime_error("Not implemented");
+            });
+        },
+        .on_list_host_file = [](Erased_t* self, slice_ref_uint8_t path) noexcept {
+            return rust_exception_boundary<RustResult_VirtualPtr__Erased_ptr_MEraEngineHostFileListingFfiVTable_char_const_ptr_t>([&] {
+                // TODO: Implement this
+                //return ((MEraEngineSysCallback*)self)->on_list_host_file(STR_VIEW(path));
+                throw std::runtime_error("Not implemented");
+                return VirtualPtr__Erased_ptr_MEraEngineHostFileListingFfiVTable_t{};
+            });
+        },
+        .on_check_font = [](Erased_t* self, slice_ref_uint8_t font_name) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_check_font(STR_VIEW(font_name));
+        },
+        .on_get_host_time = [](Erased_t* self) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_get_host_time();
+        },
+        .on_get_config_int = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
+            return rust_exception_boundary<RustResult_int64_char_const_ptr_t>([&] {
+                return ((MEraEngineSysCallback*)self)->on_get_config_int(STR_VIEW(name));
+            });
+        },
+        .on_get_config_str = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
+            return rust_exception_boundary<RustResult_char_const_ptr_char_const_ptr_t>([&] {
+                return ((MEraEngineSysCallback*)self)->on_get_config_str(STR_VIEW(name));
+            });
+        },
+        .on_get_key_state = [](Erased_t* self, int64_t key_code) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_get_key_state(key_code);
         },
     };
-    engine_install_sys_callback(m_engine, c);
+    VirtualPtr__Erased_ptr_MEraEngineSysCallbackFfiVTable_t c{
+        .ptr = (Erased_t*)callback.release(),
+        .vtable = vtbl,
+    };
+    m_builder = mee_new_engine_builder(c);
 }
-void MEraEngine::load_csv(const char* filename, std::span<const uint8_t> content, EraCsvLoadKind kind) {
-    unwrap_rust_result(engine_load_csv(m_engine, filename, TO_RUST_SLICE(content), static_cast<EraCsvLoadKind_t>(kind)));
+
+MEraEngineBuilder::~MEraEngineBuilder() {
+    if (!m_builder) { return; }
+    mee_drop_engine_builder(m_builder);
 }
-void MEraEngine::load_erh(const char* filename, std::span<const uint8_t> content) {
-    unwrap_rust_result(engine_load_erh(m_engine, filename, TO_RUST_SLICE(content)));
+void MEraEngineBuilder::load_csv(const char* filename, std::span<const uint8_t> content, EraCsvLoadKind kind) {
+    unwrap_rust(mee_engine_builder_load_csv(m_builder, filename, TO_RUST_SLICE(content), static_cast<EraCsvLoadKind_t>(kind)));
 }
-void MEraEngine::load_erb(const char* filename, std::span<const uint8_t> content) {
-    unwrap_rust_result(engine_load_erb(m_engine, filename, TO_RUST_SLICE(content)));
+void MEraEngineBuilder::load_erh(const char* filename, std::span<const uint8_t> content) {
+    unwrap_rust(mee_engine_builder_load_erh(m_builder, filename, TO_RUST_SLICE(content)));
 }
-void MEraEngine::register_global_var(const char* name, bool is_string, uint32_t dimension, bool watch) {
-    unwrap_rust_result(engine_register_global_var(m_engine, name, is_string, dimension, watch));
+void MEraEngineBuilder::load_erb(const char* filename, std::span<const uint8_t> content) {
+    unwrap_rust(mee_engine_builder_load_erb(m_builder, filename, TO_RUST_SLICE(content)));
 }
-void MEraEngine::finialize_load_srcs() {
-    unwrap_rust_result(engine_finialize_load_srcs(m_engine));
+void MEraEngineBuilder::register_variable(const char* name, bool is_string, uint32_t dimension, bool watch) {
+    unwrap_rust(mee_engine_builder_register_variable(m_builder, name, is_string, dimension, watch));
 }
-bool MEraEngine::do_execution(_Atomic(bool)*stop_flag, uint64_t max_inst_cnt) {
-    return unwrap_rust_result(engine_do_execution(m_engine, reinterpret_cast<bool*>(stop_flag), max_inst_cnt));
+MEraEngine MEraEngineBuilder::build() {
+    auto builder = std::exchange(m_builder, nullptr);
+    return MEraEngine(unwrap_rust(mee_build_engine(builder)));
 }
-bool MEraEngine::get_is_halted() {
-    return engine_get_is_halted(m_engine);
+
+MEraEngine::~MEraEngine() {
+    if (!m_engine) { return; }
+    mee_drop_engine(m_engine);
 }
-void MEraEngine::reset_exec_to_ip(EraExecIpInfo ip) {
-    unwrap_rust_result(engine_reset_exec_to_ip(m_engine, ip));
+EraExecutionBreakReason MEraEngine::do_execution(_Atomic(bool)*run_flag, uint64_t max_inst_cnt) {
+    return (EraExecutionBreakReason)unwrap_rust(mee_engine_do_execution(m_engine, (bool*)run_flag, max_inst_cnt));
+}
+//bool MEraEngine::get_is_halted() {
+//    std::atomic_bool run_flag = true;
+//    return do_execution(&run_flag, 0) != ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
+//}
+void MEraEngine::reset_exec_to_ip(EraExecIp ip) {
+    do_rpc("reset_exec_to_ip", { { "ip", ip } });
 }
 EraFuncInfo MEraEngine::get_func_info(const char* name) {
-    return unwrap_rust_result(engine_get_func_info(m_engine, name));
+    return do_rpc("get_func_info", { { "name", name } }).get<EraFuncInfo>();
 }
-MEraEngineStackTrace MEraEngine::get_stack_trace() {
-    auto rust_stack_trace = unwrap_rust_result(engine_get_stack_trace(m_engine));
-    tenkai::cpp_utils::ScopeExit se_rust([&] {
-        delete_engine_stack_trace(rust_stack_trace);
-    });
-    MEraEngineStackTrace stack_trace;
-    for (auto const& rust_frame : TO_SPAN(rust_stack_trace.frames)) {
-        MEraEngineStackTraceFrame frame{
-            .file_name = STR_VIEW(rust_frame.file_name),
-            .func_name = STR_VIEW(rust_frame.func_name),
-            .ip = rust_frame.ip,
-            .src_info = { rust_frame.src_info.line, rust_frame.src_info.column },
-        };
-        stack_trace.frames.push_back(std::move(frame));
-    }
-    return stack_trace;
+EraEngineStackTrace MEraEngine::get_stack_trace() {
+    return do_rpc("get_stack_trace", {}).get<EraEngineStackTrace>();
 }
 std::string_view MEraEngine::get_version() {
-    return STR_VIEW(engine_get_version());
+    return STR_VIEW(mee_get_engine_version());
+}
+
+nlohmann::json MEraEngine::do_rpc(std::string_view method, nlohmann::json params) {
+    auto json = make_jsonrpc(method, std::move(params));
+    rust_String response{ mee_engine_do_rpc(m_engine, json.dump().c_str()) };
+    json.clear();
+    return unwrap_jsonrpc(response);
 }

@@ -8,7 +8,10 @@ use std::{
 };
 
 use bstr::ByteSlice;
-use cstree::{build::NodeCache, interning::Resolver};
+use cstree::{
+    build::NodeCache,
+    interning::{Interner, Resolver},
+};
 use either::Either;
 use hashbrown::{HashMap, HashSet};
 use indoc::indoc;
@@ -1534,12 +1537,18 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             // self.ctx.node_cache = NodeCache::from_interner(interner);
         }
 
-        // TODO: Handle watching variables
+        let mut vm_state = EraVirtualMachineState::new();
+        let mut vm = EraVirtualMachine::new(&mut self.ctx, &mut vm_state);
+
+        // Register watching variables
+        for var in self.watching_vars {
+            vm.add_trap_var(var.as_ref());
+        }
 
         Ok(MEraEngine {
             ctx: self.ctx,
             interner: self.interner,
-            vm_state: EraVirtualMachineState::new(),
+            vm_state,
         })
     }
 
@@ -1637,7 +1646,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
     }
 
     fn optimize_interner(&mut self) {
-        // SAFETY: Nope. It is NOT safe.
+        // UNSAFETY: It is NOT safe.
         unsafe {
             self.interner.optimize_lookup_unchecked();
         }
@@ -2462,6 +2471,38 @@ pub struct EraFuncInfo {
     pub ret_kind: ScalarValueKind,
 }
 
+impl EraFuncInfo {
+    pub fn from_with(x: &crate::types::EraFuncInfo, i: &impl Interner) -> Self {
+        EraFuncInfo {
+            name: i.resolve(x.name).to_owned(),
+            name_span: x.name_span,
+            frame_info: EraFuncFrameInfo {
+                args: x.frame_info.args.clone(),
+                vars: x
+                    .frame_info
+                    .vars
+                    .values()
+                    .map(|x| EraFuncFrameVarInfo {
+                        name: i.resolve(x.name).to_owned(),
+                        span: x.span,
+                        is_ref: x.is_ref,
+                        is_const: x.is_const,
+                        is_charadata: x.is_charadata,
+                        in_local_frame: x.in_local_frame,
+                        var_idx: x.var_idx,
+                        var_kind: x.var_kind,
+                        dims_cnt: x.dims_cnt,
+                    })
+                    .collect(),
+            },
+            chunk_idx: x.chunk_idx,
+            bc_offset: x.bc_offset,
+            bc_size: x.bc_size,
+            ret_kind: x.ret_kind,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EraEngineVersion {
     pub version_str: &'static str,
@@ -2478,14 +2519,33 @@ pub struct EraEngineStackTrace {
     pub frames: Vec<EraFuncExecFrame>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EraSourceInfo {
+    pub filename: String,
+    pub span: SrcSpan,
+}
+
 #[easy_jsonrpc::rpc]
 pub trait MEraEngineRpc {
     fn reset_exec_to_ip(&mut self, ip: EraExecIp) -> Result<(), MEraEngineError>;
     fn get_func_info(&self, name: &str) -> Option<EraFuncInfo>;
+    fn get_func_info_by_ip(&self, ip: EraExecIp) -> Option<EraFuncInfo>;
+    fn get_src_info_from_ip(&self, ip: EraExecIp) -> Option<EraSourceInfo>;
     fn get_stack_trace(&self) -> EraEngineStackTrace;
     fn get_file_source(&self, name: &str) -> Option<String>;
     fn get_version(&self) -> EraEngineVersion;
     fn get_mem_usage(&self) -> EraEngineMemoryUsage;
+    fn resolve_src_span(
+        &self,
+        filename: &str,
+        span: SrcSpan,
+    ) -> Option<DiagnosticResolveSrcSpanResult>;
+}
+
+impl<Callback> MEraEngine<Callback> {
+    pub fn get_version() -> &'static str {
+        "MEraEngine in MEraEmuCore v0.3.0"
+    }
 }
 
 impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
@@ -2527,32 +2587,21 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
             .func_entries
             .get(Ascii::new_str(name))
             .and_then(Option::as_ref)
-            .map(|x| EraFuncInfo {
-                name: i.resolve(x.name).to_owned(),
-                name_span: x.name_span,
-                frame_info: EraFuncFrameInfo {
-                    args: x.frame_info.args.clone(),
-                    vars: x
-                        .frame_info
-                        .vars
-                        .values()
-                        .map(|x| EraFuncFrameVarInfo {
-                            name: i.resolve(x.name).to_owned(),
-                            span: x.span,
-                            is_ref: x.is_ref,
-                            is_const: x.is_const,
-                            is_charadata: x.is_charadata,
-                            in_local_frame: x.in_local_frame,
-                            var_idx: x.var_idx,
-                            var_kind: x.var_kind,
-                            dims_cnt: x.dims_cnt,
-                        })
-                        .collect(),
-                },
-                chunk_idx: x.chunk_idx,
-                bc_offset: x.bc_offset,
-                bc_size: x.bc_size,
-                ret_kind: x.ret_kind,
+            .map(|x| EraFuncInfo::from_with(x, i))
+    }
+
+    fn get_func_info_by_ip(&self, ip: EraExecIp) -> Option<EraFuncInfo> {
+        self.ctx
+            .func_info_from_chunk_pos(ip.chunk as _, ip.offset as _)
+            .map(|x| EraFuncInfo::from_with(x, self.ctx.interner()))
+    }
+
+    fn get_src_info_from_ip(&self, ip: EraExecIp) -> Option<EraSourceInfo> {
+        self.ctx
+            .source_info_from_chunk_pos(ip.chunk as _, ip.offset as _)
+            .map(|(filename, span)| EraSourceInfo {
+                filename: filename.to_string(),
+                span,
             })
     }
 
@@ -2570,7 +2619,7 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
 
     fn get_version(&self) -> EraEngineVersion {
         EraEngineVersion {
-            version_str: "MEraEngine in MEraEmuCore v0.3.0",
+            version_str: MEraEngine::<Callback>::get_version(),
         }
     }
 
@@ -2579,5 +2628,13 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
             var_size: self.ctx.variables.iter().map(|x| x.val.mem_usage()).sum(),
             code_size: self.ctx.bc_chunks.iter().map(|x| x.mem_usage()).sum(),
         }
+    }
+
+    fn resolve_src_span(
+        &self,
+        filename: &str,
+        span: SrcSpan,
+    ) -> Option<DiagnosticResolveSrcSpanResult> {
+        self.ctx.resolve_src_span(filename, span)
     }
 }

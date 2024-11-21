@@ -111,7 +111,9 @@ impl SrcSpan {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive_ReprC]
+#[repr(C)]
 pub struct SrcLoc {
     /// The 1-based line number.
     pub line: u32,
@@ -894,6 +896,21 @@ impl<'i, Callback: EraCompilerCallback> EraCompilerCtx<'i, Callback> {
         diag.cancel();
     }
 
+    pub fn resolve_src_span(
+        &self,
+        filename: &str,
+        span: SrcSpan,
+    ) -> Option<DiagnosticResolveSrcSpanResult> {
+        // NOTE: No need to cancel since the diagnostic is empty.
+        let diag = Diagnostic::new();
+        let provider = DiagnosticProvider::new(
+            &diag,
+            Some(&self.source_map),
+            Some(self.node_cache.interner()),
+        );
+        provider.resolve_src_span(filename, span)
+    }
+
     pub fn interner(&self) -> &'i ThreadedTokenInterner {
         self.node_cache.interner()
     }
@@ -912,6 +929,20 @@ impl<'i, Callback: EraCompilerCallback> EraCompilerCtx<'i, Callback> {
 
     pub fn resolve_str(&self, key: TokenKey) -> &'i str {
         self.interner().resolve(key)
+    }
+
+    pub fn source_info_from_chunk_pos(
+        &self,
+        chunk_idx: usize,
+        bc_offset: usize,
+    ) -> Option<(&ArcStr, SrcSpan)> {
+        let chunks = self.bc_chunks.as_ref();
+        if chunk_idx >= chunks.len() {
+            return None;
+        }
+        let chunk = &chunks[chunk_idx];
+        let src_span = chunk.lookup_src(bc_offset)?;
+        Some((&chunk.name, src_span))
     }
 
     pub fn func_info_from_chunk_pos(
@@ -1571,6 +1602,7 @@ impl<'a, 'src> DiagnosticProvider<'a, 'src> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticResolveSrcSpanResult {
     /// Single line of source code containing the span.
     pub snippet: String,
@@ -1872,6 +1904,7 @@ impl ArrStrValue {
     }
 }
 
+#[derive_ReprC]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, Serialize, Deserialize)]
 pub enum ValueKind {
@@ -2649,6 +2682,8 @@ impl ScalarValue {
     }
 }
 
+#[derive_ReprC]
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, Serialize, Deserialize)]
 pub enum ScalarValueKind {
     Int,
@@ -3143,7 +3178,7 @@ pub enum EraExtBytecode1 {
 }
 
 /// Strongly typed version of Era bytecode. All integer values are encoded in platform-endian.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum EraBytecodeKind {
     FailWithMsg,
     DebugBreak,

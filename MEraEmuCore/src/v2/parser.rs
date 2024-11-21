@@ -3428,6 +3428,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     }
 
     fn stmt_call_part(&mut self, is_form: bool) -> (EraNodeRef, EraNodeRef) {
+        self.o.l.skip_whitespace(Mode::Normal);
         let func = if is_form {
             self.call_nameform()
         } else {

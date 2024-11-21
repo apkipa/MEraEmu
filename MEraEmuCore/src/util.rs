@@ -557,8 +557,8 @@ pub fn swap_slice_with_stride<T>(data: &mut [T], stride: usize, i: usize, j: usi
     let (i, j) = (i * stride, j * stride);
     {
         // Bounds check
-        &data[i..][..stride];
-        &data[j..][..stride];
+        _ = &data[i..][..stride];
+        _ = &data[j..][..stride];
     }
     unsafe {
         let slice1 = std::ptr::addr_of_mut!(data[i]);

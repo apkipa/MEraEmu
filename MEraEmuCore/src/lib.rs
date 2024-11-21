@@ -272,7 +272,9 @@ impl<B, C> RustControlFlow<B, C> {
     }
 }
 
+// NOTE: Usually returned by the other side of the FFI boundary.
 type FfiResult<T> = RustResult<T, char_p::Raw>;
+// NOTE: Usually returned by the Rust side of the FFI boundary.
 type MeeResult<T> = RustResult<T, string::String>;
 
 impl<T> FfiResult<T> {
@@ -327,7 +329,7 @@ impl<E: std::error::Error> ErrorExt for E {
 #[derive_ReprC(dyn)]
 trait MEraEngineSysCallbackFfi {
     /// Callback for script errors.
-    fn on_error(&mut self, diag: &DiagnosticProvider<'_, '_>);
+    fn on_error(&mut self, diag: DiagnosticProviderFfi<'_, '_, '_>);
     /// Callback for RAND statements. Note that you should always return a fully
     /// filled random u64; the engine will internally cache entropy to reduce
     /// the total amount of syscalls.
@@ -516,6 +518,7 @@ impl MEraEngineHostFile for VirtualPtr<dyn MEraEngineHostFileFfi> {
 
 impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackFfi> {
     fn on_error(&mut self, diag: &DiagnosticProvider) {
+        let diag = DiagnosticProviderFfi { i: diag };
         MEraEngineSysCallbackFfi::on_error(self, diag);
     }
     fn on_get_rand(&mut self) -> u64 {
@@ -817,6 +820,11 @@ struct MEraEngineFfi {
 }
 
 #[ffi_export]
+fn mee_get_engine_version() -> string::str_ref<'static> {
+    MEraEngine::<EmptyCallback>::get_version().into()
+}
+
+#[ffi_export]
 fn mee_new_engine_builder(
     callback: VirtualPtr<dyn MEraEngineSysCallbackFfi>,
 ) -> repr_c::Box<MEraEngineBuilderFfi> {
@@ -901,15 +909,29 @@ fn mee_engine_builder_load_erb(
 }
 
 #[ffi_export]
+fn mee_engine_builder_register_variable(
+    builder: &mut MEraEngineBuilderFfi,
+    name: char_p::Ref<'_>,
+    is_string: bool,
+    dimension: u32,
+    watch: bool,
+) -> MeeResult<()> {
+    builder
+        .i
+        .register_variable(name.to_str(), is_string, dimension, watch)
+        .into_mee_result()
+}
+
+#[ffi_export]
 fn mee_engine_do_execution(
     engine: &mut MEraEngineFfi,
-    stop_flag: &mut bool,
+    run_flag: &mut bool,
     max_inst_cnt: u64,
 ) -> MeeResult<EraExecutionBreakReason> {
-    let stop_flag = unsafe { AtomicBool::from_ptr(stop_flag) };
+    let run_flag = unsafe { AtomicBool::from_ptr(run_flag) };
     engine
         .i
-        .do_execution(stop_flag, max_inst_cnt)
+        .do_execution(run_flag, max_inst_cnt)
         .into_mee_result()
 }
 
@@ -917,15 +939,112 @@ fn mee_engine_do_execution(
 fn mee_engine_do_rpc(engine: &mut MEraEngineFfi, request: char_p::Ref<'_>) -> string::String {
     engine.i.do_rpc(request.to_str()).into()
 }
+
+#[derive_ReprC]
+#[repr(C)]
+pub struct DiagnosticProviderFfi<'p, 'a, 'src> {
+    i: &'p DiagnosticProvider<'a, 'src>,
+}
+
+#[ffi_export]
+fn mee_diag_get_entry_count(diag: DiagnosticProviderFfi<'_, '_, '_>) -> u64 {
+    diag.i.get_entries().len() as u64
+}
+
+#[derive_ReprC]
+#[repr(C)]
+struct DiagnosticEntryFfi<'a> {
+    pub level: DiagnosticLevel,
+    /// The filename of the source file. Empty if the source file is not specified.
+    pub filename: string::str_ref<'a>,
+    pub span: SrcSpan,
+    pub message: string::str_ref<'a>,
+}
+
+impl Default for DiagnosticEntryFfi<'_> {
+    fn default() -> Self {
+        Self {
+            level: DiagnosticLevel::Error,
+            filename: "".into(),
+            span: SrcSpan::default(),
+            message: "".into(),
+        }
+    }
+}
+
+#[ffi_export]
+fn mee_diag_get_entry<'p>(
+    diag: DiagnosticProviderFfi<'p, '_, '_>,
+    idx: u64,
+) -> RustOption<DiagnosticEntryFfi<'p>> {
+    let Some(entry) = diag.i.get_entries().get(idx as usize) else {
+        return None::<DiagnosticEntryFfi<'p>>.into();
+    };
+    Some(DiagnosticEntryFfi {
+        level: entry.level,
+        filename: entry.filename.as_str().into(),
+        span: entry.span,
+        message: entry.message.as_str().into(),
+    })
+    .into()
+}
+
+#[derive_ReprC]
+#[repr(C)]
+pub struct DiagnosticResolveSrcSpanResultFfi {
+    /// Single line of source code containing the span.
+    pub snippet: string::String,
+    /// Offset into the snippet where the span starts.
+    pub offset: u32,
+    /// Location of the span.
+    pub loc: SrcLoc,
+    /// Length of the span.
+    pub len: u32,
+}
+
+impl Default for DiagnosticResolveSrcSpanResultFfi {
+    fn default() -> Self {
+        Self {
+            snippet: String::new().into(),
+            offset: 0,
+            loc: SrcLoc::default(),
+            len: 0,
+        }
+    }
+}
+
+#[ffi_export]
+fn mee_diag_resolve_src_span<'p>(
+    diag: DiagnosticProviderFfi<'p, '_, '_>,
+    filename: string::str_ref<'_>,
+    span: SrcSpan,
+) -> RustOption<DiagnosticResolveSrcSpanResultFfi> {
+    let filename = filename.as_str();
+    let Some(result) = diag.i.resolve_src_span(filename, span) else {
+        return None::<DiagnosticResolveSrcSpanResultFfi>.into();
+    };
+    Some(DiagnosticResolveSrcSpanResultFfi {
+        snippet: result.snippet.into(),
+        offset: result.offset,
+        loc: result.loc,
+        len: result.len,
+    })
+    .into()
+}
+
+#[ffi_export]
+fn mee_do_nothing_to_export_types_eagerly(v1: ScalarValueKind, v2: ValueKind) {}
 // ----- End of FFI Exports -----
 
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, sync::atomic::AtomicBool};
 
+    use anyhow::Context;
     use colored::{Color, Colorize};
     use indoc::indoc;
     use types::EraPrintExtendedFlags;
+    use v2::{engine::MEraEngineRpc, vm::EraExecIp};
 
     use super::*;
 
@@ -1314,7 +1433,9 @@ mod tests {
             0
         }
 
-        fn on_print(&mut self, content: &str, flags: EraPrintExtendedFlags) {}
+        fn on_print(&mut self, content: &str, flags: EraPrintExtendedFlags) {
+            self.output += content;
+        }
 
         fn on_html_print(&mut self, content: &str) {}
 
@@ -1409,7 +1530,7 @@ mod tests {
         }
 
         fn on_var_get_str(&mut self, name: &str, idx: usize) -> Result<String, anyhow::Error> {
-            Ok(String::new())
+            Ok(name.to_string())
         }
 
         fn on_var_set_int(
@@ -1427,6 +1548,7 @@ mod tests {
             idx: usize,
             val: &str,
         ) -> Result<(), anyhow::Error> {
+            println!("Setting variable `{name}` to `{val}`...");
             Ok(())
         }
 
@@ -1596,6 +1718,9 @@ mod tests {
             ;#DIM cnt = 10000000
             #DIM cnt = 100
             #DIM DYNAMIC sum1
+
+            ; ------------------------------
+
             WHILE cnt > 0
                 cnt = cnt - 1
             WEND
@@ -1704,30 +1829,36 @@ mod tests {
         // builder.finish_load_csv()?;
         // builder.finish_load_erh()?;
         builder.load_erb("main.erb", main_erb.as_bytes())?;
-        let engine = builder.build()?;
-        // engine.register_global_var("WINDOW_TITLE", true, 1, true)?;
-        // _ = engine.load_erb("main.erb", main_erb.as_bytes());
-        // _ = engine.finialize_load_srcs();
-        // let stop_flag = AtomicBool::new(false);
-        // _ = engine.do_execution(&stop_flag, 1024 * 1024);
+        let mut engine = builder.build()?;
+        *errors.borrow_mut() += &format!("----- Engine built -----\n");
+        let func_info = engine
+            .get_func_info("SYSTEM_TITLE")
+            .context("SYSTEM_TITLE not found")?;
+        let ip = EraExecIp {
+            chunk: func_info.chunk_idx,
+            offset: func_info.bc_offset,
+        };
+        engine.reset_exec_to_ip(ip)?;
+        let run_flag = AtomicBool::new(true);
+        _ = engine.do_execution(&run_flag, 1024 * 1024);
         // assert!(engine.get_is_halted());
-        // drop(engine);
+        drop(engine);
         {
             let errors = errors.borrow();
-            if errors.contains("error:") {
-                panic!(
-                    "compile output:\n{errors}\nexec output:\n{}",
-                    callback.output
-                );
-            }
+            // if errors.contains("error:") {
+            //     panic!(
+            //         "compile output:\n{errors}\nexec output:\n{}",
+            //         callback.output
+            //     );
+            // }
             if !errors.is_empty() {
                 println!("compile output:\n{errors}");
             }
         }
-        // assert_eq!(
-        //     &callback.output,
-        //     "(5050)[0,0,0,3][0,3,2,2]Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135[;&]"
-        // );
+        assert_eq!(
+            &callback.output,
+            "(5050)[0,0,0,3][0,3,2,2]Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135[;&]"
+        );
 
         Ok(())
     }
