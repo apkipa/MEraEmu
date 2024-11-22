@@ -492,22 +492,25 @@ impl<Callback: EraCompilerCallback> EraVmExecSite<'_, '_, '_, Callback> {
 impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     /// Retrieves the current function being executed.
     pub fn get_current_function(&self) -> Option<&EraFuncInfo<'i>> {
-        let cur_chunk_idx = self.cur_frame.ip.chunk as usize;
+        let cur_ip = self.cur_frame.ip;
         self.ctx
-            .func_entries
-            .get_index(cur_chunk_idx)
-            .and_then(|(_, v)| v.as_ref())
+            .func_info_from_chunk_pos(cur_ip.chunk as _, cur_ip.offset as _)
     }
 
     /// Retrieves a variable in the current execution scope.
     pub fn get_var_by_name(&self, name: &str) -> Option<&Value> {
         let cur_func = self.get_current_function()?;
-        let var = cur_func.frame_info.vars.get(Ascii::new_str(name))?;
-        let idx = var.var_idx as usize;
-        if var.in_local_frame {
-            self.stack.get(idx)
+        if let Some(var) = cur_func.frame_info.vars.get(Ascii::new_str(name)) {
+            let idx = var.var_idx as usize;
+            if var.in_local_frame {
+                self.stack.get(idx)
+            } else {
+                self.ctx.variables.get_var_by_idx(idx)
+            }
+        } else if let Some(var) = self.ctx.variables.get_var(name) {
+            Some(var)
         } else {
-            self.ctx.variables.get_var_by_idx(idx)
+            None
         }
     }
 
@@ -697,7 +700,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
             //     .cur_chunk
             //     .lookup_src(s.cur_frame.ip.offset as usize)
             //     .unwrap_or_default();
-            let Some(inst) = EraBytecodeKind::from_bytes(bc_area) else {
+            let Some((inst, inst_len)) = EraBytecodeKind::with_len_from_bytes(bc_area) else {
                 let mut diag = Diagnostic::new();
                 diag.span_err(
                     s.cur_filename(),
@@ -707,10 +710,10 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                 s.ctx.emit_diag(diag);
                 break EraExecutionBreakReason::IllegalInstruction;
             };
-            let mut ip_delta = inst.bytes_len() as i32;
+            let mut ip_delta = inst_len as i32;
 
-            // dbg!((s.cur_frame.ip.offset, inst));
             // dbg!(&s.stack);
+            // dbg!((s.cur_frame.ip.offset, inst));
 
             macro_rules! unpack_one_arg {
                 ($var:ident:i) => {
@@ -1144,7 +1147,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                                         processed_args.push(val.clone());
                                     }
                                     ArgPackKind::Empty => {
-                                        let val = param.default_value.as_int().unwrap();
+                                        let val = param.default_value.coerce_as_int().unwrap();
                                         processed_args.push(Value::new_int(val));
                                     }
                                     ArgPackKind::ArrIdx(arr, idx) => {
@@ -1184,7 +1187,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                                         processed_args.push(val.clone());
                                     }
                                     ArgPackKind::Empty => {
-                                        let val = param.default_value.as_str().unwrap();
+                                        let val = param.default_value.coerce_as_str().unwrap();
                                         processed_args.push(Value::new_str(val.into()));
                                     }
                                     ArgPackKind::ArrIdx(arr, idx) => {
@@ -1874,8 +1877,15 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                                 diag.span_err(
                                     s.cur_filename(),
                                     s.cur_bc_span(),
-                                    "array index out of bounds",
+                                    format!("array index `{idx}` out of bounds"),
                                 );
+                                if let Some(arr) = s.get_variable_name_from_ptr(arr_ptr) {
+                                    diag.span_note(
+                                        s.cur_filename(),
+                                        s.cur_bc_span(),
+                                        format!("while reading from array `{}`", arr),
+                                    );
+                                }
                                 s.ctx.emit_diag(diag);
                                 break EraExecutionBreakReason::IllegalArguments;
                             };
@@ -1939,8 +1949,15 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                                 diag.span_err(
                                     s.cur_filename(),
                                     s.cur_bc_span(),
-                                    "array index out of bounds",
+                                    format!("array index `{idx}` out of bounds"),
                                 );
+                                if let Some(arr) = s.get_variable_name_from_ptr(arr_ptr) {
+                                    diag.span_note(
+                                        s.cur_filename(),
+                                        s.cur_bc_span(),
+                                        format!("while reading from array `{}`", arr),
+                                    );
+                                }
                                 s.ctx.emit_diag(diag);
                                 break EraExecutionBreakReason::IllegalArguments;
                             };
@@ -2021,13 +2038,13 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                                 diag.span_err(
                                     s.cur_filename(),
                                     s.cur_bc_span(),
-                                    "array index out of bounds",
+                                    format!("array index `{idx}` out of bounds"),
                                 );
                                 if let Some(arr) = s.get_variable_name_from_ptr(arr_ptr) {
                                     diag.span_note(
                                         s.cur_filename(),
                                         s.cur_bc_span(),
-                                        format!("while assigning to array `{}`", arr),
+                                        format!("while writing to array `{}`", arr),
                                     );
                                 }
                                 s.ctx.emit_diag(diag);
@@ -2092,13 +2109,13 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                                 diag.span_err(
                                     s.cur_filename(),
                                     s.cur_bc_span(),
-                                    "array index out of bounds",
+                                    format!("array index `{idx}` out of bounds"),
                                 );
                                 if let Some(arr) = s.get_variable_name_from_ptr(arr_ptr) {
                                     diag.span_note(
                                         s.cur_filename(),
                                         s.cur_bc_span(),
-                                        format!("while assigning to array `{}`", arr),
+                                        format!("while writing to array `{}`", arr),
                                     );
                                 }
                                 s.ctx.emit_diag(diag);
@@ -2288,7 +2305,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                     let sview = view_stack_or_bail!();
                     let [val] = sview.as_ref();
                     unpack_args!(val:s);
-                    let Some(result) = routines::parse_int_literal(val.as_bytes()) else {
+                    let Some(result) = routines::parse_int_literal_with_sign(val.as_bytes()) else {
                         let msg = format!("failed to parse integer from string: {}", val);
                         let mut diag = Diagnostic::new();
                         diag.span_err(s.cur_filename(), s.cur_bc_span(), msg);
@@ -2978,8 +2995,18 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                     s.ctx.callback.on_html_print(html);
                     sview.replace([]);
                 }
+                Bc::PrintButton { flags } => {
+                    let sview = view_stack_or_bail!();
+                    let [content, value] = sview.as_ref();
+                    unpack_args!(content:s, value:s);
+                    s.ctx.callback.on_print_button(content, value, flags);
+                    sview.replace([]);
+                }
                 Bc::PrintImg | Bc::PrintImg4 => {
                     anyhow::bail!("PrintImg is not yet implemented");
+                }
+                Bc::SplitString => {
+                    do_intrinsic!(IntrinsicKind::SplitString);
                 }
                 Bc::GCreate => {
                     let sview = view_stack_or_bail!();
@@ -3423,7 +3450,13 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                 }
                 Bc::SaveData => {
                     // TODO: Bc::SaveData
-                    anyhow::bail!("SaveData not yet implemented");
+                    let mut diag = Diagnostic::new();
+                    diag.span_err(
+                        s.cur_filename(),
+                        s.cur_bc_span(),
+                        "SaveData not yet implemented",
+                    );
+                    s.ctx.emit_diag(diag);
                 }
                 Bc::CheckData => {
                     let sv = view_stack_or_bail!();

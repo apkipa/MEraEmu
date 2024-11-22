@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 #include <stdatomic.h>
+#include <optional>
 #include <variant>
 
 #include "ffi/MEraEmuCore.rust.h"
@@ -199,6 +200,17 @@ struct EraFuncInfo {
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraFuncInfo, name, name_span, frame_info, chunk_idx, bc_offset, bc_size, ret_kind);
 
+struct EraSourceInfo {
+    std::string filename;
+    SrcSpan span;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraSourceInfo, filename, span);
+
+struct EraChunkInfo {
+    std::string name;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraChunkInfo, name);
+
 struct DiagnosticResolveSrcSpanResult {
     std::string snippet;
     uint32_t offset;
@@ -308,10 +320,16 @@ struct MEraEngine {
     EraExecutionBreakReason do_execution(_Atomic(bool)*run_flag, uint64_t max_inst_cnt);
     //bool get_is_halted();
     void reset_exec_to_ip(EraExecIp ip);
-    EraFuncInfo get_func_info(const char* name);
+    std::optional<EraFuncInfo> get_func_info(const char* name);
+    std::optional<EraFuncInfo> get_func_info_by_ip(EraExecIp ip);
+    std::optional<EraSourceInfo> get_src_info_from_ip(EraExecIp ip);
+    std::optional<EraChunkInfo> get_chunk_info(uint32_t idx);
     EraEngineStackTrace get_stack_trace();
+    std::optional<std::string> get_file_source(std::string_view name);
     static std::string_view get_version();
-    nlohmann::json do_rpc(std::string_view method, nlohmann::json params);
+    std::optional<DiagnosticResolveSrcSpanResult> resolve_src_span(std::string_view filename, SrcSpan span) const;
+
+    nlohmann::json do_rpc(std::string_view method, nlohmann::json params) const;
 
 private:
     friend struct MEraEngineBuilder;
@@ -341,6 +359,8 @@ struct MEraEngineBuilder {
     void load_csv(const char* filename, std::span<const uint8_t> content, EraCsvLoadKind kind);
     void load_erh(const char* filename, std::span<const uint8_t> content);
     void load_erb(const char* filename, std::span<const uint8_t> content);
+    void finish_load_csv();
+    void finish_load_erh();
     void register_variable(const char* name, bool is_string, uint32_t dimension, bool watch);
     MEraEngine build();
 

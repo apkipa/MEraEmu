@@ -444,16 +444,21 @@ namespace winrt::MEraEmuWin::implementation {
                 auto span = entry.span;
                 auto message = to_hstring(entry.message);
                 auto msg_clr = color_from_diagnostic_level(level);
+                if (level == DIAGNOSTIC_LEVEL_ERROR) {
+                    m_sd->has_execution_error = true;
+                }
                 if (auto resolved_opt = provider.resolve_src_span(entry.filename, span)) {
                     auto& resolved = *resolved_opt;
                     // Convert 0-based to 1-based
                     resolved.loc.col += 1;
 
-                    auto final_msg = format(L"{}({},{}): {}: {}",
+                    // TODO: Also print code snippet
+                    auto final_msg = format(L"{}({},{}): {}: {}\nSnippet: {}",
                         filename,
                         resolved.loc.line, resolved.loc.col,
                         to_hstring(level),
-                        message
+                        message,
+                        to_hstring(resolved.snippet)
                     );
                     m_sd->queue_ui_work([=, sd = m_sd] {
                         auto old_clr = sd->ui_ctrl->EngineForeColor();
@@ -465,7 +470,6 @@ namespace winrt::MEraEmuWin::implementation {
                         );
                         sd->ui_ctrl->EngineForeColor(old_clr);
                     });
-                    // TODO: Also print code snippet
                 }
                 else {
                     auto final_msg = format(L"{}(<failed to resolve SrcSpan({}, {})>): {}: {}",
@@ -1402,7 +1406,7 @@ namespace winrt::MEraEmuWin::implementation {
                 auto return_to_title = [&] {
                     EraFuncInfo func_info;
                     try {
-                        func_info = engine.get_func_info("SYSPROC_BEGIN_TITLE");
+                        func_info = engine.get_func_info("SYSPROC_BEGIN_TITLE").value();
                     }
                     // Ignore if function does not exist
                     catch (...) { return; }
@@ -1506,6 +1510,7 @@ namespace winrt::MEraEmuWin::implementation {
                     for (auto& csv : chara_csvs) {
                         load_csv(csv, ERA_CSV_LOAD_KIND_CHARA_);
                     }
+                    builder.finish_load_csv();
 
                     auto try_handle_thread_event = [&] {
                         if (sd->engine_run_flag.load(std::memory_order_acquire)) { return; }
@@ -1531,6 +1536,7 @@ namespace winrt::MEraEmuWin::implementation {
                         auto [data, size] = read_utf8_file(erh);
                         builder.load_erh(to_string(erh.c_str()).c_str(), { data.get(), size });
                     }
+                    builder.finish_load_erh();
                     for (auto& erb : erbs) {
                         if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
                         try_handle_thread_event();
@@ -1573,20 +1579,25 @@ namespace winrt::MEraEmuWin::implementation {
                         };
                         std::vector<SrcData> print_msgs;
                         auto stack_trace = engine.get_stack_trace();
-                        for (const auto& frame : stack_trace.frames) {
-                            // TODO: Stack trace
-                            /*auto path = to_hstring(frame.file_name);
-                            auto msg = winrt::format(L"  {}({},{}):{}",
+                        for (const auto& frame : stack_trace.frames | std::views::reverse) {
+                            auto ip = frame.ip;
+                            auto func_info = engine.get_func_info_by_ip(ip).value();
+                            auto chunk_info = engine.get_chunk_info(func_info.chunk_idx).value();
+                            auto src_info = engine.get_src_info_from_ip(ip).value();
+                            auto path = to_hstring(src_info.filename);
+                            auto resolved = engine.resolve_src_span(src_info.filename, src_info.span).value();
+                            auto msg = format(L"  {}({},{}):{}\nSnippet: {}",
                                 path,
-                                frame.src_info.line,
-                                frame.src_info.column,
-                                to_hstring(frame.func_name)
+                                resolved.loc.line,
+                                resolved.loc.col,
+                                to_hstring(func_info.name),
+                                to_hstring(resolved.snippet)
                             );
                             print_msgs.emplace_back(
                                 path,
-                                frame.src_info.line, frame.src_info.column,
+                                resolved.loc.line, resolved.loc.col,
                                 std::move(msg)
-                            );*/
+                            );
                         }
                         sd->queue_ui_work([sd, msgs = std::move(print_msgs)] {
                             sd->ui_ctrl->SetSkipDisplay(0);

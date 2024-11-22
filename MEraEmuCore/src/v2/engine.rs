@@ -2525,12 +2525,18 @@ pub struct EraSourceInfo {
     pub span: SrcSpan,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EraChunkInfo {
+    pub name: String,
+}
+
 #[easy_jsonrpc::rpc]
 pub trait MEraEngineRpc {
     fn reset_exec_to_ip(&mut self, ip: EraExecIp) -> Result<(), MEraEngineError>;
     fn get_func_info(&self, name: &str) -> Option<EraFuncInfo>;
     fn get_func_info_by_ip(&self, ip: EraExecIp) -> Option<EraFuncInfo>;
     fn get_src_info_from_ip(&self, ip: EraExecIp) -> Option<EraSourceInfo>;
+    fn get_chunk_info(&self, idx: u32) -> Option<EraChunkInfo>;
     fn get_stack_trace(&self) -> EraEngineStackTrace;
     fn get_file_source(&self, name: &str) -> Option<String>;
     fn get_version(&self) -> EraEngineVersion;
@@ -2603,6 +2609,12 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
                 filename: filename.to_string(),
                 span,
             })
+    }
+
+    fn get_chunk_info(&self, idx: u32) -> Option<EraChunkInfo> {
+        self.ctx.bc_chunks.get(idx as usize).map(|x| EraChunkInfo {
+            name: x.name.to_string(),
+        })
     }
 
     fn get_stack_trace(&self) -> EraEngineStackTrace {

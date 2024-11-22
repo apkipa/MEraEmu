@@ -437,6 +437,12 @@ void MEraEngineBuilder::load_erh(const char* filename, std::span<const uint8_t> 
 void MEraEngineBuilder::load_erb(const char* filename, std::span<const uint8_t> content) {
     unwrap_rust(mee_engine_builder_load_erb(m_builder, filename, TO_RUST_SLICE(content)));
 }
+void MEraEngineBuilder::finish_load_csv() {
+    unwrap_rust(mee_engine_builder_finish_load_csv(m_builder));
+}
+void MEraEngineBuilder::finish_load_erh() {
+    unwrap_rust(mee_engine_builder_finish_load_erh(m_builder));
+}
 void MEraEngineBuilder::register_variable(const char* name, bool is_string, uint32_t dimension, bool watch) {
     unwrap_rust(mee_engine_builder_register_variable(m_builder, name, is_string, dimension, watch));
 }
@@ -459,17 +465,56 @@ EraExecutionBreakReason MEraEngine::do_execution(_Atomic(bool)*run_flag, uint64_
 void MEraEngine::reset_exec_to_ip(EraExecIp ip) {
     do_rpc("reset_exec_to_ip", { { "ip", ip } });
 }
-EraFuncInfo MEraEngine::get_func_info(const char* name) {
-    return do_rpc("get_func_info", { { "name", name } }).get<EraFuncInfo>();
+std::optional<EraFuncInfo> MEraEngine::get_func_info(const char* name) {
+    auto r = do_rpc("get_func_info", { { "name", name } });
+    if (r.is_null()) {
+        return std::nullopt;
+    }
+    return r.get<EraFuncInfo>();
+}
+std::optional<EraFuncInfo> MEraEngine::get_func_info_by_ip(EraExecIp ip) {
+    auto r = do_rpc("get_func_info_by_ip", { { "ip", ip } });
+    if (r.is_null()) {
+        return std::nullopt;
+    }
+    return r.get<EraFuncInfo>();
+}
+std::optional<EraSourceInfo> MEraEngine::get_src_info_from_ip(EraExecIp ip) {
+    auto r = do_rpc("get_src_info_from_ip", { { "ip", ip } });
+    if (r.is_null()) {
+        return std::nullopt;
+    }
+    return r.get<EraSourceInfo>();
+}
+std::optional<EraChunkInfo> MEraEngine::get_chunk_info(uint32_t idx) {
+    auto r = do_rpc("get_chunk_info", { { "idx", idx } });
+    if (r.is_null()) {
+        return std::nullopt;
+    }
+    return r.get<EraChunkInfo>();
 }
 EraEngineStackTrace MEraEngine::get_stack_trace() {
     return do_rpc("get_stack_trace", {}).get<EraEngineStackTrace>();
 }
+std::optional<std::string> MEraEngine::get_file_source(std::string_view name) {
+    auto r = do_rpc("get_file_source", { { "name", name } });
+    if (r.is_null()) {
+        return std::nullopt;
+    }
+    return r.get<std::string>();
+}
 std::string_view MEraEngine::get_version() {
     return STR_VIEW(mee_get_engine_version());
 }
+std::optional<DiagnosticResolveSrcSpanResult> MEraEngine::resolve_src_span(std::string_view filename, SrcSpan span) const {
+    auto r = do_rpc("resolve_src_span", { { "filename", filename }, { "span", span } });
+    if (r.is_null()) {
+        return std::nullopt;
+    }
+    return r.get<DiagnosticResolveSrcSpanResult>();
+}
 
-nlohmann::json MEraEngine::do_rpc(std::string_view method, nlohmann::json params) {
+nlohmann::json MEraEngine::do_rpc(std::string_view method, nlohmann::json params) const {
     auto json = make_jsonrpc(method, std::move(params));
     rust_String response{ mee_engine_do_rpc(m_engine, json.dump().c_str()) };
     json.clear();

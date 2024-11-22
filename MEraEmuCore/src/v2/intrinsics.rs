@@ -38,6 +38,7 @@ pub enum IntrinsicKind {
     RowAssign,
     ForLoopStep,
     ExtendStrToWidth,
+    SplitString,
     FindElement,
     FindLastElement,
     FindChara,
@@ -128,6 +129,8 @@ pub const fn get_global_intrinsic(kind: IntrinsicKind) -> Option<&'static dyn Er
         ArrayCopy => array_copy,
         ArrayShift => array_shift,
         ForLoopStep => for_loop_step,
+        ExtendStrToWidth => extend_str_to_width,
+        SplitString => split_string,
         FindElement => |arr, arr_idx, value, start_idx, count| find_element(true, -1, arr, arr_idx, value, start_idx, count),
         FindLastElement => |arr, arr_idx, value, start_idx, count| find_element(false, -1, arr, arr_idx, value, start_idx, count),
         FindChara => |arr, arr_idx, value, start_idx, count| find_element(true, 0, arr, arr_idx, value, start_idx, count),
@@ -1050,6 +1053,31 @@ pub fn extend_str_to_width(s: ArcStr, width: i64) -> anyhow::Result<ArcStr> {
         buf.pop();
     }
     Ok(ArcStr::from(buf))
+}
+
+pub fn split_string(
+    input: ArcStr,
+    separator: ArcStr,
+    dest: Rc<RefCell<ArrStrValue>>,
+    dest_idx: i64,
+    dest_count: Rc<RefCell<ArrIntValue>>,
+    dest_count_idx: i64,
+) -> anyhow::Result<()> {
+    let mut dest = MaskedArr::try_new(dest.borrow_mut(), dest_idx as _, -1)
+        .context("invalid indices into array")?;
+    let mut dest_count = dest_count.borrow_mut();
+    let dest_count_idx = dest_count_idx as usize;
+    let mut count = 0;
+    for part in input.split(separator.as_str()) {
+        let dest = dest.get_mut(count).context("invalid indices into array")?;
+        dest.val = part.into();
+        count += 1;
+    }
+    let dest_count = dest_count
+        .flat_get_mut(dest_count_idx)
+        .context("invalid indices into array")?;
+    dest_count.val = count as _;
+    Ok(())
 }
 
 pub fn find_element(

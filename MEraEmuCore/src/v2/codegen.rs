@@ -274,6 +274,7 @@ impl EraBcChunkBuilder {
 /// Describes the destination of an parameter in a function prototype.
 struct EraFuncArgsBinding {
     target: TokenKey,
+    local_slot: u32,
     span: SrcSpan,
     dims: EraVarDims,
     // init: ScalarValue,
@@ -768,9 +769,10 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                         let var_kind = var_info.val.kind();
                         let is_const = var_decl.is_const;
                         let is_charadata = var_info.is_charadata;
+                        let prefix = if var_kind.is_str() { "S" } else { "I" };
                         let mut hasher = FxHasher::default();
                         var_info.val.inner_hash(&mut hasher);
-                        let const_name = rcstr::format!("$CONSTVAL@{:x}", hasher.finish());
+                        let const_name = rcstr::format!("$CONSTVAL@{prefix}{:x}", hasher.finish());
                         var_info.name = Ascii::new(const_name);
                         let (var_idx, _) = interp.get_ctx_mut().variables.add_var_force(var_info);
                         let var_idx = var_idx.try_into().expect("too many variables");
@@ -1120,6 +1122,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
             if !is_ref {
                 arg_bindings.push(EraFuncArgsBinding {
                     target,
+                    local_slot: arg_idx,
                     span: target_span,
                     dims: arg_dims,
                 });
@@ -1292,8 +1295,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         }
 
         // Assign arguments
-        for (arg_idx, arg) in prebuild_info.args.iter().enumerate() {
-            let arg_idx = arg_idx as _;
+        for arg in &prebuild_info.args {
+            let arg_idx = arg.local_slot as _;
 
             // Load target
             let target_str = o.ctx.interner().resolve(arg.target);
@@ -1309,14 +1312,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             {
                 target_in_local_frame = false;
                 target_idx = global_var_idx.try_into().expect("too many variables");
-                is_mdarray = o
-                    .ctx
-                    .variables
-                    .get_var_by_idx(target_idx as _)
-                    .unwrap()
-                    .dims_cnt()
-                    .unwrap()
-                    > 1;
+                let var = o.ctx.variables.get_var_by_idx(target_idx as _).unwrap();
+                is_mdarray = var.dims_cnt().unwrap() > 1;
             } else {
                 unreachable!("variable not found");
             }
@@ -1328,6 +1325,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     arg.span,
                 );
             } else {
+                let var = o.ctx.variables.get_var_by_idx(target_idx as _).unwrap();
+                var.ensure_alloc();
                 chunk.push_bc(BcKind::LoadVarWW { idx: target_idx }, arg.span);
             }
             for dim in arg.dims.iter().copied() {
@@ -5229,8 +5228,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             self.chunk.push_load_imm(0, expr_span);
                         }
                         ScalarValueKind::Str => {
-                            self.chunk
-                                .push_bc(BcKind::LoadConstStr { idx: 0 }, expr_span);
+                            self.chunk.push_build_string(0, expr_span);
                         }
                         _ => unreachable!(),
                     }
@@ -5250,7 +5248,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     self.chunk.push_load_imm(0, span);
                 }
                 ScalarValueKind::Str => {
-                    self.chunk.push_bc(BcKind::LoadConstStr { idx: 0 }, span);
+                    self.chunk.push_build_string(0, span);
                 }
                 _ => unreachable!(),
             },
@@ -5445,11 +5443,11 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let arg = if arg.is_empty() {
                     match target_param.var_kind {
                         ValueKind::Int => {
-                            let val = target_param.default_value.as_int().unwrap();
+                            let val = target_param.default_value.coerce_as_int().unwrap();
                             self.chunk.push_load_imm(val, arg_span);
                         }
                         ValueKind::Str => {
-                            let val = target_param.default_value.as_str().unwrap();
+                            let val = target_param.default_value.coerce_as_str().unwrap();
                             self.chunk.push_bc(
                                 BcKind::LoadConstStr {
                                     idx: self.o.ctx.interner().get_or_intern(val).into_u32(),

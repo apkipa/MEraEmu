@@ -158,6 +158,18 @@ pub fn parse_int_literal(s: &[u8]) -> Option<i64> {
     Some(num)
 }
 
+pub fn parse_int_literal_with_sign(s: &[u8]) -> Option<i64> {
+    let mut s = s;
+    let sign = if s.strip_prefix_inplace(b"-") {
+        -1
+    } else if s.strip_prefix_inplace(b"+") {
+        1
+    } else {
+        1
+    };
+    parse_int_literal(s).map(|x| x.wrapping_mul(sign))
+}
+
 pub fn int_to_char(v: i64) -> char {
     v.try_into()
         .ok()

@@ -1709,6 +1709,44 @@ mod tests {
             REPEAT 1
                 ;GOTO LABEL1
             REND
+        @EMPTYFN
+        @BENCHMARK_FN(fn_name)
+            #DIMS DYNAMIC fn_name
+            #DIM DYNAMIC t1
+            t1 = GETMILLISECOND()
+            CALLFORM %fn_name%
+            PRINTFORM `%fn_name%` took {(GETMILLISECOND() - t1)*0}ms.
+        @ASK_CHOICES3(argChoices:0="", argChoices:1="", argChoices:2="")
+            #DIMS argChoices, 3
+            CALL ASK_CHOICES(argChoices)
+            RETURN RESULT
+        @ASK_CHOICES(refChoices, argCanselNo=-1,argCanselText="中止")
+            {
+                #DIM CONST SEASONALCOLORS =
+                    0x3C2D0F, 0x2D2D00, 0x323D2D, 0x46461E,
+                    0x5A4B1E, 0x787800, 0x648C4B, 0x8C8C3C,
+                    0x4B3C14, 0x4B4B00, 0x50643C, 0x64642D,
+                    0x2D1E0A, 0x141400, 0x141E0F, 0x28280F,
+                    0x3C2D0F, 0x64963C, 0x238C32, 0x78460F,
+                    0x5A4B1E, 0xA0D264, 0x50B45A, 0xB4961E,
+                    0x4B3C14, 0x82B450, 0x32A046, 0x966E14,
+                    0x2D1E0A, 0x3C7828, 0x00641E, 0x3C280A,
+                    0x321E14, 0xF096C8, 0x643C5A, 0x5A4B32,
+                    0x28190F, 0xD26496, 0x502846, 0x4B3C28,
+                    0x1E140A, 0xA03C64, 0x3C1E37, 0x3C2D1E,
+                    0x140A05, 0x5A283C, 0x281423, 0x2D1E14
+            }
+            #DIMS REF refChoices, 0
+            #DIM DYNAMIC argCanselNo
+            #DIMS DYNAMIC argCanselText
+            #DIMS html, 4
+            #DIM skip, 4
+            ;生成
+            0+VARSIZE("refChoices")
+            PRINTFORM %VARSIZE("SEASONALCOLORS")%
+            SEASONALCOLORS:20 + 0
+            VARSET skip
+            VARSET html
         @SYSTEM_TITLE()
             ;#DIM REF xre
             #DIM val = 1 + 1 ;*0
@@ -1720,6 +1758,15 @@ mod tests {
             #DIM DYNAMIC sum1
 
             ; ------------------------------
+
+            FOR LOCAL, 0, 10
+                PRINTFORM {GROUPMATCH(LOCAL, 3, 5, 7, 8)}
+            NEXT
+
+            ASK_CHOICES3("a", "b", "c")
+
+            PRINTSINGLEFORMS "== %ARGS% " + "%(\"=\" * 3)%"
+            BENCHMARK_FN("EMPTYFN")
 
             WHILE cnt > 0
                 cnt = cnt - 1
@@ -1857,7 +1904,7 @@ mod tests {
         }
         assert_eq!(
             &callback.output,
-            "(5050)[0,0,0,3][0,3,2,2]Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135[;&]"
+            "`EMPTYFN` took 0ms.(5050)[0,0,0,3][0,3,2,2]Hello, 4 the world!falseDone[IN 50][Ret][OK][IN 10][Ret][IN 100][Ret]55~-5050~WINDOW_TITLE![1]0135[;&]"
         );
 
         Ok(())

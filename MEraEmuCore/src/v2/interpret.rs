@@ -607,7 +607,8 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                 })
             })
             .collect::<Result<EraVarDims, _>>()?;
-        if dims.is_empty() {
+        let omitted_dims = dims.is_empty();
+        if omitted_dims {
             dims.push(if is_ref { 0 } else { 1 });
         }
         if is_ref {
@@ -642,22 +643,52 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
             unreachable!("invalid variable initializers node");
         };
         let var_val = if is_string {
-            let inits = self
+            let inits: Vec<_> = self
                 .node_arena
                 .get_extra_data_view(inits)
                 .iter()
                 .map(|&x| EraNodeRef(x))
                 .map(|x| self.interpret_str_expr(x).map(|x| StrValue::new(x.into())))
                 .try_collect()?;
+            if inits.len() > 0 {
+                if is_ref {
+                    let mut diag = self.make_diag();
+                    diag.span_err(
+                        Default::default(),
+                        decl_span,
+                        "REF variable cannot have initializers",
+                    );
+                    self.ctx.emit_diag(diag);
+                    return Err(EraInterpretError::Others);
+                }
+                if omitted_dims {
+                    *dims.last_mut().unwrap() = inits.len().max(1) as _;
+                }
+            }
             Value::new_str_arr(dims, inits)
         } else {
-            let inits = self
+            let inits: Vec<_> = self
                 .node_arena
                 .get_extra_data_view(inits)
                 .iter()
                 .map(|&x| EraNodeRef(x))
                 .map(|x| self.interpret_int_expr(x).map(IntValue::new))
                 .try_collect()?;
+            if inits.len() > 0 {
+                if is_ref {
+                    let mut diag = self.make_diag();
+                    diag.span_err(
+                        Default::default(),
+                        decl_span,
+                        "REF variable cannot have initializers",
+                    );
+                    self.ctx.emit_diag(diag);
+                    return Err(EraInterpretError::Others);
+                }
+                if omitted_dims {
+                    *dims.last_mut().unwrap() = inits.len().max(1) as _;
+                }
+            }
             Value::new_int_arr(dims, inits)
         };
 
