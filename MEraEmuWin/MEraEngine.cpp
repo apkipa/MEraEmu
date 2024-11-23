@@ -455,8 +455,9 @@ MEraEngine::~MEraEngine() {
     if (!m_engine) { return; }
     mee_drop_engine(m_engine);
 }
-EraExecutionBreakReason MEraEngine::do_execution(_Atomic(bool)*run_flag, uint64_t max_inst_cnt) {
-    return (EraExecutionBreakReason)unwrap_rust(mee_engine_do_execution(m_engine, (bool*)run_flag, max_inst_cnt));
+EraExecutionBreakReason MEraEngine::do_execution(std::atomic_bool const& run_flag, uint64_t max_inst_cnt) {
+    // NOTE: It is safe to cast away the constness of `run_flag` because the Rust function does not modify the value
+    return (EraExecutionBreakReason)unwrap_rust(mee_engine_do_execution(m_engine, (bool*)&run_flag, max_inst_cnt));
 }
 //bool MEraEngine::get_is_halted() {
 //    std::atomic_bool run_flag = true;

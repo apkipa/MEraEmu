@@ -9,6 +9,8 @@
 
 #include "MEraEngine.hpp"
 
+#include "util.hpp"
+
 #include <variant>
 #include <future>
 
@@ -73,8 +75,8 @@ namespace winrt::MEraEmuWin::implementation {
         EngineUnhandledExceptionEventArgs(hresult code, hstring const& msg) :
             m_code(code), m_msg(msg) {}
 
-        hresult Code() noexcept { return m_code; }
-        hstring Message() noexcept { return m_msg; }
+        hresult Code() const noexcept { return m_code; }
+        hstring Message() const noexcept { return m_msg; }
 
     private:
         hresult m_code;
@@ -127,6 +129,9 @@ namespace winrt::MEraEmuWin::implementation {
         friend MEraEmuWinEngineSysCallback;
         friend EngineUIPrintLineData;
 
+        void UISideDisconnect();
+        void QueueEngineTask(std::unique_ptr<EngineThreadTask> task);
+
         void InitEngineUI();
         void UpdateEngineUI();
         void EmitUnhandledExceptionEvent(std::exception_ptr ex);
@@ -174,6 +179,9 @@ namespace winrt::MEraEmuWin::implementation {
         DP_DECLARE(EngineTitle);
 
         std::shared_ptr<EngineSharedData> m_sd;
+        util::sync::spsc::Receiver<std::move_only_function<void()>> m_ui_task_rx{ nullptr };
+        util::sync::spsc::Sender< std::unique_ptr<EngineThreadTask>> m_engine_task_tx{ nullptr };
+
         event<Windows::Foundation::EventHandler<MEraEmuWin::EngineUnhandledExceptionEventArgs>> m_ev_UnhandledException;
         IVirtualSurfaceImageSourceNative* m_vsis_noref{};
         ISurfaceImageSourceNativeWithD2D* m_vsis_d2d_noref{};

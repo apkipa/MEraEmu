@@ -15,6 +15,8 @@
 #include <filesystem>
 #include <variant>
 
+#include "util.hpp"
+
 using namespace winrt;
 using namespace Windows::UI;
 using namespace Windows::UI::Xaml;
@@ -321,13 +323,8 @@ namespace winrt::MEraEmuWin::implementation {
         //virtual void do_work();
     };
 
-    enum class EngineThreadState {
-        Died,
-        Vacant,
-        Occupied,
-    };
-
     struct EngineSharedData : std::enable_shared_from_this<EngineSharedData> {
+        EngineSharedData() {}
         ~EngineSharedData() {}
 
         hstring game_base_dir;
@@ -338,102 +335,18 @@ namespace winrt::MEraEmuWin::implementation {
         IAsyncAction thread_task_op{ nullptr };
         std::atomic_bool ui_is_alive{ false };
         std::atomic_bool ui_redraw_block_engine{ false };
-        // Also used as an event queue indicator (?)
-        std::atomic_bool engine_run_flag{ false };
-        //std::atomic_bool thread_is_alive{ false };
-        std::atomic<EngineThreadState> thread_state{ EngineThreadState::Died };
+        std::atomic_bool ui_queue_work_debounce{ false };
         std::atomic_bool thread_started{ false };
+        std::atomic_bool thread_is_alive{ false };
         std::exception_ptr thread_exception{ nullptr };
-        //std::atomic<EngineThreadTask*> thread_task{};
-        std::unique_ptr<EngineThreadTask> thread_task;
         bool has_execution_error{ false };
-
-        std::mutex ui_mutex;
-        std::vector<std::move_only_function<void()>> ui_works;
-
-        // NOTE: Called by UI thread
-        void ui_disconnect() {
-            if (thread_task_op) {
-                thread_task_op.Cancel();
-            }
-            engine_run_flag.store(false, std::memory_order_relaxed);
-            ui_is_alive.store(false, std::memory_order_relaxed);
-            ui_is_alive.notify_one();
-            // Abandon queued works
-            [&] {
-                std::scoped_lock guard(ui_mutex);
-                return std::exchange(ui_works, {});
-            }();
-            ui_redraw_block_engine.store(false, std::memory_order_relaxed);
-            ui_redraw_block_engine.notify_one();
-            queue_thread_work(EngineThreadTaskKind::None);
-        }
-        // NOTE: Called by engine (background) thread
-        void task_disconnect() {
-            auto state = thread_state.exchange(EngineThreadState::Died, std::memory_order_relaxed);
-            thread_state.notify_one();
-            // Triggers UI update, which in turn responds to task disconnection
-            queue_ui_work([] {});
-            if (state == EngineThreadState::Occupied) {
-                engine_run_flag.wait(true, std::memory_order_acquire);
-                thread_task = nullptr;
-                engine_run_flag.store(true, std::memory_order_release);
-                engine_run_flag.notify_one();
-            }
-        }
-        void queue_ui_work(std::move_only_function<void()> work) {
-            if (!ui_is_alive.load(std::memory_order_relaxed)) {
-                //throw hresult_canceled();
-                // Fail silently
-                return;
-            }
-            bool has_no_work;
-            {
-                std::scoped_lock guard(ui_mutex);
-                has_no_work = ui_works.empty();
-                ui_works.push_back(std::move(work));
-            }
-            if (has_no_work) {
-                // Wake up UI thread
-                ui_redraw_block_engine.wait(true, std::memory_order_relaxed);
-                // NOTE: CoreDispatcher.RunAsync will cause memory leak, so use
-                //       DispatcherQueue.TryEnqueue instead
-                ui_dispatcher_queue.TryEnqueue(DispatcherQueuePriority::Low, [self = shared_from_this()] {
-                    if (!self->ui_is_alive.load(std::memory_order_relaxed)) { return; }
-                    // SAFETY: We are in the UI thread; no one could be destructing
-                    //         EngineControl.
-                    self->ui_ctrl->UpdateEngineUI();
-                });
-            }
-        }
-        void queue_thread_work(EngineThreadTaskKind kind) {
-            auto state = EngineThreadState::Vacant;
-            while (!thread_state.compare_exchange_weak(state, EngineThreadState::Occupied, std::memory_order_acq_rel)) {
-                if (state == EngineThreadState::Died) { return; }
-                // TODO: Is wait unnecessary?
-                thread_state.wait(state, std::memory_order_relaxed);
-                state = EngineThreadState::Vacant;
-            }
-            thread_task = std::make_unique<EngineThreadTask>(kind);
-            // Interrupt engine thread so that it can process queued works
-            engine_run_flag.store(false, std::memory_order_release);
-            engine_run_flag.notify_one();
-            // SAFETY: Stop flag is reverted even when engine thread is disconnecting
-            engine_run_flag.wait(false, std::memory_order_acquire);
-            // Task was processed by engine thread, we can return now
-        }
-        void wait_for_thread_disconnect() {
-            while (true) {
-                auto state = thread_state.load(std::memory_order_acquire);
-                if (state == EngineThreadState::Died) { break; }
-                thread_state.wait(state, std::memory_order_relaxed);
-            }
-        }
     };
 
     struct MEraEmuWinEngineSysCallback : ::MEraEngineSysCallback {
         // SAFETY: Engine is destructed before EngineSharedData
-        MEraEmuWinEngineSysCallback(EngineSharedData* sd) : m_sd(sd) {}
+        MEraEmuWinEngineSysCallback(EngineSharedData* sd, util::sync::spsc::Sender<std::move_only_function<void()>> const* ui_task_tx) :
+            m_sd(sd), m_ui_task_tx(ui_task_tx) {
+        }
 
         void on_error(EraDiagnosticProvider const& provider) override {
             auto count = provider.get_entry_count();
@@ -460,7 +373,7 @@ namespace winrt::MEraEmuWin::implementation {
                         message,
                         to_hstring(resolved.snippet)
                     );
-                    m_sd->queue_ui_work([=, sd = m_sd] {
+                    queue_ui_work([=, sd = m_sd] {
                         auto old_clr = sd->ui_ctrl->EngineForeColor();
                         sd->ui_ctrl->EngineForeColor(msg_clr);
                         sd->ui_ctrl->RoutinePrintSourceButton(
@@ -478,7 +391,7 @@ namespace winrt::MEraEmuWin::implementation {
                         to_hstring(level),
                         message
                     );
-                    m_sd->queue_ui_work([=, sd = m_sd] {
+                    queue_ui_work([=, sd = m_sd] {
                         auto old_clr = sd->ui_ctrl->EngineForeColor();
                         sd->ui_ctrl->EngineForeColor(msg_clr);
                         sd->ui_ctrl->RoutinePrintSourceButton(
@@ -495,7 +408,7 @@ namespace winrt::MEraEmuWin::implementation {
             return m_rand_gen();
         }
         void on_print(std::string_view content, PrintExtendedFlags flags) override {
-            m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content), flags] {
+            queue_ui_work([sd = m_sd, content = to_hstring(content), flags] {
                 sd->ui_ctrl->RoutinePrint(content, flags);
             });
             if (flags & ERA_PEF_IS_WAIT) {
@@ -503,7 +416,7 @@ namespace winrt::MEraEmuWin::implementation {
             }
         }
         void on_html_print(std::string_view content) override {
-            m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content)] {
+            queue_ui_work([sd = m_sd, content = to_hstring(content)] {
                 sd->ui_ctrl->RoutineHtmlPrint(content);
             });
         }
@@ -514,7 +427,7 @@ namespace winrt::MEraEmuWin::implementation {
             input_req->break_user_skip = is_force;
             input_req->can_click = true;
             auto future = input_req->promise.get_future();
-            m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+            queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                 sd->ui_ctrl->RoutineInput(std::move(input_req));
             });
             return future.get();
@@ -539,7 +452,7 @@ namespace winrt::MEraEmuWin::implementation {
             input_req->can_skip = !is_force;
             input_req->break_user_skip = true;
             auto future = input_req->promise.get_future();
-            m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+            queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                 sd->ui_ctrl->RoutineInput(std::move(input_req));
             });
             return future.get();
@@ -554,7 +467,7 @@ namespace winrt::MEraEmuWin::implementation {
                 input_req->break_user_skip = true;
                 input_req->can_click = can_click;
                 auto future = input_req->promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+                queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
                 });
                 return { continue_tag, future.get() };
@@ -571,7 +484,7 @@ namespace winrt::MEraEmuWin::implementation {
                 input_req->break_user_skip = true;
                 input_req->can_click = can_click;
                 auto future = input_req->promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+                queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
                 });
                 m_str_cache = to_string(future.get());
@@ -605,7 +518,7 @@ namespace winrt::MEraEmuWin::implementation {
                 input_req->break_user_skip = true;
                 input_req->can_click = can_click;
                 auto future = input_req->promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+                queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
                 });
                 return { continue_tag, future.get() };
@@ -638,7 +551,7 @@ namespace winrt::MEraEmuWin::implementation {
                 input_req->break_user_skip = true;
                 input_req->can_click = can_click;
                 auto future = input_req->promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
+                queue_ui_work([sd = m_sd, input_req = std::move(input_req)]() mutable {
                     sd->ui_ctrl->RoutineInput(std::move(input_req));
                 });
                 m_str_cache = to_string(future.get());
@@ -663,13 +576,13 @@ namespace winrt::MEraEmuWin::implementation {
             return { continue_tag, nullptr };
         }
         void on_reuselastline(std::string_view content) override {
-            m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content)] {
+            queue_ui_work([sd = m_sd, content = to_hstring(content)] {
                 sd->ui_ctrl->RoutineReuseLastLine(content);
             });
         }
         void on_clearline(int64_t count) override {
             if (count <= 0) { return; }
-            m_sd->queue_ui_work([sd = m_sd, count = (uint64_t)count] {
+            queue_ui_work([sd = m_sd, count = (uint64_t)count] {
                 sd->ui_ctrl->RoutineClearLine(count);
             });
         }
@@ -677,7 +590,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@COLOR") {
                 std::promise<uint32_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(to_u32(sd->ui_ctrl->EngineForeColor()) & ~0xff000000);
                 });
                 return future.get();
@@ -688,7 +601,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@BGCOLOR") {
                 std::promise<uint32_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(to_u32(sd->ui_ctrl->EngineBackColor()) & ~0xff000000);
                 });
                 return future.get();
@@ -702,7 +615,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@STYLE") {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->GetCurrentFontStyle());
                 });
                 return future.get();
@@ -710,7 +623,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@REDRAW") {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->GetRedrawState());
                 });
                 return future.get();
@@ -718,7 +631,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@ALIGN") {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->GetCurrentLineAlignment());
                 });
                 return future.get();
@@ -734,7 +647,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@SKIPDISP") {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->GetSkipDisplay());
                 });
                 return future.get();
@@ -750,7 +663,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@PRINTCPERLINE") {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_cfg.printc_per_line);
                 });
                 return future.get();
@@ -758,7 +671,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@PRINTCLENGTH") {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_cfg.printc_char_count);
                 });
                 return future.get();
@@ -766,7 +679,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@LINEISEMPTY") {
                 std::promise<bool> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_cur_composing_line.parts.empty());
                 });
                 return future.get();
@@ -775,7 +688,7 @@ namespace winrt::MEraEmuWin::implementation {
                 // TODO: SCREENWIDTH
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_ui_width / 20);
                 });
                 return future.get();
@@ -784,7 +697,7 @@ namespace winrt::MEraEmuWin::implementation {
                 // NOTE: Returns width in logical pixels
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_ui_width);
                 });
                 return future.get();
@@ -792,7 +705,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "LINECOUNT") {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value((int64_t)sd->ui_ctrl->m_ui_lines.size());
                 });
                 return future.get();
@@ -803,7 +716,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "@FONT") {
                 std::promise<hstring> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->GetCurrentFontName());
                 });
                 m_str_cache = to_string(future.get());
@@ -812,7 +725,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "WINDOW_TITLE") {
                 std::promise<hstring> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->EngineTitle());
                 });
                 m_str_cache = to_string(future.get());
@@ -821,7 +734,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "DRAWLINESTR") {
                 std::promise<std::string> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     auto screen_width = sd->ui_ctrl->m_ui_width / 20;
                     promise.set_value(std::string(screen_width, '-'));
                 });
@@ -836,31 +749,31 @@ namespace winrt::MEraEmuWin::implementation {
         }
         void on_var_set_int(std::string_view name, size_t idx, int64_t val) override {
             if (name == "@COLOR") {
-                m_sd->queue_ui_work([sd = m_sd, val]() {
+                queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->EngineForeColor(to_winrt_color((uint32_t)val | 0xff000000));
                 });
                 return;
             }
             if (name == "@BGCOLOR") {
-                m_sd->queue_ui_work([sd = m_sd, val]() {
+                queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->EngineBackColor(to_winrt_color((uint32_t)val | 0xff000000));
                 });
                 return;
             }
             if (name == "@STYLE") {
-                m_sd->queue_ui_work([sd = m_sd, val]() {
+                queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->SetCurrentFontStyle(val);
                 });
                 return;
             }
             if (name == "@REDRAW") {
-                m_sd->queue_ui_work([sd = m_sd, val]() {
+                queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->SetRedrawState(val);
                 });
                 return;
             }
             if (name == "@ALIGN") {
-                m_sd->queue_ui_work([sd = m_sd, val]() {
+                queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->SetCurrentLineAlignment(val);
                 });
                 return;
@@ -874,7 +787,7 @@ namespace winrt::MEraEmuWin::implementation {
                 return;
             }
             if (name == "@SKIPDISP") {
-                m_sd->queue_ui_work([sd = m_sd, val]() {
+                queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->SetSkipDisplay(val);
                 });
                 return;
@@ -890,13 +803,13 @@ namespace winrt::MEraEmuWin::implementation {
         }
         void on_var_set_str(std::string_view name, size_t idx, std::string_view val) override {
             if (name == "@FONT") {
-                m_sd->queue_ui_work([sd = m_sd, val = to_hstring(val)]() {
+                queue_ui_work([sd = m_sd, val = to_hstring(val)]() {
                     sd->ui_ctrl->SetCurrentFontName(val);
                 });
                 return;
             }
             if (name == "WINDOW_TITLE") {
-                m_sd->queue_ui_work([sd = m_sd, val = to_hstring(val)]() {
+                queue_ui_work([sd = m_sd, val = to_hstring(val)]() {
                     sd->ui_ctrl->EngineTitle(val);
                 });
                 return;
@@ -904,7 +817,7 @@ namespace winrt::MEraEmuWin::implementation {
             throw std::exception("no such variable");
         }
         void on_print_button(std::string_view content, std::string_view value, PrintExtendedFlags flags) override {
-            m_sd->queue_ui_work([sd = m_sd, content = to_hstring(content), value = to_hstring(value), flags] {
+            queue_ui_work([sd = m_sd, content = to_hstring(content), value = to_hstring(value), flags] {
                 sd->ui_ctrl->RoutinePrintButton(content, value, flags);
             });
         }
@@ -1037,7 +950,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "一行の高さ") {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_cfg.line_height);
                 });
                 return future.get();
@@ -1045,7 +958,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "フォントサイズ") {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
-                m_sd->queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
+                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_cfg.font_size);
                 });
                 return future.get();
@@ -1068,7 +981,26 @@ namespace winrt::MEraEmuWin::implementation {
         }
 
     private:
+        void queue_ui_work(std::move_only_function<void()> work) {
+            if (m_ui_task_tx->send(work) && !m_sd->ui_queue_work_debounce.load(std::memory_order_relaxed)) {
+                // Wake up UI thread
+                m_sd->ui_redraw_block_engine.wait(true, std::memory_order_relaxed);
+                // Debounce to avoid too many UI update calls
+                m_sd->ui_queue_work_debounce.store(true, std::memory_order_relaxed);
+                // NOTE: CoreDispatcher.RunAsync will cause memory leak, so use
+                //       DispatcherQueue.TryEnqueue instead
+                m_sd->ui_dispatcher_queue.TryEnqueue(DispatcherQueuePriority::Low, [sd = m_sd->shared_from_this()] {
+                    sd->ui_queue_work_debounce.store(false, std::memory_order_relaxed);
+                    if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
+                    // SAFETY: We are in the UI thread; no one could be destructing
+                    //         EngineControl.
+                    sd->ui_ctrl->UpdateEngineUI();
+                });
+            }
+        }
+
         EngineSharedData* const m_sd;
+        util::sync::spsc::Sender<std::move_only_function<void()>> const* const m_ui_task_tx;
         std::string m_str_cache;
         std::mt19937_64 m_rand_gen{ std::random_device{}() };
 
@@ -1159,11 +1091,7 @@ namespace winrt::MEraEmuWin::implementation {
         ensure_global_factory();
     }
     EngineControl::~EngineControl() {
-        if (m_sd) {
-            m_outstanding_input_req = nullptr;
-            m_sd->ui_disconnect();
-            m_sd->wait_for_thread_disconnect();
-        }
+        UISideDisconnect();
     }
     void EngineControl::InitializeComponent() {
         EngineControlT::InitializeComponent();
@@ -1214,13 +1142,13 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::ReturnToTitle() {
         m_outstanding_input_req = nullptr;
         m_cur_printc_count = 0;
-        m_sd->queue_thread_work(EngineThreadTaskKind::ReturnToTitle);
+        QueueEngineTask(std::make_unique<EngineThreadTask>(EngineThreadTaskKind::ReturnToTitle));
 
         m_ui_lines.clear();
         check_hresult(m_vsis_noref->Resize(0, 0));
     }
     bool EngineControl::IsStarted() {
-        return m_sd && m_sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Died;
+        return m_sd && m_sd->thread_is_alive.load(std::memory_order_relaxed);
     }
     void EngineControl::EngineOutputImage_PointerMoved(IInspectable const& sender, PointerRoutedEventArgs const& e) {
         e.Handled(true);
@@ -1277,6 +1205,7 @@ namespace winrt::MEraEmuWin::implementation {
                     )));
                     cd.PrimaryButtonText(L"是, 执行");
                     cd.CloseButtonText(L"取消");
+                    cd.DefaultButton(ContentDialogButton::Primary);
                     cd.PrimaryButtonClick([&](auto&&, auto&&) {
                         STARTUPINFOW si{ sizeof si };
                         PROCESS_INFORMATION pi;
@@ -1331,30 +1260,55 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
     void EngineControl::Bootstrap(hstring const& game_base_dir) try {
-        if (m_sd) {
-            m_outstanding_input_req = nullptr;
-            m_sd->ui_disconnect();
-        }
+        UISideDisconnect();
         m_sd = std::make_shared<EngineSharedData>();
         m_sd->game_base_dir = game_base_dir;
         m_sd->ui_dispatcher = Dispatcher();
         m_sd->ui_dispatcher_queue = DispatcherQueue::GetForCurrentThread();
         //m_sd->ui_ctrl = get_weak();
         m_sd->ui_ctrl = this;
+        // Create channels
+        auto [ui_task_tx, ui_task_rx] = util::sync::spsc::sync_channel<std::move_only_function<void()>>(64);
+        auto [engine_task_tx, engine_task_rx] = util::sync::spsc::sync_channel<std::unique_ptr<EngineThreadTask>>(64);
+        m_ui_task_rx = std::move(ui_task_rx);
+        m_engine_task_tx = std::move(engine_task_tx);
         // Start a dedicated background thread
-        m_sd->thread_task_op = ThreadPool::RunAsync([sd = m_sd](IAsyncAction const& op) {
+        m_sd->thread_task_op = ThreadPool::RunAsync([sd = m_sd, ui_task_tx = std::move(ui_task_tx), engine_task_rx = std::move(engine_task_rx)](IAsyncAction const& op) {
             SetThreadDescription(GetCurrentThread(), L"MEraEmu Engine Thread");
 
-            sd->thread_state.store(EngineThreadState::Vacant, std::memory_order_relaxed);
-            sd->thread_state.notify_one();
+            sd->thread_is_alive.store(true, std::memory_order_relaxed);
+
+            auto queue_ui_work = [&](std::move_only_function<void()> work) {
+                auto is_vacant = ui_task_tx.is_vacant();
+                if (ui_task_tx.send(work) && is_vacant) {
+                    // Wake up UI thread
+                    sd->ui_redraw_block_engine.wait(true, std::memory_order_relaxed);
+                    // NOTE: CoreDispatcher.RunAsync will cause memory leak, so use
+                    //       DispatcherQueue.TryEnqueue instead
+                    sd->ui_dispatcher_queue.TryEnqueue(DispatcherQueuePriority::Low, [sd] {
+                        if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
+                        // SAFETY: We are in the UI thread; no one could be destructing
+                        //         EngineControl.
+                        sd->ui_ctrl->UpdateEngineUI();
+                    });
+                }
+            };
 
             auto mark_thread_started = [&] {
                 sd->thread_started.store(true, std::memory_order_release);
                 sd->thread_started.notify_one();
             };
 
+            auto task_disconnect = [&] {
+                sd->thread_is_alive.store(false, std::memory_order_relaxed);
+                sd->thread_is_alive.notify_one();
+                // Triggers UI update, which in turn responds to task disconnection
+                queue_ui_work([] {});
+            };
+
             tenkai::cpp_utils::ScopeExit se_thread([&] {
-                sd->task_disconnect();
+                task_disconnect();
+                // In case of exception, don't hang the UI thread
                 mark_thread_started();
             });
 
@@ -1364,7 +1318,7 @@ namespace winrt::MEraEmuWin::implementation {
                 MEraEngine engine{ nullptr };
                 MEraEmuWinEngineSysCallback* callback{};
                 auto builder = [&] {
-                    auto callback_box = std::make_unique<MEraEmuWinEngineSysCallback>(sd.get());
+                    auto callback_box = std::make_unique<MEraEmuWinEngineSysCallback>(sd.get(), &ui_task_tx);
                     callback = callback_box.get();
                     return MEraEngineBuilder(std::move(callback_box));
                 }();
@@ -1513,19 +1467,8 @@ namespace winrt::MEraEmuWin::implementation {
                     builder.finish_load_csv();
 
                     auto try_handle_thread_event = [&] {
-                        if (sd->engine_run_flag.load(std::memory_order_acquire)) { return; }
-                        if (sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Occupied) {
-                            // Likely the UI side has just disconnected
-                            return;
-                        }
-                        tenkai::cpp_utils::ScopeExit se_stop_flag([&] {
-                            sd->engine_run_flag.store(true, std::memory_order_release);
-                            sd->engine_run_flag.notify_one();
-                            sd->thread_state.store(EngineThreadState::Vacant, std::memory_order_release);
-                            sd->thread_state.notify_one();
-                        });
-                        if (sd->thread_task) {
-                            run_ui_task(std::move(sd->thread_task), false);
+                        if (auto task = engine_task_rx.try_recv()) {
+                            run_ui_task(std::move(*task), false);
                         }
                     };
 
@@ -1552,7 +1495,7 @@ namespace winrt::MEraEmuWin::implementation {
                 return_to_title();
 
                 // Disable auto redraw before running VM
-                sd->queue_ui_work([sd] {
+                queue_ui_work([sd] {
                     sd->ui_ctrl->SetRedrawState(0);
                 });
 
@@ -1560,10 +1503,7 @@ namespace winrt::MEraEmuWin::implementation {
                 while (sd->ui_is_alive.load(std::memory_order_relaxed)) {
                     //while (!engine.get_is_halted()) {
                     while (true) {
-                        if (!sd->engine_run_flag.load(std::memory_order_relaxed)) {
-                            break;
-                        }
-                        auto stop_reason = engine.do_execution(&sd->engine_run_flag, UINT64_MAX);
+                        auto stop_reason = engine.do_execution(engine_task_rx.is_vacant_var(), UINT64_MAX);
                         if (stop_reason != ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS) {
                             break;
                         }
@@ -1599,7 +1539,7 @@ namespace winrt::MEraEmuWin::implementation {
                                 std::move(msg)
                             );
                         }
-                        sd->queue_ui_work([sd, msgs = std::move(print_msgs)] {
+                        queue_ui_work([sd, msgs = std::move(print_msgs)] {
                             sd->ui_ctrl->SetSkipDisplay(0);
 
                             sd->ui_ctrl->RoutinePrint(L"函数堆栈跟踪 (最近调用者最先显示):", ERA_PEF_IS_LINE);
@@ -1611,31 +1551,16 @@ namespace winrt::MEraEmuWin::implementation {
                             sd->ui_ctrl->SetRedrawState(2);
                         });
                     }
-                    sd->engine_run_flag.wait(true, std::memory_order_acquire);
-                    if (sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Occupied) {
-                        // Likely the UI side has just disconnected
-                        break;
-                    }
-                    tenkai::cpp_utils::ScopeExit se_stop_flag([&] {
-                        sd->engine_run_flag.store(true, std::memory_order_release);
-                        sd->engine_run_flag.notify_one();
-                        sd->thread_state.store(EngineThreadState::Vacant, std::memory_order_release);
-                        sd->thread_state.notify_one();
-                    });
-                    if (sd->thread_task) {
-                        run_ui_task(std::move(sd->thread_task), true);
+                    // Handle one task event
+                    if (auto task = engine_task_rx.recv()) {
+                        run_ui_task(std::move(*task), true);
                     }
                 }
-
-                // TODO: Do we really need this delay?
-                // HACK: Delay thread tear down to prevent ordering issues
-                Sleep(100);
             }
             catch (...) {
                 sd->thread_exception = std::current_exception();
             }
         }, WorkItemPriority::Normal, WorkItemOptions::TimeSliced);
-        m_sd->engine_run_flag.store(true, std::memory_order_relaxed);
         m_sd->ui_is_alive.store(true, std::memory_order_release);
         m_sd->ui_is_alive.notify_one();
 
@@ -1644,13 +1569,35 @@ namespace winrt::MEraEmuWin::implementation {
 
         // Check whether engine has panicked
         m_sd->thread_started.wait(false, std::memory_order_acquire);
-        if (m_sd->thread_state.load(std::memory_order_relaxed) != EngineThreadState::Vacant) {
+        if (!m_sd->thread_is_alive.load(std::memory_order_relaxed)) {
             assert(m_sd->thread_exception);
             std::rethrow_exception(m_sd->thread_exception);
         }
     }
     catch (std::exception const& e) {
         throw hresult_error(E_FAIL, to_hstring(e.what()));
+    }
+    void EngineControl::UISideDisconnect() {
+        m_outstanding_input_req = nullptr;
+        if (auto sd = std::exchange(m_sd, nullptr)) {
+            if (sd->thread_task_op) {
+                sd->thread_task_op.Cancel();
+            }
+            sd->ui_is_alive.store(false, std::memory_order_relaxed);
+            sd->ui_is_alive.notify_one();
+            sd->ui_redraw_block_engine.store(false, std::memory_order_relaxed);
+            sd->ui_redraw_block_engine.notify_one();
+            // Close the channel to signal the engine thread to stop
+            m_engine_task_tx = nullptr;
+            // Wait for engine thread to stop
+            // NOTE: Don't execute any engine tasks after this point, for example
+            //       m_outstanding_input_req may be assigned a new value.
+            while (m_ui_task_rx.recv()) {}
+        }
+    }
+    void EngineControl::QueueEngineTask(std::unique_ptr<EngineThreadTask> task) {
+        if (!m_sd) { return; }
+        m_engine_task_tx.send(task);
     }
     void EngineControl::InitEngineUI() {
         // Reset UI resources
@@ -1707,13 +1654,8 @@ namespace winrt::MEraEmuWin::implementation {
     }
     void EngineControl::UpdateEngineUI() {
         // Process UI works sent from the engine thread
-        decltype(m_sd->ui_works) works;
-        {
-            std::scoped_lock guard(m_sd->ui_mutex);
-            std::swap(works, m_sd->ui_works);
-        }
-        for (auto& work : std::move(works)) {
-            work();
+        while (auto work = m_ui_task_rx.try_recv()) {
+            (*work)();
         }
 
         // After processing works, update layout so that OS can fire redraw events
@@ -1721,7 +1663,7 @@ namespace winrt::MEraEmuWin::implementation {
         //m_vsis_noref->Resize();
 
         // Handle engine thread termination
-        if (m_sd->thread_state.load(std::memory_order_relaxed) == EngineThreadState::Died) {
+        if (!m_sd->thread_is_alive.load(std::memory_order_relaxed)) {
             VisualStateManager::GoToState(*this, L"ExecutionEnded", true);
             if (m_sd->thread_exception) {
                 EmitUnhandledExceptionEvent(m_sd->thread_exception);

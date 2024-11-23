@@ -317,7 +317,7 @@ struct MEraEngine {
         return m_engine;
     }
 
-    EraExecutionBreakReason do_execution(_Atomic(bool)*run_flag, uint64_t max_inst_cnt);
+    EraExecutionBreakReason do_execution(std::atomic_bool const& run_flag, uint64_t max_inst_cnt);
     //bool get_is_halted();
     void reset_exec_to_ip(EraExecIp ip);
     std::optional<EraFuncInfo> get_func_info(const char* name);

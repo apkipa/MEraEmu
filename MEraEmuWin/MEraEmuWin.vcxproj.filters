@@ -24,6 +24,7 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="MEraEngine.hpp" />
+    <ClInclude Include="util.hpp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="Assets\Wide310x150Logo.scale-200.png">
