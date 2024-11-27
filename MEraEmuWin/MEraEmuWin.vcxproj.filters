@@ -8,10 +8,19 @@
     <Page Include="EngineControl.xaml" />
     <Page Include="ScrollBar_themeresources_v1.xaml" />
     <Page Include="ScrollViewer_themeresources_v1.xaml" />
+    <Page Include="DevTools\MainPage.xaml">
+      <Filter>DevTools</Filter>
+    </Page>
   </ItemGroup>
   <ItemGroup>
     <Midl Include="App.idl" />
     <Midl Include="MainPage.idl" />
+    <Midl Include="DevTools\SourcesFileTabItem.idl">
+      <Filter>DevTools</Filter>
+    </Midl>
+    <Midl Include="DevTools\SourcesTabCallStackTabItem.idl">
+      <Filter>DevTools</Filter>
+    </Midl>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp" />
@@ -56,6 +65,12 @@
     <Filter Include="Assets">
       <UniqueIdentifier>{e48dc53e-40b1-40cb-970a-f89935452892}</UniqueIdentifier>
     </Filter>
+    <Filter Include="DevTools">
+      <UniqueIdentifier>{23869983-96de-4108-9b4a-4012e34d6dd3}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Assets\Fonts">
+      <UniqueIdentifier>{451f82c4-8b18-45a6-9ff1-947c10eb4a8d}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <None Include="PropertySheet.props" />
@@ -69,5 +84,10 @@
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="..\MEraEmuCore\src\lib.rs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Font Include="Assets\Fonts\MaterialSymbolsOutlined-Light.ttf">
+      <Filter>Assets\Fonts</Filter>
+    </Font>
   </ItemGroup>
 </Project>

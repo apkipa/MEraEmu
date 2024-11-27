@@ -138,6 +138,10 @@ namespace winrt::MEraEmuWin::implementation {
     void MainPage::MenuFile_Exit_Click(IInspectable const&, RoutedEventArgs const&) {
         Tenkai::AppService::Quit();
     }
+    void MainPage::MenuFile_DevTools_Click(IInspectable const&, RoutedEventArgs const&) {
+        auto ctrl = MainEngineControl();
+        ctrl.IsDevToolsOpen(!ctrl.IsDevToolsOpen());
+    }
     void MainPage::MenuHelp_About_Click(IInspectable const&, RoutedEventArgs const&) {
         ShowSimpleContentDialog(L"关于 MEraEmu", hstring(std::format(
             L"UI 版本: {}\n"

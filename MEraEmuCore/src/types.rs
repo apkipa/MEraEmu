@@ -1839,6 +1839,7 @@ impl ArrIntValue {
     pub fn ensure_alloc(&mut self) {
         if self.vals.is_empty() {
             let size = self.dims.iter().fold(1, |acc, x| acc * (*x as usize));
+            self.vals.reserve_exact(size);
             self.vals.resize(size, Default::default());
         }
     }

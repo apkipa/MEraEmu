@@ -26,6 +26,7 @@
     <_NoWinAPIFamilyApp>true</_NoWinAPIFamilyApp>
     <_VC_Target_Library_Platform>Desktop</_VC_Target_Library_Platform>
     <CppWinRTImplicitlyExpandTargetPlatform>true</CppWinRTImplicitlyExpandTargetPlatform>
+    <CppWinRTUsePrefixes>false</CppWinRTUsePrefixes>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <ItemGroup Label="ProjectConfigurations">
@@ -116,7 +117,11 @@
       <PreprocessorDefinitions>DISABLE_XAML_GENERATED_MAIN;WIN32_LEAN_AND_MEAN;WINRT_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
     </ClCompile>
+    <Midl>
+      <MetadataFileName>$(IntDir)Unmerged\%(RelativeDir)%(Filename).winmd</MetadataFileName>
+    </Midl>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
@@ -138,6 +143,18 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="DevTools\MainPage.h">
+      <DependentUpon>DevTools\MainPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
+    <ClInclude Include="DevTools\SourcesFileTabItem.h">
+      <DependentUpon>DevTools\SourcesFileTabItem.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
+    <ClInclude Include="DevTools\SourcesTabCallStackTabItem.h">
+      <DependentUpon>DevTools\SourcesTabCallStackTabItem.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
     <ClInclude Include="EngineControl.h">
       <DependentUpon>EngineControl.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -155,6 +172,9 @@
     <ApplicationDefinition Include="App.xaml">
       <SubType>Designer</SubType>
     </ApplicationDefinition>
+    <Page Include="DevTools\MainPage.xaml">
+      <SubType>Designer</SubType>
+    </Page>
     <Page Include="EngineControl.xaml">
       <SubType>Designer</SubType>
     </Page>
@@ -183,6 +203,18 @@
     <Image Include="Assets\Wide310x150Logo.scale-200.png" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="DevTools\MainPage.cpp">
+      <DependentUpon>DevTools\MainPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
+    <ClCompile Include="DevTools\SourcesFileTabItem.cpp">
+      <DependentUpon>DevTools\SourcesFileTabItem.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
+    <ClCompile Include="DevTools\SourcesTabCallStackTabItem.cpp">
+      <DependentUpon>DevTools\SourcesTabCallStackTabItem.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
     <ClCompile Include="EngineControl.cpp">
       <DependentUpon>EngineControl.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -206,6 +238,16 @@
   <ItemGroup>
     <Midl Include="App.idl">
       <DependentUpon>App.xaml</DependentUpon>
+    </Midl>
+    <Midl Include="DevTools\MainPage.idl">
+      <DependentUpon>DevTools\MainPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </Midl>
+    <Midl Include="DevTools\SourcesFileTabItem.idl">
+      <SubType>Designer</SubType>
+    </Midl>
+    <Midl Include="DevTools\SourcesTabCallStackTabItem.idl">
+      <SubType>Designer</SubType>
     </Midl>
     <Midl Include="EngineControl.idl">
       <DependentUpon>EngineControl.xaml</DependentUpon>
@@ -268,14 +310,17 @@ cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --fea
   <ItemGroup>
     <Manifest Include="App.exe.manifest" />
   </ItemGroup>
+  <ItemGroup>
+    <Font Include="Assets\Fonts\MaterialSymbolsOutlined-Light.ttf" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
     <Import Project="packages\Microsoft.Web.WebView2.1.0.1264.42\build\native\Microsoft.Web.WebView2.targets" Condition="Exists('packages\Microsoft.Web.WebView2.1.0.1264.42\build\native\Microsoft.Web.WebView2.targets')" />
     <Import Project="packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.targets" Condition="Exists('packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.targets')" />
     <Import Project="packages\WinUIEdit.Uwp.0.0.3-prerelease\build\native\WinUIEdit.Uwp.targets" Condition="Exists('packages\WinUIEdit.Uwp.0.0.3-prerelease\build\native\WinUIEdit.Uwp.targets')" />
     <Import Project="packages\Microsoft.VCRTForwarders.140.1.1.0\build\native\Microsoft.VCRTForwarders.140.targets" Condition="Exists('packages\Microsoft.VCRTForwarders.140.1.1.0\build\native\Microsoft.VCRTForwarders.140.targets')" />
-    <Import Project="packages\Tenkai.UWP.0.1.1-alpha\build\native\Tenkai.UWP.targets" Condition="Exists('packages\Tenkai.UWP.0.1.1-alpha\build\native\Tenkai.UWP.targets')" />
     <Import Project="packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets" Condition="Exists('packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets')" />
+    <Import Project="packages\Tenkai.UWP.0.1.3-alpha\build\native\Tenkai.UWP.targets" Condition="Exists('packages\Tenkai.UWP.0.1.3-alpha\build\native\Tenkai.UWP.targets')" />
   </ImportGroup>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
@@ -286,8 +331,8 @@ cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --fea
     <Error Condition="!Exists('packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.targets'))" />
     <Error Condition="!Exists('packages\WinUIEdit.Uwp.0.0.3-prerelease\build\native\WinUIEdit.Uwp.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\WinUIEdit.Uwp.0.0.3-prerelease\build\native\WinUIEdit.Uwp.targets'))" />
     <Error Condition="!Exists('packages\Microsoft.VCRTForwarders.140.1.1.0\build\native\Microsoft.VCRTForwarders.140.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.VCRTForwarders.140.1.1.0\build\native\Microsoft.VCRTForwarders.140.targets'))" />
-    <Error Condition="!Exists('packages\Tenkai.UWP.0.1.1-alpha\build\native\Tenkai.UWP.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Tenkai.UWP.0.1.1-alpha\build\native\Tenkai.UWP.targets'))" />
     <Error Condition="!Exists('packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.props'))" />
     <Error Condition="!Exists('packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets'))" />
+    <Error Condition="!Exists('packages\Tenkai.UWP.0.1.3-alpha\build\native\Tenkai.UWP.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Tenkai.UWP.0.1.3-alpha\build\native\Tenkai.UWP.targets'))" />
   </Target>
 </Project>

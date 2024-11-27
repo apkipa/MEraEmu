@@ -455,7 +455,7 @@ MEraEngine::~MEraEngine() {
     if (!m_engine) { return; }
     mee_drop_engine(m_engine);
 }
-EraExecutionBreakReason MEraEngine::do_execution(std::atomic_bool const& run_flag, uint64_t max_inst_cnt) {
+EraExecutionBreakReason MEraEngine::do_execution(std::atomic_bool const& run_flag, uint64_t max_inst_cnt) const {
     // NOTE: It is safe to cast away the constness of `run_flag` because the Rust function does not modify the value
     return (EraExecutionBreakReason)unwrap_rust(mee_engine_do_execution(m_engine, (bool*)&run_flag, max_inst_cnt));
 }
@@ -463,41 +463,41 @@ EraExecutionBreakReason MEraEngine::do_execution(std::atomic_bool const& run_fla
 //    std::atomic_bool run_flag = true;
 //    return do_execution(&run_flag, 0) != ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
 //}
-void MEraEngine::reset_exec_to_ip(EraExecIp ip) {
+void MEraEngine::reset_exec_to_ip(EraExecIp ip) const {
     do_rpc("reset_exec_to_ip", { { "ip", ip } });
 }
-std::optional<EraFuncInfo> MEraEngine::get_func_info(const char* name) {
+std::optional<EraFuncInfo> MEraEngine::get_func_info(const char* name) const {
     auto r = do_rpc("get_func_info", { { "name", name } });
     if (r.is_null()) {
         return std::nullopt;
     }
     return r.get<EraFuncInfo>();
 }
-std::optional<EraFuncInfo> MEraEngine::get_func_info_by_ip(EraExecIp ip) {
+std::optional<EraFuncInfo> MEraEngine::get_func_info_by_ip(EraExecIp ip) const {
     auto r = do_rpc("get_func_info_by_ip", { { "ip", ip } });
     if (r.is_null()) {
         return std::nullopt;
     }
     return r.get<EraFuncInfo>();
 }
-std::optional<EraSourceInfo> MEraEngine::get_src_info_from_ip(EraExecIp ip) {
+std::optional<EraSourceInfo> MEraEngine::get_src_info_from_ip(EraExecIp ip) const {
     auto r = do_rpc("get_src_info_from_ip", { { "ip", ip } });
     if (r.is_null()) {
         return std::nullopt;
     }
     return r.get<EraSourceInfo>();
 }
-std::optional<EraChunkInfo> MEraEngine::get_chunk_info(uint32_t idx) {
+std::optional<EraChunkInfo> MEraEngine::get_chunk_info(uint32_t idx) const {
     auto r = do_rpc("get_chunk_info", { { "idx", idx } });
     if (r.is_null()) {
         return std::nullopt;
     }
     return r.get<EraChunkInfo>();
 }
-EraEngineStackTrace MEraEngine::get_stack_trace() {
+EraEngineStackTrace MEraEngine::get_stack_trace() const {
     return do_rpc("get_stack_trace", {}).get<EraEngineStackTrace>();
 }
-std::optional<std::string> MEraEngine::get_file_source(std::string_view name) {
+std::optional<std::string> MEraEngine::get_file_source(std::string_view name) const {
     auto r = do_rpc("get_file_source", { { "name", name } });
     if (r.is_null()) {
         return std::nullopt;
@@ -514,7 +514,9 @@ std::optional<DiagnosticResolveSrcSpanResult> MEraEngine::resolve_src_span(std::
     }
     return r.get<DiagnosticResolveSrcSpanResult>();
 }
-
+std::vector<std::string> MEraEngine::get_loaded_files_list() const {
+    return do_rpc("get_loaded_files_list", {}).get<std::vector<std::string>>();
+}
 nlohmann::json MEraEngine::do_rpc(std::string_view method, nlohmann::json params) const {
     auto json = make_jsonrpc(method, std::move(params));
     rust_String response{ mee_engine_do_rpc(m_engine, json.dump().c_str()) };

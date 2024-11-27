@@ -2546,6 +2546,7 @@ pub trait MEraEngineRpc {
         filename: &str,
         span: SrcSpan,
     ) -> Option<DiagnosticResolveSrcSpanResult>;
+    fn get_loaded_files_list(&self) -> Vec<String>;
 }
 
 impl<Callback> MEraEngine<Callback> {
@@ -2648,5 +2649,9 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
         span: SrcSpan,
     ) -> Option<DiagnosticResolveSrcSpanResult> {
         self.ctx.resolve_src_span(filename, span)
+    }
+
+    fn get_loaded_files_list(&self) -> Vec<String> {
+        self.ctx.source_map.keys().map(|x| x.to_string()).collect()
     }
 }

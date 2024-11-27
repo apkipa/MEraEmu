@@ -313,21 +313,22 @@ struct MEraEngine {
         std::swap(m_engine, other.m_engine);
         return *this;
     }
-    operator bool() noexcept {
+    operator bool() const noexcept {
         return m_engine;
     }
 
-    EraExecutionBreakReason do_execution(std::atomic_bool const& run_flag, uint64_t max_inst_cnt);
+    EraExecutionBreakReason do_execution(std::atomic_bool const& run_flag, uint64_t max_inst_cnt) const;
     //bool get_is_halted();
-    void reset_exec_to_ip(EraExecIp ip);
-    std::optional<EraFuncInfo> get_func_info(const char* name);
-    std::optional<EraFuncInfo> get_func_info_by_ip(EraExecIp ip);
-    std::optional<EraSourceInfo> get_src_info_from_ip(EraExecIp ip);
-    std::optional<EraChunkInfo> get_chunk_info(uint32_t idx);
-    EraEngineStackTrace get_stack_trace();
-    std::optional<std::string> get_file_source(std::string_view name);
+    void reset_exec_to_ip(EraExecIp ip) const;
+    std::optional<EraFuncInfo> get_func_info(const char* name) const;
+    std::optional<EraFuncInfo> get_func_info_by_ip(EraExecIp ip) const;
+    std::optional<EraSourceInfo> get_src_info_from_ip(EraExecIp ip) const;
+    std::optional<EraChunkInfo> get_chunk_info(uint32_t idx) const;
+    EraEngineStackTrace get_stack_trace() const;
+    std::optional<std::string> get_file_source(std::string_view name) const;
     static std::string_view get_version();
     std::optional<DiagnosticResolveSrcSpanResult> resolve_src_span(std::string_view filename, SrcSpan span) const;
+    std::vector<std::string> get_loaded_files_list() const;
 
     nlohmann::json do_rpc(std::string_view method, nlohmann::json params) const;
 
@@ -367,3 +368,20 @@ struct MEraEngineBuilder {
 private:
     MEraEngineBuilderFfi* m_builder;
 };
+
+/// <summary>
+/// Checks if the given execution break reason is fatal (i.e. no further progress can be made without
+/// user intervention, such as modifying bytecode).
+/// </summary>
+/// <param name="reason"></param>
+/// <returns></returns>
+inline bool is_execution_break_reason_fatal(EraExecutionBreakReason reason) {
+    switch (reason) {
+    case ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS:
+    case ERA_EXECUTION_BREAK_REASON_CALLBACK_BREAK:
+    case ERA_EXECUTION_BREAK_REASON_STOP_FLAG:
+        return false;
+    default:
+        return true;
+    }
+}

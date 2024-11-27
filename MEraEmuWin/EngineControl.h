@@ -1,5 +1,7 @@
 ﻿#pragma once
 
+#include <winrt/Tenkai.h>
+#include <winrt/Tenkai.UI.Xaml.h>
 #include "winrt/Windows.UI.Xaml.h"
 #include "winrt/Windows.UI.Xaml.Markup.h"
 #include "winrt/Windows.UI.Xaml.Interop.h"
@@ -48,6 +50,10 @@
             Windows::UI::Xaml::PropertyMetadata{ __VA_ARGS__ }                  \
         )
 
+namespace winrt::MEraEmuWin::DevTools::implementation {
+    struct MainPage;
+}
+
 namespace winrt::MEraEmuWin::implementation {
     struct EngineSharedData;
     struct InputRequest;
@@ -55,6 +61,15 @@ namespace winrt::MEraEmuWin::implementation {
     struct EngineUIPrintLineData;
     struct InputRequest;
     struct EngineThreadTask;
+
+    enum class EngineThreadTaskKind {
+        None,
+        ReturnToTitle,
+        SetHaltState,
+        ClearHaltState,
+        CustomFunc,
+        CustomFuncAndClearHaltState,
+    };
 
     struct EngineUIPrintLineDataButton {
         // For input command
@@ -73,7 +88,8 @@ namespace winrt::MEraEmuWin::implementation {
 
     struct EngineUnhandledExceptionEventArgs : EngineUnhandledExceptionEventArgsT<EngineUnhandledExceptionEventArgs> {
         EngineUnhandledExceptionEventArgs(hresult code, hstring const& msg) :
-            m_code(code), m_msg(msg) {}
+            m_code(code), m_msg(msg) {
+        }
 
         hresult Code() const noexcept { return m_code; }
         hstring Message() const noexcept { return m_msg; }
@@ -90,6 +106,8 @@ namespace winrt::MEraEmuWin::implementation {
 
         void ReturnToTitle();
         bool IsStarted();
+        void IsDevToolsOpen(bool value);
+        bool IsDevToolsOpen();
 
         event_token UnhandledException(Windows::Foundation::EventHandler<MEraEmuWin::EngineUnhandledExceptionEventArgs> h) {
             return m_ev_UnhandledException.add(h);
@@ -125,12 +143,45 @@ namespace winrt::MEraEmuWin::implementation {
         bool IsUserSkipping() const { return m_user_skipping; }
 
     private:
+        friend winrt::MEraEmuWin::DevTools::implementation::MainPage;
+
         friend EngineSharedData;
         friend MEraEmuWinEngineSysCallback;
         friend EngineUIPrintLineData;
 
         void UISideDisconnect();
         void QueueEngineTask(std::unique_ptr<EngineThreadTask> task);
+        void QueueEngineTask(EngineThreadTaskKind task_kind);
+        void QueueEngineFuncTask(std::move_only_function<void(MEraEngine const&)> f, bool clear_halt);
+        template <typename F>
+        auto ExecEngineTask(F&& f, bool clear_halt = false) {
+            using R = std::invoke_result_t<F, MEraEngine const&>;
+            std::promise<R> prom;
+            auto fut = prom.get_future();
+            QueueEngineFuncTask([f = std::forward<F>(f), prom = std::move(prom)](auto&& e) mutable {
+                try {
+                    if constexpr (std::is_same_v<R, void>) {
+                        f(e);
+                        prom.set_value();
+                    }
+                    else {
+                        prom.set_value(f(e));
+                    }
+                }
+                catch (...) {
+                    prom.set_exception(std::current_exception());
+                }
+            }, clear_halt);
+            return util::winrt::apartment_aware_future(std::move(fut));
+        }
+        void OnEngineExecutionInterrupted(EraExecutionBreakReason reason);
+        event_token EngineExecutionInterrupted(delegate<EraExecutionBreakReason> dg) {
+            return m_ev_EngineExecutionInterrupted.add(dg);
+        }
+        void EngineExecutionInterrupted(event_token et) noexcept {
+            m_ev_EngineExecutionInterrupted.remove(et);
+        }
+        EraExecutionBreakReason GetLastBreakReason() const { return m_last_execution_break_reason; }
 
         void InitEngineUI();
         void UpdateEngineUI();
@@ -180,8 +231,11 @@ namespace winrt::MEraEmuWin::implementation {
 
         std::shared_ptr<EngineSharedData> m_sd;
         util::sync::spsc::Receiver<std::move_only_function<void()>> m_ui_task_rx{ nullptr };
-        util::sync::spsc::Sender< std::unique_ptr<EngineThreadTask>> m_engine_task_tx{ nullptr };
+        util::sync::spsc::Sender<std::unique_ptr<EngineThreadTask>> m_engine_task_tx{ nullptr };
 
+        EraExecutionBreakReason m_last_execution_break_reason = ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
+        event<delegate<EraExecutionBreakReason>> m_ev_EngineExecutionInterrupted;
+        Tenkai::UI::Xaml::Window m_devtools_wnd{ nullptr };
         event<Windows::Foundation::EventHandler<MEraEmuWin::EngineUnhandledExceptionEventArgs>> m_ev_UnhandledException;
         IVirtualSurfaceImageSourceNative* m_vsis_noref{};
         ISurfaceImageSourceNativeWithD2D* m_vsis_d2d_noref{};

@@ -4,17 +4,16 @@
 #include "EngineControl.g.cpp"
 #endif
 
-#include "EngineUnhandledExceptionEventArgs.g.cpp"
-
-#include "MEraEngine.hpp"
-
-#include "Tenkai.hpp"
-
 #include <random>
 #include <fstream>
 #include <filesystem>
 #include <variant>
+#include <winrt/Tenkai.UI.ViewManagement.h>
 
+#include "EngineUnhandledExceptionEventArgs.g.cpp"
+#include "DevTools/MainPage.h"
+#include "MEraEngine.hpp"
+#include "Tenkai.hpp"
 #include "util.hpp"
 
 using namespace winrt;
@@ -228,6 +227,8 @@ namespace winrt::MEraEmuWin::implementation {
 }
 
 namespace winrt::MEraEmuWin::implementation {
+    // NOTE: If InputRequest is dropped before fulfilled, it will be treated as interrupted.
+    //       To convey the skip operation, call `try_fulfill_void` instead.
     struct InputRequest {
         //InputRequest(int64_t time_limit, bool show_time_prompt, hstring expiry_msg, bool is_one, bool can_skip) : {}
         InputRequest(int64_t& time_limit) : time_limit(time_limit) {}
@@ -249,6 +250,10 @@ namespace winrt::MEraEmuWin::implementation {
 
         //virtual void time_tick() = 0;
         virtual bool try_fulfill(hstring const& input) = 0;
+        // NOTE: Recommended to override this for proper semantics (don't handle skip as empty input!)
+        virtual bool try_fulfill_void() {
+            return try_fulfill({});
+        }
     };
     struct InputRequestI : InputRequest {
         std::optional<int64_t> default_value;
@@ -257,9 +262,9 @@ namespace winrt::MEraEmuWin::implementation {
         using InputRequest::InputRequest;
 
         ~InputRequestI() {
-            if (default_value) {
+            /*if (default_value) {
                 promise.set_value(*default_value);
-            }
+            }*/
         }
         bool try_fulfill(hstring const& input) override {
             if (input.empty() && default_value) {
@@ -282,9 +287,9 @@ namespace winrt::MEraEmuWin::implementation {
         using InputRequest::InputRequest;
 
         ~InputRequestS() {
-            if (default_value) {
+            /*if (default_value) {
                 promise.set_value(*default_value);
-            }
+            }*/
         }
         bool try_fulfill(hstring const& input) override {
             if (input.empty() && default_value) {
@@ -304,6 +309,7 @@ namespace winrt::MEraEmuWin::implementation {
         using InputRequest::InputRequest;
 
         ~InputRequestVoid() {
+            // TODO: Don't fulfill if interrupted, use ControlFlow::Break(())
             promise.set_value();
         }
         bool try_fulfill(hstring const& input) override {
@@ -311,16 +317,16 @@ namespace winrt::MEraEmuWin::implementation {
         }
     };
 
-    enum class EngineThreadTaskKind {
-        None,
-        ReturnToTitle,
-    };
     struct EngineThreadTask {
         EngineThreadTask(EngineThreadTaskKind kind) : kind(kind) {}
-        virtual ~EngineThreadTask() {}
+        EngineThreadTask(std::move_only_function<void()> f, bool clear_halt = false) :
+            kind(clear_halt ? EngineThreadTaskKind::CustomFuncAndClearHaltState : EngineThreadTaskKind::CustomFunc),
+            f(std::move(f)) {
+        }
+        //virtual ~EngineThreadTask() {}
 
         EngineThreadTaskKind kind;
-        //virtual void do_work();
+        std::move_only_function<void()> f;
     };
 
     struct EngineSharedData : std::enable_shared_from_this<EngineSharedData> {
@@ -340,6 +346,7 @@ namespace winrt::MEraEmuWin::implementation {
         std::atomic_bool thread_is_alive{ false };
         std::exception_ptr thread_exception{ nullptr };
         bool has_execution_error{ false };
+        MEraEngine engine{ nullptr };
     };
 
     struct MEraEmuWinEngineSysCallback : ::MEraEngineSysCallback {
@@ -472,7 +479,7 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 return { continue_tag, future.get() };
             }
-            catch (std::future_error const& e) { return { continue_tag, std::nullopt }; }
+            catch (std::future_error const& e) { return { break_tag, std::monostate{} }; }
         }
         ControlFlow<std::monostate, const char*> on_input_str(std::optional<std::string_view> default_value, bool can_click, bool allow_skip) override {
             m_tick_compensation = 0;
@@ -490,7 +497,7 @@ namespace winrt::MEraEmuWin::implementation {
                 m_str_cache = to_string(future.get());
                 return { continue_tag, m_str_cache.c_str() };
             }
-            catch (std::future_error const& e) { return { continue_tag, nullptr }; }
+            catch (std::future_error const& e) { return { break_tag, std::monostate{} }; }
         }
         ControlFlow<std::monostate, std::optional<int64_t>> on_tinput_int(int64_t time_limit, int64_t default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
             try {
@@ -523,7 +530,7 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 return { continue_tag, future.get() };
             }
-            catch (std::future_error const& e) { return { continue_tag, std::nullopt }; }
+            catch (std::future_error const& e) { return { break_tag, std::monostate{} }; }
         }
         ControlFlow<std::monostate, const char*> on_tinput_str(int64_t time_limit, std::string_view default_value, bool show_prompt, std::string_view expiry_msg, bool can_click) override {
             try {
@@ -557,7 +564,7 @@ namespace winrt::MEraEmuWin::implementation {
                 m_str_cache = to_string(future.get());
                 return { continue_tag, m_str_cache.c_str() };
             }
-            catch (std::future_error const& e) { return { continue_tag, nullptr }; }
+            catch (std::future_error const& e) { return { break_tag, std::monostate{} }; }
         }
         ControlFlow<std::monostate, std::optional<int64_t>> on_oneinput_int(std::optional<int64_t> default_value) override {
             // TODO: on_oneinput_int
@@ -925,8 +932,8 @@ namespace winrt::MEraEmuWin::implementation {
                     LONG high = (LONG)(pos >> 32);
                     LONG low = (LONG)pos;
                     auto r = SetFilePointer(m_fh.get(), low, &high, native_mode);
-                    check_bool(r != INVALID_SET_FILE_POINTER);
-                    return low + (static_cast<uint64_t>(high) << 32);
+                    check_bool(r != INVALID_SET_FILE_POINTER || GetLastError() == NO_ERROR);
+                    return (uint32_t)r + (((uint64_t)(uint32_t)high) << 32);
                 }
 
             private:
@@ -1092,11 +1099,15 @@ namespace winrt::MEraEmuWin::implementation {
     }
     EngineControl::~EngineControl() {
         UISideDisconnect();
+        if (m_devtools_wnd) {
+            m_devtools_wnd.Close();
+            m_devtools_wnd = nullptr;
+        }
     }
     void EngineControl::InitializeComponent() {
         EngineControlT::InitializeComponent();
 
-        // Register for scale notification
+        // Register for scale notification...
         auto bkg_swapchain_panel = BackgroundSwapchainPanel();
         bkg_swapchain_panel.CompositionScaleChanged([this](SwapChainPanel const& sender, auto&&) {
             m_xscale = sender.CompositionScaleX();
@@ -1107,7 +1118,7 @@ namespace winrt::MEraEmuWin::implementation {
         });
         m_xscale = bkg_swapchain_panel.CompositionScaleX();
         m_yscale = bkg_swapchain_panel.CompositionScaleY();
-        // And width notification
+        // And width notification.
         SizeChanged([this](auto&&, auto&&) {
             UpdateUIWidth((uint64_t)ActualWidth());
             // Always bring view to bottom
@@ -1149,6 +1160,29 @@ namespace winrt::MEraEmuWin::implementation {
     }
     bool EngineControl::IsStarted() {
         return m_sd && m_sd->thread_is_alive.load(std::memory_order_relaxed);
+    }
+    void EngineControl::IsDevToolsOpen(bool value) {
+        if (value == IsDevToolsOpen()) { return; }
+
+        if (value) {
+            m_devtools_wnd = Tenkai::UI::Xaml::Window();
+            auto page = make<DevTools::implementation::MainPage>();
+            auto p = page.as<DevTools::implementation::MainPage>();
+            m_devtools_wnd.Content(page);
+            m_devtools_wnd.Title(format(L"{} - MEraEmu DevTools", EngineTitle()));
+            m_devtools_wnd.Activate();
+            page.SetConnectedEngineControl(*this);
+            m_devtools_wnd.View().Closing([this](auto&&, auto&&) {
+                m_devtools_wnd = nullptr;
+            });
+        }
+        else {
+            m_devtools_wnd.Close();
+            m_devtools_wnd = nullptr;
+        }
+    }
+    bool EngineControl::IsDevToolsOpen() {
+        return m_devtools_wnd != nullptr;
     }
     void EngineControl::EngineOutputImage_PointerMoved(IInspectable const& sender, PointerRoutedEventArgs const& e) {
         e.Handled(true);
@@ -1233,6 +1267,7 @@ namespace winrt::MEraEmuWin::implementation {
             // Try to skip input requests
             if (auto& input_req = m_outstanding_input_req) {
                 if (input_req->can_click) {
+                    input_req->try_fulfill_void();
                     input_req = nullptr;
                 }
             }
@@ -1246,6 +1281,7 @@ namespace winrt::MEraEmuWin::implementation {
         // Try to skip input requests
         if (auto& input_req = m_outstanding_input_req) {
             if (input_req->can_click || input_req->can_skip) {
+                input_req->try_fulfill_void();
                 input_req = nullptr;
                 m_user_skipping = true;
             }
@@ -1278,6 +1314,7 @@ namespace winrt::MEraEmuWin::implementation {
 
             sd->thread_is_alive.store(true, std::memory_order_relaxed);
 
+            auto& engine = sd->engine;
             auto queue_ui_work = [&](std::move_only_function<void()> work) {
                 auto is_vacant = ui_task_tx.is_vacant();
                 if (ui_task_tx.send(work) && is_vacant) {
@@ -1310,12 +1347,12 @@ namespace winrt::MEraEmuWin::implementation {
                 task_disconnect();
                 // In case of exception, don't hang the UI thread
                 mark_thread_started();
+                engine = nullptr;
             });
 
             try {
                 sd->ui_is_alive.wait(false, std::memory_order_acquire);
 
-                MEraEngine engine{ nullptr };
                 MEraEmuWinEngineSysCallback* callback{};
                 auto builder = [&] {
                     auto callback_box = std::make_unique<MEraEmuWinEngineSysCallback>(sd.get(), &ui_task_tx);
@@ -1378,6 +1415,12 @@ namespace winrt::MEraEmuWin::implementation {
                     if (!loaded) { return; }
                     if (task->kind == EngineThreadTaskKind::ReturnToTitle) {
                         return_to_title();
+                    }
+                    else if (task->kind == EngineThreadTaskKind::CustomFunc) {
+                        task->f();
+                    }
+                    else {
+                        throw hresult_error(E_FAIL, L"unexpected task kind");
                     }
                 };
 
@@ -1500,14 +1543,36 @@ namespace winrt::MEraEmuWin::implementation {
                 });
 
                 // Main loop
+                EraExecutionBreakReason stop_reason = ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
+                // (?) Notify UI thread that engine is about to execute instructions
+                queue_ui_work([sd, stop_reason] {
+                    sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
+                });
                 while (sd->ui_is_alive.load(std::memory_order_relaxed)) {
-                    //while (!engine.get_is_halted()) {
-                    while (true) {
-                        auto stop_reason = engine.do_execution(engine_task_rx.is_vacant_var(), UINT64_MAX);
-                        if (stop_reason != ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS) {
-                            break;
-                        }
+                    // If not reached max instructions, we treat engine as halted
+                    auto is_halted = [&] {
+                        return is_execution_break_reason_fatal(stop_reason);
+                    };
+                    auto clear_halted = [&] {
+                        stop_reason = ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
+                        queue_ui_work([sd, stop_reason] {
+                            sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
+                        });
+                    };
+                    auto set_halted = [&] {
+                        stop_reason = ERA_EXECUTION_BREAK_REASON_DEBUG_BREAK_INSTRUCTION;
+                        queue_ui_work([sd, stop_reason] {
+                            sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
+                        });
+                    };
+                    while (!is_halted()) {
+                        stop_reason = engine.do_execution(engine_task_rx.is_vacant_var(), UINT64_MAX);
+                        queue_ui_work([sd, stop_reason] {
+                            sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
+                        });
+                        break;
                     }
+
                     callback->m_tick_compensation = 0;
                     if (sd->has_execution_error) {
                         // Dump stack trace when execution error occurs
@@ -1529,13 +1594,13 @@ namespace winrt::MEraEmuWin::implementation {
                             auto msg = format(L"  {}({},{}):{}\nSnippet: {}",
                                 path,
                                 resolved.loc.line,
-                                resolved.loc.col,
+                                resolved.loc.col + 1,
                                 to_hstring(func_info.name),
                                 to_hstring(resolved.snippet)
                             );
                             print_msgs.emplace_back(
                                 path,
-                                resolved.loc.line, resolved.loc.col,
+                                resolved.loc.line, resolved.loc.col + 1,
                                 std::move(msg)
                             );
                         }
@@ -1552,9 +1617,33 @@ namespace winrt::MEraEmuWin::implementation {
                         });
                     }
                     // Handle one task event
-                    if (auto task = engine_task_rx.recv()) {
-                        run_ui_task(std::move(*task), true);
-                    }
+                    do {
+                        auto task_opt = engine_task_rx.recv();
+                        if (!task_opt) { break; }
+                        auto& task = *task_opt;
+                        if (task->kind == EngineThreadTaskKind::ReturnToTitle) {
+                            return_to_title();
+                            clear_halted();
+                        }
+                        else if (task->kind == EngineThreadTaskKind::SetHaltState) {
+                            set_halted();
+                        }
+                        else if (task->kind == EngineThreadTaskKind::ClearHaltState) {
+                            clear_halted();
+                        }
+                        else if (task->kind == EngineThreadTaskKind::CustomFunc) {
+                            if (task->f) {
+                                task->f();
+                            }
+                        }
+                        else if (task->kind == EngineThreadTaskKind::CustomFuncAndClearHaltState) {
+                            if (task->f) {
+                                task->f();
+                            }
+                            clear_halted();
+                        }
+                        //run_ui_task(std::move(task), true);
+                    } while (!engine_task_rx.is_vacant());
                 }
             }
             catch (...) {
@@ -1573,11 +1662,23 @@ namespace winrt::MEraEmuWin::implementation {
             assert(m_sd->thread_exception);
             std::rethrow_exception(m_sd->thread_exception);
         }
+
+        // If DevTools is open, connect to it
+        if (IsDevToolsOpen()) {
+            m_devtools_wnd.Content().as<DevTools::MainPage>().SetConnectedEngineControl(*this);
+        }
     }
     catch (std::exception const& e) {
         throw hresult_error(E_FAIL, to_hstring(e.what()));
     }
     void EngineControl::UISideDisconnect() {
+        // No longer relevant, so also clear the event handlers
+        m_ev_EngineExecutionInterrupted.clear();
+        // Close DevTools connection
+        if (IsDevToolsOpen()) {
+            m_devtools_wnd.Content().as<DevTools::MainPage>().SetConnectedEngineControl(nullptr);
+        }
+        // Clear engine resources
         m_outstanding_input_req = nullptr;
         if (auto sd = std::exchange(m_sd, nullptr)) {
             if (sd->thread_task_op) {
@@ -1597,7 +1698,23 @@ namespace winrt::MEraEmuWin::implementation {
     }
     void EngineControl::QueueEngineTask(std::unique_ptr<EngineThreadTask> task) {
         if (!m_sd) { return; }
+        // In order for engine to handle tasks properly, we need to interrupt pending input requests
+        if (m_outstanding_input_req) {
+            m_outstanding_input_req = nullptr;
+        }
         m_engine_task_tx.send(task);
+    }
+    void EngineControl::QueueEngineTask(EngineThreadTaskKind task_kind) {
+        QueueEngineTask(std::make_unique<EngineThreadTask>(task_kind));
+    }
+    void EngineControl::QueueEngineFuncTask(std::move_only_function<void(MEraEngine const&)> f, bool clear_halt) {
+        QueueEngineTask(std::make_unique<EngineThreadTask>([sd = m_sd.get(), f = std::move(f)]() mutable {
+            f(sd->engine);
+        }, clear_halt));
+    }
+    void EngineControl::OnEngineExecutionInterrupted(EraExecutionBreakReason reason) {
+        m_last_execution_break_reason = reason;
+        m_ev_EngineExecutionInterrupted(reason);
     }
     void EngineControl::InitEngineUI() {
         // Reset UI resources
@@ -2040,6 +2157,7 @@ namespace winrt::MEraEmuWin::implementation {
             // Expired
             input_req->time_limit = std::chrono::duration_cast<std::chrono::milliseconds>(remaining_time).count();
             tenkai::cpp_utils::ScopeExit se_input_req([&] {
+                input_req->try_fulfill_void();
                 input_req = nullptr;
             });
             m_input_countdown_timer.Stop();
@@ -2308,6 +2426,11 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::RoutineInput(std::unique_ptr<InputRequest> request) {
         assert(request);
 
+        if (!m_engine_task_tx.is_vacant()) {
+            // Abandon the input request until the engine has processed the task we sent
+            return;
+        }
+
         // Flush intermediate print contents first
         FlushCurPrintLine();
         FlushEngineImageOutputLayout(false);
@@ -2330,7 +2453,7 @@ namespace winrt::MEraEmuWin::implementation {
         }
         // If user is skipping, skip current request
         if (m_user_skipping && input_req->can_skip) {
-            input_req = nullptr;
+            std::exchange(input_req, nullptr)->try_fulfill_void();
             return;
         }
         else {

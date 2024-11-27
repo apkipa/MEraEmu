@@ -1,0 +1,15 @@
+namespace MEraEmuWin.DevTools {
+    [bindable]
+    [default_interface]
+    runtimeclass SourcesTabCallStackTabItem {
+        SourcesTabCallStackTabItem();
+
+        String FuncName;
+        String FileName;
+        UInt32 LineNumber;
+        UInt32 ColumnNumber;
+        UInt32 SrcSpanStart;
+        UInt32 SrcSpanLen;
+        Boolean IsCurrent;
+    };
+}

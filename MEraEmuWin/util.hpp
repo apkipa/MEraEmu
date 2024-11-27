@@ -6,6 +6,11 @@
 #include <optional>
 #include <vector>
 #include <mutex>
+#include <future>
+#include <format>
+#include <winrt/base.h>
+#include <Tenkai.hpp>
+//#include <robuffer.h>
 
 namespace util {
     namespace sync {
@@ -381,4 +386,215 @@ namespace util {
             }
         }
     }
+
+    // TODO: When Tenkai.UWP goes to v0.1.4-alpha, remove this
+    namespace cpp_utils {
+        // Similar to std::experimental::scope_exit
+        template<typename T>
+        struct ScopeExit final {
+            explicit ScopeExit(T&& func) noexcept(noexcept(T(std::forward<T>(func)))) :
+                m_func(std::forward<T>(func)) {
+            }
+            explicit ScopeExit(std::nullptr_t) noexcept : m_active(false) {}
+            ScopeExit(ScopeExit const&) = delete;
+            ScopeExit(ScopeExit&& other) : m_active(other.m_active), m_func(std::move(other.m_func)) {
+                other.release();
+            }
+            // TODO: Does this even make sense?
+            ScopeExit& operator=(ScopeExit other) {
+                swap(m_active, other.m_active);
+                swap(m_func, other.m_func);
+                return *this;
+            }
+            ~ScopeExit() { if (m_active) { std::invoke(m_func); } }
+            void release(void) noexcept { m_active = false; }
+        private:
+            bool m_active{ true };
+            T m_func;
+        };
+        template<typename T>
+        inline auto scope_exit(T&& func) noexcept(noexcept(T(std::forward<T>(func)))) {
+            return ScopeExit{ std::forward<T>(func) };
+        }
+    }
+
+    namespace winrt {
+        namespace details {
+            inline void __stdcall resume_background_callback(void*, void* context) noexcept try {
+                auto f_ptr = static_cast<std::function<void()>*>(context);
+                std::unique_ptr<std::function<void()>> f(f_ptr);
+                (*f)();
+            }
+            catch (...) {
+                // Ignore
+            }
+
+            struct __declspec(uuid("905a0fef-bc53-11df-8c49-001e4fc686da")) IBufferByteAccess : ::IUnknown {
+                virtual HRESULT __stdcall Buffer(uint8_t** value) = 0;
+            };
+        }
+
+        template <typename F>
+        void resume_background(F f) {
+            using namespace ::winrt::impl;
+            auto f_ptr = std::make_unique<std::function<void()>>(std::move(f));
+            submit_threadpool_callback(details::resume_background_callback, f_ptr.get());
+            f_ptr.release();
+        }
+
+        template <typename T>
+        inline auto apartment_aware_future(std::future<T> fut) {
+            struct Awaiter {
+                Awaiter(std::future<T> fut) : fut(std::move(fut)) {}
+                bool await_ready() const { return fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready; }
+                T await_resume() {
+                    if constexpr (std::is_same_v<T, void>) {
+                        fut.get();
+                    }
+                    else {
+                        return std::move(fut.get());
+                    }
+                }
+                void await_suspend(std::coroutine_handle<> handle) {
+                    ::winrt::apartment_context ui_ctx;
+                    resume_background([=] {
+                        auto awaiter = ::winrt::operator co_await(ui_ctx);
+                        fut.wait();
+                        awaiter.await_suspend(handle);
+                    });
+                }
+                std::future<T> fut;
+            };
+            return Awaiter{ std::move(fut) };
+        }
+
+        struct fire_forget {
+            struct promise_type {
+                fire_forget get_return_object() const noexcept { return {}; }
+                std::suspend_never initial_suspend() const noexcept { return {}; }
+                std::suspend_never final_suspend() const noexcept { return {}; }
+                void return_void() const noexcept {}
+                void unhandled_exception() const noexcept {
+                    auto ex_code = ::winrt::to_hresult();
+                    auto ex_msg = ::winrt::to_message();
+                    auto msg = std::format(L"fire_forget: Unobserved exception: 0x{:08x} {}", (uint32_t)ex_code, ex_msg);
+                    OutputDebugStringW(msg.c_str());
+                }
+            };
+        };
+
+        // TODO: Support both Borrwoed and Owned forms
+        /// A buffer wrapper.
+        template <typename T>
+        struct BufferWrapper : ::winrt::implements<BufferWrapper<T>,
+            ::winrt::Windows::Storage::Streams::IBuffer,
+            details::IBufferByteAccess>
+        {
+            BufferWrapper(T const& buffer) : m_buffer(buffer) {}
+            uint32_t Capacity() const noexcept {
+                return static_cast<uint32_t>(m_buffer.size());
+            }
+            uint32_t Length() const noexcept {
+                return static_cast<uint32_t>(m_buffer.size());
+            }
+            void Length(uint32_t) {
+                throw ::winrt::hresult_not_implemented();
+            }
+            HRESULT __stdcall Buffer(uint8_t** value) override {
+                *value = (uint8_t*)m_buffer.data();
+                return S_OK;
+            }
+        private:
+            T const& m_buffer;
+        };
+
+        template <typename T>
+        auto make_buffer_wrapper(T const& buffer) {
+            return ::winrt::make<BufferWrapper<T>>(buffer);
+        }
+
+        // Must be run on UI thread
+        template<typename Functor, typename T>
+        void run_when_loaded(Functor&& functor, T const& elem) {
+            using ::winrt::Windows::UI::Xaml::RoutedEventArgs;
+            using ::winrt::Windows::Foundation::IInspectable;
+            //if constexpr (util::misc::is_pointer_like<T>) {
+            if constexpr (false) {
+                if (elem->IsLoaded()) { functor(elem); }
+                else {
+                    auto raw_ptr = ::winrt::get_abi(elem);
+                    auto revoke_et = std::make_shared_for_overwrite<::winrt::event_token>();
+                    *revoke_et = elem->Loaded(
+                        [revoke_et, functor = std::forward<Functor>(functor), raw_ptr](
+                            IInspectable const&, RoutedEventArgs const&)
+                    {
+                        T elem;
+                        ::winrt::copy_from_abi(elem, raw_ptr);
+                        raw_ptr->Loaded(*revoke_et);
+                        functor(std::move(elem));
+                    }
+                    );
+                }
+            }
+            else {
+                constexpr bool is_implementation =
+                    !std::is_same_v<decltype(::winrt::Windows::Foundation::IUnknown{}.as<T>()), T > ;
+                if constexpr (is_implementation) {
+                    return run_when_loaded(std::forward<Functor>(functor), &elem);
+                }
+                else {
+                    if (elem.IsLoaded()) { functor(elem); }
+                    else {
+                        auto raw_ptr = ::winrt::get_abi(elem);
+                        auto revoke_et = std::make_shared_for_overwrite<::winrt::event_token>();
+                        *revoke_et = elem.Loaded(
+                            [revoke_et, functor = std::forward<Functor>(functor), raw_ptr](
+                                IInspectable const&, RoutedEventArgs const&)
+                        {
+                            T elem{ nullptr };
+                            ::winrt::copy_from_abi(elem, raw_ptr);
+                            elem.Loaded(*revoke_et);
+                            functor(std::move(elem));
+                        }
+                        );
+                    }
+                }
+            }
+        }
+
+        template <typename T>
+        auto resume_when_loaded(T const& elem) {
+            struct Awaiter {
+                Awaiter(T const& elem) : elem(elem), m_succeeded(elem.IsLoaded()) {}
+                ~Awaiter() {
+                    std::format("");
+                }
+                bool await_ready() const { return m_succeeded; }
+                void await_suspend(std::coroutine_handle<> handle) {
+                    // TODO: When Tenkai.UWP goes to v0.1.4-alpha, use its instead
+                    run_when_loaded([this, handle, se_handle = ::util::cpp_utils::scope_exit([this, handle] {
+                        // HACK: Workarounds a MSVC bug by adding `this->`
+                        if (!this->m_succeeded) {
+                            handle();
+                        }
+                    })](auto&&) {
+                        m_succeeded = true;
+                        handle();
+                    }, elem);
+                }
+                void await_resume() {
+                    if (!m_succeeded) {
+                        throw ::winrt::hresult_changed_state();
+                    }
+                }
+                T const& elem;
+            private:
+                bool m_succeeded;
+            };
+            return Awaiter{ elem };
+        }
+    }
 }
+
+// Preludes
+using util::winrt::fire_forget;

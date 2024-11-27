@@ -1,0 +1,10 @@
+namespace MEraEmuWin.DevTools {
+    [bindable]
+    [default_interface]
+    runtimeclass SourcesFileTabItem {
+        SourcesFileTabItem();
+
+        String FileName;
+        String FullPath;
+    };
+}

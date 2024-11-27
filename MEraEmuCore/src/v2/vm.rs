@@ -3550,6 +3550,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                     for (stain, default_stain) in var_stain.iter_mut().zip(default_stain) {
                         stain.val = default_stain;
                     }
+                    sview.replace([]);
                 }
                 Bc::SaveChara { charas_cnt } => {
                     let charas_cnt = charas_cnt as usize;

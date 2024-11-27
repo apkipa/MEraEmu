@@ -11,6 +11,7 @@ namespace MEraEmuWin {
         void ReturnToTitle();
 
         Boolean IsStarted{ get; };
+        Boolean IsDevToolsOpen;
 
         event Windows.Foundation.EventHandler<EngineUnhandledExceptionEventArgs> UnhandledException;
 

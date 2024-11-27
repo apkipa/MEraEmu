@@ -12,6 +12,8 @@
                 <ResourceDictionary Source="ScrollBar_themeresources_v1.xaml" />
                 <ResourceDictionary Source="ScrollViewer_themeresources_v1.xaml" />
             </ResourceDictionary.MergedDictionaries>
+
+            <FontFamily x:Key="MaterialSymbolFontFamily">ms-appx:///Assets/Fonts/MaterialSymbolsOutlined-Light.ttf#Material Symbols Outlined</FontFamily>
         </ResourceDictionary>
     </Application.Resources>
 
