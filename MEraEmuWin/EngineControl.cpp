@@ -1544,6 +1544,7 @@ namespace winrt::MEraEmuWin::implementation {
 
                 // Main loop
                 EraExecutionBreakReason stop_reason = ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
+                uint64_t instructions_to_exec = UINT64_MAX;
                 // (?) Notify UI thread that engine is about to execute instructions
                 queue_ui_work([sd, stop_reason] {
                     sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
@@ -1566,11 +1567,16 @@ namespace winrt::MEraEmuWin::implementation {
                         });
                     };
                     while (!is_halted()) {
-                        stop_reason = engine.do_execution(engine_task_rx.is_vacant_var(), UINT64_MAX);
+                        stop_reason = engine.do_execution(engine_task_rx.is_vacant_var(), instructions_to_exec);
                         queue_ui_work([sd, stop_reason] {
                             sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
                         });
                         break;
+                    }
+                    if (instructions_to_exec != UINT64_MAX) {
+                        // Limit reached, auto halt
+                        instructions_to_exec = UINT64_MAX;
+                        set_halted();
                     }
 
                     callback->m_tick_compensation = 0;
@@ -1629,6 +1635,10 @@ namespace winrt::MEraEmuWin::implementation {
                             set_halted();
                         }
                         else if (task->kind == EngineThreadTaskKind::ClearHaltState) {
+                            clear_halted();
+                        }
+                        else if (task->kind == EngineThreadTaskKind::SingleStepAndHalt) {
+                            instructions_to_exec = 1;
                             clear_halted();
                         }
                         else if (task->kind == EngineThreadTaskKind::CustomFunc) {

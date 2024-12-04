@@ -13,6 +13,12 @@ using namespace Windows::UI::Xaml::Controls;
 
 namespace muxc = Microsoft::UI::Xaml::Controls;
 
+using winrt::MEraEmuWin::implementation::EngineThreadTaskKind;
+
+static constexpr int32_t BreakPointMargin = 1;
+static constexpr int32_t LineNumberMargin = 2;
+static constexpr int32_t BreakPointMarker = 11;
+
 namespace winrt::MEraEmuWin::DevTools::implementation {
     MainPage::~MainPage() {
         if (m_engine_ctrl) {
@@ -80,8 +86,6 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void MainPage::CodeExecPauseResumeButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         if (!m_engine_ctrl) { return; }
 
-        using winrt::MEraEmuWin::implementation::EngineThreadTaskKind;
-
         if (m_engine_running) {
             // Pause execution
             m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SetHaltState);
@@ -90,6 +94,22 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             // Resume execution
             m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
         }
+    }
+    void MainPage::CodeExecStepIntoButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        if (!m_engine_ctrl) { return; }
+        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::CustomFuncAndClearHaltState);
+    }
+    void MainPage::CodeExecStepOverButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        if (!m_engine_ctrl) { return; }
+        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::CustomFuncAndClearHaltState);
+    }
+    void MainPage::CodeExecStepOutButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        if (!m_engine_ctrl) { return; }
+        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::CustomFuncAndClearHaltState);
+    }
+    void MainPage::CodeExecStepSingleButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        if (!m_engine_ctrl) { return; }
+        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
     }
     fire_forget MainPage::SourcesTabCallStackTabItem_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         //auto item = sender.as<FrameworkElement>().DataContext().as<MEraEmuWin::DevTools::SourcesTabCallStackTabItem>();
@@ -258,19 +278,31 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
         if (!editor_ctrl) { co_return tvi; }
         auto editor = editor_ctrl.Editor();
+
         // TODO: If we don't wait, the editor will not be ready and invokes nullptr?
-        co_await resume_foreground(DispatcherQueue::GetForCurrentThread(), DispatcherQueuePriority::Low);
+        //co_await resume_foreground(DispatcherQueue::GetForCurrentThread(), DispatcherQueuePriority::Low);
+        co_await util::winrt::resume_when_loaded(editor_ctrl);
+
         editor.ClearAll();
+
+        if (!tvi.Tag()) {
+            // Manually prevent reinitialization thanks to TabViewItem being reused :(
+            tvi.Tag(box_value(L"Inited"));
+            InitializeCodeEditorControl(editor_ctrl);
+        }
+
         editor.AppendTextFromBuffer((int64_t)source.size(), util::winrt::make_buffer_wrapper(source));
         editor.EmptyUndoBuffer();
 
         co_return tvi;
     }
-    WinUIEditor::CodeEditorControl MainPage::CodeEditorControlFromSourcesFileTabViewItem(muxc::TabViewItem const& tab) {
+    MEraEmuWin::DevTools::CodeEditControl MainPage::CodeEditorControlFromSourcesFileTabViewItem(muxc::TabViewItem const& tab) {
         if (!tab) { return nullptr; }
         auto content = tab.Content().try_as<FrameworkElement>();
         if (!content) { return nullptr; }
-        return content.FindName(L"SrcCodeEditor").try_as<WinUIEditor::CodeEditorControl>();
+        if (auto ctrl = content.try_as<MEraEmuWin::DevTools::CodeEditControl>()) { return ctrl; }
+        auto ctrl = content.FindName(L"SrcCodeEditor");
+        return ctrl.try_as<MEraEmuWin::DevTools::CodeEditControl>();
     }
     IAsyncAction MainPage::OpenOrCreateSourcesFileTabAtSrcSpan(hstring path, SrcSpan span) {
         auto strong_this = get_strong();
@@ -280,5 +312,34 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         // Move caret to the position
         editor_ctrl.Editor().GotoPos(span.start);
         editor_ctrl.Focus(FocusState::Programmatic);
+    }
+    void MainPage::InitializeCodeEditorControl(MEraEmuWin::DevTools::CodeEditControl const& editor_ctrl) {
+        if (!editor_ctrl) { return; }
+
+        // Register event handlers
+        auto editor = editor_ctrl.Editor();
+        editor.SetMarginTypeN(0, WinUIEditor::MarginType::Symbol);
+        editor.SetMarginTypeN(BreakPointMargin, WinUIEditor::MarginType::Symbol);
+        editor.SetMarginSensitiveN(BreakPointMargin, true);
+        editor.SetMarginMaskN(BreakPointMargin, (1ul << BreakPointMarker));
+        editor.SetMarginCursorN(BreakPointMargin, WinUIEditor::CursorShape::ReverseArrow);
+        editor.SetMarginTypeN(LineNumberMargin, WinUIEditor::MarginType::Number);
+        editor.SetMarginSensitiveN(LineNumberMargin, false);
+        editor.SetMarginMaskN(LineNumberMargin, 0);
+        editor.MarkerDefine(BreakPointMarker, WinUIEditor::MarkerSymbol::Circle);
+        editor.MarkerSetBack(BreakPointMarker, RGB(0xff, 0, 0));
+        editor.MarkerSetFore(BreakPointMarker, RGB(0xdc, 0x14, 0x3c));
+        editor.MarginClick({ this, &MainPage::CodeEditorControl_MarginClick });
+    }
+    void MainPage::CodeEditorControl_MarginClick(WinUIEditor::Editor const& sender, WinUIEditor::MarginClickEventArgs const& e) {
+        if (e.Margin() != BreakPointMargin) { return; }
+
+        auto line = sender.LineFromPosition(e.Position());
+        if (sender.MarkerGet(line) & (1 << BreakPointMarker)) {
+            sender.MarkerDelete(line, BreakPointMarker);
+        }
+        else {
+            sender.MarkerAdd(line, BreakPointMarker);
+        }
     }
 }

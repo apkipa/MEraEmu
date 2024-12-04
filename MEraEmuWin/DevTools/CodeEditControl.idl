@@ -1,0 +1,8 @@
+namespace MEraEmuWin.DevTools {
+    [default_interface]
+    runtimeclass CodeEditControl : Windows.UI.Xaml.Controls.Control {
+        CodeEditControl();
+
+        WinUIEditor.Editor Editor{ get; };
+    };
+}

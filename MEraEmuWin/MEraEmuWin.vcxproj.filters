@@ -11,6 +11,9 @@
     <Page Include="DevTools\MainPage.xaml">
       <Filter>DevTools</Filter>
     </Page>
+    <Page Include="DevTools\CodeEditControl.xaml">
+      <Filter>DevTools</Filter>
+    </Page>
   </ItemGroup>
   <ItemGroup>
     <Midl Include="App.idl" />
@@ -29,11 +32,16 @@
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="MEraEngine.cpp" />
+    <ClCompile Include="ScintillaModule.cpp" />
+    <ClCompile Include="DevTools\CodeEditControl.SciEdit.cpp">
+      <Filter>DevTools</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="MEraEngine.hpp" />
     <ClInclude Include="util.hpp" />
+    <ClInclude Include="ScintillaModule.hpp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="Assets\Wide310x150Logo.scale-200.png">

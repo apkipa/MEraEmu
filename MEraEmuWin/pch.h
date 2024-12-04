@@ -54,7 +54,13 @@
 #include <windows.ui.xaml.media.dxinterop.h>
 
 #include <functional>
+#include <algorithm>
 #include <ranges>
 #include <thread>
 #include <vector>
+#include <array>
 #include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <chrono>
+#include <set>

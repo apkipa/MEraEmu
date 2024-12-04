@@ -23,6 +23,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         void SourcesTabLeftPaneOpenCloseButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
         void SourcesTabRightPaneOpenCloseButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
         void CodeExecPauseResumeButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        void CodeExecStepIntoButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        void CodeExecStepOverButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        void CodeExecStepOutButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        void CodeExecStepSingleButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
         fire_forget SourcesTabCallStackTabItem_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
 
     private:
@@ -31,8 +35,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         fire_forget UpdateForEnginePausedState(EraExecutionBreakReason reason);
         fire_forget UpdateForEngineRunningState(EraExecutionBreakReason reason);
         Windows::Foundation::IAsyncOperation<Microsoft::UI::Xaml::Controls::TabViewItem> OpenOrCreateSourcesFileTab(hstring path);
-        WinUIEditor::CodeEditorControl CodeEditorControlFromSourcesFileTabViewItem(Microsoft::UI::Xaml::Controls::TabViewItem const& tab);
+        MEraEmuWin::DevTools::CodeEditControl CodeEditorControlFromSourcesFileTabViewItem(Microsoft::UI::Xaml::Controls::TabViewItem const& tab);
         Windows::Foundation::IAsyncAction OpenOrCreateSourcesFileTabAtSrcSpan(hstring path, SrcSpan span);
+        void InitializeCodeEditorControl(MEraEmuWin::DevTools::CodeEditControl const& editor_ctrl);
+        void CodeEditorControl_MarginClick(WinUIEditor::Editor const& sender, WinUIEditor::MarginClickEventArgs const& e);
 
         winrt::MEraEmuWin::implementation::EngineControl* m_engine_ctrl{ nullptr };
         event_token m_et_EngineExecutionInterrupted{};

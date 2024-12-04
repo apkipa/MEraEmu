@@ -143,6 +143,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="DevTools\CodeEditControl.h">
+      <DependentUpon>DevTools\CodeEditControl.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
     <ClInclude Include="DevTools\MainPage.h">
       <DependentUpon>DevTools\MainPage.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -166,12 +170,16 @@
     <ClInclude Include="MainPage.h">
       <DependentUpon>MainPage.xaml</DependentUpon>
     </ClInclude>
+    <ClInclude Include="ScintillaModule.hpp" />
     <ClInclude Include="util.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ApplicationDefinition Include="App.xaml">
       <SubType>Designer</SubType>
     </ApplicationDefinition>
+    <Page Include="DevTools\CodeEditControl.xaml">
+      <SubType>Designer</SubType>
+    </Page>
     <Page Include="DevTools\MainPage.xaml">
       <SubType>Designer</SubType>
     </Page>
@@ -203,6 +211,11 @@
     <Image Include="Assets\Wide310x150Logo.scale-200.png" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="DevTools\CodeEditControl.cpp">
+      <DependentUpon>DevTools\CodeEditControl.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
+    <ClCompile Include="DevTools\CodeEditControl.SciEdit.cpp" />
     <ClCompile Include="DevTools\MainPage.cpp">
       <DependentUpon>DevTools\MainPage.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -220,6 +233,16 @@
       <SubType>Code</SubType>
     </ClCompile>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="ScintillaModule.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClInclude Include="MEraEngine.hpp">
       <FileType>CppCode</FileType>
     </ClInclude>
@@ -238,6 +261,10 @@
   <ItemGroup>
     <Midl Include="App.idl">
       <DependentUpon>App.xaml</DependentUpon>
+    </Midl>
+    <Midl Include="DevTools\CodeEditControl.idl">
+      <DependentUpon>DevTools\CodeEditControl.xaml</DependentUpon>
+      <SubType>Code</SubType>
     </Midl>
     <Midl Include="DevTools\MainPage.idl">
       <DependentUpon>DevTools\MainPage.xaml</DependentUpon>

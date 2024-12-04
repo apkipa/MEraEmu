@@ -566,9 +566,7 @@ namespace util {
         auto resume_when_loaded(T const& elem) {
             struct Awaiter {
                 Awaiter(T const& elem) : elem(elem), m_succeeded(elem.IsLoaded()) {}
-                ~Awaiter() {
-                    std::format("");
-                }
+                ~Awaiter() {}
                 bool await_ready() const { return m_succeeded; }
                 void await_suspend(std::coroutine_handle<> handle) {
                     // TODO: When Tenkai.UWP goes to v0.1.4-alpha, use its instead

@@ -6,5 +6,6 @@ namespace MEraEmuWin.DevTools {
 
         String FileName;
         String FullPath;
+        Boolean IsInited;
     };
 }

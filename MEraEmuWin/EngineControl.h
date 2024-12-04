@@ -67,6 +67,7 @@ namespace winrt::MEraEmuWin::implementation {
         ReturnToTitle,
         SetHaltState,
         ClearHaltState,
+        SingleStepAndHalt,
         CustomFunc,
         CustomFuncAndClearHaltState,
     };

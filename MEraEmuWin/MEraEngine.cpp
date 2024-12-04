@@ -517,6 +517,16 @@ std::optional<DiagnosticResolveSrcSpanResult> MEraEngine::resolve_src_span(std::
 std::vector<std::string> MEraEngine::get_loaded_files_list() const {
     return do_rpc("get_loaded_files_list", {}).get<std::vector<std::string>>();
 }
+std::optional<std::vector<uint8_t>> MEraEngine::read_bytecode(uint32_t chunk_idx, uint32_t offset, uint32_t size) const {
+    auto r = do_rpc("read_bytecode", { { "chunk_idx", chunk_idx }, { "offset", offset }, { "size", size } });
+    if (r.is_null()) {
+        return std::nullopt;
+    }
+    return r.get<std::vector<uint8_t>>();
+}
+void MEraEngine::patch_bytecode(uint32_t chunk_idx, uint32_t offset, std::span<const uint8_t> data) const {
+    do_rpc("patch_bytecode", { { "chunk_idx", chunk_idx }, { "offset", offset }, { "data", data } });
+}
 nlohmann::json MEraEngine::do_rpc(std::string_view method, nlohmann::json params) const {
     auto json = make_jsonrpc(method, std::move(params));
     rust_String response{ mee_engine_do_rpc(m_engine, json.dump().c_str()) };

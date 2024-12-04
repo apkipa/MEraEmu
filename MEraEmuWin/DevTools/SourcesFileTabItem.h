@@ -10,10 +10,13 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         hstring FileName() const { return m_file_name; }
         void FullPath(hstring const& value) { m_full_path = value; }
         hstring FullPath() const { return m_full_path; }
+        void IsInited(bool value) { m_is_inited = value; }
+        bool IsInited() const { return m_is_inited; }
 
     private:
         hstring m_file_name;
         hstring m_full_path;
+        bool m_is_inited{};
     };
 }
 

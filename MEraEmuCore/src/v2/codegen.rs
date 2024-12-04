@@ -5505,8 +5505,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         }
 
         // Push function number
-        self.chunk
-            .push_load_imm(target_idx as _, target_func.name_span);
+        self.chunk.push_load_imm(target_idx as _, name_span);
         // Call function
         self.chunk.push_bc(
             BcKind::CallFun {

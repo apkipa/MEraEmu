@@ -8,6 +8,7 @@
 #include <stdatomic.h>
 #include <optional>
 #include <variant>
+#include <span>
 
 #include "ffi/MEraEmuCore.rust.h"
 
@@ -329,6 +330,8 @@ struct MEraEngine {
     static std::string_view get_version();
     std::optional<DiagnosticResolveSrcSpanResult> resolve_src_span(std::string_view filename, SrcSpan span) const;
     std::vector<std::string> get_loaded_files_list() const;
+    std::optional<std::vector<uint8_t>> read_bytecode(uint32_t chunk_idx, uint32_t offset, uint32_t size) const;
+    void patch_bytecode(uint32_t chunk_idx, uint32_t offset, std::span<const uint8_t> data) const;
 
     nlohmann::json do_rpc(std::string_view method, nlohmann::json params) const;
 

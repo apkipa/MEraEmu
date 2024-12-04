@@ -224,6 +224,7 @@
                         <Setter Target="CodeExecStepIntoButton.IsEnabled" Value="True" />
                         <Setter Target="CodeExecStepOverButton.IsEnabled" Value="True" />
                         <Setter Target="CodeExecStepOutButton.IsEnabled" Value="True" />
+                        <Setter Target="CodeExecStepSingleButton.IsEnabled" Value="True" />
                         <Setter Target="SourcesTabScopeTabRunningIndicator.Visibility" Value="Collapsed" />
                         <Setter Target="SourcesTabCallStackTabRunningIndicator.Visibility" Value="Collapsed" />
                     </VisualState.Setters>
@@ -287,7 +288,7 @@
                             <muxc:TabView.TabItemTemplate>
                                 <DataTemplate x:DataType="local:SourcesFileTabItem">
                                     <muxc:TabViewItem Header="{x:Bind FileName}" ToolTipService.ToolTip="{x:Bind FullPath}">
-                                        <editor:CodeEditorControl x:Name="SrcCodeEditor" Background="{ThemeResource SolidBackgroundFillColorTertiaryBrush}" />
+                                        <local:CodeEditControl x:Name="SrcCodeEditor" Background="{ThemeResource SolidBackgroundFillColorTertiaryBrush}" />
                                     </muxc:TabViewItem>
                                 </DataTemplate>
                             </muxc:TabView.TabItemTemplate>
@@ -317,20 +318,36 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal">
                             <Button x:Name="CodeExecPauseResumeButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36"
                                     Click="CodeExecPauseResumeButton_Click">
-                                <!-- Pause -->
+                                <!-- Pause / Continue -->
+                                <Button.KeyboardAccelerators>
+                                    <KeyboardAccelerator Key="F5" />
+                                </Button.KeyboardAccelerators>
+                                
                                 <FontIcon x:Name="CodeExecPauseResumeButtonContent" FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xE034;" />
                             </Button>
-                            <Button x:Name="CodeExecStepIntoButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False">
+                            <Button x:Name="CodeExecStepIntoButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False"
+                                    Click="CodeExecStepIntoButton_Click">
                                 <!-- Step Into -->
                                 <FontIcon FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF701;" />
                             </Button>
-                            <Button x:Name="CodeExecStepOverButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False">
+                            <Button x:Name="CodeExecStepOverButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False"
+                                    Click="CodeExecStepOverButton_Click">
                                 <!-- Step Over -->
                                 <FontIcon FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF6FF;" />
                             </Button>
-                            <Button x:Name="CodeExecStepOutButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False">
+                            <Button x:Name="CodeExecStepOutButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False"
+                                    Click="CodeExecStepOutButton_Click">
                                 <!-- Step Out -->
                                 <FontIcon FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF700;" />
+                            </Button>
+                            <Button x:Name="CodeExecStepSingleButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False"
+                                    Click="CodeExecStepSingleButton_Click">
+                                <!-- Step Single -->
+                                <Button.KeyboardAccelerators>
+                                    <KeyboardAccelerator Key="F9" />
+                                </Button.KeyboardAccelerators>
+                                
+                                <FontIcon FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF6FE;" />
                             </Button>
                         </StackPanel>
                         <ScrollViewer Grid.Row="1">

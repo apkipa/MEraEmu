@@ -4505,6 +4505,11 @@ impl EraBcChunk {
         &self.bc
     }
 
+    #[inline]
+    pub fn get_bc_mut(&mut self) -> &mut [u8] {
+        &mut self.bc
+    }
+
     pub fn lookup_src(&self, idx: usize) -> Option<SrcSpan> {
         use crate::util::read_packed_u32;
         let start = {

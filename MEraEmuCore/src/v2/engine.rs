@@ -2547,6 +2547,13 @@ pub trait MEraEngineRpc {
         span: SrcSpan,
     ) -> Option<DiagnosticResolveSrcSpanResult>;
     fn get_loaded_files_list(&self) -> Vec<String>;
+    fn read_bytecode(&self, chunk_idx: u32, offset: u32, size: u32) -> Option<Vec<u8>>;
+    fn patch_bytecode(
+        &mut self,
+        chunk_idx: u32,
+        offset: u32,
+        data: Vec<u8>,
+    ) -> Result<(), MEraEngineError>;
 }
 
 impl<Callback> MEraEngine<Callback> {
@@ -2653,5 +2660,34 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
 
     fn get_loaded_files_list(&self) -> Vec<String> {
         self.ctx.source_map.keys().map(|x| x.to_string()).collect()
+    }
+
+    fn read_bytecode(&self, chunk_idx: u32, offset: u32, size: u32) -> Option<Vec<u8>> {
+        self.ctx.bc_chunks.get(chunk_idx as usize).and_then(|x| {
+            let offset = offset as usize;
+            let size = size as usize;
+            x.get_bc().get(offset..offset + size).map(|x| x.to_vec())
+        })
+    }
+
+    fn patch_bytecode(
+        &mut self,
+        chunk_idx: u32,
+        offset: u32,
+        data: Vec<u8>,
+    ) -> Result<(), MEraEngineError> {
+        let chunk_idx = chunk_idx as usize;
+        let offset = offset as usize;
+        let chunk = Rc::get_mut(&mut self.ctx.bc_chunks)
+            .unwrap()
+            .get_mut(chunk_idx)
+            .ok_or_else(|| MEraEngineError::new("chunk not found".to_owned()))?;
+        let Some(bc_slice) = chunk.get_bc_mut().get_mut(offset..offset + data.len()) else {
+            return Err(MEraEngineError::new(
+                "patched data exceeds chunk size".to_owned(),
+            ));
+        };
+        bc_slice.copy_from_slice(&data);
+        Ok(())
     }
 }
