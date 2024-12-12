@@ -12,6 +12,11 @@
 #include <Tenkai.hpp>
 //#include <robuffer.h>
 
+// Suppress warning C4324: structure was padded due to alignment specifier
+// Suppress warning C4456: declaration of 'val' hides previous local declaration
+#pragma warning(push)
+#pragma warning(disable: 4324 4456)
+
 namespace util {
     namespace sync {
         namespace spsc {
@@ -387,37 +392,6 @@ namespace util {
         }
     }
 
-    // TODO: When Tenkai.UWP goes to v0.1.4-alpha, remove this
-    namespace cpp_utils {
-        // Similar to std::experimental::scope_exit
-        template<typename T>
-        struct ScopeExit final {
-            explicit ScopeExit(T&& func) noexcept(noexcept(T(std::forward<T>(func)))) :
-                m_func(std::forward<T>(func)) {
-            }
-            explicit ScopeExit(std::nullptr_t) noexcept : m_active(false) {}
-            ScopeExit(ScopeExit const&) = delete;
-            ScopeExit(ScopeExit&& other) : m_active(other.m_active), m_func(std::move(other.m_func)) {
-                other.release();
-            }
-            // TODO: Does this even make sense?
-            ScopeExit& operator=(ScopeExit other) {
-                swap(m_active, other.m_active);
-                swap(m_func, other.m_func);
-                return *this;
-            }
-            ~ScopeExit() { if (m_active) { std::invoke(m_func); } }
-            void release(void) noexcept { m_active = false; }
-        private:
-            bool m_active{ true };
-            T m_func;
-        };
-        template<typename T>
-        inline auto scope_exit(T&& func) noexcept(noexcept(T(std::forward<T>(func)))) {
-            return ScopeExit{ std::forward<T>(func) };
-        }
-    }
-
     namespace winrt {
         namespace details {
             inline void __stdcall resume_background_callback(void*, void* context) noexcept try {
@@ -569,8 +543,7 @@ namespace util {
                 ~Awaiter() {}
                 bool await_ready() const { return m_succeeded; }
                 void await_suspend(std::coroutine_handle<> handle) {
-                    // TODO: When Tenkai.UWP goes to v0.1.4-alpha, use its instead
-                    run_when_loaded([this, handle, se_handle = ::util::cpp_utils::scope_exit([this, handle] {
+                    run_when_loaded([this, handle, se_handle = tenkai::cpp_utils::scope_exit([this, handle] {
                         // HACK: Workarounds a MSVC bug by adding `this->`
                         if (!this->m_succeeded) {
                             handle();
@@ -593,6 +566,8 @@ namespace util {
         }
     }
 }
+
+#pragma warning(pop)
 
 // Preludes
 using util::winrt::fire_forget;

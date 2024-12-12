@@ -51,7 +51,19 @@
 
 #include <winrt/WinUIEditor.h>
 
+#include <winrt/Tenkai.UI.Xaml.Data.h>
+
+//#include <winrt/Microsoft.Xaml.Interactivity.h>
+//#include <winrt/Microsoft.Xaml.Interactions.Core.h>
+//#include <winrt/Microsoft.Xaml.Interactions.Media.h>
+
+//#include <include/WinUIIncludes.hpp>
+
 #include <windows.ui.xaml.media.dxinterop.h>
+
+#include <ppl.h>
+#include <ppltasks.h>
+#include <pplawait.h>
 
 #include <functional>
 #include <algorithm>

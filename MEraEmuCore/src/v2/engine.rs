@@ -2538,6 +2538,7 @@ pub trait MEraEngineRpc {
     fn get_src_info_from_ip(&self, ip: EraExecIp) -> Option<EraSourceInfo>;
     fn get_chunk_info(&self, idx: u32) -> Option<EraChunkInfo>;
     fn get_stack_trace(&self) -> EraEngineStackTrace;
+    fn get_current_ip(&self) -> Option<EraExecIp>;
     fn get_file_source(&self, name: &str) -> Option<String>;
     fn get_version(&self) -> EraEngineVersion;
     fn get_mem_usage(&self) -> EraEngineMemoryUsage;
@@ -2554,6 +2555,20 @@ pub trait MEraEngineRpc {
         offset: u32,
         data: Vec<u8>,
     ) -> Result<(), MEraEngineError>;
+    // fn enumerate_scope_vars(&self, scope_idx: Option<u32>) -> !;
+    fn read_stack_value(&self, slot: u32) -> Option<Value>;
+    fn read_variable_with_slot(&self, slot: u32, in_global_frame: bool) -> Option<Value>;
+    fn evaluate_expr(
+        &self,
+        expr: &str,
+        scope_idx: Option<u32>,
+    ) -> Result<ScalarValue, MEraEngineError>;
+    // scope_idx: 0 => global, 1.. => local, None => current (topmost) scope
+    fn evaluate_var_at_scope(
+        &self,
+        name: &str,
+        scope_idx: Option<u32>,
+    ) -> Result<Value, MEraEngineError>;
 }
 
 impl<Callback> MEraEngine<Callback> {
@@ -2626,8 +2641,12 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
     }
 
     fn get_stack_trace(&self) -> EraEngineStackTrace {
-        let frames = self.vm_state.dump_exec_frames();
+        let frames = self.vm_state.get_exec_frames().to_owned();
         EraEngineStackTrace { frames }
+    }
+
+    fn get_current_ip(&self) -> Option<EraExecIp> {
+        self.vm_state.get_exec_frames().last().map(|x| x.ip)
     }
 
     fn get_file_source(&self, name: &str) -> Option<String> {
@@ -2689,5 +2708,81 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
         };
         bc_slice.copy_from_slice(&data);
         Ok(())
+    }
+
+    fn read_stack_value(&self, slot: u32) -> Option<Value> {
+        self.vm_state.get_stack_value(slot as _).cloned()
+    }
+
+    fn read_variable_with_slot(&self, slot: u32, in_global_frame: bool) -> Option<Value> {
+        if !in_global_frame {
+            return self.read_stack_value(slot);
+        }
+
+        self.ctx.variables.get_var_by_idx(slot as _).cloned()
+    }
+
+    fn evaluate_expr(
+        &self,
+        expr: &str,
+        scope_idx: Option<u32>,
+    ) -> Result<ScalarValue, MEraEngineError> {
+        // TODO...
+        return Err(MEraEngineError::new("not implemented".to_owned()));
+    }
+
+    fn evaluate_var_at_scope(
+        &self,
+        name: &str,
+        scope_idx: Option<u32>,
+    ) -> Result<Value, MEraEngineError> {
+        let scope_idx = scope_idx
+            .map(|x| x as usize)
+            .unwrap_or_else(|| self.vm_state.get_exec_frames().len());
+        let exec_frame = if scope_idx > 0 {
+            let Some(exec_frame) = self.vm_state.get_exec_frames().get(scope_idx - 1) else {
+                return Err(MEraEngineError::new("scope not found".to_owned()));
+            };
+            Some(exec_frame)
+        } else {
+            None
+        };
+
+        // Check local scope first
+        if let Some(exec_frame) = exec_frame {
+            let Some(func_info) = self
+                .ctx
+                .func_info_from_chunk_pos(exec_frame.ip.chunk as _, exec_frame.ip.offset as _)
+            else {
+                return Err(MEraEngineError::new("function info not found".to_owned()));
+            };
+            if let Some(var_info) = func_info.frame_info.vars.get(Ascii::new_str(name)) {
+                return if var_info.in_local_frame {
+                    let var_idx = var_info.var_idx as usize + exec_frame.stack_start as usize;
+                    self.vm_state
+                        .get_stack_value(var_idx)
+                        .cloned()
+                        .ok_or_else(|| {
+                            MEraEngineError::new("variable not found in local frame".to_owned())
+                        })
+                } else {
+                    let var_idx = var_info.var_idx as usize;
+                    self.ctx
+                        .variables
+                        .get_var_by_idx(var_idx)
+                        .cloned()
+                        .ok_or_else(|| {
+                            MEraEngineError::new("variable not found in global frame".to_owned())
+                        })
+                };
+            }
+        }
+
+        // Check global scope
+        if let Some(var) = self.ctx.variables.get_var(name) {
+            return Ok(var.clone());
+        }
+
+        Err(MEraEngineError::new("variable not found".to_owned()))
     }
 }

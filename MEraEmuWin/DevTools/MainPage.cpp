@@ -8,7 +8,9 @@ using namespace winrt;
 using namespace Windows::Foundation;
 using namespace Windows::System;
 using namespace Windows::UI::Xaml;
+using namespace Windows::UI::Xaml::Input;
 using namespace Windows::UI::Xaml::Controls;
+using namespace Windows::UI::Xaml::Media;
 //using namespace Microsoft::UI::Xaml::Controls;
 
 namespace muxc = Microsoft::UI::Xaml::Controls;
@@ -18,6 +20,67 @@ using winrt::MEraEmuWin::implementation::EngineThreadTaskKind;
 static constexpr int32_t BreakPointMargin = 1;
 static constexpr int32_t LineNumberMargin = 2;
 static constexpr int32_t BreakPointMarker = 11;
+static constexpr int32_t YellowBackgroundMarker = 12;
+
+static constexpr int32_t ARGB(int32_t a, int32_t r, int32_t g, int32_t b) {
+    return (a << 24) | RGB(r, g, b);
+}
+
+static bool IsDescendantOfMenuFlyout(Windows::UI::Xaml::UIElement const& element) {
+    auto parent = element.try_as<FrameworkElement>();
+    while (parent) {
+        if (auto parent_as_menu_flyout = parent.try_as<MenuFlyout>()) {
+            return true;
+        }
+        parent = parent.Parent().try_as<FrameworkElement>();
+    }
+    return false;
+}
+
+static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, Value const& value) {
+    if (value.is_int()) {
+        item.BriefValue(to_hstring(*value.as_int()));
+    }
+    else if (value.is_str()) {
+        item.BriefValue(to_hstring(*value.as_str()));
+    }
+    else if (value.is_arr_int()) {
+        std::wstring result;
+        for (const auto& val : value.as_arr_int()->vals) {
+            if (result.empty()) {
+                result = L"[" + std::to_wstring(val);
+            }
+            else {
+                result += L", " + std::to_wstring(val);
+            }
+        }
+        if (result.empty()) {
+            result = L"[]";
+        }
+        else {
+            result += L"]";
+        }
+        item.BriefValue(result);
+    }
+    else if (value.is_arr_str()) {
+        std::wstring result;
+        for (const auto& val : value.as_arr_str()->vals) {
+            if (result.empty()) {
+                result = L"[" + to_hstring(val);
+            }
+            else {
+                result += L", " + to_hstring(val);
+            }
+        }
+        if (result.empty()) {
+            result = L"[]";
+        }
+        else {
+            result += L"]";
+        }
+        item.BriefValue(result);
+    }
+}
 
 namespace winrt::MEraEmuWin::DevTools::implementation {
     MainPage::~MainPage() {
@@ -111,18 +174,58 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         if (!m_engine_ctrl) { return; }
         m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
     }
+    void MainPage::CodeSourceWatchAddButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        auto index = m_sources_tab_watch_tab_items.Size();
+        m_sources_tab_watch_tab_items.Append(MEraEmuWin::DevTools::SourcesTabWatchTabItem());
+        PositionSourcesTabWatchTabCurrentItemTextBox(index);
+    }
+    fire_forget MainPage::CodeSourceWatchRefreshButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        co_await RefreshSourcesTabWatchTabItemValues();
+    }
+    fire_forget MainPage::SourcesTabWatchTabItemsListRepeaterContainer_Tapped(IInspectable const& sender, TappedRoutedEventArgs const& e) {
+        // TODO: Expand to list all array elements
+        //auto item = sender.as<FrameworkElement>().DataContext().as<MEraEmuWin::DevTools::SourcesTabWatchTabItem>();
+        //auto watch_name = item.WatchName();
+        //auto watch_value = co_await m_engine_ctrl->ExecEngineTask([watch_name](MEraEngine const& e) {
+        //    return e.get_watch_value(watch_name);
+        //});
+        //item.WatchValue(to_hstring(watch_value));
+        co_return;
+    }
+    void MainPage::SourcesTabWatchTabItemsListRepeaterContainer_DoubleTapped(IInspectable const& sender, DoubleTappedRoutedEventArgs const& e) {
+        auto elem = e.OriginalSource().as<FrameworkElement>();
+        auto repeater = SourcesTabWatchTabItemsListRepeater();
+        while (auto parent = elem.Parent().try_as<FrameworkElement>()) {
+            if (!parent || parent == repeater) {
+                break;
+            }
+            elem = parent;
+        }
+        auto index = SourcesTabWatchTabItemsListRepeater().GetElementIndex(elem);
+        if (index < 0) { return; }
+        PositionSourcesTabWatchTabCurrentItemTextBox(index);
+    }
+    void MainPage::SourcesTabWatchTabCurrentItemTextBox_LostFocus(IInspectable const& sender, RoutedEventArgs const& e) {
+        auto cur_focused = FocusManager::GetFocusedElement(XamlRoot()).as<DependencyObject>();
+        auto parent = VisualTreeHelper::GetParent(cur_focused);
+        if (cur_focused && parent && !IsDescendantOfMenuFlyout(cur_focused.try_as<UIElement>())) {
+            CommitSourcesTabWatchTabCurrentItemTextBox();
+        }
+    }
+    void MainPage::SourcesTabWatchTabCurrentItemTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
+        auto key = e.Key();
+        if (key == VirtualKey::Enter) {
+            CommitSourcesTabWatchTabCurrentItemTextBox();
+        }
+        else if (key == VirtualKey::Escape) {
+            // Cancel editing
+            auto tb = SourcesTabWatchTabCurrentItemTextBox();
+            auto index = unbox_value<uint32_t>(tb.Tag());
+            tb.Text(m_sources_tab_watch_tab_items.GetAt(index).Expression());
+            CommitSourcesTabWatchTabCurrentItemTextBox();
+        }
+    }
     fire_forget MainPage::SourcesTabCallStackTabItem_Click(IInspectable const& sender, RoutedEventArgs const& e) {
-        //auto item = sender.as<FrameworkElement>().DataContext().as<MEraEmuWin::DevTools::SourcesTabCallStackTabItem>();
-        //auto tvi = co_await OpenOrCreateSourcesFileTab(item.FileName());
-        //auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
-        //if (!editor_ctrl) { co_return; }
-
-        //// Move caret to the position
-        //auto span_start = item.SrcSpanStart();
-        //auto span_end = span_start + item.SrcSpanLen();
-        //editor_ctrl.Editor().GotoPos(span_start);
-        //editor_ctrl.Focus(FocusState::Programmatic);
-
         auto item = sender.as<FrameworkElement>().DataContext().as<MEraEmuWin::DevTools::SourcesTabCallStackTabItem>();
         co_await OpenOrCreateSourcesFileTabAtSrcSpan(item.FileName(), { item.SrcSpanStart(), item.SrcSpanLen() });
     }
@@ -231,6 +334,9 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             auto& item = call_stack_items.front();
             OpenOrCreateSourcesFileTabAtSrcSpan(item.FileName(), { item.SrcSpanStart(), item.SrcSpanLen() });
         }
+
+        // Reload watch items
+        co_await RefreshSourcesTabWatchTabItemValues();
     }
     fire_forget MainPage::UpdateForEngineRunningState(EraExecutionBreakReason reason) {
         auto strong_this = get_strong();
@@ -265,15 +371,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         auto source = (co_await m_engine_ctrl->ExecEngineTask([path = to_string(path)](MEraEngine const& e) {
             return e.get_file_source(path);
         })).value_or("");
-        auto tvi = source_tabview.ContainerFromIndex(tab_index).as<muxc::TabViewItem>();
         // HACK: Wait for TabViewItem to be loaded
         co_await util::winrt::resume_when_loaded(source_tabview);
-        while (!tvi) {
-            if (!source_tabview.IsLoaded()) { break; }
-            //co_await resume_foreground(DispatcherQueue::GetForCurrentThread(), DispatcherQueuePriority::Low);
-            source_tabview.UpdateLayout();
-            tvi = source_tabview.ContainerFromIndex(tab_index).as<muxc::TabViewItem>();
-        }
+        source_tabview.UpdateLayout();
+        auto tvi = source_tabview.ContainerFromIndex(tab_index).as<muxc::TabViewItem>();
         if (!tvi) { co_return tvi; }
         auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
         if (!editor_ctrl) { co_return tvi; }
@@ -310,7 +411,13 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
         if (!editor_ctrl) { co_return; }
         // Move caret to the position
-        editor_ctrl.Editor().GotoPos(span.start);
+        auto editor = editor_ctrl.Editor();
+        editor.GotoPos(span.start);
+        // Highlight the line
+        auto line_to_highlight = editor.LineFromPosition(span.start);
+        editor.MarkerDeleteAll(YellowBackgroundMarker);
+        editor.MarkerAdd(line_to_highlight, YellowBackgroundMarker);
+        // Focus the editor
         editor_ctrl.Focus(FocusState::Programmatic);
     }
     void MainPage::InitializeCodeEditorControl(MEraEmuWin::DevTools::CodeEditControl const& editor_ctrl) {
@@ -329,6 +436,9 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         editor.MarkerDefine(BreakPointMarker, WinUIEditor::MarkerSymbol::Circle);
         editor.MarkerSetBack(BreakPointMarker, RGB(0xff, 0, 0));
         editor.MarkerSetFore(BreakPointMarker, RGB(0xdc, 0x14, 0x3c));
+        editor.MarkerDefine(YellowBackgroundMarker, WinUIEditor::MarkerSymbol::Background);
+        editor.MarkerSetBack(YellowBackgroundMarker, ARGB(0x80, 0xff, 0xd7, 0));
+        editor.MarkerSetFore(YellowBackgroundMarker, ARGB(0x80, 0xff, 0xd7, 0));
         editor.MarginClick({ this, &MainPage::CodeEditorControl_MarginClick });
     }
     void MainPage::CodeEditorControl_MarginClick(WinUIEditor::Editor const& sender, WinUIEditor::MarginClickEventArgs const& e) {
@@ -340,6 +450,78 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         }
         else {
             sender.MarkerAdd(line, BreakPointMarker);
+        }
+    }
+    fire_forget MainPage::PositionSourcesTabWatchTabCurrentItemTextBox(uint32_t index) {
+        auto item = m_sources_tab_watch_tab_items.GetAt(index);
+        if (!item) { co_return; }
+        auto repeater = SourcesTabWatchTabItemsListRepeater();
+        auto container = repeater.GetOrCreateElement(index).as<FrameworkElement>();
+        if (!container) { co_return; }
+
+        repeater.UpdateLayout();
+
+        auto tb = SourcesTabWatchTabCurrentItemTextBox();
+        tb.Tag(box_value(index));
+        tb.Text(item.Expression());
+        tb.ClearUndoRedoHistory();
+        tb.SelectAll();
+        Point pt = { 0, 0 };
+        pt = container.TransformToVisual(repeater).TransformPoint(pt);
+        tb.Margin({ pt.X, pt.Y, 0, 0 });
+        tb.Visibility(Visibility::Visible);
+        tb.Focus(FocusState::Programmatic);
+        container.StartBringIntoView();
+    }
+    fire_forget MainPage::CommitSourcesTabWatchTabCurrentItemTextBox() {
+        auto tb = SourcesTabWatchTabCurrentItemTextBox();
+        auto tag = tb.Tag();
+        if (!tag) { co_return; }
+        auto index = unbox_value<uint32_t>(tag);
+        auto item = m_sources_tab_watch_tab_items.GetAt(index);
+        if (!item) { co_return; }
+        auto expression = tb.Text();
+        item.Expression(expression);
+
+        if (expression.empty()) {
+            m_sources_tab_watch_tab_items.RemoveAt(index);
+        }
+        else {
+            co_await UpdateSourcesTabWatchTabItemFromExpressionString(item, to_string(expression));
+            m_sources_tab_watch_tab_items.SetAt(index, item);
+        }
+
+        // Hide the TextBox
+        tb.Tag(nullptr);
+        CodeSourceWatchTabExpander().Focus(FocusState::Pointer);
+        tb.Visibility(Visibility::Collapsed);
+    }
+    IAsyncAction MainPage::UpdateSourcesTabWatchTabItemFromExpressionString(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, std::string_view expression) {
+        item.BriefValue({});
+        item.SubItems().Clear();
+        item.ErrorInfo({});
+
+        try {
+            auto watch_value = co_await m_engine_ctrl->ExecEngineTask([expression](MEraEngine const& e) {
+                // TODO: Properly implement this
+                //return e.evaluate_expr(expression);
+                return e.evaluate_var_at_scope(expression, std::nullopt);
+            });
+            UpdateSourcesTabWatchTabItemFromValue(item, watch_value);
+        }
+        catch (MEraEngineException const& e) {
+            item.ErrorInfo(to_hstring(e.what()));
+        }
+    }
+    IAsyncAction MainPage::RefreshSourcesTabWatchTabItemValues() {
+        auto strong_this = get_strong();
+
+        for (size_t i = 0; auto item : m_sources_tab_watch_tab_items) {
+            auto expression = to_string(item.Expression());
+            if (expression.empty()) { continue; }
+            co_await UpdateSourcesTabWatchTabItemFromExpressionString(item, expression);
+            m_sources_tab_watch_tab_items.SetAt(i, item);
+            i++;
         }
     }
 }

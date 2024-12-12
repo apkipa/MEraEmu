@@ -1,0 +1,12 @@
+namespace MEraEmuWin.DevTools {
+    [bindable]
+    [default_interface]
+    runtimeclass SourcesTabWatchTabItem {
+        SourcesTabWatchTabItem();
+
+        String Expression;
+        String BriefValue;
+        String ErrorInfo;
+        IVector<SourcesTabWatchTabItem> SubItems;
+    };
+}

@@ -12,6 +12,25 @@ pub union ArcStr {
     s: ManuallyDrop<arcstr::ArcStr>,
 }
 
+impl Serialize for ArcStr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.as_str().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ArcStr {
+    fn deserialize<D>(deserializer: D) -> Result<ArcStr, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(ArcStr::from(s))
+    }
+}
+
 // TODO: Document UNSAFETY and all possible UBs.
 
 impl ArcStr {
@@ -326,6 +345,7 @@ macro_rules! literal {
 
 pub(crate) use format;
 pub(crate) use literal;
+use serde::{Deserialize, Serialize};
 
 #[test]
 fn test_arcstr() {

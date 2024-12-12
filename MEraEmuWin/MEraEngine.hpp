@@ -78,6 +78,14 @@ struct EraDiagnosticEntry {
     std::string_view message;
 };
 
+template<typename T> void to_json(nlohmann::json& data, const std::optional<T>& opt) {
+    data = opt ? nlohmann::json(*opt) : nlohmann::json(nullptr);
+}
+
+template<typename T> nlohmann::json ret_to_json(const std::optional<T>& opt) {
+    return opt ? nlohmann::json(*opt) : nlohmann::json(nullptr);
+}
+
 struct EraExecIp {
     uint32_t chunk, offset;
 };
@@ -149,6 +157,82 @@ inline void from_json(nlohmann::json const& j, ScalarValue& v) {
         }
         else if (j.contains("Str")) {
             v = j["Str"].get<std::string>();
+        }
+    }
+}
+
+struct ArrIntValue {
+    std::vector<int64_t> vals;
+    std::vector<uint32_t> dims;
+};
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ArrIntValue, vals, dims);
+
+struct ArrStrValue {
+    std::vector<std::string> vals;
+    std::vector<uint32_t> dims;
+};
+
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(ArrStrValue, vals, dims);
+
+struct Value : std::variant<int64_t, std::string, ArrIntValue, ArrStrValue> {
+    using std::variant<int64_t, std::string, ArrIntValue, ArrStrValue>::variant;
+    bool is_int() const { return std::holds_alternative<int64_t>(*this); }
+    bool is_str() const { return std::holds_alternative<std::string>(*this); }
+    bool is_arr_int() const { return std::holds_alternative<ArrIntValue>(*this); }
+    bool is_arr_str() const { return std::holds_alternative<ArrStrValue>(*this); }
+    int64_t const* as_int() const {
+        return std::get_if<int64_t>(this);
+    }
+    int64_t* as_int() {
+        return std::get_if<int64_t>(this);
+    }
+    std::string const* as_str() const {
+        return std::get_if<std::string>(this);
+    }
+    std::string* as_str() {
+        return std::get_if<std::string>(this);
+    }
+    ArrIntValue const* as_arr_int() const {
+        return std::get_if<ArrIntValue>(this);
+    }
+    ArrIntValue* as_arr_int() {
+        return std::get_if<ArrIntValue>(this);
+    }
+    ArrStrValue const* as_arr_str() const {
+        return std::get_if<ArrStrValue>(this);
+    }
+    ArrStrValue* as_arr_str() {
+        return std::get_if<ArrStrValue>(this);
+    }
+};
+inline void to_json(nlohmann::json& j, Value const& v) {
+    if (v.is_int()) {
+        j = { { "Int", *v.as_int() } };
+    }
+    else if (v.is_str()) {
+        j = { { "Str", *v.as_str() } };
+    }
+    else if (v.is_arr_int()) {
+        j = { { "ArrInt", *v.as_arr_int() } };
+    }
+    else if (v.is_arr_str()) {
+        j = { { "ArrStr", *v.as_arr_str() } };
+    }
+}
+inline void from_json(nlohmann::json const& j, Value& v) {
+    if (j.is_object()) {
+        if (j.contains("Int")) {
+            v = j["Int"].get<int64_t>();
+        }
+        else if (j.contains("Str")) {
+            v = j["Str"].get<std::string>();
+        }
+        else if (j.contains("ArrInt")) {
+            v = j["ArrInt"].get<ArrIntValue>();
+        }
+        else if (j.contains("ArrStr")) {
+            v = j["ArrStr"].get<ArrStrValue>();
         }
     }
 }
@@ -326,12 +410,18 @@ struct MEraEngine {
     std::optional<EraSourceInfo> get_src_info_from_ip(EraExecIp ip) const;
     std::optional<EraChunkInfo> get_chunk_info(uint32_t idx) const;
     EraEngineStackTrace get_stack_trace() const;
+    std::optional<EraExecIp> get_current_ip() const;
     std::optional<std::string> get_file_source(std::string_view name) const;
     static std::string_view get_version();
+    // auto get_mem_usage() const;
     std::optional<DiagnosticResolveSrcSpanResult> resolve_src_span(std::string_view filename, SrcSpan span) const;
     std::vector<std::string> get_loaded_files_list() const;
     std::optional<std::vector<uint8_t>> read_bytecode(uint32_t chunk_idx, uint32_t offset, uint32_t size) const;
     void patch_bytecode(uint32_t chunk_idx, uint32_t offset, std::span<const uint8_t> data) const;
+    std::optional<Value> read_stack_value(uint32_t slot) const;
+    std::optional<Value> read_variable_with_slot(uint32_t slot, bool in_global_frame) const;
+    ScalarValue evaluate_expr(std::string_view expr, std::optional<uint32_t> scope_idx) const;
+    Value evaluate_var_at_scope(std::string_view name, std::optional<uint32_t> scope_idx) const;
 
     nlohmann::json do_rpc(std::string_view method, nlohmann::json params) const;
 

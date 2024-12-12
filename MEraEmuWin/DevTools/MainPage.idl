@@ -1,14 +1,20 @@
 import "EngineControl.idl";
 import "DevTools/SourcesFileTabItem.idl";
+import "DevTools/SourcesTabWatchTabItem.idl";
 import "DevTools/SourcesTabCallStackTabItem.idl";
+
+#define MUXC Microsoft.UI.Xaml.Controls
 
 namespace MEraEmuWin.DevTools {
     [default_interface]
     runtimeclass MainPage : Windows.UI.Xaml.Controls.Page {
         MainPage();
 
-        IVector<SourcesFileTabItem> SourcesFileTabsItemList{ get; };
-        IVector<SourcesTabCallStackTabItem> SourcesTabCallStackTabItemsList{ get; };
+        MUXC.Expander CodeSourceWatchTabExpander{ get; };
+
+        IObservableVector<SourcesFileTabItem> SourcesFileTabsItemList{ get; };
+        IObservableVector<SourcesTabWatchTabItem> SourcesTabWatchTabItemsList{ get; };
+        IObservableVector<SourcesTabCallStackTabItem> SourcesTabCallStackTabItemsList{ get; };
 
         void SetConnectedEngineControl(MEraEmuWin.EngineControl engine);
     };

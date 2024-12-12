@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.props" Condition="Exists('packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.props')" />
   <Import Project="packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.props" Condition="Exists('packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.props')" />
-  <Import Project="packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.props" Condition="Exists('packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.props')" />
   <!-- Enable HybridCRT to allow for cross-platform execution -->
   <Import Project="$(MSBuildThisFileDirectory)HybridCRT.props" />
   <PropertyGroup Label="Globals">
@@ -159,6 +159,10 @@
       <DependentUpon>DevTools\SourcesTabCallStackTabItem.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClInclude>
+    <ClInclude Include="DevTools\SourcesTabWatchTabItem.h">
+      <DependentUpon>DevTools\SourcesTabWatchTabItem.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
     <ClInclude Include="EngineControl.h">
       <DependentUpon>EngineControl.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -228,6 +232,10 @@
       <DependentUpon>DevTools\SourcesTabCallStackTabItem.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
+    <ClCompile Include="DevTools\SourcesTabWatchTabItem.cpp">
+      <DependentUpon>DevTools\SourcesTabWatchTabItem.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
     <ClCompile Include="EngineControl.cpp">
       <DependentUpon>EngineControl.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -274,6 +282,9 @@
       <SubType>Designer</SubType>
     </Midl>
     <Midl Include="DevTools\SourcesTabCallStackTabItem.idl">
+      <SubType>Designer</SubType>
+    </Midl>
+    <Midl Include="DevTools\SourcesTabWatchTabItem.idl">
       <SubType>Designer</SubType>
     </Midl>
     <Midl Include="EngineControl.idl">
@@ -342,24 +353,24 @@ cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --fea
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="packages\Microsoft.Web.WebView2.1.0.1264.42\build\native\Microsoft.Web.WebView2.targets" Condition="Exists('packages\Microsoft.Web.WebView2.1.0.1264.42\build\native\Microsoft.Web.WebView2.targets')" />
-    <Import Project="packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.targets" Condition="Exists('packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.targets')" />
     <Import Project="packages\WinUIEdit.Uwp.0.0.3-prerelease\build\native\WinUIEdit.Uwp.targets" Condition="Exists('packages\WinUIEdit.Uwp.0.0.3-prerelease\build\native\WinUIEdit.Uwp.targets')" />
     <Import Project="packages\Microsoft.VCRTForwarders.140.1.1.0\build\native\Microsoft.VCRTForwarders.140.targets" Condition="Exists('packages\Microsoft.VCRTForwarders.140.1.1.0\build\native\Microsoft.VCRTForwarders.140.targets')" />
     <Import Project="packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets" Condition="Exists('packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets')" />
-    <Import Project="packages\Tenkai.UWP.0.1.3-alpha\build\native\Tenkai.UWP.targets" Condition="Exists('packages\Tenkai.UWP.0.1.3-alpha\build\native\Tenkai.UWP.targets')" />
+    <Import Project="packages\Microsoft.Web.WebView2.1.0.2849.39\build\native\Microsoft.Web.WebView2.targets" Condition="Exists('packages\Microsoft.Web.WebView2.1.0.2849.39\build\native\Microsoft.Web.WebView2.targets')" />
+    <Import Project="packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.targets" Condition="Exists('packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.targets')" />
+    <Import Project="packages\Tenkai.UWP.0.1.4-alpha\build\native\Tenkai.UWP.targets" Condition="Exists('packages\Tenkai.UWP.0.1.4-alpha\build\native\Tenkai.UWP.targets')" />
   </ImportGroup>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
       <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
     </PropertyGroup>
-    <Error Condition="!Exists('packages\Microsoft.Web.WebView2.1.0.1264.42\build\native\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Web.WebView2.1.0.1264.42\build\native\Microsoft.Web.WebView2.targets'))" />
-    <Error Condition="!Exists('packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.props'))" />
-    <Error Condition="!Exists('packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.UI.Xaml.2.8.2-prerelease.220830001\build\native\Microsoft.UI.Xaml.targets'))" />
     <Error Condition="!Exists('packages\WinUIEdit.Uwp.0.0.3-prerelease\build\native\WinUIEdit.Uwp.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\WinUIEdit.Uwp.0.0.3-prerelease\build\native\WinUIEdit.Uwp.targets'))" />
     <Error Condition="!Exists('packages\Microsoft.VCRTForwarders.140.1.1.0\build\native\Microsoft.VCRTForwarders.140.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.VCRTForwarders.140.1.1.0\build\native\Microsoft.VCRTForwarders.140.targets'))" />
     <Error Condition="!Exists('packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.props'))" />
     <Error Condition="!Exists('packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets'))" />
-    <Error Condition="!Exists('packages\Tenkai.UWP.0.1.3-alpha\build\native\Tenkai.UWP.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Tenkai.UWP.0.1.3-alpha\build\native\Tenkai.UWP.targets'))" />
+    <Error Condition="!Exists('packages\Microsoft.Web.WebView2.1.0.2849.39\build\native\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Web.WebView2.1.0.2849.39\build\native\Microsoft.Web.WebView2.targets'))" />
+    <Error Condition="!Exists('packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.props'))" />
+    <Error Condition="!Exists('packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.targets'))" />
+    <Error Condition="!Exists('packages\Tenkai.UWP.0.1.4-alpha\build\native\Tenkai.UWP.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Tenkai.UWP.0.1.4-alpha\build\native\Tenkai.UWP.targets'))" />
   </Target>
 </Project>

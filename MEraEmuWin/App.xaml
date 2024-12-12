@@ -3,7 +3,8 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
-    xmlns:local="using:MEraEmuWin">
+    xmlns:local="using:MEraEmuWin"
+    xmlns:tuxd="using:Tenkai.UI.Xaml.Data">
 
     <Application.Resources>
         <ResourceDictionary>
@@ -14,6 +15,24 @@
             </ResourceDictionary.MergedDictionaries>
 
             <FontFamily x:Key="MaterialSymbolFontFamily">ms-appx:///Assets/Fonts/MaterialSymbolsOutlined-Light.ttf#Material Symbols Outlined</FontFamily>
+            <tuxd:ContainerToBoolConverter x:Key="ContainerToBoolConverter" />
+            <tuxd:ContainerToBoolConverter x:Key="NegatedContainerToBoolConverter" IsNegated="True" />
+            <tuxd:ConverterGroup x:Key="ContainerToVisibilityConverter">
+                <tuxd:ContainerToBoolConverter />
+                <tuxd:BoolToVisibilityConverter />
+            </tuxd:ConverterGroup>
+            <tuxd:ConverterGroup x:Key="NegatedContainerToVisibilityConverter">
+                <tuxd:ContainerToBoolConverter IsNegated="True" />
+                <tuxd:BoolToVisibilityConverter />
+            </tuxd:ConverterGroup>
+            <tuxd:ConverterGroup x:Key="NegatedStringToVisibilityConverter">
+                <tuxd:StringToBoolConverter IsNegated="True" />
+                <tuxd:BoolToVisibilityConverter />
+            </tuxd:ConverterGroup>
+            <tuxd:ConverterGroup x:Key="NegatedIntToVisibilityConverter">
+                <tuxd:IntToBoolConverter IsNegated="True" />
+                <tuxd:BoolToVisibilityConverter />
+            </tuxd:ConverterGroup>
         </ResourceDictionary>
     </Application.Resources>
 

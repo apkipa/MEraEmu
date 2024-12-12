@@ -290,11 +290,11 @@ pub struct EraExecIp {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EraFuncExecFrame {
-    stack_start: u32,
-    ip: EraExecIp,
-    ret_ip: EraExecIp,
-    ignore_return_value: bool,
-    is_transient: bool,
+    pub stack_start: u32,
+    pub ip: EraExecIp,
+    pub ret_ip: EraExecIp,
+    pub ignore_return_value: bool,
+    pub is_transient: bool,
 }
 
 #[derive(Debug)]
@@ -323,8 +323,16 @@ impl EraVirtualMachineState {
         self.inner.rand_gen = SimpleUniformGenerator::new();
     }
 
-    pub fn dump_exec_frames(&self) -> Vec<EraFuncExecFrame> {
-        self.frames.clone()
+    pub fn get_exec_frames(&self) -> &[EraFuncExecFrame] {
+        &self.frames[..]
+    }
+
+    pub fn stack_len(&self) -> usize {
+        self.stack.len()
+    }
+
+    pub fn get_stack_value(&self, idx: usize) -> Option<&Value> {
+        self.stack.get(idx)
     }
 }
 

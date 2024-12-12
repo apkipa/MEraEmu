@@ -24,6 +24,9 @@
     <Midl Include="DevTools\SourcesTabCallStackTabItem.idl">
       <Filter>DevTools</Filter>
     </Midl>
+    <Midl Include="DevTools\SourcesTabWatchTabItem.idl">
+      <Filter>DevTools</Filter>
+    </Midl>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp" />

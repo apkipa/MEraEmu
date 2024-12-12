@@ -13,8 +13,9 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         void InitializeComponent();
 
-        Windows::Foundation::Collections::IVector<MEraEmuWin::DevTools::SourcesFileTabItem> SourcesFileTabsItemList() { return m_sources_file_tab_items; }
-        Windows::Foundation::Collections::IVector<MEraEmuWin::DevTools::SourcesTabCallStackTabItem> SourcesTabCallStackTabItemsList() { return m_sources_tab_call_stack_tab_items; }
+        Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesFileTabItem> SourcesFileTabsItemList() { return m_sources_file_tab_items; }
+        Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesTabWatchTabItem> SourcesTabWatchTabItemsList() { return m_sources_tab_watch_tab_items; }
+        Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesTabCallStackTabItem> SourcesTabCallStackTabItemsList() { return m_sources_tab_call_stack_tab_items; }
 
         void SetConnectedEngineControl(MEraEmuWin::EngineControl engine);
 
@@ -27,6 +28,12 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         void CodeExecStepOverButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
         void CodeExecStepOutButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
         void CodeExecStepSingleButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        void CodeSourceWatchAddButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        fire_forget CodeSourceWatchRefreshButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        fire_forget SourcesTabWatchTabItemsListRepeaterContainer_Tapped(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::TappedRoutedEventArgs const& e);
+        void SourcesTabWatchTabItemsListRepeaterContainer_DoubleTapped(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::DoubleTappedRoutedEventArgs const& e);
+        void SourcesTabWatchTabCurrentItemTextBox_LostFocus(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        void SourcesTabWatchTabCurrentItemTextBox_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
         fire_forget SourcesTabCallStackTabItem_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
 
     private:
@@ -39,13 +46,20 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         Windows::Foundation::IAsyncAction OpenOrCreateSourcesFileTabAtSrcSpan(hstring path, SrcSpan span);
         void InitializeCodeEditorControl(MEraEmuWin::DevTools::CodeEditControl const& editor_ctrl);
         void CodeEditorControl_MarginClick(WinUIEditor::Editor const& sender, WinUIEditor::MarginClickEventArgs const& e);
+        fire_forget PositionSourcesTabWatchTabCurrentItemTextBox(uint32_t index);
+        fire_forget CommitSourcesTabWatchTabCurrentItemTextBox();
+        Windows::Foundation::IAsyncAction UpdateSourcesTabWatchTabItemFromExpressionString(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, std::string_view expression);
+        Windows::Foundation::IAsyncAction RefreshSourcesTabWatchTabItemValues();
 
         winrt::MEraEmuWin::implementation::EngineControl* m_engine_ctrl{ nullptr };
         event_token m_et_EngineExecutionInterrupted{};
-        Windows::Foundation::Collections::IVector<MEraEmuWin::DevTools::SourcesFileTabItem> m_sources_file_tab_items{
+        Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesFileTabItem> m_sources_file_tab_items{
             single_threaded_observable_vector<MEraEmuWin::DevTools::SourcesFileTabItem>()
         };
-        Windows::Foundation::Collections::IVector<MEraEmuWin::DevTools::SourcesTabCallStackTabItem> m_sources_tab_call_stack_tab_items{
+        Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesTabWatchTabItem> m_sources_tab_watch_tab_items{
+            single_threaded_observable_vector<MEraEmuWin::DevTools::SourcesTabWatchTabItem>()
+        };
+        Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesTabCallStackTabItem> m_sources_tab_call_stack_tab_items{
             single_threaded_observable_vector<MEraEmuWin::DevTools::SourcesTabCallStackTabItem>()
         };
         bool m_engine_running{};

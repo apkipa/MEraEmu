@@ -56,6 +56,8 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void CodeEditControl::InitializeComponent() {
         CodeEditControlT::InitializeComponent();
 
+        ApplyTemplate();
+
         auto editor_ctrl = EditorControl();
         auto editor = Editor();
         editor_ctrl.DpiChanged({ this, &CodeEditControl::Editor_DpiChanged });
@@ -67,7 +69,6 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         return EditorControl().Editor();
     }
     WinUIEditor::EditorBaseControl CodeEditControl::EditorControl() {
-        ApplyTemplate();
         return GetTemplateChild(L"BaseEditor").try_as<WinUIEditor::EditorBaseControl>();
     }
     void CodeEditControl::OnApplyTemplate() {

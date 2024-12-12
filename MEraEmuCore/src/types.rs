@@ -20,7 +20,7 @@ use indexmap::IndexMap;
 use rclite::Rc;
 use rustc_hash::FxBuildHasher;
 use safer_ffi::{derive_ReprC, prelude::VirtualPtr};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tinyvec::ArrayVec;
 
 use crate::util::{interning::ThreadedTokenInterner, rcstr::ArcStr, Ascii};
@@ -1665,22 +1665,36 @@ pub struct IntValue {
     pub val: i64,
 }
 
+impl Serialize for IntValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.val.serialize(serializer)
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StrValue {
     pub val: ArcStr,
 }
 
+impl Serialize for StrValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.val.serialize(serializer)
+    }
+}
+
 // NOTE: Arr*Value are used as variable references
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ArrIntValue {
     pub vals: Vec<IntValue>,
     pub dims: EraVarDims,
+    #[serde(skip)]
     pub flags: EraValueFlags,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ArrStrValue {
     pub vals: Vec<StrValue>,
     pub dims: EraVarDims,
+    #[serde(skip)]
     pub flags: EraValueFlags,
 }
 
@@ -1961,7 +1975,32 @@ impl ValueKind {
 // >;
 pub type ValueInner = FlatValue;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl Serialize for FlatValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use FlatValue::*;
+        match self {
+            Int(x) => Serializer::serialize_newtype_variant(serializer, "FlatValue", 0, "Int", x),
+            Str(x) => Serializer::serialize_newtype_variant(serializer, "FlatValue", 1, "Str", x),
+            ArrInt(x) => {
+                Serializer::serialize_newtype_variant(serializer, "FlatValue", 2, "ArrInt", &**x)
+            }
+            ArrStr(x) => {
+                Serializer::serialize_newtype_variant(serializer, "FlatValue", 3, "ArrStr", &**x)
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FlatValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        todo!()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Value(ValueInner);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlatValue {

@@ -265,7 +265,7 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
-                    <Grid x:Name="SourcesTabLeftPane" Grid.Column="0" BorderBrush="LightGray" BorderThickness="0,0,1,0" Width="300">
+                    <Grid x:Name="SourcesTabLeftPane" Grid.Column="0" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" BorderThickness="0,0,1,0" Width="300">
                         <muxc:TreeView x:Name="SourceFilesTreeView" Grid.Column="0" CanReorderItems="False" CanDrag="False"
                                        ItemInvoked="SourceFilesTreeView_ItemInvoked" />
                     </Grid>
@@ -309,7 +309,7 @@
                             </muxc:TabView.TabStripFooter>
                         </muxc:TabView>
                     </Grid>
-                    <Grid x:Name="SourcesTabRightPane" Grid.Column="2" BorderBrush="LightGray" BorderThickness="1,0,0,0" Width="300">
+                    <Grid x:Name="SourcesTabRightPane" Grid.Column="2" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" BorderThickness="1,0,0,0" Width="300">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
@@ -322,7 +322,7 @@
                                 <Button.KeyboardAccelerators>
                                     <KeyboardAccelerator Key="F5" />
                                 </Button.KeyboardAccelerators>
-                                
+
                                 <FontIcon x:Name="CodeExecPauseResumeButtonContent" FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xE034;" />
                             </Button>
                             <Button x:Name="CodeExecStepIntoButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False"
@@ -346,7 +346,7 @@
                                 <Button.KeyboardAccelerators>
                                     <KeyboardAccelerator Key="F9" />
                                 </Button.KeyboardAccelerators>
-                                
+
                                 <FontIcon FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF6FE;" />
                             </Button>
                         </StackPanel>
@@ -356,18 +356,51 @@
                                     <RepositionThemeTransition />
                                 </StackPanel.ChildrenTransitions>
 
-                                <muxc:Expander Header="Watch (unsupported)" HorizontalAlignment="Stretch" IsExpanded="True"
-                                               Padding="0" MinHeight="16">
-                                    <!--
-                                    <Grid>
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
-                                        <TextBox Grid.Column="0" PlaceholderText="Add watch expression" />
-                                        <Button Grid.Column="1" Content="Add" />
+                                <muxc:Expander x:Name="CodeSourceWatchTabExpander" HorizontalAlignment="Stretch" IsExpanded="True" Padding="0" MinHeight="16">
+                                    <muxc:Expander.Header>
+                                        <Grid>
+                                            <TextBlock Text="Watch" VerticalAlignment="Center" />
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="4"
+                                                        Visibility="{x:Bind CodeSourceWatchTabExpander.IsExpanded,Mode=OneWay}">
+                                                <Button x:Name="CodeSourceWatchAddButton" Style="{StaticResource FlatButtonStyle}" CornerRadius="999" Width="28" Height="28" Padding="0"
+                                                        Click="CodeSourceWatchAddButton_Click">
+                                                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" FontSize="13" Glyph="&#xE710;" />
+                                                </Button>
+                                                <Button x:Name="CodeSourceWatchRefreshButton" Style="{StaticResource FlatButtonStyle}" CornerRadius="999" Width="28" Height="28" Padding="0"
+                                                        Click="CodeSourceWatchRefreshButton_Click">
+                                                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" FontSize="13" Glyph="&#xE72C;" />
+                                                </Button>
+                                            </StackPanel>
+                                        </Grid>
+                                    </muxc:Expander.Header>
+
+                                    <Grid IsTapEnabled="True" IsDoubleTapEnabled="True" Background="Transparent"
+                                          Tapped="SourcesTabWatchTabItemsListRepeaterContainer_Tapped" DoubleTapped="SourcesTabWatchTabItemsListRepeaterContainer_DoubleTapped">
+                                        <TextBlock x:Name="SourcesTabWatchTabRunningIndicator" Text="No watch expressions" Foreground="Gray"
+                                                   FontStyle="Italic" Margin="0,16"
+                                                   Visibility="{x:Bind SourcesTabWatchTabItemsList.Size,Mode=OneWay,Converter={StaticResource NegatedIntToVisibilityConverter}}" />
+                                        <muxc:ItemsRepeater x:Name="SourcesTabWatchTabItemsListRepeater" ItemsSource="{x:Bind SourcesTabWatchTabItemsList}">
+                                            <muxc:ItemsRepeater.ItemTemplate>
+                                                <DataTemplate x:DataType="local:SourcesTabWatchTabItem">
+                                                    <Grid BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" DataContext="{x:Bind}"
+                                                          BorderThickness="0,1,0,0" Padding="4,2" HorizontalAlignment="Stretch" Background="Transparent">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock>
+                                                            <Run Foreground="BlueViolet" Text="{x:Bind Expression}" /><Run Text=": " /><Run Foreground="LightSeaGreen" Text="{x:Bind BriefValue}" /><Run Foreground="Red" Text="{x:Bind ErrorInfo}" />
+                                                        </TextBlock>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </muxc:ItemsRepeater.ItemTemplate>
+                                        </muxc:ItemsRepeater>
+                                        <!-- Shared TextBox for editing & adding current watching expression item -->
+                                        <TextBox x:Name="SourcesTabWatchTabCurrentItemTextBox" Margin="4" Padding="4,2" BorderThickness="0"
+                                                 HorizontalAlignment="Stretch" VerticalAlignment="Top" MinHeight="4" Height="24" Visibility="Collapsed"
+                                                 LostFocus="SourcesTabWatchTabCurrentItemTextBox_LostFocus" 
+                                                 KeyDown="SourcesTabWatchTabCurrentItemTextBox_KeyDown" />
                                     </Grid>
-                                    -->
                                 </muxc:Expander>
                                 <muxc:Expander Header="Breakpoints (unsupported)" HorizontalAlignment="Stretch" IsExpanded="True"
                                                Padding="0" MinHeight="16">
@@ -380,19 +413,19 @@
                                 <muxc:Expander Header="Scope (unsupported)" HorizontalAlignment="Stretch" IsExpanded="True"
                                                Padding="0" MinHeight="16">
                                     <Grid>
-                                        <TextBlock x:Name="SourcesTabScopeTabRunningIndicator" Text="Not Paused" Foreground="Gray"
+                                        <TextBlock x:Name="SourcesTabScopeTabRunningIndicator" Text="Not paused" Foreground="Gray"
                                                    FontStyle="Italic" Margin="0,16" />
                                     </Grid>
                                 </muxc:Expander>
-                                <muxc:Expander Header="Call Stack (unsupported)" HorizontalAlignment="Stretch" IsExpanded="True"
+                                <muxc:Expander Header="Call Stack" HorizontalAlignment="Stretch" IsExpanded="True"
                                                Padding="0" MinHeight="16">
                                     <Grid>
-                                        <TextBlock x:Name="SourcesTabCallStackTabRunningIndicator" Text="Not Paused" Foreground="Gray"
+                                        <TextBlock x:Name="SourcesTabCallStackTabRunningIndicator" Text="Not paused" Foreground="Gray"
                                                    FontStyle="Italic" Margin="0,16" />
                                         <muxc:ItemsRepeater x:Name="SourcesTabCallStackTabItemsListRepeater" ItemsSource="{x:Bind SourcesTabCallStackTabItemsList}">
                                             <muxc:ItemsRepeater.ItemTemplate>
                                                 <DataTemplate x:DataType="local:SourcesTabCallStackTabItem">
-                                                    <Button Style="{StaticResource FlatButtonStyle}" BorderBrush="LightGray" DataContext="{x:Bind}"
+                                                    <Button Style="{StaticResource FlatButtonStyle}" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" DataContext="{x:Bind}"
                                                             BorderThickness="0,1,0,0" Padding="4,2" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
                                                             Click="SourcesTabCallStackTabItem_Click">
                                                         <Grid HorizontalAlignment="Stretch">

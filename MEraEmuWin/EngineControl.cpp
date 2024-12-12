@@ -1136,7 +1136,7 @@ namespace winrt::MEraEmuWin::implementation {
             }
             else {
                 // Fast path
-                pt.Y += root_sv.VerticalOffset();
+                pt.Y = float(pt.Y + root_sv.VerticalOffset());
             }
             UpdateAndInvalidateActiveButton(pt);
         });
