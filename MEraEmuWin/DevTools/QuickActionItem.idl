@@ -1,0 +1,11 @@
+namespace MEraEmuWin.DevTools {
+    [bindable]
+    [default_interface]
+    runtimeclass QuickActionItem {
+        QuickActionItem();
+
+        String Title;
+        Int32 Score;
+        Windows.UI.Xaml.Input.ICommand Command;
+    };
+}

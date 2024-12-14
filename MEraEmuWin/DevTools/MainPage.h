@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "DevTools/MainPage.g.h"
+#include "DevTools/QuickActionItem.h"
 #include "DevTools/SourcesFileTabItem.h"
 #include "DevTools/SourcesTabCallStackTabItem.h"
 #include "EngineControl.h"
@@ -13,11 +14,21 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         void InitializeComponent();
 
+        Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::QuickActionItem> FilteredQuickActionItemsList() { return m_filtered_quick_action_items; }
         Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesFileTabItem> SourcesFileTabsItemList() { return m_sources_file_tab_items; }
         Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesTabWatchTabItem> SourcesTabWatchTabItemsList() { return m_sources_tab_watch_tab_items; }
         Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesTabCallStackTabItem> SourcesTabCallStackTabItemsList() { return m_sources_tab_call_stack_tab_items; }
 
         void SetConnectedEngineControl(MEraEmuWin::EngineControl engine);
+
+        void GlobalQuickActionsBaseFlyout_InputTextBox_TextChanged(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Controls::TextChangedEventArgs const& e);
+        void GlobalQuickActionsBaseFlyout_InputTextBox_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
+        void GlobalQuickActionsBaseFlyout_QuickActionsItemListView_ItemClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Controls::ItemClickEventArgs const& e);
+
+        void PageFlyoutContainerBackground_PointerPressed(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
+        void PageFlyoutContainer_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
+
+        void TopTabViewMoreMenuRunCommandItem_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
 
         void SourceFilesTreeView_ItemInvoked(Windows::Foundation::IInspectable const& sender, Microsoft::UI::Xaml::Controls::TreeViewItemInvokedEventArgs const& e);
         void SourceFilesTabView_TabCloseRequested(Windows::Foundation::IInspectable const& sender, Microsoft::UI::Xaml::Controls::TabViewTabCloseRequestedEventArgs const& e);
@@ -42,6 +53,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         fire_forget UpdateForEnginePausedState(EraExecutionBreakReason reason);
         fire_forget UpdateForEngineRunningState(EraExecutionBreakReason reason);
         Windows::Foundation::IAsyncOperation<Microsoft::UI::Xaml::Controls::TabViewItem> OpenOrCreateSourcesFileTab(hstring path);
+        Windows::Foundation::IAsyncOperation<Microsoft::UI::Xaml::Controls::TabViewItem> OpenOrCreateSourcesFuncAsmTab(hstring path, hstring func_name);
         MEraEmuWin::DevTools::CodeEditControl CodeEditorControlFromSourcesFileTabViewItem(Microsoft::UI::Xaml::Controls::TabViewItem const& tab);
         Windows::Foundation::IAsyncAction OpenOrCreateSourcesFileTabAtSrcSpan(hstring path, SrcSpan span);
         void InitializeCodeEditorControl(MEraEmuWin::DevTools::CodeEditControl const& editor_ctrl);
@@ -50,9 +62,15 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         fire_forget CommitSourcesTabWatchTabCurrentItemTextBox();
         Windows::Foundation::IAsyncAction UpdateSourcesTabWatchTabItemFromExpressionString(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, std::string_view expression);
         Windows::Foundation::IAsyncAction RefreshSourcesTabWatchTabItemValues();
+        void CloseGlobalQuickActionsBaseFlyout();
+        void UpdateFilteredQuickActionItems();
+        Windows::Foundation::IAsyncAction DumpBytecodeForFunctionAtCaret();
 
         winrt::MEraEmuWin::implementation::EngineControl* m_engine_ctrl{ nullptr };
         event_token m_et_EngineExecutionInterrupted{};
+        Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::QuickActionItem> m_filtered_quick_action_items{
+            single_threaded_observable_vector<MEraEmuWin::DevTools::QuickActionItem>()
+        };
         Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesFileTabItem> m_sources_file_tab_items{
             single_threaded_observable_vector<MEraEmuWin::DevTools::SourcesFileTabItem>()
         };

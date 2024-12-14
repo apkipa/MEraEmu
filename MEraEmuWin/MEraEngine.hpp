@@ -28,6 +28,25 @@ struct rust_String {
     Vec_uint8_t i;
 };
 
+struct rust_FuzzyStringMatch {
+    static std::optional<rust_FuzzyStringMatch> best_match(const char* query, const char* target) {
+        auto i = rust_fuzzy_string_match(query, target);
+        if (i.is_some) {
+            return rust_FuzzyStringMatch(i.some);
+        }
+        return std::nullopt;
+    }
+
+    ssize_t score() const { return m_i.score; }
+    std::span<const RustFuzzyStringMatchEntry> matches() const {
+        return { m_i.matches.ptr, m_i.matches.len };
+    }
+
+private:
+    rust_FuzzyStringMatch(RustFuzzyStringMatch i) : m_i(i) {}
+    RustFuzzyStringMatch m_i;
+};
+
 static const struct break_tag_t {} break_tag;
 static const struct continue_tag_t {} continue_tag;
 
@@ -408,6 +427,7 @@ struct MEraEngine {
     std::optional<EraFuncInfo> get_func_info(const char* name) const;
     std::optional<EraFuncInfo> get_func_info_by_ip(EraExecIp ip) const;
     std::optional<EraSourceInfo> get_src_info_from_ip(EraExecIp ip) const;
+    std::optional<EraExecIp> get_ip_from_src(std::string_view filename, SrcSpan span) const;
     std::optional<EraChunkInfo> get_chunk_info(uint32_t idx) const;
     EraEngineStackTrace get_stack_trace() const;
     std::optional<EraExecIp> get_current_ip() const;
@@ -422,6 +442,8 @@ struct MEraEngine {
     std::optional<Value> read_variable_with_slot(uint32_t slot, bool in_global_frame) const;
     ScalarValue evaluate_expr(std::string_view expr, std::optional<uint32_t> scope_idx) const;
     Value evaluate_var_at_scope(std::string_view name, std::optional<uint32_t> scope_idx) const;
+    std::vector<std::string> get_functions_list() const;
+    std::vector<std::string> dump_function_bytecode(std::string_view name) const;
 
     nlohmann::json do_rpc(std::string_view method, nlohmann::json params) const;
 

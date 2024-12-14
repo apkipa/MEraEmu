@@ -24,6 +24,7 @@
 #include <winrt/Windows.System.Threading.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Input.h>
+#include <winrt/Windows.UI.Text.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Shapes.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
@@ -37,6 +38,7 @@
 #include <winrt/Windows.UI.Xaml.Documents.h>
 #include <winrt/Windows.UI.Xaml.Hosting.h>
 #include <winrt/Windows.UI.Xaml.Input.h>
+#include <winrt/Windows.UI.Xaml.Core.Direct.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.ApplicationModel.Core.h>
@@ -51,6 +53,8 @@
 
 #include <winrt/WinUIEditor.h>
 
+#include <winrt/Tenkai.UI.ViewManagement.h>
+#include <winrt/Tenkai.UI.Xaml.h>
 #include <winrt/Tenkai.UI.Xaml.Data.h>
 
 //#include <winrt/Microsoft.Xaml.Interactivity.h>
@@ -76,3 +80,5 @@
 #include <atomic>
 #include <chrono>
 #include <set>
+
+typedef SSIZE_T ssize_t;

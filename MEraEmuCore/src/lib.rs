@@ -29,6 +29,7 @@ use engine::ExecSourceInfo;
 pub use engine::{
     EraScriptErrorInfo, MEraEngine, MEraEngineConfig, MEraEngineError, MEraEngineSysCallback,
 };
+use itertools::Itertools;
 use safer_ffi::{prelude::*, slice, string};
 use types::*;
 use v2::engine::{
@@ -91,6 +92,58 @@ fn rust_get_wstring_width(s: safer_ffi::ptr::NonNullRef<u16>) -> u64 {
         }
     }
     width
+}
+
+#[derive_ReprC]
+#[repr(C)]
+#[derive(Clone, Debug, Default)]
+struct RustFuzzyStringMatchEntry {
+    start: usize,
+    len: usize,
+}
+
+#[derive_ReprC]
+#[repr(C)]
+#[derive(Clone, Debug)]
+struct RustFuzzyStringMatch {
+    score: isize,
+    matches: safer_ffi::vec::Vec<RustFuzzyStringMatchEntry>,
+}
+
+impl Default for RustFuzzyStringMatch {
+    fn default() -> Self {
+        RustFuzzyStringMatch {
+            score: 0,
+            matches: Vec::default().into(),
+        }
+    }
+}
+
+#[ffi_export]
+fn rust_fuzzy_string_match(
+    query: char_p::Ref<'_>,
+    target: char_p::Ref<'_>,
+) -> RustOption<RustFuzzyStringMatch> {
+    let Some(result) = sublime_fuzzy::best_match(query.to_str(), target.to_str()) else {
+        return None::<RustFuzzyStringMatch>.into();
+    };
+    let matches = result
+        .continuous_matches()
+        .map(|m| RustFuzzyStringMatchEntry {
+            start: m.start(),
+            len: m.len(),
+        })
+        .collect_vec();
+    Some(RustFuzzyStringMatch {
+        score: result.score(),
+        matches: matches.into(),
+    })
+    .into()
+}
+
+#[ffi_export]
+fn rust_drop_fuzzy_string_match(match_: RustFuzzyStringMatch) {
+    drop(match_);
 }
 
 #[derive_ReprC]

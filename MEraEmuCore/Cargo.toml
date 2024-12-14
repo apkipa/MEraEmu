@@ -12,6 +12,7 @@ build = "build.rs"
 
 [lib]
 crate-type = ["cdylib", "lib"]
+# crate-type = ["cdylib"]
 
 [[bin]]
 name = "generate-headers"
@@ -106,6 +107,7 @@ lending-iterator = "0.1.7"
 jsonrpsee = { version = "0.24.7", features = ["server-core"] }
 easy-jsonrpc = { git = "https://github.com/apkipa/easy-jsonrpc" }
 serde_json = "1.0.132"
+sublime_fuzzy = "0.7.0"
 # snmalloc-rs = "0.3.5"
 # rpmalloc = "0.2.2"
 

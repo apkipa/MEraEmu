@@ -7,9 +7,13 @@
 using namespace winrt;
 using namespace Windows::Foundation;
 using namespace Windows::System;
+using namespace Windows::UI;
+using namespace Windows::UI::Text;
 using namespace Windows::UI::Xaml;
 using namespace Windows::UI::Xaml::Input;
 using namespace Windows::UI::Xaml::Controls;
+using namespace Windows::UI::Xaml::Controls::Primitives;
+using namespace Windows::UI::Xaml::Documents;
 using namespace Windows::UI::Xaml::Media;
 //using namespace Microsoft::UI::Xaml::Controls;
 
@@ -37,22 +41,66 @@ static bool IsDescendantOfMenuFlyout(Windows::UI::Xaml::UIElement const& element
     return false;
 }
 
+static bool TryFocusToFirstFocusableElement(Windows::UI::Xaml::UIElement const& element) {
+    if (!element) { return false; }
+    /*auto class_name = get_class_name(element);
+    OutputDebugStringW((L"TryFocusToFirstFocusableElement: " + class_name + L"\n").c_str());*/
+    if (auto ctrl = element.try_as<Control>()) {
+        if (ctrl.Focus(FocusState::Programmatic)) {
+            return true;
+        }
+    }
+    if (auto ctrl = element.try_as<ContentControl>()) {
+        return TryFocusToFirstFocusableElement(ctrl.Content().try_as<UIElement>());
+    }
+    if (auto panel = element.try_as<Panel>()) {
+        for (const auto& child : panel.Children()) {
+            if (TryFocusToFirstFocusableElement(child)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, Value const& value) {
+    const size_t MAX_BRIEF_VALUE_LENGTH = 4;
+
+    auto escape_to_literal_sink = [](std::wstring& sink, std::wstring_view sv) {
+        for (auto ch : sv) {
+            if (ch == L'\\' || ch == L'"') {
+                sink += L"\\";
+            }
+            sink += ch;
+        }
+    };
+
+    item.SubItems().Clear();
+
     if (value.is_int()) {
         item.BriefValue(to_hstring(*value.as_int()));
     }
     else if (value.is_str()) {
-        item.BriefValue(to_hstring(*value.as_str()));
+        std::wstring result = L"\"";
+        escape_to_literal_sink(result, to_hstring(*value.as_str()));
+        result += L"\"";
+        item.BriefValue(result);
     }
     else if (value.is_arr_int()) {
         std::wstring result;
-        for (const auto& val : value.as_arr_int()->vals) {
+        // Brief value
+        for (size_t count = 0; const auto & val : value.as_arr_int()->vals) {
             if (result.empty()) {
                 result = L"[" + std::to_wstring(val);
             }
             else {
                 result += L", " + std::to_wstring(val);
             }
+
+            if (++count >= MAX_BRIEF_VALUE_LENGTH) {
+                result += L", ...";
+                break;
+            }
         }
         if (result.empty()) {
             result = L"[]";
@@ -60,16 +108,33 @@ static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesT
         else {
             result += L"]";
         }
+        result += L" (" + std::to_wstring(value.as_arr_int()->vals.size()) + L")";
         item.BriefValue(result);
+        // Sub items
+        for (size_t i = 0; const auto & val : value.as_arr_int()->vals) {
+            auto sub_item = MEraEmuWin::DevTools::SourcesTabWatchTabItem();
+            sub_item.Expression(to_hstring(i));
+            sub_item.BriefValue(to_hstring(val));
+            item.SubItems().Append(sub_item);
+            i++;
+        }
     }
     else if (value.is_arr_str()) {
         std::wstring result;
-        for (const auto& val : value.as_arr_str()->vals) {
+        // Brief value
+        for (size_t count = 0; const auto & val : value.as_arr_str()->vals) {
             if (result.empty()) {
-                result = L"[" + to_hstring(val);
+                result = L"[\"";
             }
             else {
-                result += L", " + to_hstring(val);
+                result += L", \"";
+            }
+            escape_to_literal_sink(result, to_hstring(val));
+            result += L"\"";
+
+            if (++count >= MAX_BRIEF_VALUE_LENGTH) {
+                result += L", ...";
+                break;
             }
         }
         if (result.empty()) {
@@ -78,7 +143,16 @@ static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesT
         else {
             result += L"]";
         }
+        result += L" (" + std::to_wstring(value.as_arr_str()->vals.size()) + L")";
         item.BriefValue(result);
+        // Sub items
+        for (size_t i = 0; const auto & val : value.as_arr_str()->vals) {
+            auto sub_item = MEraEmuWin::DevTools::SourcesTabWatchTabItem();
+            sub_item.Expression(to_hstring(i));
+            sub_item.BriefValue(to_hstring(val));
+            item.SubItems().Append(sub_item);
+            i++;
+        }
     }
 }
 
@@ -109,6 +183,127 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         //InitFromEngineControl();
         OnEngineExecutionInterrupted(m_engine_ctrl->GetLastBreakReason());
     }
+
+    void MainPage::GlobalQuickActionsBaseFlyout_InputTextBox_TextChanged(IInspectable const& sender, TextChangedEventArgs const& e) {
+        UpdateFilteredQuickActionItems();
+    }
+    void MainPage::GlobalQuickActionsBaseFlyout_InputTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
+        auto key = e.Key();
+        if (key == VirtualKey::Enter) {
+            // Execute command
+            e.Handled(true);
+
+            auto xaml_item = GlobalQuickActionsBaseFlyout_QuickActionsItemListView().SelectedItem()
+                .try_as<FrameworkElement>();
+            if (!xaml_item) { return; }
+            auto item = xaml_item.DataContext().try_as<MEraEmuWin::DevTools::QuickActionItem>();
+            if (!item) { return; }
+
+            CloseGlobalQuickActionsBaseFlyout();
+
+            if (auto cmd = item.Command()) {
+                if (cmd.CanExecute(*this)) {
+                    cmd.Execute(*this);
+                }
+            }
+        }
+        else if (key == VirtualKey::Up || key == VirtualKey::Down) {
+            // Move selection
+            e.Handled(true);
+            auto list_view = GlobalQuickActionsBaseFlyout_QuickActionsItemListView();
+            auto items = list_view.Items();
+            auto count = items.Size();
+            if (count == 0) { return; }
+            auto selected_index = list_view.SelectedIndex();
+            if (selected_index == -1) {
+                selected_index = 0;
+            }
+            else {
+                selected_index += key == VirtualKey::Up ? -1 : 1;
+                if (selected_index < 0) {
+                    selected_index = count - 1;
+                }
+                else if (selected_index >= count) {
+                    selected_index = 0;
+                }
+            }
+            list_view.SelectedIndex(selected_index);
+            //list_view.ScrollIntoView(items.GetAt(selected_index));
+        }
+    }
+    void MainPage::GlobalQuickActionsBaseFlyout_QuickActionsItemListView_ItemClick(IInspectable const& sender, ItemClickEventArgs const& e) {
+        auto xaml_item = e.ClickedItem().try_as<FrameworkElement>();
+        if (!xaml_item) { return; }
+        auto item = xaml_item.DataContext().try_as<MEraEmuWin::DevTools::QuickActionItem>();
+        if (!item) { return; }
+
+        CloseGlobalQuickActionsBaseFlyout();
+
+        if (auto cmd = item.Command()) {
+            if (cmd.CanExecute(*this)) {
+                cmd.Execute(*this);
+            }
+        }
+    }
+
+    void MainPage::PageFlyoutContainerBackground_PointerPressed(IInspectable const& sender, PointerRoutedEventArgs const& e) {
+        e.Handled(true);
+        // Close flyout
+        CloseGlobalQuickActionsBaseFlyout();
+    }
+    void MainPage::PageFlyoutContainer_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
+        if (e.Key() == VirtualKey::Escape) {
+            // Close flyout
+            CloseGlobalQuickActionsBaseFlyout();
+        }
+    }
+
+    void MainPage::TopTabViewMoreMenuRunCommandItem_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        using namespace Windows::UI::Xaml::Core::Direct;
+
+        /*GlobalQuickActionsBaseFlyout().ShowAt(LayoutRoot());
+        return;*/
+
+        // Workaround KeyboarAccelerator having too-global scope, by checking if main window is in foreground
+        if (auto wnd = Tenkai::UI::Xaml::Window::GetCurrentMain()) {
+            auto active_mode = wnd.View().ActivationMode();
+            if (active_mode == Tenkai::UI::ViewManagement::WindowActivationMode::ActivatedInForeground) {
+                return;
+            }
+        }
+
+        auto flyout = GlobalQuickActionsBaseFlyout();
+        auto flyout_content = flyout.Content().as<FrameworkElement>();
+        auto is_open = flyout_content.IsLoaded();
+
+        if (is_open) {
+            // Close flyout instead
+            CloseGlobalQuickActionsBaseFlyout();
+            return;
+        }
+
+        auto presenter = FlyoutPresenter();
+        presenter.Style(flyout.FlyoutPresenterStyle());
+        presenter.Content(flyout_content);
+        auto shadow = ThemeShadow();
+        shadow.Receivers().Append(PageFlyoutContainerBackground());
+        presenter.Shadow(shadow);
+        presenter.Translation({ 0, 0, 32 });
+        PageFlyoutContainer().Children().Append(presenter);
+        PageFlyoutContainerBackground().Fill(SolidColorBrush(Colors::Transparent()));
+        PageFlyoutContainer().UpdateLayout();
+        /*if (!TryFocusToFirstFocusableElement(presenter)) {
+            presenter.IsTabStop(true);
+            presenter.Focus(FocusState::Programmatic);
+            presenter.IsTabStop(false);
+        }*/
+        GlobalQuickActionsBaseFlyout_InputTextBox().Text(L">");
+        GlobalQuickActionsBaseFlyout_InputTextBox().Select(INT32_MAX, 0);
+        GlobalQuickActionsBaseFlyout_InputTextBox().Focus(FocusState::Programmatic);
+
+        // TODO: GlobalQuickActionsBaseFlyout
+    }
+
     void MainPage::SourceFilesTreeView_ItemInvoked(IInspectable const& sender, muxc::TreeViewItemInvokedEventArgs const& e) {
         auto node = e.InvokedItem().as<muxc::TreeViewNode>();
         if (!node) { return; }
@@ -183,14 +378,13 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         co_await RefreshSourcesTabWatchTabItemValues();
     }
     fire_forget MainPage::SourcesTabWatchTabItemsListRepeaterContainer_Tapped(IInspectable const& sender, TappedRoutedEventArgs const& e) {
-        // TODO: Expand to list all array elements
-        //auto item = sender.as<FrameworkElement>().DataContext().as<MEraEmuWin::DevTools::SourcesTabWatchTabItem>();
-        //auto watch_name = item.WatchName();
-        //auto watch_value = co_await m_engine_ctrl->ExecEngineTask([watch_name](MEraEngine const& e) {
-        //    return e.get_watch_value(watch_name);
-        //});
-        //item.WatchValue(to_hstring(watch_value));
-        co_return;
+        auto item = e.OriginalSource().as<FrameworkElement>().DataContext().try_as<MEraEmuWin::DevTools::SourcesTabWatchTabItem>();
+        if (!item) { co_return; }
+        uint32_t index;
+        if (!m_sources_tab_watch_tab_items.IndexOf(item, index)) { co_return; }
+
+        // Switch expansion state
+        item.IsExpanded(!item.IsExpanded());
     }
     void MainPage::SourcesTabWatchTabItemsListRepeaterContainer_DoubleTapped(IInspectable const& sender, DoubleTappedRoutedEventArgs const& e) {
         auto elem = e.OriginalSource().as<FrameworkElement>();
@@ -345,6 +539,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         co_return;
     }
+    // TODO: Unify tabs creation logic
     IAsyncOperation<muxc::TabViewItem> MainPage::OpenOrCreateSourcesFileTab(hstring path) {
         auto strong_this = get_strong();
 
@@ -352,6 +547,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         auto source_tabview = SourceFilesTabView();
 
         for (size_t i = 0; auto && tab : m_sources_file_tab_items) {
+            if (tab.DocType() != L"erb") { i++; continue; }
             if (tab.FullPath() == path) {
                 source_tabview.SelectedIndex(i);
                 co_return source_tabview.ContainerFromIndex(i).as<muxc::TabViewItem>();
@@ -362,6 +558,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         auto tab = make<SourcesFileTabItem>();
         tab.FileName(path_sv.substr(path_sv.rfind(L'\\') + 1));
         tab.FullPath(path);
+        tab.DocType(L"erb");
         auto tab_index = m_sources_file_tab_items.Size();
         m_sources_file_tab_items.Append(tab);
         // TODO: Fix add tab missing animation
@@ -385,14 +582,63 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         co_await util::winrt::resume_when_loaded(editor_ctrl);
 
         editor.ClearAll();
-
         if (!tvi.Tag()) {
             // Manually prevent reinitialization thanks to TabViewItem being reused :(
-            tvi.Tag(box_value(L"Inited"));
+            tvi.Tag(box_value(L"inited"));
             InitializeCodeEditorControl(editor_ctrl);
         }
-
         editor.AppendTextFromBuffer((int64_t)source.size(), util::winrt::make_buffer_wrapper(source));
+        editor.EmptyUndoBuffer();
+
+        co_return tvi;
+    }
+    IAsyncOperation<muxc::TabViewItem> MainPage::OpenOrCreateSourcesFuncAsmTab(hstring path, hstring func_name) {
+        auto strong_this = get_strong();
+        auto source_tabview = SourceFilesTabView();
+        auto target_tab_name = L"Disassembly of @" + func_name;
+        for (size_t i = 0; auto && tab : m_sources_file_tab_items) {
+            if (tab.DocType() != L"func-asm") { i++; continue; }
+            if (tab.FullPath() == path && tab.FileName() == target_tab_name) {
+                source_tabview.SelectedIndex(i);
+                co_return source_tabview.ContainerFromIndex(i).as<muxc::TabViewItem>();
+            }
+            i++;
+        }
+
+        auto tab = make<SourcesFileTabItem>();
+        tab.FileName(target_tab_name);
+        tab.FullPath(path);
+        tab.DocType(L"func-asm");
+        auto tab_index = m_sources_file_tab_items.Size();
+        m_sources_file_tab_items.Append(tab);
+        source_tabview.SelectedIndex(tab_index);
+
+        // Load source
+        auto bytecodes = co_await m_engine_ctrl->ExecEngineTask([&](MEraEngine const& e) {
+            return e.dump_function_bytecode(to_string(func_name));
+        });
+
+        // HACK: Wait for TabViewItem to be loaded
+        co_await util::winrt::resume_when_loaded(source_tabview);
+        source_tabview.UpdateLayout();
+        auto tvi = source_tabview.ContainerFromIndex(tab_index).as<muxc::TabViewItem>();
+        if (!tvi) { co_return tvi; }
+        auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
+        if (!editor_ctrl) { co_return tvi; }
+        auto editor = editor_ctrl.Editor();
+
+        co_await util::winrt::resume_when_loaded(editor_ctrl);
+
+        editor.ClearAll();
+        if (!tvi.Tag()) {
+            // Manually prevent reinitialization thanks to TabViewItem being reused :(
+            tvi.Tag(box_value(L"inited"));
+            InitializeCodeEditorControl(editor_ctrl);
+        }
+        for (const auto& bc : bytecodes) {
+            editor.AppendTextFromBuffer((int64_t)bc.size(), util::winrt::make_buffer_wrapper(bc));
+            editor.AppendTextFromBuffer(1, util::winrt::make_buffer_wrapper(std::string_view{ "\n" }));
+        }
         editor.EmptyUndoBuffer();
 
         co_return tvi;
@@ -412,7 +658,14 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         if (!editor_ctrl) { co_return; }
         // Move caret to the position
         auto editor = editor_ctrl.Editor();
-        editor.GotoPos(span.start);
+        {
+            // Center the line
+            using WinUIEditor::CaretPolicy;
+            auto old_policy = CaretPolicy::Slop | CaretPolicy::Strict | CaretPolicy::Even;
+            editor.SetYCaretPolicy(CaretPolicy::Strict | CaretPolicy::Even, 0);
+            editor.GotoPos(span.start);
+            editor.SetYCaretPolicy(old_policy, 1);
+        }
         // Highlight the line
         auto line_to_highlight = editor.LineFromPosition(span.start);
         editor.MarkerDeleteAll(YellowBackgroundMarker);
@@ -423,23 +676,30 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void MainPage::InitializeCodeEditorControl(MEraEmuWin::DevTools::CodeEditControl const& editor_ctrl) {
         if (!editor_ctrl) { return; }
 
+        using WinUIEditor::MarginType;
+        using WinUIEditor::MarkerSymbol;
+        using WinUIEditor::CursorShape;
+        using WinUIEditor::CaretPolicy;
+
         // Register event handlers
         auto editor = editor_ctrl.Editor();
-        editor.SetMarginTypeN(0, WinUIEditor::MarginType::Symbol);
-        editor.SetMarginTypeN(BreakPointMargin, WinUIEditor::MarginType::Symbol);
+        editor.SetMarginTypeN(0, MarginType::Symbol);
+        editor.SetMarginTypeN(BreakPointMargin, MarginType::Symbol);
         editor.SetMarginSensitiveN(BreakPointMargin, true);
         editor.SetMarginMaskN(BreakPointMargin, (1ul << BreakPointMarker));
-        editor.SetMarginCursorN(BreakPointMargin, WinUIEditor::CursorShape::ReverseArrow);
-        editor.SetMarginTypeN(LineNumberMargin, WinUIEditor::MarginType::Number);
+        editor.SetMarginCursorN(BreakPointMargin, CursorShape::ReverseArrow);
+        editor.SetMarginTypeN(LineNumberMargin, MarginType::Number);
         editor.SetMarginSensitiveN(LineNumberMargin, false);
         editor.SetMarginMaskN(LineNumberMargin, 0);
-        editor.MarkerDefine(BreakPointMarker, WinUIEditor::MarkerSymbol::Circle);
+        editor.MarkerDefine(BreakPointMarker, MarkerSymbol::Circle);
         editor.MarkerSetBack(BreakPointMarker, RGB(0xff, 0, 0));
         editor.MarkerSetFore(BreakPointMarker, RGB(0xdc, 0x14, 0x3c));
-        editor.MarkerDefine(YellowBackgroundMarker, WinUIEditor::MarkerSymbol::Background);
+        editor.MarkerDefine(YellowBackgroundMarker, MarkerSymbol::Background);
         editor.MarkerSetBack(YellowBackgroundMarker, ARGB(0x80, 0xff, 0xd7, 0));
         editor.MarkerSetFore(YellowBackgroundMarker, ARGB(0x80, 0xff, 0xd7, 0));
         editor.MarginClick({ this, &MainPage::CodeEditorControl_MarginClick });
+        //editor.SetYCaretPolicy(CaretPolicy::Slop | CaretPolicy::Strict | CaretPolicy::Jumps, 0);
+        //editor.SetYCaretPolicy(CaretPolicy::Strict | CaretPolicy::Even, 0);
     }
     void MainPage::CodeEditorControl_MarginClick(WinUIEditor::Editor const& sender, WinUIEditor::MarginClickEventArgs const& e) {
         if (e.Margin() != BreakPointMargin) { return; }
@@ -455,6 +715,8 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     fire_forget MainPage::PositionSourcesTabWatchTabCurrentItemTextBox(uint32_t index) {
         auto item = m_sources_tab_watch_tab_items.GetAt(index);
         if (!item) { co_return; }
+        // Don't expand the item
+        item.IsExpanded(false);
         auto repeater = SourcesTabWatchTabItemsListRepeater();
         auto container = repeater.GetOrCreateElement(index).as<FrameworkElement>();
         if (!container) { co_return; }
@@ -493,7 +755,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         // Hide the TextBox
         tb.Tag(nullptr);
-        CodeSourceWatchTabExpander().Focus(FocusState::Pointer);
+        // Don't steal focus if there's a flyout
+        if (PageFlyoutContainer().Children().Size() == 0) {
+            CodeSourceWatchTabExpander().Focus(FocusState::Pointer);
+        }
         tb.Visibility(Visibility::Collapsed);
     }
     IAsyncAction MainPage::UpdateSourcesTabWatchTabItemFromExpressionString(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, std::string_view expression) {
@@ -523,5 +788,124 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             m_sources_tab_watch_tab_items.SetAt(i, item);
             i++;
         }
+    }
+    void MainPage::CloseGlobalQuickActionsBaseFlyout() {
+        GlobalQuickActionsBaseFlyout_InputTextBox().Text({});
+        PageFlyoutContainerBackground().Fill(nullptr);
+        PageFlyoutContainer().Children().Clear();
+        if (auto elem = FocusManager::FindFirstFocusableElement(LayoutRoot())) {
+            elem.as<Control>().Focus(FocusState::Pointer);
+        }
+    }
+    void MainPage::UpdateFilteredQuickActionItems() {
+        if (PageFlyoutContainer().Children().Size() == 0) { return; }
+
+        auto quick_actions_item_list_view = GlobalQuickActionsBaseFlyout_QuickActionsItemListView();
+
+        quick_actions_item_list_view.Items().Clear();
+        m_filtered_quick_action_items.Clear();
+
+        auto input_str = GlobalQuickActionsBaseFlyout_InputTextBox().Text();
+        std::wstring_view input = input_str;
+        if (input.starts_with(L">")) {
+            // Mode: Run command
+            input.remove_prefix(1);
+
+            static auto g_all_items = []() {
+                std::vector<MEraEmuWin::DevTools::QuickActionItem> items;
+                auto push_item = [&](hstring const& name, ICommand cmd) {
+                    MEraEmuWin::DevTools::QuickActionItem item;
+                    item.Title(name);
+                    item.Command(cmd);
+                    items.push_back(item);
+                };
+                push_item(L"Dump bytecode for the function at caret", RelayCommand([](auto&& sender) {
+                    sender.as<MainPage>()->DumpBytecodeForFunctionAtCaret();
+                }));
+                return items;
+            }();
+
+            std::vector<MEraEmuWin::DevTools::QuickActionItem> filtered_items;
+            for (const auto& item : g_all_items) {
+                if (input.empty()) {
+                    item.as<QuickActionItem>()->ranges().clear();
+                    filtered_items.push_back(item);
+                    continue;
+                }
+
+                auto result_opt = rust_FuzzyStringMatch::best_match(to_string(input.data()).c_str(), to_string(item.Title()).c_str());
+                if (!result_opt) { continue; }
+                auto& result = *result_opt;
+                if (result.score() <= 0) { continue; }
+                item.Score((int32_t)result.score());
+                item.as<QuickActionItem>()->ranges() = result.matches() | std::ranges::to<std::vector>();
+                filtered_items.push_back(item);
+            }
+            std::ranges::sort(filtered_items, [](const auto& a, const auto& b) {
+                return a.Score() > b.Score();
+            });
+            m_filtered_quick_action_items.ReplaceAll(filtered_items);
+        }
+        else {
+            // Mode: Open workspace files
+            // TODO...
+        }
+
+        // Update UI ListView according to the filtered items
+        auto dt = quick_actions_item_list_view.ItemTemplate();
+        for (const auto& item : m_filtered_quick_action_items) {
+            auto root = dt.LoadContent().as<FrameworkElement>();
+            root.DataContext(item);
+            auto item_title = item.Title();
+            auto title_tb = root.FindName(L"QuickActionItemTitleTextBlock").as<TextBlock>();
+            auto title_tb_inlines = title_tb.Inlines();
+            title_tb_inlines.Clear();
+            size_t last_end = 0;
+            for (const auto& range : item.as<QuickActionItem>()->ranges()) {
+                if (range.start > last_end) {
+                    auto run = Run();
+                    run.Text(hstring(std::wstring_view(item_title).substr(last_end, range.start - last_end)));
+                    title_tb_inlines.Append(run);
+                }
+                auto run = Run();
+                run.Text(hstring(std::wstring_view(item_title).substr(range.start, range.len)));
+                run.FontWeight(FontWeights::Bold());
+                title_tb_inlines.Append(run);
+                last_end = range.start + range.len;
+            }
+            if (last_end < item_title.size()) {
+                auto run = Run();
+                run.Text(hstring(std::wstring_view(item_title).substr(last_end)));
+                title_tb_inlines.Append(run);
+            }
+            quick_actions_item_list_view.Items().Append(root);
+        }
+        if (m_filtered_quick_action_items.Size() > 0) {
+            quick_actions_item_list_view.SelectedIndex(0);
+        }
+    }
+    IAsyncAction MainPage::DumpBytecodeForFunctionAtCaret() {
+        auto src_tabview = SourceFilesTabView();
+        auto src_tvi_idx = src_tabview.SelectedIndex();
+        if (src_tvi_idx < 0) { co_return; }
+        auto src_tvi = src_tabview.ContainerFromIndex(src_tvi_idx).try_as<muxc::TabViewItem>();
+        if (!src_tvi) { co_return; }
+        auto src_item = m_sources_file_tab_items.GetAt(src_tvi_idx);
+        if (!src_item || src_item.DocType() != L"erb") { co_return; }
+
+        // Disassemble the function at caret
+        auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(src_tvi);
+        if (!editor_ctrl) { co_return; }
+        auto editor = editor_ctrl.Editor();
+        auto caret_pos = editor.CurrentPos();
+        auto func_name = co_await m_engine_ctrl->ExecEngineTask([&](MEraEngine const& e) {
+            SrcSpan span{ caret_pos, 0 };
+            auto ip = e.get_ip_from_src(to_string(src_item.FullPath()), span).value();
+            auto func_name = e.get_func_info_by_ip(ip).value().name;
+            return func_name;
+        });
+
+        // Create a new tab to place the disassembled bytecode
+        co_await OpenOrCreateSourcesFuncAsmTab(src_item.FullPath(), to_hstring(func_name));
     }
 }

@@ -18,7 +18,7 @@
     <ApplicationType>Windows Store</ApplicationType>
     <ApplicationTypeRevision>10.0</ApplicationTypeRevision>
     <WindowsTargetPlatformVersion Condition=" '$(WindowsTargetPlatformVersion)' == '' ">10.0.22621.0</WindowsTargetPlatformVersion>
-    <WindowsTargetPlatformMinVersion>10.0.17763.0</WindowsTargetPlatformMinVersion>
+    <WindowsTargetPlatformMinVersion>10.0.18362.0</WindowsTargetPlatformMinVersion>
     <!-- HybridCRT hack for msbuild -->
     <UseCrtSDKReferenceStaticWarning>false</UseCrtSDKReferenceStaticWarning>
     <!-- Enables full Win32 APIs (since we are only targeting PC-exclusive UWP and Desktop) -->
@@ -97,12 +97,7 @@
     <OutDir>$(SolutionDir)Output\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)Output\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
-  <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <VcpkgTriplet>x64-windows</VcpkgTriplet>
-    <VcpkgHostTriplet>
-    </VcpkgHostTriplet>
-  </PropertyGroup>
-  <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+  <PropertyGroup Label="Vcpkg" Condition="'$(Platform)'=='x64'">
     <VcpkgTriplet>x64-windows</VcpkgTriplet>
     <VcpkgHostTriplet>
     </VcpkgHostTriplet>
@@ -151,6 +146,10 @@
       <DependentUpon>DevTools\MainPage.xaml</DependentUpon>
       <SubType>Code</SubType>
     </ClInclude>
+    <ClInclude Include="DevTools\QuickActionItem.h">
+      <DependentUpon>DevTools\QuickActionItem.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
     <ClInclude Include="DevTools\SourcesFileTabItem.h">
       <DependentUpon>DevTools\SourcesFileTabItem.idl</DependentUpon>
       <SubType>Code</SubType>
@@ -173,6 +172,10 @@
     </ClInclude>
     <ClInclude Include="MainPage.h">
       <DependentUpon>MainPage.xaml</DependentUpon>
+    </ClInclude>
+    <ClInclude Include="RelayCommand.h">
+      <DependentUpon>RelayCommand.idl</DependentUpon>
+      <SubType>Code</SubType>
     </ClInclude>
     <ClInclude Include="ScintillaModule.hpp" />
     <ClInclude Include="util.hpp" />
@@ -224,6 +227,10 @@
       <DependentUpon>DevTools\MainPage.xaml</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
+    <ClCompile Include="DevTools\QuickActionItem.cpp">
+      <DependentUpon>DevTools\QuickActionItem.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
     <ClCompile Include="DevTools\SourcesFileTabItem.cpp">
       <DependentUpon>DevTools\SourcesFileTabItem.idl</DependentUpon>
       <SubType>Code</SubType>
@@ -241,15 +248,12 @@
       <SubType>Code</SubType>
     </ClCompile>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="RelayCommand.cpp">
+      <DependentUpon>RelayCommand.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
     <ClCompile Include="ScintillaModule.cpp">
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">NotUsing</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">NotUsing</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">NotUsing</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">NotUsing</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">NotUsing</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClInclude Include="MEraEngine.hpp">
       <FileType>CppCode</FileType>
@@ -278,6 +282,9 @@
       <DependentUpon>DevTools\MainPage.xaml</DependentUpon>
       <SubType>Code</SubType>
     </Midl>
+    <Midl Include="DevTools\QuickActionItem.idl">
+      <SubType>Designer</SubType>
+    </Midl>
     <Midl Include="DevTools\SourcesFileTabItem.idl">
       <SubType>Designer</SubType>
     </Midl>
@@ -294,50 +301,21 @@
     <Midl Include="MainPage.idl">
       <DependentUpon>MainPage.xaml</DependentUpon>
     </Midl>
+    <Midl Include="RelayCommand.idl">
+      <SubType>Designer</SubType>
+    </Midl>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="..\MEraEmuCore\src\lib.rs">
       <FileType>Document</FileType>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">cargo build --manifest-path ..\MEraEmuCore\Cargo.toml
+      <Command Condition="'$(Configuration)'=='Debug'">cargo build --manifest-path ..\MEraEmuCore\Cargo.toml
 cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --features headers -- "ffi/MEraEmuCore.rust.h"</Command>
-      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Generating FFI interop files...</Message>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">cargo build --manifest-path ..\MEraEmuCore\Cargo.toml --release
+      <Command Condition="'$(Configuration)'=='Release'">cargo build --manifest-path ..\MEraEmuCore\Cargo.toml --release
 cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --features headers -- "ffi/MEraEmuCore.rust.h"</Command>
-      <Message Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Generating FFI interop files...</Message>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">cargo build --manifest-path ..\MEraEmuCore\Cargo.toml
-cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --features headers -- "ffi/MEraEmuCore.rust.h"</Command>
-      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">Generating FFI interop files...</Message>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">cargo build --manifest-path ..\MEraEmuCore\Cargo.toml --release
-cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --features headers -- "ffi/MEraEmuCore.rust.h"</Command>
-      <Message Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">Generating FFI interop files...</Message>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">cargo build --manifest-path ..\MEraEmuCore\Cargo.toml
-cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --features headers -- "ffi/MEraEmuCore.rust.h"</Command>
-      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">Generating FFI interop files...</Message>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">cargo build --manifest-path ..\MEraEmuCore\Cargo.toml --release
-cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --features headers -- "ffi/MEraEmuCore.rust.h"</Command>
-      <Message Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">Generating FFI interop files...</Message>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">cargo build --manifest-path ..\MEraEmuCore\Cargo.toml
-cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --features headers -- "ffi/MEraEmuCore.rust.h"</Command>
-      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Generating FFI interop files...</Message>
-      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">cargo build --manifest-path ..\MEraEmuCore\Cargo.toml --release
-cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --features headers -- "ffi/MEraEmuCore.rust.h"</Command>
-      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Generating FFI interop files...</Message>
-      <TreatOutputAsContent Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</TreatOutputAsContent>
-      <TreatOutputAsContent Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</TreatOutputAsContent>
-      <TreatOutputAsContent Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">true</TreatOutputAsContent>
-      <TreatOutputAsContent Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">true</TreatOutputAsContent>
-      <TreatOutputAsContent Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">true</TreatOutputAsContent>
-      <TreatOutputAsContent Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">true</TreatOutputAsContent>
-      <TreatOutputAsContent Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</TreatOutputAsContent>
-      <TreatOutputAsContent Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</TreatOutputAsContent>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">ffi/MEraEmuCore.rust.h;..\MEraEmuCore\target\debug\MEraEmuCore.dll.lib;..\MEraEmuCore\target\debug\MEraEmuCore.dll;%(Outputs)</Outputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">ffi/MEraEmuCore.rust.h;..\MEraEmuCore\target\release\MEraEmuCore.dll.lib;..\MEraEmuCore\target\release\MEraEmuCore.dll;%(Outputs)</Outputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">ffi/MEraEmuCore.rust.h;..\MEraEmuCore\target\debug\MEraEmuCore.dll.lib;..\MEraEmuCore\target\debug\MEraEmuCore.dll;%(Outputs)</Outputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">ffi/MEraEmuCore.rust.h;..\MEraEmuCore\target\release\MEraEmuCore.dll.lib;..\MEraEmuCore\target\release\MEraEmuCore.dll;%(Outputs)</Outputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">ffi/MEraEmuCore.rust.h;..\MEraEmuCore\target\debug\MEraEmuCore.dll.lib;..\MEraEmuCore\target\debug\MEraEmuCore.dll;%(Outputs)</Outputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">ffi/MEraEmuCore.rust.h;..\MEraEmuCore\target\release\MEraEmuCore.dll.lib;..\MEraEmuCore\target\release\MEraEmuCore.dll;%(Outputs)</Outputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">ffi/MEraEmuCore.rust.h;..\MEraEmuCore\target\debug\MEraEmuCore.dll.lib;..\MEraEmuCore\target\debug\MEraEmuCore.dll;%(Outputs)</Outputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">ffi/MEraEmuCore.rust.h;..\MEraEmuCore\target\release\MEraEmuCore.dll.lib;..\MEraEmuCore\target\release\MEraEmuCore.dll;%(Outputs)</Outputs>
+      <Message>Generating FFI interop files...</Message>
+      <TreatOutputAsContent>true</TreatOutputAsContent>
+      <Outputs Condition="'$(Configuration)'=='Debug'">ffi/MEraEmuCore.rust.h;..\MEraEmuCore\target\debug\MEraEmuCore.dll.lib;..\MEraEmuCore\target\debug\MEraEmuCore.dll;%(Outputs)</Outputs>
+      <Outputs Condition="'$(Configuration)'=='Release'">ffi/MEraEmuCore.rust.h;..\MEraEmuCore\target\release\MEraEmuCore.dll.lib;..\MEraEmuCore\target\release\MEraEmuCore.dll;%(Outputs)</Outputs>
     </CustomBuild>
     <None Include="packages.config" />
     <None Include="PropertySheet.props" />

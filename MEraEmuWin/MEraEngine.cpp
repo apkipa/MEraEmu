@@ -490,6 +490,13 @@ std::optional<EraSourceInfo> MEraEngine::get_src_info_from_ip(EraExecIp ip) cons
     }
     return r.get<EraSourceInfo>();
 }
+std::optional<EraExecIp> MEraEngine::get_ip_from_src(std::string_view filename, SrcSpan span) const {
+    auto r = do_rpc("get_ip_from_src", { { "filename", filename }, { "span", span } });
+    if (r.is_null()) {
+        return std::nullopt;
+    }
+    return r.get<EraExecIp>();
+}
 std::optional<EraChunkInfo> MEraEngine::get_chunk_info(uint32_t idx) const {
     auto r = do_rpc("get_chunk_info", { { "idx", idx } });
     if (r.is_null()) {
@@ -556,6 +563,12 @@ ScalarValue MEraEngine::evaluate_expr(std::string_view expr, std::optional<uint3
 }
 Value MEraEngine::evaluate_var_at_scope(std::string_view name, std::optional<uint32_t> scope_idx) const {
     return do_rpc("evaluate_var_at_scope", { { "name", name }, { "scope_idx", ret_to_json(scope_idx) } }).get<Value>();
+}
+std::vector<std::string> MEraEngine::get_functions_list() const {
+    return do_rpc("get_functions_list", {}).get<std::vector<std::string>>();
+}
+std::vector<std::string> MEraEngine::dump_function_bytecode(std::string_view name) const {
+    return do_rpc("dump_function_bytecode", { { "name", name } }).get<std::vector<std::string>>();
 }
 nlohmann::json MEraEngine::do_rpc(std::string_view method, nlohmann::json params) const {
     auto json = make_jsonrpc(method, std::move(params));

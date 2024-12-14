@@ -2053,8 +2053,16 @@ impl Value {
         match self.as_unpacked() {
             RefFlatValue::Int(x) => x.val.hash(state),
             RefFlatValue::Str(x) => x.val.hash(state),
-            RefFlatValue::ArrInt(x) => x.borrow().vals.hash(state),
-            RefFlatValue::ArrStr(x) => x.borrow().vals.hash(state),
+            RefFlatValue::ArrInt(x) => {
+                let x = x.borrow();
+                x.dims.hash(state);
+                x.vals.hash(state);
+            }
+            RefFlatValue::ArrStr(x) => {
+                let x = x.borrow();
+                x.dims.hash(state);
+                x.vals.hash(state);
+            }
         }
     }
 
@@ -4564,6 +4572,25 @@ impl EraBcChunk {
             read_packed_u32(num_size as u8, bytes)
         };
         Some(SrcSpan::new(SrcPos(start), len))
+    }
+
+    pub fn src_spans_iter(&self) -> impl Iterator<Item = SrcSpan> + '_ {
+        use crate::util::read_packed_u32;
+        let starts_num_size = self.packed_src_spans.starts.0;
+        let lens_num_size = self.packed_src_spans.lens.0;
+        (0..self.bc.len()).map(move |i| {
+            let start = read_packed_u32(
+                starts_num_size,
+                &self.packed_src_spans.starts.1
+                    [i * starts_num_size as usize..(i + 1) * starts_num_size as usize],
+            );
+            let len = read_packed_u32(
+                lens_num_size,
+                &self.packed_src_spans.lens.1
+                    [i * lens_num_size as usize..(i + 1) * lens_num_size as usize],
+            );
+            SrcSpan::new(SrcPos(start), len)
+        })
     }
 
     pub fn clear(&mut self) {

@@ -17,6 +17,8 @@
             <FontFamily x:Key="MaterialSymbolFontFamily">ms-appx:///Assets/Fonts/MaterialSymbolsOutlined-Light.ttf#Material Symbols Outlined</FontFamily>
             <tuxd:ContainerToBoolConverter x:Key="ContainerToBoolConverter" />
             <tuxd:ContainerToBoolConverter x:Key="NegatedContainerToBoolConverter" IsNegated="True" />
+            <tuxd:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
+            <tuxd:BoolToVisibilityConverter x:Key="NegatedBoolToVisibilityConverter" IsNegated="True" />
             <tuxd:ConverterGroup x:Key="ContainerToVisibilityConverter">
                 <tuxd:ContainerToBoolConverter />
                 <tuxd:BoolToVisibilityConverter />

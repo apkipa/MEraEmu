@@ -1,8 +1,10 @@
 import "EngineControl.idl";
+import "DevTools/QuickActionItem.idl";
 import "DevTools/SourcesFileTabItem.idl";
 import "DevTools/SourcesTabWatchTabItem.idl";
 import "DevTools/SourcesTabCallStackTabItem.idl";
 
+#define WUXC Windows.UI.Xaml.Controls
 #define MUXC Microsoft.UI.Xaml.Controls
 
 namespace MEraEmuWin.DevTools {
@@ -10,8 +12,11 @@ namespace MEraEmuWin.DevTools {
     runtimeclass MainPage : Windows.UI.Xaml.Controls.Page {
         MainPage();
 
+        // Objects declared in XAML, must expose here or will otherwise be inaccessible (unlike WinUI 3)
+        WUXC.Grid LayoutRoot{ get; };
         MUXC.Expander CodeSourceWatchTabExpander{ get; };
 
+        IObservableVector<QuickActionItem> FilteredQuickActionItemsList{ get; };
         IObservableVector<SourcesFileTabItem> SourcesFileTabsItemList{ get; };
         IObservableVector<SourcesTabWatchTabItem> SourcesTabWatchTabItemsList{ get; };
         IObservableVector<SourcesTabCallStackTabItem> SourcesTabCallStackTabItemsList{ get; };

@@ -27,6 +27,10 @@
     <Midl Include="DevTools\SourcesTabWatchTabItem.idl">
       <Filter>DevTools</Filter>
     </Midl>
+    <Midl Include="RelayCommand.idl" />
+    <Midl Include="DevTools\QuickActionItem.idl">
+      <Filter>DevTools</Filter>
+    </Midl>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp" />

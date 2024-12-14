@@ -4,6 +4,8 @@ namespace MEraEmuWin.DevTools {
     runtimeclass SourcesFileTabItem {
         SourcesFileTabItem();
 
+        /// Can be one of [erb, asm].
+        String DocType;
         String FileName;
         String FullPath;
         Boolean IsInited;

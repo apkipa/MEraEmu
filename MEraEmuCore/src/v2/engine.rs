@@ -1278,7 +1278,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             EraCsvLoadKind::Base => load_kvs("BASENAME", Some(EraCsvVarKind::CsvBase))?,
             EraCsvLoadKind::Source => load_kvs("SOURCENAME", Some(EraCsvVarKind::CsvSource))?,
             EraCsvLoadKind::Ex => load_kvs("EXNAME", Some(EraCsvVarKind::CsvEx))?,
-            EraCsvLoadKind::Str => load_kvs("STRNAME", Some(EraCsvVarKind::CsvStr))?,
+            EraCsvLoadKind::Str => load_kvs("STR", Some(EraCsvVarKind::CsvStr))?,
             EraCsvLoadKind::Equip => load_kvs("EQUIPNAME", Some(EraCsvVarKind::CsvEquip))?,
             EraCsvLoadKind::TEquip => load_kvs("TEQUIPNAME", Some(EraCsvVarKind::CsvTEquip))?,
             EraCsvLoadKind::Flag => load_kvs("FLAGNAME", Some(EraCsvVarKind::CsvFlag))?,
@@ -2536,6 +2536,7 @@ pub trait MEraEngineRpc {
     fn get_func_info(&self, name: &str) -> Option<EraFuncInfo>;
     fn get_func_info_by_ip(&self, ip: EraExecIp) -> Option<EraFuncInfo>;
     fn get_src_info_from_ip(&self, ip: EraExecIp) -> Option<EraSourceInfo>;
+    fn get_ip_from_src(&self, filename: &str, span: SrcSpan) -> Option<EraExecIp>;
     fn get_chunk_info(&self, idx: u32) -> Option<EraChunkInfo>;
     fn get_stack_trace(&self) -> EraEngineStackTrace;
     fn get_current_ip(&self) -> Option<EraExecIp>;
@@ -2569,6 +2570,8 @@ pub trait MEraEngineRpc {
         name: &str,
         scope_idx: Option<u32>,
     ) -> Result<Value, MEraEngineError>;
+    fn get_functions_list(&self) -> Vec<String>;
+    fn dump_function_bytecode(&self, name: &str) -> Result<Vec<String>, MEraEngineError>;
 }
 
 impl<Callback> MEraEngine<Callback> {
@@ -2632,6 +2635,24 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
                 filename: filename.to_string(),
                 span,
             })
+    }
+
+    fn get_ip_from_src(&self, filename: &str, span: SrcSpan) -> Option<EraExecIp> {
+        // WARN: It currently only performs a best-effort search, and will never be exact.
+        let (bc_chunk_idx, bc_chunk) = self
+            .ctx
+            .bc_chunks
+            .iter()
+            .enumerate()
+            .find(|(_, x)| x.name.as_str() == filename)?;
+        let (bc_offset, _) = bc_chunk
+            .src_spans_iter()
+            .enumerate()
+            .find(|(_, x)| x.contains_pos(span.start()))?;
+        Some(EraExecIp {
+            chunk: bc_chunk_idx as _,
+            offset: bc_offset as _,
+        })
     }
 
     fn get_chunk_info(&self, idx: u32) -> Option<EraChunkInfo> {
@@ -2784,5 +2805,35 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
         }
 
         Err(MEraEngineError::new("variable not found".to_owned()))
+    }
+
+    fn get_functions_list(&self) -> Vec<String> {
+        self.ctx
+            .func_entries
+            .keys()
+            .map(|x| x.to_string())
+            .collect()
+    }
+
+    fn dump_function_bytecode(&self, name: &str) -> Result<Vec<String>, MEraEngineError> {
+        let func_info = self
+            .ctx
+            .func_entries
+            .get(Ascii::new_str(name))
+            .and_then(Option::as_ref)
+            .ok_or_else(|| MEraEngineError::new("function not found".to_owned()))?;
+        let chunk = self
+            .ctx
+            .bc_chunks
+            .get(func_info.chunk_idx as usize)
+            .ok_or_else(|| MEraEngineError::new("chunk not found".to_owned()))?;
+        let bc_start = func_info.bc_offset as usize;
+        let bc_end = bc_start + func_info.bc_size as usize;
+        let mut bc = &chunk.get_bc()[bc_start..bc_end];
+        let mut lines = Vec::new();
+        while let Ok(cur_inst) = EraBytecodeKind::from_reader(&mut bc) {
+            lines.push(format!("{:?}", cur_inst));
+        }
+        Ok(lines)
     }
 }

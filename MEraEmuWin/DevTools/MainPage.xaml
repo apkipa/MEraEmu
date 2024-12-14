@@ -196,9 +196,52 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <Flyout x:Name="GlobalQuickActionsBaseFlyout" AreOpenCloseAnimationsEnabled="False" Placement="Full">
+            <Flyout.FlyoutPresenterStyle>
+                <Style TargetType="FlyoutPresenter" BasedOn="{StaticResource DefaultFlyoutPresenterStyle}">
+                    <Setter Property="HorizontalAlignment" Value="Stretch" />
+                    <Setter Property="VerticalAlignment" Value="Stretch" />
+                    <Setter Property="MaxWidth" Value="456" />
+                    <Setter Property="MaxHeight" Value="420" />
+                    <Setter Property="Margin" Value="20,20,20,0" />
+                    <Setter Property="Padding" Value="2" />
+                    <Setter Property="Background" Value="{ThemeResource AcrylicInAppFillColorDefaultBrush}" />
+                </Style>
+            </Flyout.FlyoutPresenterStyle>
+
+            <Grid HorizontalAlignment="Stretch">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBox x:Name="GlobalQuickActionsBaseFlyout_InputTextBox" Margin="4" IsSpellCheckEnabled="False"
+                         TextChanged="GlobalQuickActionsBaseFlyout_InputTextBox_TextChanged"
+                         KeyDown="GlobalQuickActionsBaseFlyout_InputTextBox_KeyDown"
+                         PlaceholderText="Type command..." />
+                <ListView x:Name="GlobalQuickActionsBaseFlyout_QuickActionsItemListView" Grid.Row="1" IsItemClickEnabled="True"
+                          ItemClick="GlobalQuickActionsBaseFlyout_QuickActionsItemListView_ItemClick">
+                    <ListView.ItemContainerTransitions>
+                        <TransitionCollection />
+                    </ListView.ItemContainerTransitions>
+                    <ListView.Header>
+                        <TextBlock Text="No matches found" Foreground="Gray" FontStyle="Italic" Margin="8,8,8,10"
+                                   Visibility="{x:Bind FilteredQuickActionItemsList.Size,Mode=OneWay,Converter={StaticResource NegatedIntToVisibilityConverter}}" />
+                    </ListView.Header>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="local:QuickActionItem">
+                            <ListViewItem MinHeight="0" Height="32" IsTabStop="False" CornerRadius="8">
+                                <TextBlock x:Name="QuickActionItemTitleTextBlock" />
+                            </ListViewItem>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+        </Flyout>
     </Page.Resources>
 
-    <Grid Background="{ThemeResource AppBarBackgroundThemeBrush}">
+    <Grid x:Name="LayoutRoot" Background="{ThemeResource AppBarBackgroundThemeBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
@@ -257,6 +300,25 @@
         </StackPanel>
 
         <muxc:TabView x:Name="TopTabView" Grid.Row="0" IsAddTabButtonVisible="False" TabWidthMode="SizeToContent" VerticalAlignment="Stretch">
+            <muxc:TabView.TabStripFooter>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="4,0">
+                    <Button x:Name="TopTabViewMoreButton" Style="{StaticResource FlatButtonStyle}" Width="24" Height="24" CornerRadius="999">
+                        <Button.Flyout>
+                            <MenuFlyout Placement="Bottom" ShouldConstrainToRootBounds="True">
+                                <MenuFlyoutItem Text="Run command" Click="TopTabViewMoreMenuRunCommandItem_Click">
+                                    <MenuFlyoutItem.KeyboardAccelerators>
+                                        <KeyboardAccelerator Key="P" Modifiers="Control,Shift" />
+                                    </MenuFlyoutItem.KeyboardAccelerators>
+                                </MenuFlyoutItem>
+                            </MenuFlyout>
+                        </Button.Flyout>
+
+                        <!-- More -->
+                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE712;" FontSize="14" />
+                    </Button>
+                </StackPanel>
+            </muxc:TabView.TabStripFooter>
+
             <muxc:TabViewItem Header="Sources" IsClosable="False">
                 <Grid>
                     <Grid.ColumnDefinitions>
@@ -384,19 +446,43 @@
                                                 <DataTemplate x:DataType="local:SourcesTabWatchTabItem">
                                                     <Grid BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" DataContext="{x:Bind}"
                                                           BorderThickness="0,1,0,0" Padding="4,2" HorizontalAlignment="Stretch" Background="Transparent">
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto" />
+                                                            <RowDefinition Height="Auto" />
+                                                        </Grid.RowDefinitions>
                                                         <Grid.ColumnDefinitions>
-                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="16" />
                                                             <ColumnDefinition Width="*" />
                                                         </Grid.ColumnDefinitions>
-                                                        <TextBlock>
+
+                                                        <!-- Right -->
+                                                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE76C;" Grid.Row="0" Grid.Column="0" FontSize="10"
+                                                                  Visibility="{x:Bind IsExpanded,Mode=OneWay,Converter={StaticResource NegatedBoolToVisibilityConverter}}" />
+                                                        <!-- Down -->
+                                                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE70D;" Grid.Row="0" Grid.Column="0" FontSize="10"
+                                                                  Visibility="{x:Bind IsExpanded,Mode=OneWay,Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                        <TextBlock Grid.Column="1">
                                                             <Run Foreground="BlueViolet" Text="{x:Bind Expression}" /><Run Text=": " /><Run Foreground="LightSeaGreen" Text="{x:Bind BriefValue}" /><Run Foreground="Red" Text="{x:Bind ErrorInfo}" />
                                                         </TextBlock>
+                                                        <muxc:ItemsRepeater Grid.Row="1" Grid.ColumnSpan="2" Visibility="{x:Bind IsExpanded,Mode=OneWay}" ItemsSource="{x:Bind SubItems}" Margin="16,0,0,0">
+                                                            <muxc:ItemsRepeater.Layout>
+                                                                <muxc:StackLayout DisableVirtualization="True" />
+                                                            </muxc:ItemsRepeater.Layout>
+
+                                                            <muxc:ItemsRepeater.ItemTemplate>
+                                                                <DataTemplate x:DataType="local:SourcesTabWatchTabItem">
+                                                                    <TextBlock>
+                                                                        <Run Foreground="BlueViolet" Text="{x:Bind Expression}" /><Run Text=": " /><Run Foreground="LightSeaGreen" Text="{x:Bind BriefValue}" /><Run Foreground="Red" Text="{x:Bind ErrorInfo}" />
+                                                                    </TextBlock>
+                                                                </DataTemplate>
+                                                            </muxc:ItemsRepeater.ItemTemplate>
+                                                        </muxc:ItemsRepeater>
                                                     </Grid>
                                                 </DataTemplate>
                                             </muxc:ItemsRepeater.ItemTemplate>
                                         </muxc:ItemsRepeater>
                                         <!-- Shared TextBox for editing & adding current watching expression item -->
-                                        <TextBox x:Name="SourcesTabWatchTabCurrentItemTextBox" Margin="4" Padding="4,2" BorderThickness="0"
+                                        <TextBox x:Name="SourcesTabWatchTabCurrentItemTextBox" Margin="4" Padding="4,2" BorderThickness="0" IsSpellCheckEnabled="False"
                                                  HorizontalAlignment="Stretch" VerticalAlignment="Top" MinHeight="4" Height="24" Visibility="Collapsed"
                                                  LostFocus="SourcesTabWatchTabCurrentItemTextBox_LostFocus" 
                                                  KeyDown="SourcesTabWatchTabCurrentItemTextBox_KeyDown" />
@@ -460,5 +546,9 @@
             TODO: Console, Time Travel, etc.
             -->
         </muxc:TabView>
+
+        <Rectangle x:Name="PageFlyoutContainerBackground" Grid.RowSpan="2" IsTapEnabled="True" PointerPressed="PageFlyoutContainerBackground_PointerPressed" />
+        <Grid x:Name="PageFlyoutContainer" Grid.RowSpan="2" TabFocusNavigation="Cycle" VerticalAlignment="Top"
+              KeyDown="PageFlyoutContainer_KeyDown" />
     </Grid>
 </Page>
