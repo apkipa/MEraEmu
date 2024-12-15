@@ -315,6 +315,12 @@ struct EraChunkInfo {
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraChunkInfo, name);
 
+struct EraDumpFunctionBytecodeEntry {
+    uint32_t offset;
+    std::string opcode_str;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraDumpFunctionBytecodeEntry, offset, opcode_str);
+
 struct DiagnosticResolveSrcSpanResult {
     std::string snippet;
     uint32_t offset;
@@ -443,7 +449,7 @@ struct MEraEngine {
     ScalarValue evaluate_expr(std::string_view expr, std::optional<uint32_t> scope_idx) const;
     Value evaluate_var_at_scope(std::string_view name, std::optional<uint32_t> scope_idx) const;
     std::vector<std::string> get_functions_list() const;
-    std::vector<std::string> dump_function_bytecode(std::string_view name) const;
+    std::vector<EraDumpFunctionBytecodeEntry> dump_function_bytecode(std::string_view name) const;
 
     nlohmann::json do_rpc(std::string_view method, nlohmann::json params) const;
 

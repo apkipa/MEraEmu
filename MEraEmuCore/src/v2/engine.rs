@@ -2530,6 +2530,12 @@ pub struct EraChunkInfo {
     pub name: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EraDumpFunctionBytecodeEntry {
+    pub offset: u32,
+    pub opcode_str: String,
+}
+
 #[easy_jsonrpc::rpc]
 pub trait MEraEngineRpc {
     fn reset_exec_to_ip(&mut self, ip: EraExecIp) -> Result<(), MEraEngineError>;
@@ -2571,7 +2577,10 @@ pub trait MEraEngineRpc {
         scope_idx: Option<u32>,
     ) -> Result<Value, MEraEngineError>;
     fn get_functions_list(&self) -> Vec<String>;
-    fn dump_function_bytecode(&self, name: &str) -> Result<Vec<String>, MEraEngineError>;
+    fn dump_function_bytecode(
+        &self,
+        name: &str,
+    ) -> Result<Vec<EraDumpFunctionBytecodeEntry>, MEraEngineError>;
 }
 
 impl<Callback> MEraEngine<Callback> {
@@ -2648,7 +2657,7 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
         let (bc_offset, _) = bc_chunk
             .src_spans_iter()
             .enumerate()
-            .find(|(_, x)| x.contains_pos(span.start()))?;
+            .find(|(_, x)| x.intersects(span))?;
         Some(EraExecIp {
             chunk: bc_chunk_idx as _,
             offset: bc_offset as _,
@@ -2815,7 +2824,10 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
             .collect()
     }
 
-    fn dump_function_bytecode(&self, name: &str) -> Result<Vec<String>, MEraEngineError> {
+    fn dump_function_bytecode(
+        &self,
+        name: &str,
+    ) -> Result<Vec<EraDumpFunctionBytecodeEntry>, MEraEngineError> {
         let func_info = self
             .ctx
             .func_entries
@@ -2831,8 +2843,16 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
         let bc_end = bc_start + func_info.bc_size as usize;
         let mut bc = &chunk.get_bc()[bc_start..bc_end];
         let mut lines = Vec::new();
-        while let Ok(cur_inst) = EraBytecodeKind::from_reader(&mut bc) {
-            lines.push(format!("{:?}", cur_inst));
+        loop {
+            use crate::util::SubsliceOffset;
+            let offset = chunk.get_bc().subslice_offset(bc).unwrap();
+            let Ok(cur_inst) = EraBytecodeKind::from_reader(&mut bc) else {
+                break;
+            };
+            lines.push(EraDumpFunctionBytecodeEntry {
+                offset: offset as _,
+                opcode_str: format!("{:?}", cur_inst),
+            });
         }
         Ok(lines)
     }

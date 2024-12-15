@@ -359,6 +359,7 @@ pub enum EraNode {
     StmtSaveGame,
     StmtDebugClear,
     StmtResetData,
+    StmtSaveNos(EraNodeRef),
 
     SelectCaseCondSingle(EraNodeRef),
     SelectCaseCondRange(EraNodeRef, EraNodeRef),
@@ -2740,6 +2741,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 b"SAVEGAME" => make!(EraNode::StmtSaveGame),
                 b"DEBUGCLEAR" => make!(EraNode::StmtDebugClear),
                 b"RESETDATA" => make!(EraNode::StmtResetData),
+                b"SAVENOS" => make!(EraNode::StmtSaveNos(self.cmd_arg_limit(1, 1))),
                 b"GCREATE"
                 | b"GCREATEFROMFILE"
                 | b"GDISPOSE"

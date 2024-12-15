@@ -636,7 +636,8 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             InitializeCodeEditorControl(editor_ctrl);
         }
         for (const auto& bc : bytecodes) {
-            editor.AppendTextFromBuffer((int64_t)bc.size(), util::winrt::make_buffer_wrapper(bc));
+            std::string_view bc_str = bc.opcode_str;
+            editor.AppendTextFromBuffer((int64_t)bc_str.size(), util::winrt::make_buffer_wrapper(bc_str));
             editor.AppendTextFromBuffer(1, util::winrt::make_buffer_wrapper(std::string_view{ "\n" }));
         }
         editor.EmptyUndoBuffer();
@@ -793,6 +794,18 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         GlobalQuickActionsBaseFlyout_InputTextBox().Text({});
         PageFlyoutContainerBackground().Fill(nullptr);
         PageFlyoutContainer().Children().Clear();
+        // Try to focus back to the editor
+        if (auto idx = SourceFilesTabView().SelectedIndex(); idx >= 0) {
+            auto tvi = SourceFilesTabView().ContainerFromIndex(idx).try_as<muxc::TabViewItem>();
+            if (tvi) {
+                auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
+                if (editor_ctrl) {
+                    editor_ctrl.Focus(FocusState::Programmatic);
+                    return;
+                }
+            }
+        }
+        // Fallback to the first focusable element
         if (auto elem = FocusManager::FindFirstFocusableElement(LayoutRoot())) {
             elem.as<Control>().Focus(FocusState::Pointer);
         }
@@ -898,14 +911,22 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         if (!editor_ctrl) { co_return; }
         auto editor = editor_ctrl.Editor();
         auto caret_pos = editor.CurrentPos();
+        auto line = editor.LineFromPosition(caret_pos);
+        auto line_start_pos = editor.PositionFromLine(line);
+        SrcSpan span{ line_start_pos, editor.GetLineEndPosition(line) - line_start_pos };
         auto func_name = co_await m_engine_ctrl->ExecEngineTask([&](MEraEngine const& e) {
-            SrcSpan span{ caret_pos, 0 };
             auto ip = e.get_ip_from_src(to_string(src_item.FullPath()), span).value();
             auto func_name = e.get_func_info_by_ip(ip).value().name;
             return func_name;
         });
 
         // Create a new tab to place the disassembled bytecode
-        co_await OpenOrCreateSourcesFuncAsmTab(src_item.FullPath(), to_hstring(func_name));
+        auto tvi = co_await OpenOrCreateSourcesFuncAsmTab(src_item.FullPath(), to_hstring(func_name));
+        if (tvi) {
+            auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
+            if (editor_ctrl) {
+                editor_ctrl.Focus(FocusState::Programmatic);
+            }
+        }
     }
 }

@@ -2575,6 +2575,26 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             EraNode::StmtResetData => {
                 self.chunk.push_bc(BcKind::ResetData, stmt_span);
             }
+            EraNode::StmtSaveNos(args) => {
+                // The same as GETCONFIG("表示するセーブデータ数")
+                let ([], [dest_var]) = self.unpack_list_expr(args)?;
+                match dest_var {
+                    EraExprOrSpan::Expr(dest_var) => {
+                        self.int_norm_var_idx(dest_var, true)?;
+                    }
+                    EraExprOrSpan::Span(span) => {
+                        self.int_var_static_idx("RESULT", span, 0)?;
+                    }
+                }
+                let key = self
+                    .o
+                    .ctx
+                    .interner()
+                    .get_or_intern("表示するセーブデータ数");
+                self.chunk.push_load_const_str(key, stmt_span);
+                self.chunk.push_bc(BcKind::GetConfig, stmt_span);
+                self.chunk.push_bc(BcKind::SetArrValFlat, stmt_span);
+            }
             _ => {
                 let mut diag = self.make_diag();
                 diag.span_err(Default::default(), stmt_span, "invalid statement");
@@ -6684,6 +6704,18 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let [save_id] = site.unpack_args(args)?;
                 apply_args!(name_span, save_id:i);
                 site.chunk.push_bc(BcKind::CheckData, name_span);
+            }
+            b"SAVENOS" => {
+                // The same as GETCONFIG("表示するセーブデータ数")
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                let key = site
+                    .o
+                    .ctx
+                    .interner()
+                    .get_or_intern("表示するセーブデータ数");
+                site.chunk.push_load_const_str(key, name_span);
+                site.chunk.push_bc(BcKind::GetConfig, name_span);
             }
             _ if name.eq_ignore_ascii_case("SYSINTRINSIC_LoadGameInit") => {
                 // Do nothing

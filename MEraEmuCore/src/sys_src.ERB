@@ -9,9 +9,18 @@
 @SYSPROC_LOADGAME
     #DIM DYNAMIC OldResult
     #DIM DYNAMIC LoadSucceeded = 0
+    #DIM DYNAMIC temp_i1
     OldResult = RESULT
     SYSINTRINSIC_LoadGameInit()
-    SYSINTRINSIC_LoadGamePrintText()
+
+    ; SYSINTRINSIC_LoadGamePrintText()
+    PRINTFORML Load which save?
+    FOR temp_i1, 0, SAVENOS()
+        SYSPROC_LOADGAME_PrintOneSave(temp_i1)
+    NEXT
+    SYSPROC_LOADGAME_PrintOneSave(99)
+    PRINTFORML [100] Cancel
+    
     $INPUT_LOOP
     INPUT
     SIF RESULT == 100
@@ -318,3 +327,13 @@
     #FUNCTIONS
     #DIMS CONST int_str_map = "LEFT", "CENTER", "RIGHT"
     RETURN int_str_map:(ARG:0)
+
+@SYSPROC_LOADGAME_PrintOneSave(save_id)
+    #DIM DYNAMIC save_id
+    IF CHKDATA(save_id) == 0
+        ; Succeeded
+        PRINTFORML [{save_id, 2}] %RESULTS%
+    ELSE
+        ; Failed
+        PRINTFORML [{save_id, 2}] ----
+    ENDIF

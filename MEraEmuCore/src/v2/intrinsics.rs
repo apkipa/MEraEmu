@@ -1513,7 +1513,7 @@ fn check_save_header<Callback: EraCompilerCallback>(
     }
     // Check game version
     let game_ver = save_header.game_version;
-    if !(game_ver >= cur_game_min_ver && game_ver <= cur_game_ver) {
+    if !(game_ver >= cur_game_min_ver || game_ver == cur_game_ver) {
         return Ok(CheckSaveHeaderResult {
             status: 3,
             timestamp: 0,

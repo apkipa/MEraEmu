@@ -259,6 +259,20 @@ impl SubsliceOffset for str {
     }
 }
 
+impl SubsliceOffset for [u8] {
+    fn subslice_offset(&self, inner: &Self) -> Option<usize> {
+        let self_range = self.as_ptr_range();
+        let self_range = (self_range.start as usize)..(self_range.end as usize);
+        let inner = inner.as_ptr() as usize;
+        // if inner < self_range.start || inner + inner.len() > self_range.end {
+        if inner < self_range.start || inner > self_range.end {
+            None
+        } else {
+            Some(inner - self_range.start)
+        }
+    }
+}
+
 pub trait StrReplaceCount {
     fn replace_count(&self, from: &str, to: &str) -> (String, usize);
 }

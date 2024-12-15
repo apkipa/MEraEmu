@@ -973,6 +973,9 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "ウィンドウ幅") {
                 return on_var_get_int("SCREENPIXELWIDTH", 0);
             }
+            if (name == "表示するセーブデータ数") {
+                return 20;
+            }
             throw std::runtime_error(std::format("no such int config: {}", name));
         }
         const char* on_get_config_str(std::string_view name) override {
