@@ -202,18 +202,38 @@
                 <Style TargetType="FlyoutPresenter" BasedOn="{StaticResource DefaultFlyoutPresenterStyle}">
                     <Setter Property="HorizontalAlignment" Value="Stretch" />
                     <Setter Property="VerticalAlignment" Value="Stretch" />
-                    <Setter Property="MaxWidth" Value="456" />
+                    <Setter Property="MaxWidth" Value="520" />
                     <Setter Property="MaxHeight" Value="420" />
                     <Setter Property="Margin" Value="20,20,20,0" />
-                    <Setter Property="Padding" Value="2" />
+                    <Setter Property="Padding" Value="4" />
                     <Setter Property="Background" Value="{ThemeResource AcrylicInAppFillColorDefaultBrush}" />
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="FlyoutPresenter">
+                                <Border
+                                    Background="{TemplateBinding Background}"                        
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="{TemplateBinding CornerRadius}"
+                                    BackgroundSizing="InnerBorderEdge">
+                                    <ContentPresenter
+                                        Content="{TemplateBinding Content}"
+                                        ContentTemplate="{TemplateBinding ContentTemplate}"
+                                        ContentTransitions="{TemplateBinding ContentTransitions}"
+                                        Margin="{TemplateBinding Padding}"
+                                        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                        VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                                </Border>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
                 </Style>
             </Flyout.FlyoutPresenterStyle>
 
             <Grid HorizontalAlignment="Stretch">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
                 <TextBox x:Name="GlobalQuickActionsBaseFlyout_InputTextBox" Margin="4" IsSpellCheckEnabled="False"
@@ -221,7 +241,9 @@
                          KeyDown="GlobalQuickActionsBaseFlyout_InputTextBox_KeyDown"
                          PlaceholderText="Type command..." />
                 <ListView x:Name="GlobalQuickActionsBaseFlyout_QuickActionsItemListView" Grid.Row="1" IsItemClickEnabled="True"
-                          ItemClick="GlobalQuickActionsBaseFlyout_QuickActionsItemListView_ItemClick">
+                          HorizontalAlignment="Stretch" ItemsSource="{x:Bind FilteredQuickActionItemsList}"
+                          ItemClick="GlobalQuickActionsBaseFlyout_QuickActionsItemListView_ItemClick"
+                          ContainerContentChanging="GlobalQuickActionsBaseFlyout_QuickActionsItemListView_ContainerContentChanging">
                     <ListView.ItemContainerTransitions>
                         <TransitionCollection />
                     </ListView.ItemContainerTransitions>
@@ -231,7 +253,7 @@
                     </ListView.Header>
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="local:QuickActionItem">
-                            <ListViewItem MinHeight="0" Height="32" IsTabStop="False" CornerRadius="8">
+                            <ListViewItem MinHeight="0" Height="32" IsTabStop="False">
                                 <TextBlock x:Name="QuickActionItemTitleTextBlock" />
                             </ListViewItem>
                         </DataTemplate>

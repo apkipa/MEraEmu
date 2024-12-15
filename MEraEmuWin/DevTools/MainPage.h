@@ -24,6 +24,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         void GlobalQuickActionsBaseFlyout_InputTextBox_TextChanged(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Controls::TextChangedEventArgs const& e);
         void GlobalQuickActionsBaseFlyout_InputTextBox_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
         void GlobalQuickActionsBaseFlyout_QuickActionsItemListView_ItemClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Controls::ItemClickEventArgs const& e);
+        void GlobalQuickActionsBaseFlyout_QuickActionsItemListView_ContainerContentChanging(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Controls::ContainerContentChangingEventArgs const& e);
 
         void PageFlyoutContainerBackground_PointerPressed(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
         void PageFlyoutContainer_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
@@ -63,8 +64,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         Windows::Foundation::IAsyncAction UpdateSourcesTabWatchTabItemFromExpressionString(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, std::string_view expression);
         Windows::Foundation::IAsyncAction RefreshSourcesTabWatchTabItemValues();
         void CloseGlobalQuickActionsBaseFlyout();
-        void UpdateFilteredQuickActionItems();
+        Windows::Foundation::IAsyncAction UpdateFilteredQuickActionItems();
         Windows::Foundation::IAsyncAction DumpBytecodeForFunctionAtCaret();
+        Microsoft::UI::Xaml::Controls::TabViewItem GetCurrentSourcesFileTabViewItem();
+        Windows::Foundation::IAsyncOperation<Windows::UI::Xaml::Controls::ContentDialogResult> ShowSimpleDialog(hstring const& title, hstring const& content);
 
         winrt::MEraEmuWin::implementation::EngineControl* m_engine_ctrl{ nullptr };
         event_token m_et_EngineExecutionInterrupted{};
@@ -80,6 +83,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::SourcesTabCallStackTabItem> m_sources_tab_call_stack_tab_items{
             single_threaded_observable_vector<MEraEmuWin::DevTools::SourcesTabCallStackTabItem>()
         };
+        std::vector<MEraEmuWin::DevTools::QuickActionItem> m_quick_action_source_file_items;
         bool m_engine_running{};
     };
 }

@@ -15,6 +15,7 @@
 #include <d2d1_2helper.h>
 #include <dwrite_3.h>
 #include <wincodec.h>
+#include <Shlobj.h>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
