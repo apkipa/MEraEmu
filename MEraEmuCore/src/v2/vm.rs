@@ -3427,6 +3427,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                     let chara_no1 = sanitize_chara_no(chara_no1, s.i.charas_count)?;
                     let chara_no2 = sanitize_chara_no(chara_no2, s.i.charas_count)?;
                     intrinsics::swap_chara(chara_no1 as _, chara_no2 as _, s.ctx)?;
+                    sview.replace([]);
                 }
                 Bc::AddCopyChara => {
                     // TODO: Bc::AddCopyChara
@@ -3491,7 +3492,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                 }
                 Bc::GetCharaRegNum => {
                     let var_no = s.get_global_var_int("NO")?.clone();
-                    let var_no = MaskedArr::try_new(var_no.borrow(), 0, -1).unwrap();
+                    let var_no = MaskedArr::try_new(var_no.borrow(), 0, -2).unwrap();
                     let sv = view_stack_or_bail!();
                     let [chara_tmpl_no] = sv.as_ref();
                     unpack_args!(chara_tmpl_no:i);

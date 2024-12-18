@@ -2062,8 +2062,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let dest_span = self.arena.get_node_span(dest_name);
                 let source_name = self.const_eval_str(source_name)?;
                 let dest_name = self.const_eval_str(dest_name)?;
-                let source = self.var_static(&source_name, source_span)?;
-                let dest = self.var_static(&dest_name, dest_span)?;
+                let source = self.var_static_with_local(&source_name, source_span)?;
+                let dest = self.var_static_with_local(&dest_name, dest_span)?;
                 if source != dest {
                     let mut diag = self.make_diag();
                     diag.span_err(
@@ -3234,14 +3234,49 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let cur_scope = self.allocate_scope_id(cur_scope, 4);
 
         // REPEAT loop prologue
-        let jp_body = self.chunk.push_jump(stmt_span);
+        let emit_ternary_fn =
+            |this: &mut Self,
+             span,
+             then_fn: &mut dyn Fn(&mut Self, SrcSpan),
+             else_fn: &mut dyn Fn(&mut Self, SrcSpan)| {
+                // Assuming stack has condition pushed
+                let bt_else = this.chunk.push_jump_if_not(span);
+                then_fn(this, span);
+                let bt_end = this.chunk.push_jump(span);
+                bt_else.complete_here(this.chunk);
+                else_fn(this, span);
+                bt_end.complete_here(this.chunk);
+            };
+        let emit_cond_fn = |this: &mut Self, span| {
+            this.chunk.push_duplicate_all(2, span);
+            this.chunk.push_load_imm(0, span);
+            this.chunk.push_bc(BcKind::CmpIntLT, span);
+            emit_ternary_fn(
+                this,
+                span,
+                &mut |this, span| {
+                    this.chunk.push_duplicate_one(5, span);
+                    this.chunk.push_duplicate_one(5, span);
+                    this.chunk.push_bc(BcKind::GetArrValFlat, span);
+                    this.chunk.push_bc(BcKind::CmpIntLT, span);
+                },
+                &mut |this, span| {
+                    this.chunk.push_duplicate_one(5, span);
+                    this.chunk.push_duplicate_one(5, span);
+                    this.chunk.push_bc(BcKind::GetArrValFlat, span);
+                    this.chunk.push_bc(BcKind::CmpIntGT, span);
+                },
+            );
+        };
+        emit_cond_fn(self, stmt_span);
+        let jp_cond_pre_check = self.chunk.push_jump(stmt_span);
         // Continue part
         let cp_continue = self.chunk.checkpoint();
         self.chunk.push_bc(BcKind::ForLoopStep, stmt_span);
+        jp_cond_pre_check.complete_here(self.chunk);
         let jp_end = self.chunk.push_jump_if_not(stmt_span);
 
         // REPEAT loop body
-        jp_body.complete_here(self.chunk);
         self.statements_list(stmts, cur_scope)?;
         self.chunk
             .push_jump(stmt_span)
@@ -3306,14 +3341,49 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let cur_scope = self.allocate_scope_id(cur_scope, 4);
 
         // FOR loop prologue
-        let jp_body = self.chunk.push_jump(stmt_span);
+        let emit_ternary_fn =
+            |this: &mut Self,
+             span,
+             then_fn: &mut dyn Fn(&mut Self, SrcSpan),
+             else_fn: &mut dyn Fn(&mut Self, SrcSpan)| {
+                // Assuming stack has condition pushed
+                let bt_else = this.chunk.push_jump_if_not(span);
+                then_fn(this, span);
+                let bt_end = this.chunk.push_jump(span);
+                bt_else.complete_here(this.chunk);
+                else_fn(this, span);
+                bt_end.complete_here(this.chunk);
+            };
+        let emit_cond_fn = |this: &mut Self, span| {
+            this.chunk.push_duplicate_all(2, span);
+            this.chunk.push_load_imm(0, span);
+            this.chunk.push_bc(BcKind::CmpIntLT, span);
+            emit_ternary_fn(
+                this,
+                span,
+                &mut |this, span| {
+                    this.chunk.push_duplicate_one(5, span);
+                    this.chunk.push_duplicate_one(5, span);
+                    this.chunk.push_bc(BcKind::GetArrValFlat, span);
+                    this.chunk.push_bc(BcKind::CmpIntLT, span);
+                },
+                &mut |this, span| {
+                    this.chunk.push_duplicate_one(5, span);
+                    this.chunk.push_duplicate_one(5, span);
+                    this.chunk.push_bc(BcKind::GetArrValFlat, span);
+                    this.chunk.push_bc(BcKind::CmpIntGT, span);
+                },
+            );
+        };
+        emit_cond_fn(self, stmt_span);
+        let jp_cond_pre_check = self.chunk.push_jump(stmt_span);
         // Continue part
         let cp_continue = self.chunk.checkpoint();
         self.chunk.push_bc(BcKind::ForLoopStep, stmt_span);
+        jp_cond_pre_check.complete_here(self.chunk);
         let jp_end = self.chunk.push_jump_if_not(stmt_span);
 
         // FOR loop body
-        jp_body.complete_here(self.chunk);
         self.statements_list(stmts, cur_scope)?;
         self.chunk
             .push_jump(stmt_span)
@@ -4909,6 +4979,34 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         self.chunk.push_load_imm(idx.into(), name_span);
 
         Ok(var_kind)
+    }
+
+    fn var_static_with_local(
+        &mut self,
+        name: &str,
+        name_span: SrcSpan,
+    ) -> CompileResult<ScalarValueKind> {
+        if let Some(var) = self
+            .cur_func
+            .get()
+            .frame_info
+            .vars
+            .get(Ascii::new_str(name))
+        {
+            let var_idx = var.var_idx;
+            if var.in_local_frame {
+                self.chunk
+                    .push_bc(BcKind::LoadLocalVar { idx: var_idx as _ }, name_span);
+            } else {
+                let var_info = self.o.ctx.variables.get_var_info(var_idx as _).unwrap();
+                var_info.val.ensure_alloc();
+                self.chunk
+                    .push_bc(BcKind::LoadVarWW { idx: var_idx }, name_span);
+            }
+            Ok(var.var_kind.to_scalar())
+        } else {
+            self.var_static(name, name_span)
+        }
     }
 
     fn var_static(&mut self, name: &str, name_span: SrcSpan) -> CompileResult<ScalarValueKind> {
