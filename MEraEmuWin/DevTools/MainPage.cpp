@@ -96,6 +96,12 @@ Windows::Foundation::IAsyncAction BrowseToFileAsync(hstring filename) {
     check_hresult(BrowseToFile(filename.c_str()));
 }
 
+SrcSpan PositionToLineSpan(WinUIEditor::Editor const& editor, int64_t position) {
+    auto line = editor.LineFromPosition(position);
+    auto line_start_pos = editor.PositionFromLine(line);
+    return { (uint32_t)line_start_pos, (uint32_t)(editor.GetLineEndPosition(line) - line_start_pos) };
+}
+
 static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, Value const& value) {
     const size_t MAX_BRIEF_VALUE_LENGTH = 4;
 
@@ -191,9 +197,12 @@ static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesT
 
 namespace winrt::MEraEmuWin::DevTools::implementation {
     MainPage::~MainPage() {
-        if (m_engine_ctrl) {
-            m_engine_ctrl->EngineExecutionInterrupted(m_et_EngineExecutionInterrupted);
-        }
+    }
+    fire_forget MainPage::final_release(std::unique_ptr<MainPage> self) noexcept {
+        self->CleanupEngineConnection();
+        // FIXME: Keep alive to prevent crash; should properly wait for all async tasks to finish instead.
+        using namespace std::chrono_literals;
+        co_await 1s;
     }
     void MainPage::InitializeComponent() {
         MainPageT::InitializeComponent();
@@ -202,23 +211,19 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     }
     void MainPage::SetConnectedEngineControl(MEraEmuWin::EngineControl engine) {
         // Close self first
-        if (m_engine_ctrl) {
-            m_engine_ctrl->EngineExecutionInterrupted(m_et_EngineExecutionInterrupted);
-            m_engine_ctrl = nullptr;
-            InitFromEngineControl();
-        }
+        CleanupEngineConnection();
 
         if (!engine) { return; }
 
         m_engine_ctrl = engine.as<MEraEmuWin::implementation::EngineControl>().get();
         m_et_EngineExecutionInterrupted = m_engine_ctrl->EngineExecutionInterrupted({ this, &MainPage::OnEngineExecutionInterrupted });
 
-        //InitFromEngineControl();
+        //InitFromEngineControlAsync();
         OnEngineExecutionInterrupted(m_engine_ctrl->GetLastBreakReason());
     }
 
     void MainPage::GlobalQuickActionsBaseFlyout_InputTextBox_TextChanged(IInspectable const& sender, TextChangedEventArgs const& e) {
-        UpdateFilteredQuickActionItems();
+        UpdateFilteredQuickActionItemsAsync();
     }
     void MainPage::GlobalQuickActionsBaseFlyout_InputTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
         auto key = e.Key();
@@ -362,7 +367,8 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         GlobalQuickActionsBaseFlyout_InputTextBox().Select(INT32_MAX, 0);
         GlobalQuickActionsBaseFlyout_InputTextBox().Focus(FocusState::Programmatic);
 
-        // TODO: GlobalQuickActionsBaseFlyout
+        // Avoid items flickering because of TextChanged event delay
+        UpdateFilteredQuickActionItemsAsync();
     }
 
     void MainPage::SourceFilesTreeView_ItemInvoked(IInspectable const& sender, muxc::TreeViewItemInvokedEventArgs const& e) {
@@ -381,7 +387,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         }
 
         // Open existing file in editor or create new tab
-        OpenOrCreateSourcesFileTab(to_hstring(path_str));
+        OpenOrCreateSourcesFileTabAsync(to_hstring(path_str));
     }
     void MainPage::SourceFilesTabView_TabCloseRequested(IInspectable const& sender, muxc::TabViewTabCloseRequestedEventArgs const& e) {
         auto tab = e.Item().as<MEraEmuWin::DevTools::SourcesFileTabItem>();
@@ -411,7 +417,13 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         }
         else {
             // Resume execution
-            m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+            if (m_sources_tab_breakpoint_items.size() > 0) {
+                m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
+                m_going_to_resume_single_step_halt = true;
+            }
+            else {
+                m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+            }
         }
     }
     void MainPage::CodeExecStepIntoButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
@@ -429,6 +441,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void MainPage::CodeExecStepSingleButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         if (!m_engine_ctrl) { return; }
         m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
+        m_doing_single_step = true;
     }
     void MainPage::CodeSourceWatchAddButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         auto index = m_sources_tab_watch_tab_items.Size();
@@ -436,7 +449,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         PositionSourcesTabWatchTabCurrentItemTextBox(index);
     }
     fire_forget MainPage::CodeSourceWatchRefreshButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
-        co_await RefreshSourcesTabWatchTabItemValues();
+        co_await RefreshSourcesTabWatchTabItemValuesAsync();
     }
     fire_forget MainPage::SourcesTabWatchTabItemsListRepeaterContainer_Tapped(IInspectable const& sender, TappedRoutedEventArgs const& e) {
         auto item = e.OriginalSource().as<FrameworkElement>().DataContext().try_as<MEraEmuWin::DevTools::SourcesTabWatchTabItem>();
@@ -480,11 +493,27 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             CommitSourcesTabWatchTabCurrentItemTextBox();
         }
     }
+    fire_forget MainPage::SourcesTabBreakpointsTabItem_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        auto item = sender.as<FrameworkElement>().DataContext().as<MEraEmuWin::DevTools::SourcesTabBreakpointItem>();
+        co_await OpenOrCreateSourcesFileTabAtSrcSpanAsync(item.FileName(), { item.SrcSpanStart(), item.SrcSpanLen() });
+    }
     fire_forget MainPage::SourcesTabCallStackTabItem_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         auto item = sender.as<FrameworkElement>().DataContext().as<MEraEmuWin::DevTools::SourcesTabCallStackTabItem>();
-        co_await OpenOrCreateSourcesFileTabAtSrcSpan(item.FileName(), { item.SrcSpanStart(), item.SrcSpanLen() });
+        co_await OpenOrCreateSourcesFileTabAtSrcSpanAsync(item.FileName(), { item.SrcSpanStart(), item.SrcSpanLen() });
     }
-    fire_forget MainPage::InitFromEngineControl() {
+    void MainPage::CleanupEngineConnection() {
+        // WARN: Init & Uninit operations must not be async because of APIs exposed to EngineControl
+        if (m_engine_ctrl) {
+            m_engine_running = false;
+            m_engine_ctrl->EngineExecutionInterrupted(m_et_EngineExecutionInterrupted);
+            ApplyEngineBreakpointsAsync(false);
+            m_engine_ctrl = nullptr;
+            InitFromEngineControlAsync();
+        }
+    }
+    IAsyncAction MainPage::InitFromEngineControlAsync() {
+        auto strong_this = get_strong();
+
         auto src_files_tree_view = SourceFilesTreeView();
 
         if (!m_engine_ctrl) {
@@ -492,11 +521,12 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             src_files_tree_view.RootNodes().Clear();
             m_sources_file_tab_items.Clear();
             m_quick_action_source_file_items.clear();
+            // Clear previously set breakpoints in engine
+            m_sources_tab_breakpoint_items.clear();
+            m_filtered_sources_tab_breakpoint_items.Clear();
             VisualStateManager::GoToState(*this, L"EngineUnconnected", false);
             co_return;
         }
-
-        auto strong_this = get_strong();
 
         if (src_files_tree_view.RootNodes().Size() == 0) {
             auto source_files = co_await m_engine_ctrl->ExecEngineTask([](MEraEngine const& e) {
@@ -545,7 +575,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         VisualStateManager::GoToState(*this, L"EngineConnected", false);
     }
     void MainPage::OnEngineExecutionInterrupted(EraExecutionBreakReason reason) {
-        InitFromEngineControl();
+        InitFromEngineControlAsync();
 
         if (is_execution_break_reason_fatal(reason)) {
             m_engine_running = false;
@@ -561,6 +591,20 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     fire_forget MainPage::UpdateForEnginePausedState(EraExecutionBreakReason reason) {
         auto strong_this = get_strong();
 
+        if (m_doing_single_step) {
+            m_doing_single_step = false;
+        }
+        if (m_going_to_resume_single_step_halt) {
+            m_going_to_resume_single_step_halt = false;
+            ApplyEngineBreakpointsAsync(true);
+            m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+            co_return;
+        }
+
+        // Un-apply breakpoints
+        co_await ApplyEngineBreakpointsAsync(false);
+
+        // Load call stack items
         std::vector<MEraEmuWin::DevTools::SourcesTabCallStackTabItem> call_stack_items;
         co_await m_engine_ctrl->ExecEngineTask([&](MEraEngine const& e) {
             auto stack_trace = e.get_stack_trace();
@@ -588,21 +632,24 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         // Open current break location in editor (the first item in call stack)
         if (!call_stack_items.empty()) {
             auto& item = call_stack_items.front();
-            OpenOrCreateSourcesFileTabAtSrcSpan(item.FileName(), { item.SrcSpanStart(), item.SrcSpanLen() });
+            co_await OpenOrCreateSourcesFileTabAtSrcSpanAsync(item.FileName(), { item.SrcSpanStart(), item.SrcSpanLen() });
         }
 
         // Reload watch items
-        co_await RefreshSourcesTabWatchTabItemValues();
+        co_await RefreshSourcesTabWatchTabItemValuesAsync();
     }
     fire_forget MainPage::UpdateForEngineRunningState(EraExecutionBreakReason reason) {
         auto strong_this = get_strong();
 
         m_sources_tab_call_stack_tab_items.Clear();
 
-        co_return;
+        if (!m_going_to_resume_single_step_halt && !m_doing_single_step) {
+            // Apply breakpoints
+            co_await ApplyEngineBreakpointsAsync(true);
+        }
     }
     // TODO: Unify tabs creation logic
-    IAsyncOperation<muxc::TabViewItem> MainPage::OpenOrCreateSourcesFileTab(hstring path) {
+    IAsyncOperation<muxc::TabViewItem> MainPage::OpenOrCreateSourcesFileTabAsync(hstring path) {
         auto strong_this = get_strong();
 
         std::wstring_view path_sv = path;
@@ -652,9 +699,19 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         editor.AppendTextFromBuffer((int64_t)source.size(), util::winrt::make_buffer_wrapper(source));
         editor.EmptyUndoBuffer();
 
+        // Load user-defined breakpoints, if any
+        for (auto& bp : m_sources_tab_breakpoint_items) {
+            if (bp.IsImplicit()) { continue; }
+            if (bp.FileName() == path) {
+                auto line = bp.LineNumber() - 1;
+                auto handle = editor.MarkerAdd(line, BreakPointMarker);
+                bp.MarkerHandle(handle);
+            }
+        }
+
         co_return tvi;
     }
-    IAsyncOperation<muxc::TabViewItem> MainPage::OpenOrCreateSourcesFuncAsmTab(hstring path, hstring func_name) {
+    IAsyncOperation<muxc::TabViewItem> MainPage::OpenOrCreateSourcesFuncAsmTabAsync(hstring path, hstring func_name) {
         auto strong_this = get_strong();
         auto source_tabview = SourceFilesTabView();
         auto target_tab_name = L"Disassembly of @" + func_name;
@@ -699,8 +756,19 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         }
         for (const auto& bc : bytecodes) {
             std::string_view bc_str = bc.opcode_str;
-            editor.AppendTextFromBuffer((int64_t)bc_str.size(), util::winrt::make_buffer_wrapper(bc_str));
-            editor.AppendTextFromBuffer(1, util::winrt::make_buffer_wrapper(std::string_view{ "\n" }));
+            auto append_str = [&](std::string_view str) {
+                editor.AppendTextFromBuffer((int64_t)str.size(), util::winrt::make_buffer_wrapper(str));
+            };
+            /*editor.AppendTextFromBuffer((int64_t)bc_str.size(), util::winrt::make_buffer_wrapper(bc_str));
+            editor.AppendTextFromBuffer(1, util::winrt::make_buffer_wrapper(std::string_view{ "\n" }));*/
+            auto num_str = std::to_string(bc.offset);
+            while (num_str.size() < 8) {
+                num_str = " " + num_str;
+            }
+            append_str(num_str);
+            append_str("    ");
+            append_str(bc_str);
+            append_str("\n");
         }
         editor.EmptyUndoBuffer();
 
@@ -714,9 +782,9 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         auto ctrl = content.FindName(L"SrcCodeEditor");
         return ctrl.try_as<MEraEmuWin::DevTools::CodeEditControl>();
     }
-    IAsyncAction MainPage::OpenOrCreateSourcesFileTabAtSrcSpan(hstring path, SrcSpan span) {
+    IAsyncAction MainPage::OpenOrCreateSourcesFileTabAtSrcSpanAsync(hstring path, SrcSpan span) {
         auto strong_this = get_strong();
-        auto tvi = co_await OpenOrCreateSourcesFileTab(path);
+        auto tvi = co_await OpenOrCreateSourcesFileTabAsync(path);
         auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
         if (!editor_ctrl) { co_return; }
         // Move caret to the position
@@ -767,15 +835,34 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void MainPage::CodeEditorControl_MarginClick(WinUIEditor::Editor const& sender, WinUIEditor::MarginClickEventArgs const& e) {
         if (e.Margin() != BreakPointMargin) { return; }
 
-        auto line = sender.LineFromPosition(e.Position());
+        // Assuming the editor is in the selected tab
+        auto src_files_tab_view = SourceFilesTabView();
+        auto item = src_files_tab_view.SelectedItem().try_as<MEraEmuWin::DevTools::SourcesFileTabItem>();
+        if (!item) { return; }
+
+        auto path = item.FullPath();
+
+        auto cur_pos = e.Position();
+        auto line = sender.LineFromPosition(cur_pos);
         if (sender.MarkerGet(line) & (1 << BreakPointMarker)) {
-            sender.MarkerDelete(line, BreakPointMarker);
+            // Remove breakpoint marker by enumerating all markers on the line
+            int which{};
+            while (true) {
+                auto handle = sender.MarkerHandleFromLine(line, which++);
+                if (handle == -1) { break; }
+                //sender.MarkerDelete(line, BreakPointMarker);
+                RemoveBreakpoint(path, handle);
+            }
         }
         else {
-            sender.MarkerAdd(line, BreakPointMarker);
+            //auto handle = sender.MarkerAdd(line, BreakPointMarker);
+            auto span = PositionToLineSpan(sender, cur_pos);
+            AddNewBreakpoint(path, span, false);
         }
     }
     fire_forget MainPage::PositionSourcesTabWatchTabCurrentItemTextBox(uint32_t index) {
+        auto strong_this = get_strong();
+
         auto item = m_sources_tab_watch_tab_items.GetAt(index);
         if (!item) { co_return; }
         // Don't expand the item
@@ -799,6 +886,8 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         container.StartBringIntoView();
     }
     fire_forget MainPage::CommitSourcesTabWatchTabCurrentItemTextBox() {
+        auto strong_this = get_strong();
+
         auto tb = SourcesTabWatchTabCurrentItemTextBox();
         auto tag = tb.Tag();
         if (!tag) { co_return; }
@@ -812,7 +901,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             m_sources_tab_watch_tab_items.RemoveAt(index);
         }
         else {
-            co_await UpdateSourcesTabWatchTabItemFromExpressionString(item, to_string(expression));
+            co_await UpdateSourcesTabWatchTabItemFromExpressionStringAsync(item, to_string(expression));
             m_sources_tab_watch_tab_items.SetAt(index, item);
         }
 
@@ -824,7 +913,9 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         }
         tb.Visibility(Visibility::Collapsed);
     }
-    IAsyncAction MainPage::UpdateSourcesTabWatchTabItemFromExpressionString(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, std::string_view expression) {
+    IAsyncAction MainPage::UpdateSourcesTabWatchTabItemFromExpressionStringAsync(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, std::string_view expression) {
+        auto strong_this = get_strong();
+
         item.BriefValue({});
         item.SubItems().Clear();
         item.ErrorInfo({});
@@ -841,13 +932,13 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             item.ErrorInfo(to_hstring(e.what()));
         }
     }
-    IAsyncAction MainPage::RefreshSourcesTabWatchTabItemValues() {
+    IAsyncAction MainPage::RefreshSourcesTabWatchTabItemValuesAsync() {
         auto strong_this = get_strong();
 
         for (size_t i = 0; auto item : m_sources_tab_watch_tab_items) {
             auto expression = to_string(item.Expression());
             if (expression.empty()) { continue; }
-            co_await UpdateSourcesTabWatchTabItemFromExpressionString(item, expression);
+            co_await UpdateSourcesTabWatchTabItemFromExpressionStringAsync(item, expression);
             m_sources_tab_watch_tab_items.SetAt(i, item);
             i++;
         }
@@ -872,8 +963,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             elem.as<Control>().Focus(FocusState::Pointer);
         }
     }
-    IAsyncAction MainPage::UpdateFilteredQuickActionItems() {
+    IAsyncAction MainPage::UpdateFilteredQuickActionItemsAsync() {
         if (PageFlyoutContainer().Children().Size() == 0) { co_return; }
+
+        auto strong_this = get_strong();
 
         auto quick_actions_item_list_view = GlobalQuickActionsBaseFlyout_QuickActionsItemListView();
 
@@ -894,7 +987,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
                     items.push_back(item);
                 };
                 push_item(L"Dump bytecode for the function at caret", RelayCommand([](auto&& sender) {
-                    sender.as<MainPage>()->DumpBytecodeForFunctionAtCaret();
+                    sender.as<MainPage>()->DumpBytecodeForFunctionAtCaretAsync();
                 }));
                 push_item(L"Open current file in File Explorer", RelayCommand([](auto&& sender) {
                     auto that = sender.as<MainPage>();
@@ -909,7 +1002,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
                             co_await BrowseToFileAsync(path);
                         }
                         catch (hresult_error const& e) {
-                            that->ShowSimpleDialog(L"Failed to open file",
+                            that->ShowSimpleDialogAsync(L"Failed to open file",
                                 winrt::format(L"0x{:08x}\n{}", (uint32_t)e.code(), e.message()));
                         }
                     }(that, path);
@@ -953,7 +1046,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
                     item.Title(path);
                     item.Command(RelayCommand([path](auto&& sender) -> fire_forget {
                         auto strong_this = sender.as<MainPage>();
-                        auto tvi = co_await strong_this->OpenOrCreateSourcesFileTab(path);
+                        auto tvi = co_await strong_this->OpenOrCreateSourcesFileTabAsync(path);
                         if (tvi) {
                             auto editor_ctrl = strong_this->CodeEditorControlFromSourcesFileTabViewItem(tvi);
                             if (editor_ctrl) {
@@ -994,7 +1087,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             quick_actions_item_list_view.SelectedIndex(0);
         }
     }
-    IAsyncAction MainPage::DumpBytecodeForFunctionAtCaret() {
+    IAsyncAction MainPage::DumpBytecodeForFunctionAtCaretAsync() {
         auto strong_this = get_strong();
 
         auto src_tabview = SourceFilesTabView();
@@ -1010,9 +1103,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         if (!editor_ctrl) { co_return; }
         auto editor = editor_ctrl.Editor();
         auto caret_pos = editor.CurrentPos();
-        auto line = editor.LineFromPosition(caret_pos);
-        auto line_start_pos = editor.PositionFromLine(line);
-        SrcSpan span{ line_start_pos, editor.GetLineEndPosition(line) - line_start_pos };
+        auto span = PositionToLineSpan(editor, caret_pos);
         auto func_name = co_await m_engine_ctrl->ExecEngineTask([&](MEraEngine const& e) {
             auto ip = e.get_ip_from_src(to_string(src_item.FullPath()), span).value();
             auto func_name = e.get_func_info_by_ip(ip).value().name;
@@ -1020,7 +1111,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         });
 
         // Create a new tab to place the disassembled bytecode
-        auto tvi = co_await OpenOrCreateSourcesFuncAsmTab(src_item.FullPath(), to_hstring(func_name));
+        auto tvi = co_await OpenOrCreateSourcesFuncAsmTabAsync(src_item.FullPath(), to_hstring(func_name));
         if (tvi) {
             auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
             if (editor_ctrl) {
@@ -1028,18 +1119,193 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             }
         }
     }
-    muxc::TabViewItem MainPage::GetCurrentSourcesFileTabViewItem() {
+    muxc::TabViewItem MainPage::GetCurrentSourcesFileTabViewItem(hstring const& target_path) {
         auto src_tabview = SourceFilesTabView();
-        auto src_tvi_idx = src_tabview.SelectedIndex();
-        if (src_tvi_idx < 0) { return nullptr; }
-        return src_tabview.ContainerFromIndex(src_tvi_idx).as<muxc::TabViewItem>();
+        if (target_path.empty()) {
+            // Get the selected tab
+            auto src_tvi_idx = src_tabview.SelectedIndex();
+            if (src_tvi_idx < 0) { return nullptr; }
+            return src_tabview.ContainerFromIndex(src_tvi_idx).as<muxc::TabViewItem>();
+        }
+
+        // Get the tab with the target path
+        for (size_t i = 0; auto && tab : m_sources_file_tab_items) {
+            if (tab.FullPath() == target_path) {
+                return src_tabview.ContainerFromIndex(i).as<muxc::TabViewItem>();
+            }
+            i++;
+        }
+        return nullptr;
     }
-    IAsyncOperation<ContentDialogResult> MainPage::ShowSimpleDialog(hstring const& title, hstring const& content) {
+    IAsyncOperation<ContentDialogResult> MainPage::ShowSimpleDialogAsync(hstring const& title, hstring const& content) {
         auto dialog = ContentDialog();
         dialog.XamlRoot(XamlRoot());
         dialog.Title(box_value(title));
         dialog.Content(box_value(content));
         dialog.PrimaryButtonText(L"OK");
         return dialog.ShowAsync();
+    }
+    void MainPage::AddNewBreakpoint(hstring const& path, SrcSpan span, bool temporary) {
+        auto tvi = GetCurrentSourcesFileTabViewItem(path);
+        if (!tvi) { return; }
+        auto src_item = tvi.DataContext().try_as<MEraEmuWin::DevTools::SourcesFileTabItem>();
+        if (!src_item) { return; }
+        auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
+        if (!editor_ctrl) { return; }
+        auto editor = editor_ctrl.Editor();
+
+        auto item = MEraEmuWin::DevTools::SourcesTabBreakpointItem();
+        item.IsImplicit(temporary);
+        item.MarkerHandle(-1);
+        item.IsEnabled(true);
+        item.IsApplied(false);
+        item.FuncName(L"???");
+        item.FileName(path);
+        item.LineNumber(1);
+        item.ColumnNumber(1);
+        item.SrcSpanStart(span.start);
+        item.SrcSpanLen(span.len);
+
+        m_sources_tab_breakpoint_items.push_back(item);
+
+        if (!temporary) {
+            // Should also be displayed in the UI
+            auto line = editor.LineFromPosition(span.start);
+            auto handle = editor.MarkerAdd(line, BreakPointMarker);
+            item.LineNumber(line + 1);
+            item.MarkerHandle(handle);
+            m_filtered_sources_tab_breakpoint_items.Append(item);
+        }
+
+        if (m_engine_running) {
+            // Apply the new breakpoint
+            ApplyEngineBreakpointsAsync(true);
+        }
+    }
+    void MainPage::RemoveBreakpoint(hstring const& path, int32_t handle) {
+        MEraEmuWin::DevTools::SourcesTabBreakpointItem item = nullptr;
+        for (auto& bp : m_sources_tab_breakpoint_items) {
+            // Skip implicit breakpoints as they never get displayed in the UI
+            if (bp.IsImplicit()) { continue; }
+            if (bp.FileName() == path && bp.MarkerHandle() == handle) {
+                item = bp;
+                break;
+            }
+        }
+        if (!item) { return; }
+
+        if (!item.IsImplicit()) {
+            auto tvi = GetCurrentSourcesFileTabViewItem(path);
+            if (!tvi) { return; }
+            auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
+            if (!editor_ctrl) { return; }
+            auto editor = editor_ctrl.Editor();
+            editor.MarkerDeleteHandle(item.MarkerHandle());
+            uint32_t index;
+            if (m_filtered_sources_tab_breakpoint_items.IndexOf(item, index)) {
+                m_filtered_sources_tab_breakpoint_items.RemoveAt(index);
+            }
+
+            // Postpone the removal to properly unpatch the engine code later
+            item.IsImplicit(true);
+        }
+
+        // Purge the removed breakpoints
+        auto op = ApplyEngineBreakpointsAsync(false);
+        if (m_engine_running) {
+            op.Completed([this, strong_this = get_strong()](auto&&, auto&&) {
+                // Re-apply breakpoints
+                ApplyEngineBreakpointsAsync(true);
+            });
+        }
+    }
+    void MainPage::SyncBreakpointsWithSourceFile(hstring const& path) {
+        // Used to fix the breakpoint line number when the source file is modified in the editor.
+        // TODO: SyncBreakpointsWithSourceFile
+    }
+    IAsyncOperation<bool> MainPage::ApplyEngineBreakpointsAsync(bool do_apply) {
+        auto strong_this = get_strong();
+
+        bool has_changes = false;
+
+        if (do_apply) {
+            std::vector<MEraEmuWin::DevTools::SourcesTabBreakpointItem> breakpoints;
+            for (auto& bp : m_sources_tab_breakpoint_items) {
+                if (bp.IsApplied()) { continue; }
+                if (!bp.IsEnabled()) { continue; }
+                breakpoints.push_back(bp);
+            }
+
+            for (auto& bp : breakpoints) {
+                bp.IsApplied(true);
+            }
+
+            if (!breakpoints.empty()) {
+                co_await m_engine_ctrl->ExecEngineTask([&](MEraEngine const& e) {
+                    // TODO: What to do if an exception is thrown while applying breakpoints?
+                    std::vector<std::pair<EraExecIp, std::vector<uint8_t>>> ip_bcs;
+                    std::erase_if(breakpoints, [&](auto& bp) {
+                        auto ip = e.get_ip_from_src(to_string(bp.FileName()), { bp.SrcSpanStart(), bp.SrcSpanLen() });
+                        if (!ip) { return true; }
+                        if (std::ranges::find(ip_bcs, *ip, [](const auto& v) { return v.first; }) != ip_bcs.end()) {
+                            // Already applied, different breakpoint with same ip?
+                            return true;
+                        }
+                        auto bc = e.read_bytecode(ip->chunk, ip->offset, 1);
+                        if (!bc) { return true; }
+                        ip_bcs.push_back({ *ip, std::move(*bc) });
+                        return false;
+                    });
+                    for (size_t i = 0; auto & ip_bc : ip_bcs) {
+                        has_changes = true;
+                        OutputDebugStringW(winrt::format(L"DevTools: Applying breakpoint at {}:{}\n", ip_bc.first.chunk, ip_bc.first.offset).c_str());
+                        e.patch_bytecode(ip_bc.first.chunk, ip_bc.first.offset, { { MEE_DEBUG_BREAK_BYTECODE } });
+                        breakpoints[i].as<SourcesTabBreakpointItem>()->original_bytecode() = std::move(ip_bc.second);
+                        i++;
+                    }
+                });
+            }
+        }
+        else {
+            std::vector<MEraEmuWin::DevTools::SourcesTabBreakpointItem> breakpoints;
+            for (auto& bp : m_sources_tab_breakpoint_items) {
+                if (!bp.IsApplied()) { continue; }
+                breakpoints.push_back(bp);
+            }
+
+            for (auto& bp : breakpoints) {
+                bp.IsApplied(false);
+            }
+
+            if (!breakpoints.empty()) {
+                co_await m_engine_ctrl->ExecEngineTask([&](MEraEngine const& e) {
+                    // TODO: What to do if an exception is thrown while un-applying breakpoints?
+                    std::vector<EraExecIp> ips;
+                    std::erase_if(breakpoints, [&](auto& bp) {
+                        auto ip = e.get_ip_from_src(to_string(bp.FileName()), { bp.SrcSpanStart(), bp.SrcSpanLen() });
+                        if (!ip) { return true; }
+                        ips.push_back(*ip);
+                        return false;
+                    });
+                    for (size_t i = 0; const auto & ip : ips) {
+                        has_changes = true;
+                        OutputDebugStringW(winrt::format(L"DevTools: Un-applying breakpoint at {}:{}\n", ip.chunk, ip.offset).c_str());
+                        e.patch_bytecode(ip.chunk, ip.offset, breakpoints[i].as<SourcesTabBreakpointItem>()->original_bytecode());
+                        i++;
+                    }
+                });
+            }
+        }
+
+        if (!do_apply) {
+            // Clear temporary breakpoints
+            std::erase_if(m_sources_tab_breakpoint_items, [](const auto& bp) {
+                if (!bp.IsImplicit()) { return false; }
+                assert(!bp.IsApplied());
+                return true;
+            });
+        }
+
+        co_return has_changes;
     }
 }

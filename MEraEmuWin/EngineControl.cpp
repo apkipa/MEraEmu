@@ -334,7 +334,7 @@ namespace winrt::MEraEmuWin::implementation {
         ~EngineSharedData() {}
 
         hstring game_base_dir;
-        CoreDispatcher ui_dispatcher{ nullptr };
+        //CoreDispatcher ui_dispatcher{ nullptr };
         DispatcherQueue ui_dispatcher_queue{ nullptr };
         //weak_ref<EngineControl> ui_ctrl{ nullptr };
         EngineControl* ui_ctrl{};
@@ -976,14 +976,14 @@ namespace winrt::MEraEmuWin::implementation {
             if (name == "表示するセーブデータ数") {
                 return 20;
             }
-            throw std::runtime_error(std::format("no such int config: {}", name));
+            throw std::runtime_error(to_string(std::format(L"no such int config: {}", to_hstring(name))));
         }
         const char* on_get_config_str(std::string_view name) override {
             // TODO: on_get_config_str
             if (name == "描画インターフェース") {
                 return "Direct2D";
             }
-            throw std::runtime_error(std::format("no such str config: {}", name));
+            throw std::runtime_error(to_string(std::format(L"no such str config: {}", to_hstring(name))));
         }
         int64_t on_get_key_state(int64_t key_code) override
         {
@@ -1302,7 +1302,6 @@ namespace winrt::MEraEmuWin::implementation {
         UISideDisconnect();
         m_sd = std::make_shared<EngineSharedData>();
         m_sd->game_base_dir = game_base_dir;
-        m_sd->ui_dispatcher = Dispatcher();
         m_sd->ui_dispatcher_queue = DispatcherQueue::GetForCurrentThread();
         //m_sd->ui_ctrl = get_weak();
         m_sd->ui_ctrl = this;
@@ -1472,6 +1471,17 @@ namespace winrt::MEraEmuWin::implementation {
                     // Source loading takes a lot of time, so mark thread as started here
                     mark_thread_started();
 
+                    // Use a dedicated thread to read ERB files
+                    auto [erb_tx, erb_rx] = util::sync::spsc::sync_channel<std::tuple<std::filesystem::path, std::unique_ptr<uint8_t[]>, size_t>>(64);
+                    auto erb_thread = std::jthread([&, erb_tx = std::move(erb_tx)] {
+                        for (auto& erb : erbs) {
+                            if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
+                            auto [data, size] = read_utf8_file(erb);
+                            std::tuple<std::filesystem::path, std::unique_ptr<uint8_t[]>, size_t> erb_data{ erb, std::move(data), size };
+                            if (!erb_tx.send(erb_data)) { return; }
+                        }
+                    });
+
                     // Load CSV files
                     for (auto& csv : misc_csvs) {
                         auto filename = csv.filename();
@@ -1526,11 +1536,17 @@ namespace winrt::MEraEmuWin::implementation {
                         builder.load_erh(to_string(erh.c_str()).c_str(), { data.get(), size });
                     }
                     builder.finish_load_erh();
-                    for (auto& erb : erbs) {
+                    /*for (auto& erb : erbs) {
                         if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
                         try_handle_thread_event();
                         auto [data, size] = read_utf8_file(erb);
                         builder.load_erb(to_string(erb.c_str()).c_str(), { data.get(), size });
+                    }*/
+                    while (auto erb_opt = erb_rx.recv()) {
+                        if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
+                        try_handle_thread_event();
+                        auto& [name, data, size] = *erb_opt;
+                        builder.load_erb(to_string(name.c_str()).c_str(), { data.get(), size });
                     }
                 }
 
@@ -1548,6 +1564,7 @@ namespace winrt::MEraEmuWin::implementation {
                 // Main loop
                 EraExecutionBreakReason stop_reason = ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
                 uint64_t instructions_to_exec = UINT64_MAX;
+                bool force_exec = false;
                 // (?) Notify UI thread that engine is about to execute instructions
                 queue_ui_work([sd, stop_reason] {
                     sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
@@ -1569,13 +1586,18 @@ namespace winrt::MEraEmuWin::implementation {
                             sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
                         });
                     };
-                    while (!is_halted()) {
-                        stop_reason = engine.do_execution(engine_task_rx.is_vacant_var(), instructions_to_exec);
+                    while (force_exec || !is_halted()) {
+                        //std::atomic_bool alwaystrue{ true };
+                        stop_reason = engine.do_execution(
+                            //force_exec ? alwaystrue : engine_task_rx.is_vacant_var(),
+                            engine_task_rx.is_vacant_var(),
+                            instructions_to_exec);
                         queue_ui_work([sd, stop_reason] {
                             sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
                         });
                         break;
                     }
+                    force_exec = false;
                     if (instructions_to_exec != UINT64_MAX) {
                         // Limit reached, auto halt
                         instructions_to_exec = UINT64_MAX;
@@ -1643,6 +1665,8 @@ namespace winrt::MEraEmuWin::implementation {
                         else if (task->kind == EngineThreadTaskKind::SingleStepAndHalt) {
                             instructions_to_exec = 1;
                             clear_halted();
+                            force_exec = true;
+                            break;
                         }
                         else if (task->kind == EngineThreadTaskKind::CustomFunc) {
                             if (task->f) {

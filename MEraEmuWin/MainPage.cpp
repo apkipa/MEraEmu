@@ -61,7 +61,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         SwitchTitleBar(true);
 
-        auto dispatcher = Dispatcher();
+        auto dq = DispatcherQueue::GetForCurrentThread();
         auto engine_ctrl = MainEngineControl();
         engine_ctrl.UnhandledException([this](auto&&, MEraEmuWin::EngineUnhandledExceptionEventArgs const& e) {
             ShowSimpleContentDialog(L"运行引擎时出错", hstring(
@@ -124,8 +124,8 @@ namespace winrt::MEraEmuWin::implementation {
         });
 
         // Automatically start the game engine
-        dispatcher.RunAsync(CoreDispatcherPriority::Low, [self = get_strong()]() {
-            self->BootstrapEngine();
+        dq.TryEnqueue(DispatcherQueuePriority::Low, [this]() {
+            BootstrapEngine();
         });
     }
 

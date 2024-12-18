@@ -2,6 +2,7 @@ import "EngineControl.idl";
 import "DevTools/QuickActionItem.idl";
 import "DevTools/SourcesFileTabItem.idl";
 import "DevTools/SourcesTabWatchTabItem.idl";
+import "DevTools/SourcesTabBreakpointItem.idl";
 import "DevTools/SourcesTabCallStackTabItem.idl";
 
 #define WUXC Windows.UI.Xaml.Controls
@@ -19,6 +20,7 @@ namespace MEraEmuWin.DevTools {
         IObservableVector<QuickActionItem> FilteredQuickActionItemsList{ get; };
         IObservableVector<SourcesFileTabItem> SourcesFileTabsItemList{ get; };
         IObservableVector<SourcesTabWatchTabItem> SourcesTabWatchTabItemsList{ get; };
+        IObservableVector<SourcesTabBreakpointItem> FilteredSourcesTabBreakpointItemsList{ get; };
         IObservableVector<SourcesTabCallStackTabItem> SourcesTabCallStackTabItemsList{ get; };
 
         void SetConnectedEngineControl(MEraEmuWin.EngineControl engine);

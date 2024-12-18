@@ -31,6 +31,9 @@
     <Midl Include="DevTools\QuickActionItem.idl">
       <Filter>DevTools</Filter>
     </Midl>
+    <Midl Include="DevTools\SourcesTabBreakpointItem.idl">
+      <Filter>DevTools</Filter>
+    </Midl>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp" />

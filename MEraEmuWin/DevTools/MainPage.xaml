@@ -510,13 +510,35 @@
                                                  KeyDown="SourcesTabWatchTabCurrentItemTextBox_KeyDown" />
                                     </Grid>
                                 </muxc:Expander>
-                                <muxc:Expander Header="Breakpoints (unsupported)" HorizontalAlignment="Stretch" IsExpanded="True"
-                                               Padding="0" MinHeight="16">
-                                    <!--
-                                    <Grid>
-                                        
-                                    </Grid>
-                                    -->
+                                <muxc:Expander Header="Breakpoints" HorizontalAlignment="Stretch" IsExpanded="True"
+                                               HorizontalContentAlignment="Stretch" Padding="0" MinHeight="16">
+                                    <StackPanel Orientation="Vertical">
+                                        <CheckBox x:Name="SourcesTabBreakpointsTabBreakOnExceptionsCheckBox" Margin="8,0" Content="Break on exceptions" IsChecked="False" HorizontalAlignment="Left" />
+                                        <muxc:ItemsRepeater x:Name="SourcesTabBreakpointsTabItemsListRepeater"
+                                                            ItemsSource="{x:Bind FilteredSourcesTabBreakpointItemsList}">
+                                            <muxc:ItemsRepeater.ItemTemplate>
+                                                <DataTemplate x:DataType="local:SourcesTabBreakpointItem">
+                                                    <Button Style="{StaticResource FlatButtonStyle}" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" DataContext="{x:Bind}"
+                                                            BorderThickness="0,1,0,0" Padding="4,2" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                                                            Click="SourcesTabBreakpointsTabItem_Click">
+                                                        <Grid HorizontalAlignment="Stretch">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="16" />
+                                                                <ColumnDefinition Width="*" />
+                                                                <ColumnDefinition Width="Auto" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <FontIcon Grid.Column="0" FontSize="12" FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE91F;"
+                                                                      Visibility="{x:Bind IsEnabled}" Foreground="Red" HorizontalAlignment="Left" />
+                                                            <TextBlock Grid.Column="1" Text="{x:Bind FileName}" />
+                                                            <TextBlock Grid.Column="2" HorizontalAlignment="Right" Foreground="Gray">
+                                                                <Run Text="{x:Bind LineNumber}" />
+                                                            </TextBlock>
+                                                        </Grid>
+                                                    </Button>
+                                                </DataTemplate>
+                                            </muxc:ItemsRepeater.ItemTemplate>
+                                        </muxc:ItemsRepeater>
+                                    </StackPanel>
                                 </muxc:Expander>
                                 <muxc:Expander Header="Scope (unsupported)" HorizontalAlignment="Stretch" IsExpanded="True"
                                                Padding="0" MinHeight="16">

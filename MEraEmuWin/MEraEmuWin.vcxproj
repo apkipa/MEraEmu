@@ -112,6 +112,8 @@
       <PreprocessorDefinitions>DISABLE_XAML_GENERATED_MAIN;WIN32_LEAN_AND_MEAN;WINRT_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <!-- Disable RTTI -->
+      <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <ObjectFileName>$(IntDir)%(RelativeDir)</ObjectFileName>
     </ClCompile>
     <Midl>
@@ -152,6 +154,10 @@
     </ClInclude>
     <ClInclude Include="DevTools\SourcesFileTabItem.h">
       <DependentUpon>DevTools\SourcesFileTabItem.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
+    <ClInclude Include="DevTools\SourcesTabBreakpointItem.h">
+      <DependentUpon>DevTools\SourcesTabBreakpointItem.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClInclude>
     <ClInclude Include="DevTools\SourcesTabCallStackTabItem.h">
@@ -235,6 +241,10 @@
       <DependentUpon>DevTools\SourcesFileTabItem.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
+    <ClCompile Include="DevTools\SourcesTabBreakpointItem.cpp">
+      <DependentUpon>DevTools\SourcesTabBreakpointItem.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
     <ClCompile Include="DevTools\SourcesTabCallStackTabItem.cpp">
       <DependentUpon>DevTools\SourcesTabCallStackTabItem.idl</DependentUpon>
       <SubType>Code</SubType>
@@ -286,6 +296,9 @@
       <SubType>Designer</SubType>
     </Midl>
     <Midl Include="DevTools\SourcesFileTabItem.idl">
+      <SubType>Designer</SubType>
+    </Midl>
+    <Midl Include="DevTools\SourcesTabBreakpointItem.idl">
       <SubType>Designer</SubType>
     </Midl>
     <Midl Include="DevTools\SourcesTabCallStackTabItem.idl">

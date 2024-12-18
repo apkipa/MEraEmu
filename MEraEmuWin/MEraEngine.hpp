@@ -12,6 +12,8 @@
 
 #include "ffi/MEraEmuCore.rust.h"
 
+#define MEE_DEBUG_BREAK_BYTECODE ((uint8_t)0x01)
+
 struct rust_String {
     rust_String(Vec_uint8_t v) : i(v) {}
     rust_String(rust_String const&) = delete;
@@ -107,6 +109,7 @@ template<typename T> nlohmann::json ret_to_json(const std::optional<T>& opt) {
 
 struct EraExecIp {
     uint32_t chunk, offset;
+    auto operator<=>(const EraExecIp&) const = default;
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraExecIp, chunk, offset);
 

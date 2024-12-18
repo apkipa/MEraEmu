@@ -10,7 +10,7 @@ use std::{
 use bstr::ByteSlice;
 use cstree::{
     build::NodeCache,
-    interning::{Interner, Resolver},
+    interning::{InternKey, Interner, Resolver, TokenKey},
 };
 use either::Either;
 use hashbrown::{HashMap, HashSet};
@@ -2542,6 +2542,7 @@ pub trait MEraEngineRpc {
     fn get_func_info(&self, name: &str) -> Option<EraFuncInfo>;
     fn get_func_info_by_ip(&self, ip: EraExecIp) -> Option<EraFuncInfo>;
     fn get_src_info_from_ip(&self, ip: EraExecIp) -> Option<EraSourceInfo>;
+    /// Get the IP of the first instruction in the chunk that contains the given source span.
     fn get_ip_from_src(&self, filename: &str, span: SrcSpan) -> Option<EraExecIp>;
     fn get_chunk_info(&self, idx: u32) -> Option<EraChunkInfo>;
     fn get_stack_trace(&self) -> EraEngineStackTrace;
@@ -2654,13 +2655,20 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
             .iter()
             .enumerate()
             .find(|(_, x)| x.name.as_str() == filename)?;
-        let (bc_offset, _) = bc_chunk
-            .src_spans_iter()
-            .enumerate()
-            .find(|(_, x)| x.intersects(span))?;
+        let mut bc_offset = None;
+        for (i, x) in bc_chunk.src_spans_iter().enumerate() {
+            if span.contains_pos(x.start()) {
+                // Best match - the first instruction in the span
+                bc_offset = Some(i);
+                break;
+            } else if x.intersects(span) && bc_offset.is_none() {
+                // Second best match - the first instruction that intersects the span
+                bc_offset = Some(i);
+            }
+        }
         Some(EraExecIp {
             chunk: bc_chunk_idx as _,
-            offset: bc_offset as _,
+            offset: bc_offset? as _,
         })
     }
 
@@ -2849,9 +2857,25 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
             let Ok(cur_inst) = EraBytecodeKind::from_reader(&mut bc) else {
                 break;
             };
+            let mut opcode_str = format!("{:?}", cur_inst);
+            if let EraBytecodeKind::LoadConstStr { idx } = cur_inst {
+                let s =
+                    TokenKey::try_from_u32(idx).and_then(|x| self.ctx.interner().try_resolve(x));
+                if let Some(s) = s {
+                    opcode_str += &format!(" ; {:?}", s);
+                } else {
+                    opcode_str += " ; <invalid>";
+                }
+            }
             lines.push(EraDumpFunctionBytecodeEntry {
                 offset: offset as _,
-                opcode_str: format!("{:?}", cur_inst),
+                opcode_str,
+            });
+        }
+        if !bc.is_empty() {
+            lines.push(EraDumpFunctionBytecodeEntry {
+                offset: u32::MAX,
+                opcode_str: format!("; WARNING: {} bytes of trailing data not decoded", bc.len()),
             });
         }
         Ok(lines)

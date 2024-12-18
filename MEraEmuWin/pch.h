@@ -72,6 +72,7 @@
 
 #include <functional>
 #include <algorithm>
+#include <memory>
 #include <ranges>
 #include <thread>
 #include <vector>
