@@ -5794,16 +5794,19 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let args_cnt = args.len();
                 if args_cnt != N {
                     let mut diag = self.make_diag();
-                    diag.span_err(
-                        Default::default(),
-                        self.name_span,
-                        format!(
-                            "function `{}` expects {} arguments, but {} were given",
-                            self.name, N, args_cnt
-                        ),
+                    let msg = format!(
+                        "function `{}` expects {} arguments, but {} were given",
+                        self.name, N, args_cnt
                     );
-                    diag.emit_to(self.o.ctx);
-                    return Err(());
+                    if args_cnt < N {
+                        diag.span_err(Default::default(), self.name_span, msg);
+                        diag.emit_to(self.o.ctx);
+                        return Err(());
+                    } else {
+                        // Gracefully handle excessive arguments
+                        diag.span_warn(Default::default(), self.name_span, msg);
+                        diag.emit_to(self.o.ctx);
+                    }
                 }
                 Ok(std::array::from_fn(|i| EraNodeRef(args[i])))
             }

@@ -4,8 +4,8 @@ use itertools::Itertools;
 use smallvec::smallvec;
 
 use super::parser::{
-    EraNode, EraNodeArena, EraNodeDeclVarHomo, EraNodeExprTernary, EraNodeListExpr, EraNodeRef,
-    EraNodeStringFormInterpPart,
+    EraNode, EraNodeArena, EraNodeDeclVarHomo, EraNodeExprTernary, EraNodeExprVarIdx,
+    EraNodeListExpr, EraNodeRef, EraNodeStringFormInterpPart,
 };
 use crate::v2::routines;
 use crate::{
@@ -387,7 +387,16 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                 }
             }
             EraNode::ExprParen(x) => self.interpret_expression(x)?,
-            EraNode::ExprVarIdx(..) => todo!(),
+            EraNode::ExprVarIdx(_) => {
+                let target = EraNodeExprVarIdx::try_get_from(self.node_arena, expr).unwrap();
+                let var = EraNodeRef(target.var_indices[0]);
+                let idxs = target.var_indices[1..]
+                    .iter()
+                    .map(|&x| EraNodeRef(x))
+                    .map(|x| self.interpret_int_expr(x).map(|x| x as u32))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.resolve_var_node_with_idx(var, &idxs)?
+            }
             EraNode::Empty => ScalarValue::Empty,
             EraNode::StringForm(x) => {
                 let parts = self.node_arena.get_small_extra_data_view(x);

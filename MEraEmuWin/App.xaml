@@ -14,7 +14,7 @@
                 <ResourceDictionary Source="ScrollViewer_themeresources_v1.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
-            <FontFamily x:Key="MaterialSymbolFontFamily">ms-appx:///Assets/Fonts/MaterialSymbolsOutlined-Light.ttf#Material Symbols Outlined</FontFamily>
+            <FontFamily x:Key="MaterialSymbolFontFamily">ms-resource:///Files/Assets/Fonts/MaterialSymbolsOutlined-Light.ttf#Material Symbols Outlined</FontFamily>
             <tuxd:ContainerToBoolConverter x:Key="ContainerToBoolConverter" />
             <tuxd:ContainerToBoolConverter x:Key="NegatedContainerToBoolConverter" IsNegated="True" />
             <tuxd:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />

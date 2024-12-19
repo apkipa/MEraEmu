@@ -184,6 +184,8 @@ namespace winrt::MEraEmuWin::implementation {
         }
         EraExecutionBreakReason GetLastBreakReason() const { return m_last_execution_break_reason; }
 
+        void UpdateDevToolsWindow();
+
         void InitEngineUI();
         void UpdateEngineUI();
         void EmitUnhandledExceptionEvent(std::exception_ptr ex);

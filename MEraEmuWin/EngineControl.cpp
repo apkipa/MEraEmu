@@ -132,6 +132,36 @@ namespace winrt::MEraEmuWin::implementation {
             return r;
         }
     }
+
+    enum class FileBomKind {
+        None,
+        Utf8,
+        Utf16LE,
+        Utf16BE,
+    };
+    struct FileBomDetectResult {
+        FileBomKind kind;
+        uint32_t read_size;
+        uint32_t bom_size;
+    };
+    FileBomDetectResult consume_detect_file_bom(HANDLE hFile, uint8_t buf[4]) {
+        DWORD read_size;
+        check_bool(ReadFile(hFile, buf, 3, &read_size, nullptr));
+        if (read_size >= 3) {
+            if (buf[0] == 0xef && buf[1] == 0xbb && buf[2] == 0xbf) {
+                return { FileBomKind::Utf8, read_size, 3 };
+            }
+        }
+        if (read_size >= 2) {
+            if (buf[0] == 0xff && buf[1] == 0xfe) {
+                return { FileBomKind::Utf16LE, read_size, 2 };
+            }
+            if (buf[0] == 0xfe && buf[1] == 0xff) {
+                return { FileBomKind::Utf16BE, read_size, 2 };
+            }
+        }
+        return { FileBomKind::None, read_size, 0 };
+    }
     std::pair<std::unique_ptr<uint8_t[]>, size_t> read_utf8_file(std::filesystem::path const& path) {
         winrt::file_handle file{ CreateFileW(path.c_str(),
             GENERIC_READ,
@@ -156,23 +186,50 @@ namespace winrt::MEraEmuWin::implementation {
         });
         DWORD read_size{};
         size_t buf_offset{};
-        if (size >= 3) {
-            check_bool(ReadFile(file.get(), buf, 3, &read_size, nullptr));
-            assert(read_size == 3);
-            buf_offset += 3;
-            size -= 3;
-            // Strip BOM header
-            if (buf[0] == 0xef && buf[1] == 0xbb && buf[2] == 0xbf) {
-                buf_offset = 0;
-            }
+        FileBomKind bom_kind;
+        {
+            auto [temp_bom_kind, read_size, bom_size] = consume_detect_file_bom(file.get(), buf);
+            auto temp_payload_size = read_size - bom_size;
+            memcpy(buf, buf + bom_size, temp_payload_size);
+            buf_offset += temp_payload_size;
+            size -= read_size;
+            bom_kind = temp_bom_kind;
         }
-        check_bool(ReadFile(file.get(), buf + buf_offset, size, &read_size, nullptr));
-        assert(read_size == size);
-        buf_offset += size;
-        size = 0;
-        // HACK: Append trailing newline
-        buf[buf_offset] = L'\n';
-        buf_offset++;
+        auto read_rest_fn = [&] {
+            check_bool(ReadFile(file.get(), buf + buf_offset, size, &read_size, nullptr));
+            if (read_size != size) {
+                throw hresult_error(E_FAIL, L"Failed to read the whole file");
+            }
+            buf_offset += size;
+            size = 0;
+        };
+        if (bom_kind == FileBomKind::Utf8 || bom_kind == FileBomKind::None) {
+            // Read directly
+            read_rest_fn();
+        }
+        else if (bom_kind == FileBomKind::Utf16LE) {
+            // Convert to UTF-8
+            //OutputDebugStringW(winrt::format(L"Converting UTF-16 LE file `{}` to UTF-8...\n", path.c_str()).c_str());
+            read_rest_fn();
+            auto utf16_src = std::wstring_view((wchar_t*)buf, buf_offset / sizeof(wchar_t));
+            auto utf8_size = WideCharToMultiByte(CP_UTF8, 0, utf16_src.data(), static_cast<int32_t>(utf16_src.size()), nullptr, 0, nullptr, nullptr);
+            if (utf8_size == 0) {
+                throw hresult_error(E_FAIL, L"Failed to convert UTF-16 LE to UTF-8");
+            }
+            auto utf8_buf = std::unique_ptr<uint8_t[]>(new uint8_t[utf8_size + 1]);
+            auto final_utf8_size = WideCharToMultiByte(CP_UTF8, 0, utf16_src.data(), static_cast<int32_t>(utf16_src.size()), (char*)utf8_buf.get(), utf8_size, nullptr, nullptr);
+            if (final_utf8_size != utf8_size) {
+                throw hresult_error(E_FAIL, L"Failed to convert UTF-16 LE to UTF-8");
+            }
+            delete[] std::exchange(buf, utf8_buf.release());
+            buf_offset = final_utf8_size;
+        }
+        else if (bom_kind == FileBomKind::Utf16BE) {
+            throw hresult_error(E_FAIL, L"UTF-16 BE is not supported");
+        }
+        else {
+            throw hresult_error(E_FAIL, L"Unknown BOM kind");
+        }
 
         se_buf.release();
         return { std::unique_ptr<uint8_t[]>{ buf }, buf_offset };
@@ -1172,7 +1229,7 @@ namespace winrt::MEraEmuWin::implementation {
             auto page = make<DevTools::implementation::MainPage>();
             auto p = page.as<DevTools::implementation::MainPage>();
             m_devtools_wnd.Content(page);
-            m_devtools_wnd.Title(format(L"{} - MEraEmu DevTools", EngineTitle()));
+            UpdateDevToolsWindow();
             m_devtools_wnd.Activate();
             page.SetConnectedEngineControl(*this);
             m_devtools_wnd.View().Closing([this](auto&&, auto&&) {
@@ -1752,6 +1809,12 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::OnEngineExecutionInterrupted(EraExecutionBreakReason reason) {
         m_last_execution_break_reason = reason;
         m_ev_EngineExecutionInterrupted(reason);
+    }
+    void EngineControl::UpdateDevToolsWindow() {
+        if (!IsDevToolsOpen()) { return; }
+
+        // Update window title
+        m_devtools_wnd.Title(format(L"{} - MEraEmu DevTools", EngineTitle()));
     }
     void EngineControl::InitEngineUI() {
         // Reset UI resources
@@ -2663,7 +2726,10 @@ namespace winrt::MEraEmuWin::implementation {
 #define DP_CLASS EngineControl
     DP_DEFINE(EngineForeColor, box_value(Windows::UI::Colors::Silver()));
     DP_DEFINE(EngineBackColor, box_value(Windows::UI::Colors::Black()));
-    DP_DEFINE(EngineTitle, box_value(L"MEraEmu"));
+    DP_DEFINE(EngineTitle, box_value(L"MEraEmu"), [](DependencyObject const& sender, DependencyPropertyChangedEventArgs const& e) {
+        auto that = sender.as<EngineControl>();
+        that->UpdateDevToolsWindow();
+    });
     DP_DEFINE_METHOD(EngineForeColor, Color);
     DP_DEFINE_METHOD(EngineBackColor, Color);
     DP_DEFINE_METHOD(EngineTitle, hstring const&);

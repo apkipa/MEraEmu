@@ -46,7 +46,6 @@ LRESULT CALLBACK SubclassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
 namespace winrt::MEraEmuWin::implementation {
     MainPage::MainPage() {
-        // TODO...
     }
     MainPage::~MainPage() {
         // Remove WndProc hook
