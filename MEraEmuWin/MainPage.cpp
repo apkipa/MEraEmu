@@ -187,6 +187,7 @@ namespace winrt::MEraEmuWin::implementation {
         cd.Title(box_value(title));
         cd.Content(box_value(content));
         cd.CloseButtonText(L"OK");
+        cd.DefaultButton(ContentDialogButton::Close);
         cd.ShowAsync();
     }
 }

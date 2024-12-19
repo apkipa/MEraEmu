@@ -414,12 +414,13 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         if (m_engine_running) {
             // Pause execution
             m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SetHaltState);
+            m_dev_tools_op_state = DevToolsOperationState::None;
         }
         else {
             // Resume execution
             if (m_sources_tab_breakpoint_items.size() > 0) {
                 m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
-                m_going_to_resume_single_step_halt = true;
+                m_dev_tools_op_state = DevToolsOperationState::ResumingFromSingleStepHalt;
             }
             else {
                 m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
@@ -436,12 +437,24 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     }
     void MainPage::CodeExecStepOutButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         if (!m_engine_ctrl) { return; }
-        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::CustomFuncAndClearHaltState);
+
+        auto strong_this = get_strong();
+
+        if (m_sources_tab_call_stack_tab_items.Size() <= 1) {
+            // No caller, so just continue
+            m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+            return;
+        }
+        auto cb_item = m_sources_tab_call_stack_tab_items.GetAt(0);
+        if (!cb_item) { return; }
+        auto ret_ip = EraExecIp{ cb_item.RetIpChunk(), cb_item.RetIpOffset() };
+        AddNewTempBreakpointByIp(ret_ip);
+        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
     }
     void MainPage::CodeExecStepSingleButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         if (!m_engine_ctrl) { return; }
         m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
-        m_doing_single_step = true;
+        m_dev_tools_op_state = DevToolsOperationState::SingleStepping;
     }
     void MainPage::CodeSourceWatchAddButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         auto index = m_sources_tab_watch_tab_items.Size();
@@ -579,24 +592,28 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         if (is_execution_break_reason_fatal(reason)) {
             m_engine_running = false;
-            VisualStateManager::GoToState(*this, L"EnginePaused", false);
-            UpdateForEnginePausedState(reason);
+            if (m_dev_tools_op_state != DevToolsOperationState::Transparent) {
+                VisualStateManager::GoToState(*this, L"EnginePaused", false);
+                UpdateForEnginePausedState(reason);
+            }
         }
         else {
             m_engine_running = true;
-            VisualStateManager::GoToState(*this, L"EngineRunning", false);
-            UpdateForEngineRunningState(reason);
+            if (m_dev_tools_op_state != DevToolsOperationState::Transparent) {
+                VisualStateManager::GoToState(*this, L"EngineRunning", false);
+                UpdateForEngineRunningState(reason);
+            }
         }
     }
     fire_forget MainPage::UpdateForEnginePausedState(EraExecutionBreakReason reason) {
         auto strong_this = get_strong();
 
-        if (m_doing_single_step) {
-            m_doing_single_step = false;
+        if (m_dev_tools_op_state == DevToolsOperationState::SingleStepping) {
+            m_dev_tools_op_state = DevToolsOperationState::None;
         }
-        if (m_going_to_resume_single_step_halt) {
-            m_going_to_resume_single_step_halt = false;
-            ApplyEngineBreakpointsAsync(true);
+        else if (m_dev_tools_op_state == DevToolsOperationState::ResumingFromSingleStepHalt) {
+            m_dev_tools_op_state = DevToolsOperationState::None;
+            co_await ApplyEngineBreakpointsAsync(true);
             m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
             co_return;
         }
@@ -621,6 +638,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
                 item.ColumnNumber(resolved.loc.col + 1);
                 item.SrcSpanStart(src_info.span.start);
                 item.SrcSpanLen(src_info.span.len);
+                item.IpChunk(ip.chunk);
+                item.IpOffset(ip.offset);
+                item.RetIpChunk(frame.ret_ip.chunk);
+                item.RetIpOffset(frame.ret_ip.offset);
                 if (call_stack_items.empty()) {
                     item.IsCurrent(true);
                 }
@@ -643,8 +664,9 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         m_sources_tab_call_stack_tab_items.Clear();
 
-        if (!m_going_to_resume_single_step_halt && !m_doing_single_step) {
-            // Apply breakpoints
+        if (m_dev_tools_op_state != DevToolsOperationState::ResumingFromSingleStepHalt &&
+            m_dev_tools_op_state != DevToolsOperationState::SingleStepping)
+        {
             co_await ApplyEngineBreakpointsAsync(true);
         }
     }
@@ -733,9 +755,29 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         source_tabview.SelectedIndex(tab_index);
 
         // Load source
+        bool need_disable_breakpoints = m_engine_running;
+        auto op_state = std::exchange(m_dev_tools_op_state, DevToolsOperationState::Transparent);
+        auto se_restore_state = tenkai::cpp_utils::scope_exit([&] {
+            m_dev_tools_op_state = op_state;
+            if (need_disable_breakpoints) {
+                if (op_state == DevToolsOperationState::None) {
+                    m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+                }
+                else {
+                    m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
+                }
+            }
+        });
+        if (need_disable_breakpoints) {
+            m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SetHaltState);
+            co_await ApplyEngineBreakpointsAsync(false);
+        }
         auto bytecodes = co_await m_engine_ctrl->ExecEngineTask([&](MEraEngine const& e) {
             return e.dump_function_bytecode(to_string(func_name));
         });
+        {
+            auto to_drop = std::move(se_restore_state);
+        }
 
         // HACK: Wait for TabViewItem to be loaded
         co_await util::winrt::resume_when_loaded(source_tabview);
@@ -1182,6 +1224,22 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             ApplyEngineBreakpointsAsync(true);
         }
     }
+    void MainPage::AddNewTempBreakpointByIp(EraExecIp ip) {
+        auto item = MEraEmuWin::DevTools::SourcesTabBreakpointItem();
+        item.IsImplicit(true);
+        item.MarkerHandle(-1);
+        item.IsEnabled(true);
+        item.IsApplied(false);
+        item.FuncName(L"???");
+        item.FileName(L"???");
+        item.LineNumber(1);
+        item.ColumnNumber(1);
+        item.SrcSpanStart(-1);
+        item.SrcSpanLen(-1);
+        item.IpChunk(ip.chunk);
+        item.IpOffset(ip.offset);
+        m_sources_tab_breakpoint_items.push_back(item);
+    }
     void MainPage::RemoveBreakpoint(hstring const& path, int32_t handle) {
         MEraEmuWin::DevTools::SourcesTabBreakpointItem item = nullptr;
         for (auto& bp : m_sources_tab_breakpoint_items) {
@@ -1245,7 +1303,17 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
                     // TODO: What to do if an exception is thrown while applying breakpoints?
                     std::vector<std::pair<EraExecIp, std::vector<uint8_t>>> ip_bcs;
                     std::erase_if(breakpoints, [&](auto& bp) {
-                        auto ip = e.get_ip_from_src(to_string(bp.FileName()), { bp.SrcSpanStart(), bp.SrcSpanLen() });
+                        auto ip_chunk = bp.IpChunk();
+                        auto ip_offset = bp.IpOffset();
+                        std::optional<EraExecIp> ip;
+                        if (ip_chunk != -1 && ip_offset != -1) {
+                            // Use the cached ip if available
+                            ip = EraExecIp{ ip_chunk, ip_offset };
+                        }
+                        if (!ip) {
+                            // Calculate the ip from the source span
+                            ip = e.get_ip_from_src(to_string(bp.FileName()), { bp.SrcSpanStart(), bp.SrcSpanLen() });
+                        }
                         if (!ip) { return true; }
                         if (std::ranges::find(ip_bcs, *ip, [](const auto& v) { return v.first; }) != ip_bcs.end()) {
                             // Already applied, different breakpoint with same ip?
@@ -1282,7 +1350,17 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
                     // TODO: What to do if an exception is thrown while un-applying breakpoints?
                     std::vector<EraExecIp> ips;
                     std::erase_if(breakpoints, [&](auto& bp) {
-                        auto ip = e.get_ip_from_src(to_string(bp.FileName()), { bp.SrcSpanStart(), bp.SrcSpanLen() });
+                        auto ip_chunk = bp.IpChunk();
+                        auto ip_offset = bp.IpOffset();
+                        std::optional<EraExecIp> ip;
+                        if (ip_chunk != -1 && ip_offset != -1) {
+                            // Use the cached ip if available
+                            ip = EraExecIp{ ip_chunk, ip_offset };
+                        }
+                        if (!ip) {
+                            // Calculate the ip from the source span
+                            ip = e.get_ip_from_src(to_string(bp.FileName()), { bp.SrcSpanStart(), bp.SrcSpanLen() });
+                        }
                         if (!ip) { return true; }
                         ips.push_back(*ip);
                         return false;

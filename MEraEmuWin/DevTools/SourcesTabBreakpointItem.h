@@ -26,6 +26,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         void SrcSpanStart(uint32_t value) { m_src_span_start = value; }
         uint32_t SrcSpanLen() const { return m_src_span_len; }
         void SrcSpanLen(uint32_t value) { m_src_span_len = value; }
+        uint32_t IpChunk() const { return m_ip_chunk; }
+        void IpChunk(uint32_t value) { m_ip_chunk = value; }
+        uint32_t IpOffset() const { return m_ip_offset; }
+        void IpOffset(uint32_t value) { m_ip_offset = value; }
 
         auto& original_bytecode() { return m_orig_bytecode; }
 
@@ -40,6 +44,8 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         uint32_t m_column_number{ 0 };
         uint32_t m_src_span_start{ 0 };
         uint32_t m_src_span_len{ 0 };
+        uint32_t m_ip_chunk{ UINT32_MAX };
+        uint32_t m_ip_offset{ UINT32_MAX };
         std::vector<uint8_t> m_orig_bytecode;
     };
 }

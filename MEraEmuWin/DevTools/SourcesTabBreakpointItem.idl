@@ -19,5 +19,7 @@ namespace MEraEmuWin.DevTools {
         UInt32 ColumnNumber;
         UInt32 SrcSpanStart;
         UInt32 SrcSpanLen;
+        UInt32 IpChunk;
+        UInt32 IpOffset;
     };
 }

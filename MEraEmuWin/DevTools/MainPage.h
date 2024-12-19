@@ -76,6 +76,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         Microsoft::UI::Xaml::Controls::TabViewItem GetCurrentSourcesFileTabViewItem(hstring const& target_path = {});
         Windows::Foundation::IAsyncOperation<Windows::UI::Xaml::Controls::ContentDialogResult> ShowSimpleDialogAsync(hstring const& title, hstring const& content);
         void AddNewBreakpoint(hstring const& path, SrcSpan span, bool temporary);
+        void AddNewTempBreakpointByIp(EraExecIp ip);
         void RemoveBreakpoint(hstring const& path, int32_t handle);
         void SyncBreakpointsWithSourceFile(hstring const& path);
         // Returns whether changes were made to the engine. If do_apply is false, undo the changes.
@@ -102,8 +103,28 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         };
         std::vector<MEraEmuWin::DevTools::QuickActionItem> m_quick_action_source_file_items;
         bool m_engine_running{};
-        bool m_doing_single_step{};
-        bool m_going_to_resume_single_step_halt{};
+        // TODO: Implement StepInto and StepOver
+        // NOTE: StepOut is implemented by setting a temporary breakpoint at the caller's next instruction,
+        //       so no need to implement it separately.
+        /// Marks the current state of the DevTools operation (i.e. how the engine is being controlled).
+        enum class DevToolsOperationState {
+            /// No operation is being performed. No restrictions are imposed on the engine.
+            None,
+            /// Do not react to engine state changes, as the engine is being manipulated in a controlled way.
+            Transparent,
+            /// Engine is being single-stepped.
+            SingleStepping,
+            /// Engine is going to resume from a single-step halt. Used to apply breakpoints after stepping,
+            /// to guarantee progress and prevent the engine from staying put because of a breakpoint.
+            ResumingFromSingleStepHalt,
+            /// Going to step into a line maybe containing function calls. Will repeatedly single-step until
+            /// execution leaves the current line.
+            SteppingInto,
+            /// Going to step over a line maybe containing function calls. Similar to stepping into, but will
+            /// not single-step into function calls, by placing temporary breakpoints at the next instruction.
+            SteppingOver,
+        } m_dev_tools_op_state{ DevToolsOperationState::None };
+        SrcSpan m_step_info_safe_area_span{};
     };
 }
 
