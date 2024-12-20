@@ -576,7 +576,9 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 input_req->default_value = default_value;
                 input_req->show_time_prompt = show_prompt;
-                input_req->expiry_msg = to_hstring(expiry_msg);
+                input_req->expiry_msg = expiry_msg.empty() ?
+                    to_hstring(default_value) :
+                    winrt::format(L"{}\n{}", to_hstring(expiry_msg), to_hstring(default_value));
                 input_req->show_expiry_msg = true;
                 input_req->can_skip = can_click;
                 input_req->break_user_skip = true;
@@ -609,7 +611,9 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 input_req->default_value = to_hstring(default_value);
                 input_req->show_time_prompt = show_prompt;
-                input_req->expiry_msg = to_hstring(expiry_msg);
+                input_req->expiry_msg = expiry_msg.empty() ?
+                    to_hstring(default_value) :
+                    winrt::format(L"{}\n{}", to_hstring(expiry_msg), to_hstring(default_value));
                 input_req->show_expiry_msg = true;
                 input_req->can_skip = can_click;
                 input_req->break_user_skip = true;
@@ -2271,6 +2275,12 @@ namespace winrt::MEraEmuWin::implementation {
             if (input_req->show_expiry_msg) {
                 auto expire_msg = input_req->expiry_msg;
                 if (!expire_msg.empty()) {
+                    // HACK: Temporarily disable auto redraw to work around game output flashing issue
+                    auto prev_redraw = std::exchange(m_auto_redraw, false);
+                    auto se_prev_redraw = tenkai::cpp_utils::ScopeExit([&] {
+                        m_auto_redraw = prev_redraw;
+                    });
+
                     RoutinePrint(expire_msg, ERA_PEF_IS_LINE);
                     // HACK: Enforce a redraw so that we won't lose texts because of
                     //       engine-thread-queued UI work running too early
