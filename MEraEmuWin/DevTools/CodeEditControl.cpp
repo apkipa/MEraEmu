@@ -58,10 +58,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         ApplyTemplate();
 
-        auto editor_ctrl = EditorControl();
+        /*auto editor_ctrl = EditorControl();
         auto editor = Editor();
         editor_ctrl.DpiChanged({ this, &CodeEditControl::Editor_DpiChanged });
-        editor_ctrl.NotifyMessageReceived({ this, &CodeEditControl::Editor_NotifyMessageReceived });
+        editor_ctrl.NotifyMessageReceived({ this, &CodeEditControl::Editor_NotifyMessageReceived });*/
 
         GettingFocus({ this, &CodeEditControl::OnGettingFocus });
     }
@@ -74,6 +74,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void CodeEditControl::OnApplyTemplate() {
         CodeEditControlT::OnApplyTemplate();
 
+        auto editor_ctrl = EditorControl();
         auto editor = Editor();
         {
             // Initialize Scintilla
@@ -82,6 +83,12 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             m_call.SetFnPtr(Scintilla::FunctionDirect(direct_status_fn), direct_ptr);
         }
 
+        editor_ctrl.DpiChanged({ this, &CodeEditControl::Editor_DpiChanged });
+        editor_ctrl.NotifyMessageReceived({ this, &CodeEditControl::Editor_NotifyMessageReceived });
+
+        /*AddKeyboardShortcuts();
+        ChangeDefaults();
+        ChangeDocumentDefaults();*/
         AddKeyboardShortcuts();
         ChangeDefaults();
         ChangeDocumentDefaults();
@@ -248,11 +255,21 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void CodeEditControl::SetFoldMarginColor(bool useSetting, Scintilla::ColourAlpha back) {
         // Implement for transparent folding margin. Not implemented so default is preserved
         m_call.SetFoldMarginColour(useSetting, back);
+        // TODO: Fork WinUIEdit to expose the transparent APIs later
+        if (auto brush = Application::Current().Resources().Lookup(box_value(L"SolidBackgroundFillColorTertiaryBrush")).try_as<Windows::UI::Xaml::Media::SolidColorBrush>()) {
+            auto bg_clr = brush.Color();
+            m_call.SetFoldMarginColour(useSetting, BlendRGBA(back, IntRGBA(bg_clr.R, bg_clr.G, bg_clr.B)));
+        }
     }
 
     void CodeEditControl::SetFoldMarginHiColor(bool useSetting, Scintilla::ColourAlpha fore) {
         // Implement for transparent folding margin. Not implemented so default is preserved
         m_call.SetFoldMarginHiColour(useSetting, fore);
+        // TODO: Fork WinUIEdit to expose the transparent APIs later
+        if (auto brush = Application::Current().Resources().Lookup(box_value(L"SolidBackgroundFillColorTertiaryBrush")).try_as<Windows::UI::Xaml::Media::SolidColorBrush>()) {
+            auto bg_clr = brush.Color();
+            m_call.SetFoldMarginHiColour(useSetting, BlendRGBA(fore, IntRGBA(bg_clr.R, bg_clr.G, bg_clr.B)));
+        }
     }
 
     void CodeEditControl::DefaultColorsChanged(CodeEditorTheme theme) {

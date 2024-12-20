@@ -413,23 +413,32 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         if (m_engine_running) {
             // Pause execution
-            m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SetHaltState);
             m_dev_tools_op_state = DevToolsOperationState::None;
+            m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SetHaltState);
         }
         else {
             // Resume execution
-            if (m_sources_tab_breakpoint_items.size() > 0) {
-                m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
-                m_dev_tools_op_state = DevToolsOperationState::ResumingFromSingleStepHalt;
-            }
-            else {
-                m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
-            }
+            ResumeEngineExecutionPossiblySteppingPastBreakpoint();
         }
     }
     void MainPage::CodeExecStepIntoButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         if (!m_engine_ctrl) { return; }
-        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::CustomFuncAndClearHaltState);
+
+        auto src_files_tab_view = SourceFilesTabView();
+        auto item_index = src_files_tab_view.SelectedIndex();
+        if (item_index < 0) { return; }
+        auto tvi = src_files_tab_view.ContainerFromIndex(item_index).as<muxc::TabViewItem>();
+        auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
+        if (!editor_ctrl) { return; }
+        auto editor = editor_ctrl.Editor();
+        if (m_sources_tab_call_stack_tab_items.Size() < 1) { return; }
+        auto cb_item = m_sources_tab_call_stack_tab_items.GetAt(0);
+        if (!cb_item) { return; }
+        m_current_ip = EraExecIp{ cb_item.IpChunk(), cb_item.IpOffset() };
+        m_step_info_safe_area_span = PositionToLineSpan(editor, editor.CurrentPos());
+        m_step_info_safe_area_span.len++;
+        m_dev_tools_op_state = DevToolsOperationState::SteppingInto_Initial;
+        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
     }
     void MainPage::CodeExecStepOverButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         if (!m_engine_ctrl) { return; }
@@ -438,23 +447,21 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void MainPage::CodeExecStepOutButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         if (!m_engine_ctrl) { return; }
 
-        auto strong_this = get_strong();
-
         if (m_sources_tab_call_stack_tab_items.Size() <= 1) {
             // No caller, so just continue
-            m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+            ResumeEngineExecutionPossiblySteppingPastBreakpoint();
             return;
         }
         auto cb_item = m_sources_tab_call_stack_tab_items.GetAt(0);
         if (!cb_item) { return; }
         auto ret_ip = EraExecIp{ cb_item.RetIpChunk(), cb_item.RetIpOffset() };
         AddNewTempBreakpointByIp(ret_ip);
-        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+        ResumeEngineExecutionPossiblySteppingPastBreakpoint();
     }
     void MainPage::CodeExecStepSingleButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         if (!m_engine_ctrl) { return; }
-        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
         m_dev_tools_op_state = DevToolsOperationState::SingleStepping;
+        m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
     }
     void MainPage::CodeSourceWatchAddButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         auto index = m_sources_tab_watch_tab_items.Size();
@@ -590,7 +597,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void MainPage::OnEngineExecutionInterrupted(EraExecutionBreakReason reason) {
         InitFromEngineControlAsync();
 
-        if (is_execution_break_reason_fatal(reason)) {
+        if (reason == ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS || is_execution_break_reason_fatal(reason)) {
             m_engine_running = false;
             if (m_dev_tools_op_state != DevToolsOperationState::Transparent) {
                 VisualStateManager::GoToState(*this, L"EnginePaused", false);
@@ -613,9 +620,36 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         }
         else if (m_dev_tools_op_state == DevToolsOperationState::ResumingFromSingleStepHalt) {
             m_dev_tools_op_state = DevToolsOperationState::None;
-            co_await ApplyEngineBreakpointsAsync(true);
-            m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
-            co_return;
+            if (reason == ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS) {
+                co_await ApplyEngineBreakpointsAsync(true);
+                m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+                co_return;
+            }
+        }
+        else if (m_dev_tools_op_state == DevToolsOperationState::SteppingInto_Initial || m_dev_tools_op_state == DevToolsOperationState::SteppingInto_Body) {
+            auto se_op_state = tenkai::cpp_utils::scope_exit([&] {
+                m_dev_tools_op_state = DevToolsOperationState::None;
+            });
+            if (reason == ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS) {
+                m_dev_tools_op_state = DevToolsOperationState::Transparent;
+                co_await ApplyEngineBreakpointsAsync(true);
+                auto should_continue = co_await m_engine_ctrl->ExecEngineTask([prev_ip = m_current_ip, safe_span = m_step_info_safe_area_span](MEraEngine const& e) {
+                    auto ip = e.get_current_ip().value();
+                    if (ip.chunk != prev_ip.chunk) {
+                        // Control flow moved to another file
+                        return false;
+                    }
+                    auto src_info = e.get_src_info_from_ip(ip).value();
+                    return span_contains(safe_span, src_info.span.start);
+                });
+                if (should_continue) {
+                    // Stepping into the same line, so just continue
+                    se_op_state.release();
+                    m_dev_tools_op_state = DevToolsOperationState::SteppingInto_Body;
+                    m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
+                    co_return;
+                }
+            }
         }
 
         // Un-apply breakpoints
@@ -664,8 +698,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         m_sources_tab_call_stack_tab_items.Clear();
 
+        // Don't apply breakpoints if we're stepping through the first instruction
         if (m_dev_tools_op_state != DevToolsOperationState::ResumingFromSingleStepHalt &&
-            m_dev_tools_op_state != DevToolsOperationState::SingleStepping)
+            m_dev_tools_op_state != DevToolsOperationState::SingleStepping &&
+            m_dev_tools_op_state != DevToolsOperationState::SteppingInto_Initial)
         {
             co_await ApplyEngineBreakpointsAsync(true);
         }
@@ -701,11 +737,22 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         })).value_or("");
         // HACK: Wait for TabViewItem to be loaded
         co_await util::winrt::resume_when_loaded(source_tabview);
-        source_tabview.UpdateLayout();
-        auto tvi = source_tabview.ContainerFromIndex(tab_index).as<muxc::TabViewItem>();
-        if (!tvi) { co_return tvi; }
-        auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
-        if (!editor_ctrl) { co_return tvi; }
+        muxc::TabViewItem tvi = nullptr;
+        MEraEmuWin::DevTools::CodeEditControl editor_ctrl = nullptr;
+        while (source_tabview.IsLoaded()) {
+            co_await resume_foreground(DispatcherQueue::GetForCurrentThread(), DispatcherQueuePriority::Low);
+            if (tab_index >= source_tabview.TabItems().Size()) {
+                throw hresult_changed_state();
+            }
+            tvi = source_tabview.ContainerFromIndex(tab_index).as<muxc::TabViewItem>();
+            if (!tvi) { continue; }
+            if (tvi.DataContext() != tab) {
+                throw hresult_changed_state();
+            }
+            editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
+            if (!editor_ctrl) { continue; }
+            break;
+        }
         auto editor = editor_ctrl.Editor();
 
         // TODO: If we don't wait, the editor will not be ready and invokes nullptr?
@@ -836,7 +883,8 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             using WinUIEditor::CaretPolicy;
             auto old_policy = CaretPolicy::Slop | CaretPolicy::Strict | CaretPolicy::Even;
             editor.SetYCaretPolicy(CaretPolicy::Strict | CaretPolicy::Even, 0);
-            editor.GotoPos(span.start);
+            //editor.GotoPos(span.start);
+            editor.SetSel(span.start + span.len, span.start);
             editor.SetYCaretPolicy(old_policy, 1);
         }
         // Highlight the line
@@ -1385,5 +1433,14 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         }
 
         co_return has_changes;
+    }
+    void MainPage::ResumeEngineExecutionPossiblySteppingPastBreakpoint() {
+        if (m_sources_tab_breakpoint_items.size() > 0) {
+            m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::SingleStepAndHalt);
+            m_dev_tools_op_state = DevToolsOperationState::ResumingFromSingleStepHalt;
+        }
+        else {
+            m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+        }
     }
 }

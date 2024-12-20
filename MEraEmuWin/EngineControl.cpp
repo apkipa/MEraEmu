@@ -1538,6 +1538,9 @@ namespace winrt::MEraEmuWin::implementation {
                             if (!erb_tx.send(erb_data)) { return; }
                         }
                     });
+                    auto se_erb_rx = tenkai::cpp_utils::ScopeExit([&] {
+                        erb_rx = nullptr;
+                    });
 
                     // Load CSV files
                     for (auto& csv : misc_csvs) {
@@ -1619,7 +1622,7 @@ namespace winrt::MEraEmuWin::implementation {
                 });
 
                 // Main loop
-                EraExecutionBreakReason stop_reason = ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
+                EraExecutionBreakReason stop_reason = ERA_EXECUTION_BREAK_REASON_CALLBACK_BREAK;
                 uint64_t instructions_to_exec = UINT64_MAX;
                 bool force_exec = false;
                 // (?) Notify UI thread that engine is about to execute instructions
@@ -1632,7 +1635,7 @@ namespace winrt::MEraEmuWin::implementation {
                         return is_execution_break_reason_fatal(stop_reason);
                     };
                     auto clear_halted = [&] {
-                        stop_reason = ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
+                        stop_reason = ERA_EXECUTION_BREAK_REASON_CALLBACK_BREAK;
                         queue_ui_work([sd, stop_reason] {
                             sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
                         });
@@ -1658,7 +1661,11 @@ namespace winrt::MEraEmuWin::implementation {
                     if (instructions_to_exec != UINT64_MAX) {
                         // Limit reached, auto halt
                         instructions_to_exec = UINT64_MAX;
-                        set_halted();
+
+                        stop_reason = ERA_EXECUTION_BREAK_REASON_DEBUG_BREAK_INSTRUCTION;
+                        /*queue_ui_work([sd] {
+                            sd->ui_ctrl->OnEngineExecutionInterrupted(ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS);
+                        });*/
                     }
 
                     callback->m_tick_compensation = 0;

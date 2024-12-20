@@ -82,6 +82,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         // Returns whether changes were made to the engine. If do_apply is false, undo the changes.
         // Note that temporary breakpoints will also be deleted if do_apply is false.
         Windows::Foundation::IAsyncOperation<bool> ApplyEngineBreakpointsAsync(bool do_apply);
+        void ResumeEngineExecutionPossiblySteppingPastBreakpoint();
 
         winrt::MEraEmuWin::implementation::EngineControl* m_engine_ctrl{ nullptr };
         event_token m_et_EngineExecutionInterrupted{};
@@ -103,7 +104,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         };
         std::vector<MEraEmuWin::DevTools::QuickActionItem> m_quick_action_source_file_items;
         bool m_engine_running{};
-        // TODO: Implement StepInto and StepOver
+        // TODO: Implement StepOver
         // NOTE: StepOut is implemented by setting a temporary breakpoint at the caller's next instruction,
         //       so no need to implement it separately.
         /// Marks the current state of the DevTools operation (i.e. how the engine is being controlled).
@@ -119,11 +120,13 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             ResumingFromSingleStepHalt,
             /// Going to step into a line maybe containing function calls. Will repeatedly single-step until
             /// execution leaves the current line.
-            SteppingInto,
+            SteppingInto_Initial,
+            SteppingInto_Body,
             /// Going to step over a line maybe containing function calls. Similar to stepping into, but will
             /// not single-step into function calls, by placing temporary breakpoints at the next instruction.
             SteppingOver,
         } m_dev_tools_op_state{ DevToolsOperationState::None };
+        EraExecIp m_current_ip{};
         SrcSpan m_step_info_safe_area_span{};
     };
 }

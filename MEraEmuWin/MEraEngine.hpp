@@ -259,6 +259,10 @@ inline void from_json(nlohmann::json const& j, Value& v) {
     }
 }
 
+inline bool span_contains(SrcSpan span, uint32_t offset) {
+    return offset >= span.start && offset < span.start + span.len;
+}
+
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SrcSpan, start, len);
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(SrcLoc, line, col);
 

@@ -2870,11 +2870,13 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
 
     /// Generates a node of type `ExprList` containing the arguments of a command.
     fn command_arg(&mut self, arg_fmt: EraCmdArgFmt) -> EraNodeRef {
-        let span = self.o.l.current_src_span();
+        let mut span = self.o.l.current_src_span();
         match arg_fmt {
             EraCmdArgFmt::Expression
             | EraCmdArgFmt::ExpressionS
             | EraCmdArgFmt::ExpressionSForm => {
+                // self.o.l.skip_whitespace(Mode::Normal);
+
                 // HACK: Do not return an ExprList([Empty]) if the next token is a line break,
                 //       i.e. the command has no arguments.
                 if self.o.peek_token(Mode::Normal).token.kind == Token::LineBreak {
@@ -2883,6 +2885,10 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 self.comma_expr_list(0).unwrap()
             }
             EraCmdArgFmt::RawStringForm => {
+                if self.o.peek_token(Mode::RawStrForm).token.kind == Token::WhiteSpace {
+                    _ = self.o.bump();
+                    span = self.o.l.current_src_span();
+                }
                 let arg = self.raw_strform();
                 let data = self.o.node_arena.make_extra_data_ref_with_len([arg.0]);
                 let span = self.span_to_now(span);
@@ -2891,6 +2897,10 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                     .add_node(EraNode::ListExpr(data), span, span)
             }
             EraCmdArgFmt::RawString => {
+                if self.o.peek_token(Mode::RawStr).token.kind == Token::WhiteSpace {
+                    _ = self.o.bump();
+                    span = self.o.l.current_src_span();
+                }
                 let arg = self.raw_string();
                 let data = self.o.node_arena.make_extra_data_ref_with_len([arg.0]);
                 let span = self.span_to_now(span);
