@@ -46,7 +46,6 @@ LRESULT CALLBACK SubclassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
 namespace winrt::MEraEmuWin::implementation {
     MainPage::MainPage() {
-        // TODO...
     }
     MainPage::~MainPage() {
         // Remove WndProc hook
@@ -61,7 +60,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         SwitchTitleBar(true);
 
-        auto dispatcher = Dispatcher();
+        auto dq = DispatcherQueue::GetForCurrentThread();
         auto engine_ctrl = MainEngineControl();
         engine_ctrl.UnhandledException([this](auto&&, MEraEmuWin::EngineUnhandledExceptionEventArgs const& e) {
             ShowSimpleContentDialog(L"运行引擎时出错", hstring(
@@ -124,8 +123,8 @@ namespace winrt::MEraEmuWin::implementation {
         });
 
         // Automatically start the game engine
-        dispatcher.RunAsync(CoreDispatcherPriority::Low, [self = get_strong()]() {
-            self->BootstrapEngine();
+        dq.TryEnqueue(DispatcherQueuePriority::Low, [this]() {
+            BootstrapEngine();
         });
     }
 
@@ -138,12 +137,16 @@ namespace winrt::MEraEmuWin::implementation {
     void MainPage::MenuFile_Exit_Click(IInspectable const&, RoutedEventArgs const&) {
         Tenkai::AppService::Quit();
     }
+    void MainPage::MenuFile_DevTools_Click(IInspectable const&, RoutedEventArgs const&) {
+        auto ctrl = MainEngineControl();
+        ctrl.IsDevToolsOpen(!ctrl.IsDevToolsOpen());
+    }
     void MainPage::MenuHelp_About_Click(IInspectable const&, RoutedEventArgs const&) {
         ShowSimpleContentDialog(L"关于 MEraEmu", hstring(std::format(
             L"UI 版本: {}\n"
             L"引擎版本: {}\n"
             L"作者: apkipa",
-            L"v0.1.0",
+            L"v0.2.0",
             to_hstring(MEraEngine::get_version())
         )));
     }
@@ -184,6 +187,7 @@ namespace winrt::MEraEmuWin::implementation {
         cd.Title(box_value(title));
         cd.Content(box_value(content));
         cd.CloseButtonText(L"OK");
+        cd.DefaultButton(ContentDialogButton::Close);
         cd.ShowAsync();
     }
 }

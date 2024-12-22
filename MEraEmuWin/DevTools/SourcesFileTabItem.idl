@@ -1,0 +1,13 @@
+namespace MEraEmuWin.DevTools {
+    [bindable]
+    [default_interface]
+    runtimeclass SourcesFileTabItem {
+        SourcesFileTabItem();
+
+        /// Can be one of [erb, asm].
+        String DocType;
+        String FileName;
+        String FullPath;
+        Boolean IsInited;
+    };
+}

@@ -1,0 +1,13 @@
+namespace MEraEmuWin.DevTools {
+    [bindable]
+    [default_interface]
+    runtimeclass SourcesTabWatchTabItem : Windows.UI.Xaml.Data.INotifyPropertyChanged {
+        SourcesTabWatchTabItem();
+
+        String Expression;
+        String BriefValue;
+        String ErrorInfo;
+        Boolean IsExpanded;
+        IVector<SourcesTabWatchTabItem> SubItems;
+    };
+}

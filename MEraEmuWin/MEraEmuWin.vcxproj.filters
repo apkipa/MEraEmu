@@ -8,10 +8,32 @@
     <Page Include="EngineControl.xaml" />
     <Page Include="ScrollBar_themeresources_v1.xaml" />
     <Page Include="ScrollViewer_themeresources_v1.xaml" />
+    <Page Include="DevTools\MainPage.xaml">
+      <Filter>DevTools</Filter>
+    </Page>
+    <Page Include="DevTools\CodeEditControl.xaml">
+      <Filter>DevTools</Filter>
+    </Page>
   </ItemGroup>
   <ItemGroup>
     <Midl Include="App.idl" />
     <Midl Include="MainPage.idl" />
+    <Midl Include="DevTools\SourcesFileTabItem.idl">
+      <Filter>DevTools</Filter>
+    </Midl>
+    <Midl Include="DevTools\SourcesTabCallStackTabItem.idl">
+      <Filter>DevTools</Filter>
+    </Midl>
+    <Midl Include="DevTools\SourcesTabWatchTabItem.idl">
+      <Filter>DevTools</Filter>
+    </Midl>
+    <Midl Include="RelayCommand.idl" />
+    <Midl Include="DevTools\QuickActionItem.idl">
+      <Filter>DevTools</Filter>
+    </Midl>
+    <Midl Include="DevTools\SourcesTabBreakpointItem.idl">
+      <Filter>DevTools</Filter>
+    </Midl>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp" />
@@ -20,10 +42,16 @@
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="MEraEngine.cpp" />
+    <ClCompile Include="ScintillaModule.cpp" />
+    <ClCompile Include="DevTools\CodeEditControl.SciEdit.cpp">
+      <Filter>DevTools</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="MEraEngine.hpp" />
+    <ClInclude Include="util.hpp" />
+    <ClInclude Include="ScintillaModule.hpp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="Assets\Wide310x150Logo.scale-200.png">
@@ -55,6 +83,12 @@
     <Filter Include="Assets">
       <UniqueIdentifier>{e48dc53e-40b1-40cb-970a-f89935452892}</UniqueIdentifier>
     </Filter>
+    <Filter Include="DevTools">
+      <UniqueIdentifier>{23869983-96de-4108-9b4a-4012e34d6dd3}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Assets\Fonts">
+      <UniqueIdentifier>{451f82c4-8b18-45a6-9ff1-947c10eb4a8d}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <None Include="PropertySheet.props" />
@@ -68,5 +102,10 @@
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="..\MEraEmuCore\src\lib.rs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Font Include="Assets\Fonts\MaterialSymbolsOutlined-Light.ttf">
+      <Filter>Assets\Fonts</Filter>
+    </Font>
   </ItemGroup>
 </Project>

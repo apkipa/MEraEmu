@@ -1,10 +1,23 @@
 pub mod ascii;
+pub mod dhashmap;
 pub mod html;
+pub mod interning;
 pub mod io;
+pub mod iter;
 pub mod number;
+pub mod random;
 pub mod rcstr;
+pub mod syntax;
 
-use std::{borrow::Borrow, fmt::Display, hash::Hash, ops::Deref, rc::Rc};
+use std::{
+    borrow::Borrow,
+    fmt::Display,
+    hash::Hash,
+    mem::ManuallyDrop,
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+    rc::Rc,
+};
 
 /// An ASCII-caseless string slice type.
 #[derive(Debug)]
@@ -146,3 +159,424 @@ impl Display for CaselessString {
 }
 
 pub use ascii::Ascii;
+
+macro_rules! uppercase_bliteral {
+    ($value:expr) => {{
+        const STR_IN: &[u8] = $value;
+        const STR_OUT: [u8; STR_IN.len()] = {
+            let mut out = [0; STR_IN.len()];
+            let mut i = 0;
+            while i < STR_IN.len() {
+                out[i] = STR_IN[i].to_ascii_uppercase();
+                i += 1;
+            }
+            out
+        };
+        &STR_OUT
+    }};
+}
+
+// TODO: Does compiler optimize bmatch_caseless! well enough?
+macro_rules! bmatch_caseless {
+    ($pattern:expr => $value:expr $(, $patterns:expr => $values:expr)*, _ => $default_value:expr $(,)?) => {{
+        use crate::util::uppercase_bliteral;
+
+        // const ALL_PATTERNS: &[&[u8]] = &[$pattern, $($patterns,)*];
+        const MAX_LEN: usize = {
+            let mut max_len = 0;
+            const fn get_max(a: usize, b: usize) -> usize {
+                if a > b {
+                    a
+                } else {
+                    b
+                }
+            }
+            max_len = get_max(max_len, $pattern.len());
+            $(max_len = get_max(max_len, $patterns.len());)*
+            max_len
+        };
+
+        |value: &[u8]| {
+            if value.len() > MAX_LEN {
+                return $default_value;
+            }
+
+            let uppercased = {
+                let mut uppercased = [0; MAX_LEN];
+                for (i, &c) in value.iter().enumerate() {
+                    uppercased[i] = c.to_ascii_uppercase();
+                }
+                // uppercased[..value.len()].copy_from_slice(value);
+                // uppercased.make_ascii_uppercase();
+                uppercased
+            };
+            let uppercased = &uppercased[..value.len()];
+
+            if uppercased == uppercase_bliteral!($pattern) {
+                $value
+            } $(else if uppercased == uppercase_bliteral!($patterns) {
+                $values
+            })* else {
+                $default_value
+            }
+        }
+    }};
+}
+
+pub(crate) use bmatch_caseless;
+pub(crate) use uppercase_bliteral;
+
+// Source: https://stackoverflow.com/a/50781657
+pub trait SubsliceOffset {
+    /**
+    Returns the byte offset of an inner slice relative to an enclosing outer slice.
+
+    Examples
+
+    ```ignore
+    let string = "a\nb\nc";
+    let lines: Vec<&str> = string.lines().collect();
+    assert!(string.subslice_offset(lines[0]) == Some(0)); // &"a"
+    assert!(string.subslice_offset(lines[1]) == Some(2)); // &"b"
+    assert!(string.subslice_offset(lines[2]) == Some(4)); // &"c"
+    assert!(string.subslice_offset("other!") == None);
+    ```
+    */
+    fn subslice_offset(&self, inner: &Self) -> Option<usize>;
+}
+
+impl SubsliceOffset for str {
+    fn subslice_offset(&self, inner: &Self) -> Option<usize> {
+        let self_range = self.as_bytes().as_ptr_range();
+        let self_range = (self_range.start as usize)..(self_range.end as usize);
+        let inner = inner.as_ptr() as usize;
+        // if inner < self_range.start || inner + inner.len() > self_range.end {
+        if inner < self_range.start || inner > self_range.end {
+            None
+        } else {
+            Some(inner - self_range.start)
+        }
+    }
+}
+
+impl SubsliceOffset for [u8] {
+    fn subslice_offset(&self, inner: &Self) -> Option<usize> {
+        let self_range = self.as_ptr_range();
+        let self_range = (self_range.start as usize)..(self_range.end as usize);
+        let inner = inner.as_ptr() as usize;
+        // if inner < self_range.start || inner + inner.len() > self_range.end {
+        if inner < self_range.start || inner > self_range.end {
+            None
+        } else {
+            Some(inner - self_range.start)
+        }
+    }
+}
+
+pub trait StrReplaceCount {
+    fn replace_count(&self, from: &str, to: &str) -> (String, usize);
+}
+
+impl StrReplaceCount for str {
+    fn replace_count(&self, from: &str, to: &str) -> (String, usize) {
+        let mut count = 0;
+        let mut last_end = 0;
+        let mut result = String::new();
+        for (start, part) in self.match_indices(from) {
+            count += 1;
+            result.push_str(&self[last_end..start]);
+            result.push_str(to);
+            last_end = start + part.len();
+        }
+        result.push_str(&self[last_end..]);
+        (result, count)
+    }
+}
+
+pub fn inline_to_ascii_uppercase<const LEN: usize>(
+    value: &[u8],
+) -> Option<arrayvec::ArrayVec<u8, LEN>> {
+    if value.len() > LEN {
+        return None;
+    }
+    let mut out = arrayvec::ArrayVec::<u8, LEN>::new();
+    for b in value {
+        out.push(b.to_ascii_uppercase());
+    }
+    Some(out)
+}
+
+pub fn array_try_from_fn<T, E, const N: usize, F>(mut cb: F) -> Result<[T; N], E>
+where
+    F: FnMut(usize) -> Result<T, E>,
+{
+    let out = [const { std::mem::MaybeUninit::uninit() }; N];
+    let mut out = scopeguard::guard((out, 0usize), |(mut out, count)| {
+        for i in 0..count {
+            unsafe {
+                // Drop in place
+                out[i].assume_init_drop();
+            }
+        }
+    });
+    for i in 0..N {
+        out.0[i].write(cb(i)?);
+        out.1 += 1;
+    }
+    let (out, _) = scopeguard::ScopeGuard::into_inner(out);
+    Ok(unsafe { core::mem::transmute_copy(&out) })
+}
+
+pub fn pack_u32_from_iter(iter: impl Iterator<Item = u32> + Clone) -> (u8, Vec<u8>) {
+    let mut count = 0;
+    let max = iter.clone().inspect(|_| count += 1).max().unwrap_or(0);
+    let bits = u32::BITS - max.leading_zeros();
+    let num_size = if bits <= 8 {
+        1
+    } else if bits <= 16 {
+        2
+    } else if bits <= 24 {
+        3
+    } else {
+        4
+    };
+    let mut bytes = Vec::with_capacity(num_size as usize * count);
+    for num in iter {
+        if 0 < num_size {
+            bytes.push((num >> 0) as u8);
+        }
+        if 1 < num_size {
+            bytes.push((num >> 8) as u8);
+        }
+        if 2 < num_size {
+            bytes.push((num >> 16) as u8);
+        }
+        if 3 < num_size {
+            bytes.push((num >> 24) as u8);
+        }
+    }
+    (num_size, bytes)
+}
+
+pub fn read_packed_u32(num_size: u8, data: &[u8]) -> u32 {
+    assert_eq!(num_size as usize, data.len());
+    let mut num = 0;
+    for i in 0..num_size {
+        num |= (data[i as usize] as u32) << (i * 8);
+    }
+    num
+}
+
+/// A RAII pointer to a heap-allocated value.
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct BoxPtr<T>(NonNull<T>);
+
+impl<T> From<Box<T>> for BoxPtr<T> {
+    fn from(value: Box<T>) -> Self {
+        unsafe {
+            let ptr = Box::into_raw(value);
+            Self(NonNull::new_unchecked(ptr))
+        }
+    }
+}
+
+impl<T> Deref for BoxPtr<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl<T> DerefMut for BoxPtr<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.0.as_mut() }
+    }
+}
+
+impl<T> Drop for BoxPtr<T> {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = Box::from_raw(self.0.as_ptr());
+        }
+    }
+}
+
+union DataUnion2<T, U> {
+    t: ManuallyDrop<T>,
+    u: ManuallyDrop<U>,
+}
+
+pub struct SmallSlice<'a, T> {
+    data: DataUnion2<T, *const T>,
+    len: usize,
+    _marker: std::marker::PhantomData<&'a T>,
+}
+
+impl std::fmt::Debug for SmallSlice<'_, u32> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_slice().fmt(f)
+    }
+}
+
+impl<'a> Clone for SmallSlice<'a, u32> {
+    fn clone(&self) -> Self {
+        unsafe {
+            if self.len == 1 {
+                Self {
+                    data: DataUnion2 {
+                        t: ManuallyDrop::new(*self.data.t),
+                    },
+                    len: self.len,
+                    _marker: std::marker::PhantomData,
+                }
+            } else {
+                Self {
+                    data: DataUnion2 {
+                        u: ManuallyDrop::new(*self.data.u),
+                    },
+                    len: self.len,
+                    _marker: std::marker::PhantomData,
+                }
+            }
+        }
+    }
+}
+
+impl<'a> SmallSlice<'a, u32> {
+    pub fn new(data: &'a [u32]) -> Self {
+        let len = data.len();
+        if len == 1 {
+            Self::new_inline(data[0])
+        } else {
+            Self {
+                data: DataUnion2 {
+                    u: ManuallyDrop::new(data.as_ptr()),
+                },
+                len,
+                _marker: std::marker::PhantomData,
+            }
+        }
+    }
+
+    pub fn new_inline(data: u32) -> Self {
+        Self {
+            data: DataUnion2 {
+                t: ManuallyDrop::new(data),
+            },
+            len: 1,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            data: DataUnion2 {
+                u: ManuallyDrop::new(NonNull::dangling().as_ptr()),
+            },
+            len: 0,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u32] {
+        if self.len == 1 {
+            std::slice::from_ref(unsafe { &self.data.t })
+        } else {
+            unsafe { std::slice::from_raw_parts(*self.data.u, self.len) }
+        }
+    }
+}
+
+impl Deref for SmallSlice<'_, u32> {
+    type Target = [u32];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+/**
+ * There are two ways to encode a sorting permutation:
+ * 1. Given data [1, 2, 0], the permutation is [2, 0, 1], where
+ *    sorted[0] = data[2], sorted[1] = data[0], sorted[2] = data[1].
+ *    (i.e. sorted[i] = data[permutation[i]])
+ * 2. Given data [1, 2, 0], the permutation is [1, 2, 0], where
+ *    sorted[1] = data[0], sorted[2] = data[1], sorted[0] = data[2].
+ *    (i.e. sorted[permutation[i]] = data[i])
+ *
+ * We use the first one here.
+ */
+
+// Source: https://stackoverflow.com/a/17074810
+pub fn apply_permutation_in_place_with_fn(
+    mut swap_fn: impl FnMut(usize, usize),
+    permutation: &[usize],
+) {
+    let mut visited = vec![false; permutation.len()];
+    for i in 0..permutation.len() {
+        if visited[i] {
+            continue;
+        }
+        let mut prev_j = i;
+        loop {
+            let j = permutation[prev_j];
+            if j == i {
+                break;
+            }
+            swap_fn(prev_j, j);
+            visited[j] = true;
+            prev_j = j;
+        }
+        visited[i] = true;
+    }
+}
+
+pub fn apply_permutation_in_place<T>(data: &mut [T], permutation: &[usize]) {
+    apply_permutation_in_place_with_fn(|i, j| data.swap(i, j), permutation);
+
+    // let mut visited = vec![false; data.len()];
+    // for i in 0..data.len() {
+    //     if visited[i] {
+    //         continue;
+    //     }
+    //     let mut prev_j = i;
+    //     loop {
+    //         let j = permutation[prev_j];
+    //         if j == i {
+    //             break;
+    //         }
+    //         data.swap(prev_j, j);
+    //         visited[j] = true;
+    //         prev_j = j;
+    //     }
+    //     visited[i] = true;
+    // }
+}
+
+pub fn swap_slice_with_stride<T>(data: &mut [T], stride: usize, i: usize, j: usize) {
+    // if i == j {
+    //     return;
+    // }
+    // let (i, j) = (i.min(j), i.max(j));
+    // let (i, j) = (i * stride, j * stride);
+    // let (slice1, slice2) = data.split_at_mut(j);
+    // slice1[i..][..stride].swap_with_slice(&mut slice2[..stride]);
+    // data.swap(1, 2);
+
+    if i == j {
+        return;
+    }
+    let (i, j) = (i * stride, j * stride);
+    {
+        // Bounds check
+        _ = &data[i..][..stride];
+        _ = &data[j..][..stride];
+    }
+    unsafe {
+        let slice1 = std::ptr::addr_of_mut!(data[i]);
+        let slice2 = std::ptr::addr_of_mut!(data[j]);
+        std::ptr::swap_nonoverlapping(slice1, slice2, stride);
+    }
+}

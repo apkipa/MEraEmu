@@ -1,0 +1,25 @@
+namespace MEraEmuWin.DevTools {
+    [bindable]
+    [default_interface]
+    runtimeclass SourcesTabBreakpointItem {
+        SourcesTabBreakpointItem();
+
+        /// Gets or sets whether the breakpoint was implicitly created by the debugger.
+        /// (e.g. set by a step-over operation, and will be removed when the next line is reached)
+        Boolean IsImplicit;
+        /// Gets or sets the handle of the marker that represents this breakpoint in the editor.
+        /// NOTE: To uniquely identify a breakpoint, use the combination of MarkerHandle and FileName.
+        Int32 MarkerHandle;
+        Boolean IsEnabled;
+        /// Gets or sets whether the breakpoint is currently applied (i.e. patched in the target code).
+        Boolean IsApplied;
+        String FuncName;
+        String FileName;
+        UInt32 LineNumber;
+        UInt32 ColumnNumber;
+        UInt32 SrcSpanStart;
+        UInt32 SrcSpanLen;
+        UInt32 IpChunk;
+        UInt32 IpOffset;
+    };
+}

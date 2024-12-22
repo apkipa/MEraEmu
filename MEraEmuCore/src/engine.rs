@@ -527,6 +527,75 @@ impl MEraEngineSysCallback for EmptyCallback {
     }
 }
 
+#[derive(Debug)]
+pub struct MEraEngineBuildProgress {
+    pub current: usize,
+    pub total: usize,
+}
+
+pub trait MEraEngineBuilderCallback {
+    fn on_build_progress(&mut self, tag: &str, progress: MEraEngineBuildProgress) {
+        // Do nothing
+    }
+}
+
+impl MEraEngineBuilderCallback for EmptyCallback {}
+
+pub struct MEraEngineBuilder<SysCallback, BuilderCallback> {
+    file_inputs: Vec<EraCompilerFileInput>,
+    callback: Option<SysCallback>,
+    builder_callback: Option<BuilderCallback>,
+    config: MEraEngineConfig,
+}
+
+impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T, U> {
+    pub fn new() -> MEraEngineBuilder<T, U> {
+        MEraEngineBuilder {
+            file_inputs: Vec::new(),
+            callback: Default::default(),
+            builder_callback: Default::default(),
+            config: Default::default(),
+        }
+    }
+    pub fn with_callback(mut self, new_callback: T) -> Self {
+        self.callback = Some(new_callback);
+        self
+    }
+    pub fn with_builder_callback(mut self, new_callback: U) -> Self {
+        self.builder_callback = Some(new_callback);
+        self
+    }
+    pub fn with_config(mut self, new_config: MEraEngineConfig) -> Self {
+        self.config = new_config;
+        self
+    }
+    // TODO...
+    pub fn load_csv(
+        &mut self,
+        filename: &str,
+        content: &[u8],
+        kind: EraCsvLoadKind,
+    ) -> Result<(), MEraEngineError> {
+        todo!()
+    }
+    pub fn load_erh(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
+        todo!()
+    }
+    pub fn load_erb(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
+        todo!()
+    }
+    pub fn build(self) -> Result<MEraEngine<'static>, MEraEngineError> {
+        todo!()
+        // let mut engine = MEraEngine::new();
+        // engine.install_sys_callback(Box::new(self.callback.unwrap_or(EmptyCallback)));
+        // engine.set_config(self.config);
+        // for file_input in self.file_inputs {
+        //     engine.load_file_input(file_input)?;
+        // }
+        // Ok(engine)
+    }
+}
+
 impl<'a> MEraEngine<'a> {
     pub fn new() -> Self {
         type T1 = hashbrown::HashMap<Ascii<String>, InitialVarDesc>;
@@ -1989,7 +2058,7 @@ impl<'a> MEraEngine<'a> {
         unimplemented!()
     }
     pub fn get_version() -> &'static str {
-        "MEraEngine in MEraEmuCore v0.1.0"
+        "MEraEngine in MEraEmuCore v0.2.0"
     }
     pub fn get_mem_usage(&self) -> Result<EngineMemoryUsage, MEraEngineError> {
         let Some(vm) = self.vm.as_ref() else {

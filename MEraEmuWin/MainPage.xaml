@@ -10,10 +10,10 @@
 
     <Grid x:Name="LayoutRoot">
         <Grid.RowDefinitions>
-            <RowDefinition Height="40"/>
-            <RowDefinition Height="*"/>
+            <RowDefinition Height="40" />
+            <RowDefinition Height="*" />
         </Grid.RowDefinitions>
-        <Rectangle x:Name="TopDragRectangle" Grid.Row="0" Fill="{ThemeResource SystemControlBackgroundBaseLowBrush}"/>
+        <Rectangle x:Name="TopDragRectangle" Grid.Row="0" Fill="{ThemeResource SystemControlBackgroundBaseLowBrush}" />
         <Grid Grid.Row="0" Margin="0">
             <!--
             <Grid.Resources>
@@ -22,27 +22,34 @@
             </Grid.Resources>
             -->
             <Grid.ColumnDefinitions>
-                <ColumnDefinition x:Name="TopElasticLeftSpace" Width="0"/>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition x:Name="TopElasticRightSpace" Width="0"/>
+                <ColumnDefinition x:Name="TopElasticLeftSpace" Width="0" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition x:Name="TopElasticRightSpace" Width="0" />
             </Grid.ColumnDefinitions>
             <muxc:MenuBar x:Name="MainMenuBar" Grid.Column="1" Background="{x:Null}">
                 <muxc:MenuBarItem Title="文件" IsTabStop="False">
-                    <MenuFlyoutItem Text="重置引擎" Click="MenuFile_ResetEngine_Click"/>
-                    <MenuFlyoutItem Text="回到标题页面" Click="MenuFile_ReturnToTitle_Click"/>
-                    <MenuFlyoutSeparator/>
-                    <MenuFlyoutItem Text="退出" Click="MenuFile_Exit_Click"/>
+                    <MenuFlyoutItem Text="重置引擎" Click="MenuFile_ResetEngine_Click" />
+                    <MenuFlyoutItem Text="回到标题页面" Click="MenuFile_ReturnToTitle_Click" />
+                    <MenuFlyoutSeparator />
+                    <MenuFlyoutItem Text="退出" Click="MenuFile_Exit_Click" />
                 </muxc:MenuBarItem>
                 <muxc:MenuBarItem Title="帮助" IsTabStop="False">
-                    <MenuFlyoutItem Text="关于..." Click="MenuHelp_About_Click"/>
+                    <MenuFlyoutItem Text="开发者工具" Click="MenuFile_DevTools_Click">
+                        <MenuFlyoutItem.KeyboardAccelerators>
+                            <KeyboardAccelerator Key="F12" />
+                            <KeyboardAccelerator Key="J" Modifiers="Control,Shift" />
+                        </MenuFlyoutItem.KeyboardAccelerators>
+                    </MenuFlyoutItem>
+                    <MenuFlyoutSeparator />
+                    <MenuFlyoutItem Text="关于..." Click="MenuHelp_About_Click" />
                 </muxc:MenuBarItem>
             </muxc:MenuBar>
             <TextBlock x:Name="TitleTextBlock" Grid.Column="2" IsHitTestVisible="False"
                        HorizontalAlignment="Center" VerticalAlignment="Center"
                        FontSize="13"
-                       Text="MEraEmu"/>
+                       Text="MEraEmu" />
         </Grid>
-        <local:EngineControl x:Name="MainEngineControl" Grid.Row="1"/>
+        <local:EngineControl x:Name="MainEngineControl" Grid.Row="1" />
     </Grid>
 </Page>

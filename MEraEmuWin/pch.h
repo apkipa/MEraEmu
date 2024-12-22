@@ -15,6 +15,7 @@
 #include <d2d1_2helper.h>
 #include <dwrite_3.h>
 #include <wincodec.h>
+#include <Shlobj.h>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -24,6 +25,7 @@
 #include <winrt/Windows.System.Threading.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Input.h>
+#include <winrt/Windows.UI.Text.h>
 #include <winrt/Windows.UI.Xaml.h>
 #include <winrt/Windows.UI.Xaml.Shapes.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
@@ -34,11 +36,15 @@
 #include <winrt/Windows.UI.Xaml.Interop.h>
 #include <winrt/Windows.UI.Xaml.Markup.h>
 #include <winrt/Windows.UI.Xaml.Navigation.h>
+#include <winrt/Windows.UI.Xaml.Documents.h>
 #include <winrt/Windows.UI.Xaml.Hosting.h>
 #include <winrt/Windows.UI.Xaml.Input.h>
+#include <winrt/Windows.UI.Xaml.Core.Direct.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 #include <winrt/Windows.ApplicationModel.h>
 #include <winrt/Windows.ApplicationModel.Core.h>
+#include <winrt/Windows.Storage.h>
+#include <winrt/Windows.Storage.Streams.h>
 
 #include <winrt/Microsoft.UI.Xaml.Automation.Peers.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
@@ -48,10 +54,33 @@
 
 #include <winrt/WinUIEditor.h>
 
+#include <winrt/Tenkai.UI.ViewManagement.h>
+#include <winrt/Tenkai.UI.Xaml.h>
+#include <winrt/Tenkai.UI.Xaml.Data.h>
+
+//#include <winrt/Microsoft.Xaml.Interactivity.h>
+//#include <winrt/Microsoft.Xaml.Interactions.Core.h>
+//#include <winrt/Microsoft.Xaml.Interactions.Media.h>
+
+//#include <include/WinUIIncludes.hpp>
+
 #include <windows.ui.xaml.media.dxinterop.h>
 
+#include <ppl.h>
+#include <ppltasks.h>
+#include <pplawait.h>
+
 #include <functional>
+#include <algorithm>
+#include <memory>
 #include <ranges>
 #include <thread>
 #include <vector>
+#include <array>
 #include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <chrono>
+#include <set>
+
+typedef SSIZE_T ssize_t;

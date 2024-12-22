@@ -1,8 +1,15 @@
+#[derive(thiserror::Error, Debug)]
+pub enum HtmlTagSplitError {
+    #[error("The HTML tag is not closed")]
+    UnclosedTag,
+}
+
 pub struct SplitHtmlIterator<'a> {
     src: &'a str,
 }
+
 impl<'a> Iterator for SplitHtmlIterator<'a> {
-    type Item = Result<&'a str, ()>;
+    type Item = Result<&'a str, HtmlTagSplitError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.src.is_empty() {
@@ -17,7 +24,7 @@ impl<'a> Iterator for SplitHtmlIterator<'a> {
             return Some(Ok(part));
         }
         let Some(tag_end_pos) = self.src.find('>') else {
-            return Some(Err(()));
+            return Some(Err(HtmlTagSplitError::UnclosedTag));
         };
         (part, self.src) = self.src.split_at(tag_end_pos + 1);
         Some(Ok(part))

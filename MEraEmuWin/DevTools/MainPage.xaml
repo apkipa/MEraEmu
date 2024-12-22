@@ -1,0 +1,598 @@
+﻿<Page
+    x:Class="MEraEmuWin.DevTools.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:MEraEmuWin.DevTools"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    xmlns:muxcp="using:Microsoft.UI.Xaml.Controls.Primitives"
+    xmlns:editor="using:WinUIEditor"
+    mc:Ignorable="d">
+
+    <Page.Resources>
+        <Thickness x:Key="TabViewHeaderPadding">0,0,0,0</Thickness>
+        <Style x:Key="FlatButtonStyle" TargetType="Button">
+            <Setter Property="BackgroundSizing" Value="OuterBorderEdge" />
+            <Setter Property="Background" Value="{ThemeResource AppBarEllipsisButtonBackground}" />
+            <Setter Property="Foreground" Value="{ThemeResource AppBarEllipsisButtonForeground}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource AppBarEllipsisButtonBorderBrush}" />
+            <Setter Property="BorderThickness" Value="{ThemeResource HyperlinkButtonBorderThemeThickness}" />
+            <Setter Property="Padding" Value="{StaticResource HyperlinkButtonPadding}" />
+            <Setter Property="HorizontalAlignment" Value="Left" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" />
+            <Setter Property="FontSize" Value="{ThemeResource ControlContentThemeFontSize}" />
+            <Setter Property="UseSystemFocusVisuals" Value="{StaticResource UseSystemFocusVisuals}" />
+            <Setter Property="FocusVisualMargin" Value="-3" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <ContentPresenter x:Name="ContentPresenter"
+              Background="{TemplateBinding Background}"
+              BackgroundSizing="{TemplateBinding BackgroundSizing}"
+              BorderBrush="{TemplateBinding BorderBrush}"
+              BorderThickness="{TemplateBinding BorderThickness}"
+              Content="{TemplateBinding Content}"
+              ContentTemplate="{TemplateBinding ContentTemplate}"
+              ContentTransitions="{TemplateBinding ContentTransitions}"
+              CornerRadius="{TemplateBinding CornerRadius}"
+              Padding="{TemplateBinding Padding}"
+              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+              AutomationProperties.AccessibilityView="Raw">
+
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup x:Name="CommonStates">
+                                    <VisualState x:Name="Normal" />
+
+                                    <VisualState x:Name="PointerOver">
+
+                                        <Storyboard>
+                                            <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                                                <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AppBarEllipsisButtonForegroundPointerOver}" />
+                                            </ObjectAnimationUsingKeyFrames>
+                                            <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                                                <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AppBarEllipsisButtonBackgroundPointerOver}" />
+                                            </ObjectAnimationUsingKeyFrames>
+                                            <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                                                <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AppBarEllipsisButtonBorderBrushPointerOver}" />
+                                            </ObjectAnimationUsingKeyFrames>
+                                        </Storyboard>
+                                    </VisualState>
+
+                                    <VisualState x:Name="Pressed">
+
+                                        <Storyboard>
+                                            <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                                                <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AppBarEllipsisButtonForegroundPressed}" />
+                                            </ObjectAnimationUsingKeyFrames>
+                                            <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                                                <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AppBarEllipsisButtonBackgroundPressed}" />
+                                            </ObjectAnimationUsingKeyFrames>
+                                            <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                                                <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AppBarEllipsisButtonBorderBrushPressed}" />
+                                            </ObjectAnimationUsingKeyFrames>
+                                        </Storyboard>
+                                    </VisualState>
+
+                                    <VisualState x:Name="Disabled">
+
+                                        <Storyboard>
+                                            <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Foreground">
+                                                <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AppBarEllipsisButtonForegroundDisabled}" />
+                                            </ObjectAnimationUsingKeyFrames>
+                                            <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="Background">
+                                                <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AppBarEllipsisButtonBackgroundDisabled}" />
+                                            </ObjectAnimationUsingKeyFrames>
+                                            <ObjectAnimationUsingKeyFrames Storyboard.TargetName="ContentPresenter" Storyboard.TargetProperty="BorderBrush">
+                                                <DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource AppBarEllipsisButtonBorderBrushDisabled}" />
+                                            </ObjectAnimationUsingKeyFrames>
+                                        </Storyboard>
+                                    </VisualState>
+
+                                </VisualStateGroup>
+
+                            </VisualStateManager.VisualStateGroups>
+                        </ContentPresenter>
+
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="CustomTabViewStyle" TargetType="muxc:TabView">
+            <Setter Property="VerticalAlignment" Value="Top" />
+            <Setter Property="Padding" Value="{ThemeResource TabViewHeaderPadding}" />
+            <Setter Property="IsTabStop" Value="False" />
+            <Setter Property="Background" Value="{ThemeResource TabViewBackground}" />
+            <Setter Property="KeyboardAcceleratorPlacementMode" Value="Hidden" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="muxc:TabView">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <VisualStateManager.VisualStateGroups>
+                                <VisualStateGroup>
+                                    <VisualState x:Name="NormalBottomBorderLine"/>
+                                    <VisualState x:Name="SingleBottomBorderLine">
+                                        <VisualState.Setters>
+                                            <Setter Target="LeftBottomBorderLine.(Grid.ColumnSpan)" Value="4"/>
+                                            <Setter Target="RightBottomBorderLine.Visibility" Value="Collapsed"/>
+                                        </VisualState.Setters>
+                                    </VisualState>
+                                </VisualStateGroup>
+                            </VisualStateManager.VisualStateGroups>
+
+                            <Grid x:Name="TabContainerGrid"
+                                Background="{TemplateBinding Background}"
+                                XYFocusKeyboardNavigation="Enabled">
+
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" MinWidth="2"  x:Name="LeftContentColumn"/>
+                                    <ColumnDefinition Width="Auto" x:Name="TabColumn"/>
+                                    <ColumnDefinition Width="Auto" x:Name="AddButtonColumn"/>
+                                    <ColumnDefinition Width="*" x:Name="RightContentColumn"/>
+                                </Grid.ColumnDefinitions>
+
+                                <Border x:Name="LeftBottomBorderLine" BorderBrush="{ThemeResource TabViewBorderBrush}" BorderThickness="1" Height="1" VerticalAlignment="Bottom"/>
+
+                                <Border x:Name="RightBottomBorderLine" BorderBrush="{ThemeResource TabViewBorderBrush}" BorderThickness="1" Height="1" Grid.Column="2" Grid.ColumnSpan="2" VerticalAlignment="Bottom"/>
+
+                                <ContentPresenter
+                                Grid.Column="0"
+                                x:Name="LeftContentPresenter"
+                                Content="{TemplateBinding TabStripHeader}"
+                                ContentTemplate="{TemplateBinding TabStripHeaderTemplate}"/>
+
+                                <muxcp:TabViewListView
+                                Grid.Column="1"
+                                x:Name="TabListView"
+                                Padding="{TemplateBinding Padding}"
+                                CanReorderItems="{TemplateBinding CanReorderTabs}"
+                                CanDragItems="{TemplateBinding CanDragTabs}"
+                                AllowDrop="{TemplateBinding AllowDropTabs}"
+                                ItemsSource="{TemplateBinding TabItemsSource}"
+                                ItemTemplate="{TemplateBinding TabItemTemplate}"
+                                ItemTemplateSelector="{TemplateBinding TabItemTemplateSelector}"/>
+
+                                <Border
+                                 Visibility="{Binding IsAddTabButtonVisible, RelativeSource={RelativeSource TemplatedParent}}"
+                                 Grid.Column="2"
+                                 Padding="{ThemeResource TabViewItemAddButtonContainerPadding}"
+                                 VerticalAlignment="Bottom">
+                                    <!--
+                                    <Button
+                                    x:Name="AddButton"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Content="&#xE710;"
+                                    IsTextScaleFactorEnabled="False"
+                                    Command="{TemplateBinding AddTabButtonCommand}"
+                                    CommandParameter="{TemplateBinding AddTabButtonCommandParameter}"
+                                    Style="{ThemeResource TabViewButtonStyle}"
+                                    HighContrastAdjustment="None"/>
+                                    -->
+                                </Border>
+
+                                <ContentPresenter
+                                Grid.Column="3"
+                                x:Name="RightContentPresenter"
+                                HorizontalAlignment="Stretch"
+                                Content="{TemplateBinding TabStripFooter}"
+                                ContentTemplate="{TemplateBinding TabStripFooterTemplate}"/>
+
+                            </Grid>
+
+                            <ContentPresenter x:Name="TabContentPresenter"
+                            Grid.Row="1"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" />
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Flyout x:Name="GlobalQuickActionsBaseFlyout" AreOpenCloseAnimationsEnabled="False" Placement="Full">
+            <Flyout.FlyoutPresenterStyle>
+                <Style TargetType="FlyoutPresenter" BasedOn="{StaticResource DefaultFlyoutPresenterStyle}">
+                    <Setter Property="HorizontalAlignment" Value="Stretch" />
+                    <Setter Property="VerticalAlignment" Value="Stretch" />
+                    <Setter Property="MaxWidth" Value="520" />
+                    <Setter Property="MaxHeight" Value="420" />
+                    <Setter Property="Margin" Value="20,20,20,0" />
+                    <Setter Property="Padding" Value="4" />
+                    <Setter Property="Background" Value="{ThemeResource AcrylicInAppFillColorDefaultBrush}" />
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="FlyoutPresenter">
+                                <Border
+                                    Background="{TemplateBinding Background}"                        
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="{TemplateBinding CornerRadius}"
+                                    BackgroundSizing="InnerBorderEdge">
+                                    <ContentPresenter
+                                        Content="{TemplateBinding Content}"
+                                        ContentTemplate="{TemplateBinding ContentTemplate}"
+                                        ContentTransitions="{TemplateBinding ContentTransitions}"
+                                        Margin="{TemplateBinding Padding}"
+                                        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                        VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                                </Border>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </Flyout.FlyoutPresenterStyle>
+
+            <Grid HorizontalAlignment="Stretch">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <TextBox x:Name="GlobalQuickActionsBaseFlyout_InputTextBox" Margin="4" IsSpellCheckEnabled="False"
+                         TextChanged="GlobalQuickActionsBaseFlyout_InputTextBox_TextChanged"
+                         KeyDown="GlobalQuickActionsBaseFlyout_InputTextBox_KeyDown"
+                         PlaceholderText="Type command..." />
+                <ListView x:Name="GlobalQuickActionsBaseFlyout_QuickActionsItemListView" Grid.Row="1" IsItemClickEnabled="True"
+                          HorizontalAlignment="Stretch" ItemsSource="{x:Bind FilteredQuickActionItemsList}"
+                          ItemClick="GlobalQuickActionsBaseFlyout_QuickActionsItemListView_ItemClick"
+                          ContainerContentChanging="GlobalQuickActionsBaseFlyout_QuickActionsItemListView_ContainerContentChanging">
+                    <ListView.ItemContainerTransitions>
+                        <TransitionCollection />
+                    </ListView.ItemContainerTransitions>
+                    <ListView.Header>
+                        <TextBlock Text="No matches found" Foreground="Gray" FontStyle="Italic" Margin="8,8,8,10"
+                                   Visibility="{x:Bind FilteredQuickActionItemsList.Size,Mode=OneWay,Converter={StaticResource NegatedIntToVisibilityConverter}}" />
+                    </ListView.Header>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="local:QuickActionItem">
+                            <ListViewItem MinHeight="0" Height="32" IsTabStop="False">
+                                <TextBlock x:Name="QuickActionItemTitleTextBlock" />
+                            </ListViewItem>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+        </Flyout>
+    </Page.Resources>
+
+    <Grid x:Name="LayoutRoot" Background="{ThemeResource AppBarBackgroundThemeBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup x:Name="DevToolsMainStates">
+                <VisualState x:Name="EngineConnected" />
+                <VisualState x:Name="EngineUnconnected">
+                    <VisualState.Setters>
+                        <Setter Target="MainNotLoadedIndicator.Visibility" Value="Visible" />
+                        <Setter Target="TopTabView.Visibility" Value="Collapsed" />
+                        <Setter Target="BottomTabView.Visibility" Value="Collapsed" />
+                        <Setter Target="MainNotLoadedIndicatorProgRing.IsActive" Value="True" />
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+            <VisualStateGroup x:Name="EngineExecStates">
+                <VisualState x:Name="EngineRunning" />
+                <VisualState x:Name="EnginePaused">
+                    <VisualState.Setters>
+                        <Setter Target="CodeExecPauseResumeButtonContent.Glyph" Value="&#xE037;" />
+                        <Setter Target="CodeExecStepIntoButton.IsEnabled" Value="True" />
+                        <Setter Target="CodeExecStepOverButton.IsEnabled" Value="True" />
+                        <Setter Target="CodeExecStepOutButton.IsEnabled" Value="True" />
+                        <Setter Target="CodeExecStepSingleButton.IsEnabled" Value="True" />
+                        <Setter Target="SourcesTabScopeTabRunningIndicator.Visibility" Value="Collapsed" />
+                        <Setter Target="SourcesTabCallStackTabRunningIndicator.Visibility" Value="Collapsed" />
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+            <VisualStateGroup x:Name="SourcesTabLeftPaneStates">
+                <VisualState x:Name="SourcesTabLeftPaneOpen" />
+                <VisualState x:Name="SourcesTabLeftPaneClosed">
+                    <VisualState.Setters>
+                        <Setter Target="SourcesTabLeftPane.Visibility" Value="Collapsed" />
+                        <Setter Target="SourcesTabLeftPaneOpenCloseButtonContent.Glyph" Value="&#xF716;" />
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+            <VisualStateGroup x:Name="SourcesTabRightPaneStates">
+                <VisualState x:Name="SourcesTabRightPaneOpen" />
+                <VisualState x:Name="SourcesTabRightPaneClosed">
+                    <VisualState.Setters>
+                        <Setter Target="SourcesTabRightPane.Visibility" Value="Collapsed" />
+                        <Setter Target="SourcesTabRightPaneOpenCloseButtonContent.Glyph" Value="&#xF717;" />
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+
+        <StackPanel x:Name="MainNotLoadedIndicator" Grid.RowSpan="2" Orientation="Vertical" Spacing="8"
+                    HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed">
+            <muxc:ProgressRing x:Name="MainNotLoadedIndicatorProgRing" Width="40" Height="40" />
+            <TextBlock Text="Loading DevTools..." HorizontalAlignment="Center" />
+        </StackPanel>
+
+        <muxc:TabView x:Name="TopTabView" Grid.Row="0" IsAddTabButtonVisible="False" TabWidthMode="SizeToContent" VerticalAlignment="Stretch">
+            <muxc:TabView.TabStripFooter>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="4,0">
+                    <Button x:Name="TopTabViewMoreButton" Style="{StaticResource FlatButtonStyle}" Width="24" Height="24" CornerRadius="999">
+                        <Button.Flyout>
+                            <MenuFlyout Placement="Bottom" ShouldConstrainToRootBounds="True">
+                                <MenuFlyoutItem Text="Run command" Click="TopTabViewMoreMenuRunCommandItem_Click">
+                                    <MenuFlyoutItem.KeyboardAccelerators>
+                                        <KeyboardAccelerator Key="P" Modifiers="Control,Shift" />
+                                    </MenuFlyoutItem.KeyboardAccelerators>
+                                </MenuFlyoutItem>
+                            </MenuFlyout>
+                        </Button.Flyout>
+
+                        <!-- More -->
+                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE712;" FontSize="14" />
+                    </Button>
+                </StackPanel>
+            </muxc:TabView.TabStripFooter>
+
+            <muxc:TabViewItem Header="Sources" IsClosable="False">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <Grid x:Name="SourcesTabLeftPane" Grid.Column="0" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" BorderThickness="0,0,1,0" Width="300">
+                        <muxc:TreeView x:Name="SourceFilesTreeView" Grid.Column="0" CanReorderItems="False" CanDrag="False"
+                                       ItemInvoked="SourceFilesTreeView_ItemInvoked" />
+                    </Grid>
+                    <Grid x:Name="SourcesTabMiddlePane" Grid.Column="1">
+                        <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="WrapWholeWords"
+                                   HorizontalTextAlignment="Center"
+                                   Text="To start working, select a file in the Source Files tree." />
+                        <Rectangle Fill="{StaticResource AppBarBackgroundThemeBrush}" Height="36" VerticalAlignment="Top" />
+                        <muxc:TabView x:Name="SourceFilesTabView" Grid.Row="1" IsAddTabButtonVisible="False"
+                                      Style="{StaticResource CustomTabViewStyle}"
+                                      TabWidthMode="SizeToContent" VerticalAlignment="Stretch"
+                                      TabItemsSource="{x:Bind SourcesFileTabsItemList}"
+                                      TabCloseRequested="SourceFilesTabView_TabCloseRequested">
+                            <muxc:TabView.Resources>
+                                <Style TargetType="muxcp:TabViewListView">
+                                    <Setter Property="Height" Value="36" />
+                                </Style>
+                            </muxc:TabView.Resources>
+
+                            <muxc:TabView.TabItemTemplate>
+                                <DataTemplate x:DataType="local:SourcesFileTabItem">
+                                    <muxc:TabViewItem Header="{x:Bind FileName}" ToolTipService.ToolTip="{x:Bind FullPath}">
+                                        <local:CodeEditControl x:Name="SrcCodeEditor" Background="{ThemeResource SolidBackgroundFillColorTertiaryBrush}" />
+                                    </muxc:TabViewItem>
+                                </DataTemplate>
+                            </muxc:TabView.TabItemTemplate>
+
+                            <muxc:TabView.TabStripHeader>
+                                <Button x:Name="SourcesTabLeftPaneOpenCloseButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36"
+                                        Click="SourcesTabLeftPaneOpenCloseButton_Click">
+                                    <!-- Left Panel -->
+                                    <FontIcon x:Name="SourcesTabLeftPaneOpenCloseButtonContent" FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF717;" />
+                                </Button>
+                            </muxc:TabView.TabStripHeader>
+                            <muxc:TabView.TabStripFooter>
+                                <Button x:Name="SourcesTabRightPaneOpenCloseButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36"
+                                        Click="SourcesTabRightPaneOpenCloseButton_Click" HorizontalAlignment="Right">
+                                    <!-- Right Panel -->
+                                    <FontIcon x:Name="SourcesTabRightPaneOpenCloseButtonContent" FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF716;" />
+                                </Button>
+                            </muxc:TabView.TabStripFooter>
+                        </muxc:TabView>
+                    </Grid>
+                    <Grid x:Name="SourcesTabRightPane" Grid.Column="2" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" BorderThickness="1,0,0,0" Width="300">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                        </Grid.RowDefinitions>
+
+                        <StackPanel Grid.Row="0" Orientation="Horizontal">
+                            <Button x:Name="CodeExecPauseResumeButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36"
+                                    Click="CodeExecPauseResumeButton_Click">
+                                <!-- Pause / Continue -->
+                                <Button.KeyboardAccelerators>
+                                    <KeyboardAccelerator Key="F5" />
+                                </Button.KeyboardAccelerators>
+
+                                <FontIcon x:Name="CodeExecPauseResumeButtonContent" FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xE034;" />
+                            </Button>
+                            <Button x:Name="CodeExecStepIntoButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False"
+                                    Click="CodeExecStepIntoButton_Click">
+                                <!-- Step Into -->
+                                <FontIcon FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF701;" />
+                            </Button>
+                            <Button x:Name="CodeExecStepOverButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False"
+                                    Click="CodeExecStepOverButton_Click">
+                                <!-- Step Over -->
+                                <FontIcon FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF6FF;" />
+                            </Button>
+                            <Button x:Name="CodeExecStepOutButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False"
+                                    Click="CodeExecStepOutButton_Click">
+                                <!-- Step Out -->
+                                <FontIcon FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF700;" />
+                            </Button>
+                            <Button x:Name="CodeExecStepSingleButton" Style="{StaticResource FlatButtonStyle}" Width="36" Height="36" IsEnabled="False"
+                                    Click="CodeExecStepSingleButton_Click">
+                                <!-- Step Single -->
+                                <Button.KeyboardAccelerators>
+                                    <KeyboardAccelerator Key="F9" />
+                                </Button.KeyboardAccelerators>
+
+                                <FontIcon FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xF6FE;" />
+                            </Button>
+                        </StackPanel>
+                        <ScrollViewer Grid.Row="1">
+                            <StackPanel Orientation="Vertical">
+                                <StackPanel.ChildrenTransitions>
+                                    <RepositionThemeTransition />
+                                </StackPanel.ChildrenTransitions>
+
+                                <muxc:Expander x:Name="CodeSourceWatchTabExpander" HorizontalAlignment="Stretch" IsExpanded="True" Padding="0" MinHeight="16">
+                                    <muxc:Expander.Header>
+                                        <Grid>
+                                            <TextBlock Text="Watch" VerticalAlignment="Center" />
+                                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="4"
+                                                        Visibility="{x:Bind CodeSourceWatchTabExpander.IsExpanded,Mode=OneWay}">
+                                                <Button x:Name="CodeSourceWatchAddButton" Style="{StaticResource FlatButtonStyle}" CornerRadius="999" Width="28" Height="28" Padding="0"
+                                                        Click="CodeSourceWatchAddButton_Click">
+                                                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" FontSize="13" Glyph="&#xE710;" />
+                                                </Button>
+                                                <Button x:Name="CodeSourceWatchRefreshButton" Style="{StaticResource FlatButtonStyle}" CornerRadius="999" Width="28" Height="28" Padding="0"
+                                                        Click="CodeSourceWatchRefreshButton_Click">
+                                                    <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" FontSize="13" Glyph="&#xE72C;" />
+                                                </Button>
+                                            </StackPanel>
+                                        </Grid>
+                                    </muxc:Expander.Header>
+
+                                    <Grid IsTapEnabled="True" IsDoubleTapEnabled="True" Background="Transparent"
+                                          Tapped="SourcesTabWatchTabItemsListRepeaterContainer_Tapped" DoubleTapped="SourcesTabWatchTabItemsListRepeaterContainer_DoubleTapped">
+                                        <TextBlock x:Name="SourcesTabWatchTabRunningIndicator" Text="No watch expressions" Foreground="Gray"
+                                                   FontStyle="Italic" Margin="0,16"
+                                                   Visibility="{x:Bind SourcesTabWatchTabItemsList.Size,Mode=OneWay,Converter={StaticResource NegatedIntToVisibilityConverter}}" />
+                                        <muxc:ItemsRepeater x:Name="SourcesTabWatchTabItemsListRepeater" ItemsSource="{x:Bind SourcesTabWatchTabItemsList}">
+                                            <muxc:ItemsRepeater.ItemTemplate>
+                                                <DataTemplate x:DataType="local:SourcesTabWatchTabItem">
+                                                    <Grid BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" DataContext="{x:Bind}"
+                                                          BorderThickness="0,1,0,0" Padding="4,2" HorizontalAlignment="Stretch" Background="Transparent">
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto" />
+                                                            <RowDefinition Height="Auto" />
+                                                        </Grid.RowDefinitions>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="16" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+
+                                                        <!-- Right -->
+                                                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE76C;" Grid.Row="0" Grid.Column="0" FontSize="10"
+                                                                  Visibility="{x:Bind IsExpanded,Mode=OneWay,Converter={StaticResource NegatedBoolToVisibilityConverter}}" />
+                                                        <!-- Down -->
+                                                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE70D;" Grid.Row="0" Grid.Column="0" FontSize="10"
+                                                                  Visibility="{x:Bind IsExpanded,Mode=OneWay,Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                        <TextBlock Grid.Column="1">
+                                                            <Run Foreground="BlueViolet" Text="{x:Bind Expression}" /><Run Text=": " /><Run Foreground="LightSeaGreen" Text="{x:Bind BriefValue}" /><Run Foreground="Red" Text="{x:Bind ErrorInfo}" />
+                                                        </TextBlock>
+                                                        <muxc:ItemsRepeater Grid.Row="1" Grid.ColumnSpan="2" Visibility="{x:Bind IsExpanded,Mode=OneWay}" ItemsSource="{x:Bind SubItems}" Margin="16,0,0,0">
+                                                            <muxc:ItemsRepeater.Layout>
+                                                                <muxc:StackLayout DisableVirtualization="True" />
+                                                            </muxc:ItemsRepeater.Layout>
+
+                                                            <muxc:ItemsRepeater.ItemTemplate>
+                                                                <DataTemplate x:DataType="local:SourcesTabWatchTabItem">
+                                                                    <TextBlock>
+                                                                        <Run Foreground="BlueViolet" Text="{x:Bind Expression}" /><Run Text=": " /><Run Foreground="LightSeaGreen" Text="{x:Bind BriefValue}" /><Run Foreground="Red" Text="{x:Bind ErrorInfo}" />
+                                                                    </TextBlock>
+                                                                </DataTemplate>
+                                                            </muxc:ItemsRepeater.ItemTemplate>
+                                                        </muxc:ItemsRepeater>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </muxc:ItemsRepeater.ItemTemplate>
+                                        </muxc:ItemsRepeater>
+                                        <!-- Shared TextBox for editing & adding current watching expression item -->
+                                        <TextBox x:Name="SourcesTabWatchTabCurrentItemTextBox" Margin="4" Padding="4,2" BorderThickness="0" IsSpellCheckEnabled="False"
+                                                 HorizontalAlignment="Stretch" VerticalAlignment="Top" MinHeight="4" Height="24" Visibility="Collapsed"
+                                                 LostFocus="SourcesTabWatchTabCurrentItemTextBox_LostFocus" 
+                                                 KeyDown="SourcesTabWatchTabCurrentItemTextBox_KeyDown" />
+                                    </Grid>
+                                </muxc:Expander>
+                                <muxc:Expander Header="Breakpoints" HorizontalAlignment="Stretch" IsExpanded="True"
+                                               HorizontalContentAlignment="Stretch" Padding="0" MinHeight="16">
+                                    <StackPanel Orientation="Vertical">
+                                        <CheckBox x:Name="SourcesTabBreakpointsTabBreakOnExceptionsCheckBox" Margin="8,0" Content="Break on exceptions" IsChecked="False" HorizontalAlignment="Left" />
+                                        <muxc:ItemsRepeater x:Name="SourcesTabBreakpointsTabItemsListRepeater"
+                                                            ItemsSource="{x:Bind FilteredSourcesTabBreakpointItemsList}">
+                                            <muxc:ItemsRepeater.ItemTemplate>
+                                                <DataTemplate x:DataType="local:SourcesTabBreakpointItem">
+                                                    <Button Style="{StaticResource FlatButtonStyle}" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" DataContext="{x:Bind}"
+                                                            BorderThickness="0,1,0,0" Padding="4,2" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                                                            Click="SourcesTabBreakpointsTabItem_Click">
+                                                        <Grid HorizontalAlignment="Stretch">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="16" />
+                                                                <ColumnDefinition Width="*" />
+                                                                <ColumnDefinition Width="Auto" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <FontIcon Grid.Column="0" FontSize="12" FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE91F;"
+                                                                      Visibility="{x:Bind IsEnabled}" Foreground="Red" HorizontalAlignment="Left" />
+                                                            <TextBlock Grid.Column="1" Text="{x:Bind FileName}" />
+                                                            <TextBlock Grid.Column="2" HorizontalAlignment="Right" Foreground="Gray">
+                                                                <Run Text="{x:Bind LineNumber}" />
+                                                            </TextBlock>
+                                                        </Grid>
+                                                    </Button>
+                                                </DataTemplate>
+                                            </muxc:ItemsRepeater.ItemTemplate>
+                                        </muxc:ItemsRepeater>
+                                    </StackPanel>
+                                </muxc:Expander>
+                                <muxc:Expander Header="Scope (unsupported)" HorizontalAlignment="Stretch" IsExpanded="True"
+                                               Padding="0" MinHeight="16">
+                                    <Grid>
+                                        <TextBlock x:Name="SourcesTabScopeTabRunningIndicator" Text="Not paused" Foreground="Gray"
+                                                   FontStyle="Italic" Margin="0,16" />
+                                    </Grid>
+                                </muxc:Expander>
+                                <muxc:Expander Header="Call Stack" HorizontalAlignment="Stretch" IsExpanded="True"
+                                               Padding="0" MinHeight="16">
+                                    <Grid>
+                                        <TextBlock x:Name="SourcesTabCallStackTabRunningIndicator" Text="Not paused" Foreground="Gray"
+                                                   FontStyle="Italic" Margin="0,16" />
+                                        <muxc:ItemsRepeater x:Name="SourcesTabCallStackTabItemsListRepeater" ItemsSource="{x:Bind SourcesTabCallStackTabItemsList}">
+                                            <muxc:ItemsRepeater.ItemTemplate>
+                                                <DataTemplate x:DataType="local:SourcesTabCallStackTabItem">
+                                                    <Button Style="{StaticResource FlatButtonStyle}" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" DataContext="{x:Bind}"
+                                                            BorderThickness="0,1,0,0" Padding="4,2" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                                                            Click="SourcesTabCallStackTabItem_Click">
+                                                        <Grid HorizontalAlignment="Stretch">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="16" />
+                                                                <ColumnDefinition Width="Auto" />
+                                                                <ColumnDefinition Width="*" />
+                                                                <ColumnDefinition Width="Auto" />
+                                                            </Grid.ColumnDefinitions>
+
+                                                            <FontIcon Grid.Column="0" FontSize="15" FontFamily="{StaticResource MaterialSymbolFontFamily}" Glyph="&#xE937;"
+                                                                      Visibility="{x:Bind IsCurrent}" Foreground="DodgerBlue" />
+                                                            <TextBlock Grid.Column="1" Text="{x:Bind FuncName}" />
+                                                            <TextBlock Grid.Column="3" HorizontalAlignment="Right" Foreground="Gray">
+                                                                <Run Text="{x:Bind FileName}" /><Run Text=":" /><Run Text="{x:Bind LineNumber}" />
+                                                            </TextBlock>
+                                                        </Grid>
+                                                    </Button>
+                                                </DataTemplate>
+                                            </muxc:ItemsRepeater.ItemTemplate>
+                                        </muxc:ItemsRepeater>
+                                    </Grid>
+                                </muxc:Expander>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </Grid>
+                </Grid>
+            </muxc:TabViewItem>
+        </muxc:TabView>
+        <muxc:TabView x:Name="BottomTabView" Grid.Row="1" IsAddTabButtonVisible="True">
+            <!--
+            TODO: Console, Time Travel, etc.
+            -->
+        </muxc:TabView>
+
+        <Rectangle x:Name="PageFlyoutContainerBackground" Grid.RowSpan="2" IsTapEnabled="True" PointerPressed="PageFlyoutContainerBackground_PointerPressed" />
+        <Grid x:Name="PageFlyoutContainer" Grid.RowSpan="2" TabFocusNavigation="Cycle" VerticalAlignment="Top"
+              KeyDown="PageFlyoutContainer_KeyDown" />
+    </Grid>
+</Page>

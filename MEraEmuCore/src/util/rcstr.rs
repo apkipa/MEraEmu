@@ -1,14 +1,34 @@
 use std::{borrow::Cow, mem::ManuallyDrop};
 
-/// Fake arcstr::ArcStr, with SSO for strings up to word size - 1. Least
+/// Fake arcstr::ArcStr, with SSO for strings up to `word size - 1`. Least
 /// significant byte is used as inline marker and inline string length.
 #[cfg(target_pointer_width = "64")]
 #[repr(C)]
+// TODO: Niche optimization
 pub union ArcStr {
     i: usize,
     bytes: [u8; std::mem::size_of::<usize>()],
     // SAFETY: arcstr::ArcStr is #[repr(transparent)].
     s: ManuallyDrop<arcstr::ArcStr>,
+}
+
+impl Serialize for ArcStr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.as_str().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ArcStr {
+    fn deserialize<D>(deserializer: D) -> Result<ArcStr, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(ArcStr::from(s))
+    }
 }
 
 // TODO: Document UNSAFETY and all possible UBs.
@@ -325,6 +345,7 @@ macro_rules! literal {
 
 pub(crate) use format;
 pub(crate) use literal;
+use serde::{Deserialize, Serialize};
 
 #[test]
 fn test_arcstr() {
