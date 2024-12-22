@@ -1796,8 +1796,9 @@ namespace winrt::MEraEmuWin::implementation {
             // Close the channel to signal the engine thread to stop
             m_engine_task_tx = nullptr;
             // Wait for engine thread to stop
-            // NOTE: Don't execute any engine tasks after this point, for example
-            //       m_outstanding_input_req may be assigned a new value.
+            // NOTE: Don't execute any engine tasks after this point, for example some tasks
+            //       may set m_outstanding_input_req, which gets in the way of our disconnecting
+            //       process.
             while (m_ui_task_rx.recv()) {}
         }
     }
