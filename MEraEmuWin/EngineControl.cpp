@@ -1162,11 +1162,11 @@ namespace winrt::MEraEmuWin::implementation {
         ensure_global_factory();
     }
     EngineControl::~EngineControl() {
-        UISideDisconnect();
         if (m_devtools_wnd) {
             m_devtools_wnd.Close();
             m_devtools_wnd = nullptr;
         }
+        UISideDisconnect();
     }
     void EngineControl::InitializeComponent() {
         EngineControlT::InitializeComponent();

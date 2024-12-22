@@ -431,6 +431,8 @@ namespace util {
                 }
                 void await_suspend(std::coroutine_handle<> handle) {
                     ::winrt::apartment_context ui_ctx;
+                    // FIXME: If too many tasks are queued, this will cause app to deadlock somewhere.
+                    //        Use a lighter mechanism instead of `std::future`.
                     resume_background([=] {
                         auto awaiter = ::winrt::operator co_await(ui_ctx);
                         fut.wait();
