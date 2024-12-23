@@ -1691,6 +1691,11 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         rhs_count += 1;
                     }
                     // Assign
+                    if rhs_count == 0 {
+                        // If no operands are given, assign 0 to RESULT instead
+                        self.chunk.push_load_imm(0, stmt_span);
+                        rhs_count += 1;
+                    }
                     self.chunk.push_bc(
                         BcKind::RowAssign {
                             vals_cnt: rhs_count,

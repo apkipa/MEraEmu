@@ -56,9 +56,25 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 // NOTE: Used by safer_ffi
 #[cfg(feature = "headers")]
 pub fn generate_headers() -> ::std::io::Result<()> {
+    use ::std::io::Read;
     let builder = ::safer_ffi::headers::builder();
     if let Some(filename) = ::std::env::args_os().nth(1) {
-        builder.to_file(&filename)?.generate()
+        // Check if the file is unchanged
+        let previous_file = if let Ok(file) = ::std::fs::File::open(&filename) {
+            let mut reader = ::std::io::BufReader::new(file);
+            let mut previous = Vec::new();
+            reader.read_to_end(&mut previous)?;
+            Some(previous)
+        } else {
+            None
+        };
+        let mut new_file = Vec::new();
+        builder.to_writer(&mut new_file).generate()?;
+        if previous_file.as_deref() == Some(&new_file[..]) {
+            // File is unchanged, don't touch it to prevent unnecessary rebuilds
+            return Ok(());
+        }
+        ::std::fs::write(&filename, new_file)
     } else {
         builder.to_writer(::std::io::stdout()).generate()
     }
