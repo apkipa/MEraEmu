@@ -1566,6 +1566,18 @@ pub fn load_data<Callback: EraCompilerCallback>(
         .read_i64()?
         .try_into()
         .context("invalid character count")?;
+    let old_charas_cap = ctx
+        .variables
+        .charas_var_capacity()
+        .context("no chara variables")?;
+    if charas_count > old_charas_cap {
+        // Grow chara variables
+        use crate::v2::engine::CHARA_CAP_GROWTH_STEP;
+        let grow_count = (charas_count - old_charas_cap + CHARA_CAP_GROWTH_STEP - 1)
+            / CHARA_CAP_GROWTH_STEP
+            * CHARA_CAP_GROWTH_STEP;
+        ctx.variables.grow_charas_var_capacity(grow_count);
+    }
     for chara_i in 0..charas_count {
         loop {
             let var_type =

@@ -3390,13 +3390,21 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                     sview.replace([Value::new_int(result)]);
                 }
                 Bc::AddChara => {
+                    let cur_charas_cap = s
+                        .ctx
+                        .variables
+                        .charas_var_capacity()
+                        .context("no charas variable")?;
+                    let chara_reg_slot = s.i.charas_count;
+                    if chara_reg_slot >= cur_charas_cap {
+                        // Grow charas variable
+                        s.ctx
+                            .variables
+                            .grow_charas_var_capacity(crate::v2::engine::CHARA_CAP_GROWTH_STEP);
+                    }
                     let sview = view_stack_or_bail!();
                     let [chara_tmpl_no] = sview.as_ref();
                     unpack_args!(chara_tmpl_no:i);
-                    let chara_reg_slot = s.i.charas_count;
-                    if chara_reg_slot >= crate::v2::engine::MAX_CHARA_COUNT {
-                        anyhow::bail!("too many charas");
-                    }
                     intrinsics::add_chara(s.ctx, chara_reg_slot, chara_tmpl_no)?;
                     s.i.charas_count += 1;
                     sview.replace([]);

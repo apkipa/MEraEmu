@@ -644,7 +644,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
         }
         // HACK: Handle CHARADATA variable dimensions
         if is_charadata {
-            dims.insert(0, crate::v2::engine::MAX_CHARA_COUNT);
+            dims.insert(0, crate::v2::engine::INITIAL_CHARA_CAP);
         }
 
         // Initializers (& value)

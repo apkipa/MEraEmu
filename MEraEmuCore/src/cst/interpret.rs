@@ -604,7 +604,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
 
                 // HACK: Handle CHARADATA variable dimensions
                 if is_charadata {
-                    dims.insert(0, crate::v2::engine::MAX_CHARA_COUNT);
+                    dims.insert(0, crate::v2::engine::INITIAL_CHARA_CAP);
                 }
 
                 Value::new_int_arr(dims, inits)
@@ -683,7 +683,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
 
                 // HACK: Handle CHARADATA variable dimensions
                 if is_charadata {
-                    dims.insert(0, crate::v2::engine::MAX_CHARA_COUNT);
+                    dims.insert(0, crate::v2::engine::INITIAL_CHARA_CAP);
                 }
 
                 Value::new_str_arr(dims, inits)

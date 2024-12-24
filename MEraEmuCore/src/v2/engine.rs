@@ -61,8 +61,9 @@ pub struct MEraEngine<Callback> {
     vm_state: EraVirtualMachineState,
 }
 
-// TODO: Scale charas variables dynamically; use default capacity of 128 then.
-pub const MAX_CHARA_COUNT: u32 = 512;
+// Charas variables grow dynamically. The initial capacity is 128, and it grows by 8 each time.
+pub const INITIAL_CHARA_CAP: u32 = 128;
+pub const CHARA_CAP_GROWTH_STEP: u32 = 8;
 
 #[derive(thiserror::Error, Debug, Serialize, Deserialize)]
 #[error("{msg}")]
@@ -1414,7 +1415,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         for (name, mut var_desc) in initial_vars {
             let name = name.into_inner();
             if var_desc.is_charadata {
-                var_desc.dims.insert(0, MAX_CHARA_COUNT);
+                var_desc.dims.insert(0, INITIAL_CHARA_CAP);
             }
             // NOTE: May need ensure_alloc() later
             let val = if var_desc.is_string {

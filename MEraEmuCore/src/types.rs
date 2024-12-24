@@ -2467,6 +2467,44 @@ impl EraVarPool {
             }
         }
     }
+
+    pub fn charas_var_capacity(&self) -> Option<u32> {
+        self.chara_vars_iter()
+            .next()
+            .map(|x| x.val.dims().unwrap()[0])
+    }
+
+    pub fn grow_charas_var_capacity(&mut self, additional_cap: u32) {
+        if additional_cap == 0 {
+            return;
+        }
+
+        for var in self.chara_vars_iter() {
+            var.val.ensure_alloc();
+            let val = var.val.as_unpacked();
+            match val {
+                RefFlatValue::ArrInt(x) => {
+                    let mut x = x.borrow_mut();
+                    let size: usize = x.dims.iter().skip(1).map(|&x| x as usize).product();
+                    let add_cap = (additional_cap as usize) * size;
+                    x.vals.reserve_exact(add_cap);
+                    let new_cap = x.vals.len() + add_cap;
+                    x.vals.resize(new_cap, Default::default());
+                    x.dims[0] += additional_cap;
+                }
+                RefFlatValue::ArrStr(x) => {
+                    let mut x = x.borrow_mut();
+                    let size: usize = x.dims.iter().skip(1).map(|&x| x as usize).product();
+                    let add_cap = (additional_cap as usize) * size;
+                    x.vals.reserve_exact(add_cap);
+                    let new_cap = x.vals.len() + add_cap;
+                    x.vals.resize(new_cap, Default::default());
+                    x.dims[0] += additional_cap;
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
 }
 
 pub enum EraCmdArgFmt {

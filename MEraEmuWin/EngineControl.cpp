@@ -1372,7 +1372,21 @@ namespace winrt::MEraEmuWin::implementation {
         m_ui_task_rx = std::move(ui_task_rx);
         m_engine_task_tx = std::move(engine_task_tx);
         // Start a dedicated background thread
-        m_sd->thread_task_op = ThreadPool::RunAsync([sd = m_sd, ui_task_tx = std::move(ui_task_tx), engine_task_rx = std::move(engine_task_rx)](IAsyncAction const& op) {
+#if _DEBUG
+        auto start_thread_fn = []<typename F>(F && f) {
+            using OrigF = std::remove_cvref_t<F>;
+            auto ptr = std::make_unique<OrigF>(std::forward<F>(f));
+            // HACK: Extend stack size to 4MB
+            CloseHandle(CreateThread(nullptr, 4ull * 1024 * 1024, [](void* p) -> DWORD {
+                auto ptr = std::unique_ptr<OrigF>(static_cast<OrigF*>(p));
+                (*ptr)();
+                return 0;
+            }, ptr.release(), 0, nullptr));
+        };
+        start_thread_fn([sd = m_sd, ui_task_tx = std::move(ui_task_tx), engine_task_rx = std::move(engine_task_rx)] {
+#else
+        m_sd->thread_task_op = ThreadPool::RunAsync([sd = m_sd, ui_task_tx = std::move(ui_task_tx), engine_task_rx = std::move(engine_task_rx)](IAsyncAction const&) {
+#endif
             SetThreadDescription(GetCurrentThread(), L"MEraEmu Engine Thread");
 
             sd->thread_is_alive.store(true, std::memory_order_relaxed);
@@ -1754,7 +1768,11 @@ namespace winrt::MEraEmuWin::implementation {
             catch (...) {
                 sd->thread_exception = std::current_exception();
             }
+#if _DEBUG
+        });
+#else
         }, WorkItemPriority::Normal, WorkItemOptions::TimeSliced);
+#endif
         m_sd->ui_is_alive.store(true, std::memory_order_release);
         m_sd->ui_is_alive.notify_one();
 

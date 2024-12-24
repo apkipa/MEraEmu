@@ -110,6 +110,17 @@ fn rust_get_wstring_width(s: safer_ffi::ptr::NonNullRef<u16>) -> u64 {
     width
 }
 
+#[ffi_export]
+fn rust_get_wstring_view_width(s: slice::Ref<'_, u16>) -> u64 {
+    use unicode_width::UnicodeWidthChar;
+    let mut width = 0;
+    for ch in char::decode_utf16(s.iter().copied()) {
+        let ch = ch.unwrap_or(char::REPLACEMENT_CHARACTER);
+        width += ch.width().unwrap_or(0) as u64;
+    }
+    width
+}
+
 #[derive_ReprC]
 #[repr(C)]
 #[derive(Clone, Debug, Default)]
