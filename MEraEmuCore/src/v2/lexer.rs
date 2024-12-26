@@ -864,6 +864,8 @@ impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
                 b'{' => LBrace,
                 b'"' => DoubleQuote,
                 b'%' => Percentage,
+                // HACK: Do not allow crossing lines for now
+                b'\r' | b'\n' => self.read_newline_with_space(true),
                 b'\\' if self.peek_char() == Some(b'@') => {
                     self.next_char();
                     TernaryStrFormMarker
@@ -880,6 +882,8 @@ impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
                 b'{' => LBrace,
                 b'%' => Percentage,
                 b'#' => NumberSign,
+                // HACK: Do not allow crossing lines for now
+                b'\r' | b'\n' => self.read_newline_with_space(true),
                 b'\\' if self.peek_char() == Some(b'@') => {
                     self.next_char();
                     TernaryStrFormMarker
