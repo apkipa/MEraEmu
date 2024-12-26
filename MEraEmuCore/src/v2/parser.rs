@@ -1064,6 +1064,7 @@ struct EraParserSite<'a, 'b, 'i> {
     o: EraParserOuter<'a, 'b, 'i>,
     base_diag: Diagnostic<'a>,
     local_str_vars: FxHashSet<&'i Ascii<str>>,
+    block_start_span: Option<SrcSpan>,
 }
 
 impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
@@ -1082,6 +1083,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             o,
             base_diag,
             local_str_vars: FxHashSet::default(),
+            block_start_span: None,
         }
     }
 
@@ -1265,6 +1267,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
 
     /// `{NODE OWN}`
     fn program(&mut self) -> ParseResult<EraNodeRef> {
+        self.block_start_span = None;
+
         let span = self.o.l.current_src_span();
         self.skip_newline();
         let cp = self.o.b.checkpoint();
@@ -2520,6 +2524,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                     token.span,
                     "unexpected start of function; did you forget to close a block?",
                 );
+                if let Some(span) = self.block_start_span {
+                    diag.span_note(Default::default(), span, "block started here");
+                }
                 self.o.emit_diag(diag);
                 return Err(());
             }
@@ -2531,6 +2538,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                     token.span,
                     "unexpected end of file; did you forget to close a block?",
                 );
+                if let Some(span) = self.block_start_span {
+                    diag.span_note(Default::default(), span, "block started here");
+                }
                 self.o.emit_diag(diag);
                 return Err(());
             }
@@ -2605,17 +2615,19 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                     make!(self.stmt_call_node(true, EraNode::StmtTryCall))
                 }
                 b"TRYCCALL" | b"TRYCCALLF" => {
-                    make!(self.stmt_tryccall_node(false, EraNode::StmtTryCCall))
+                    make!(self.stmt_tryccall_node(span, false, EraNode::StmtTryCCall))
                 }
                 b"TRYCCALLFORM" | b"TRYCCALLFORMF" => {
-                    make!(self.stmt_tryccall_node(true, EraNode::StmtTryCCall))
+                    make!(self.stmt_tryccall_node(span, true, EraNode::StmtTryCCall))
                 }
                 b"JUMP" => make!(self.stmt_call_node(false, EraNode::StmtJump)),
                 b"JUMPFORM" => make!(self.stmt_call_node(true, EraNode::StmtJump)),
                 b"TRYJUMP" => make!(self.stmt_call_node(false, EraNode::StmtTryJump)),
                 b"TRYJUMPFORM" => make!(self.stmt_call_node(true, EraNode::StmtTryJump)),
-                b"TRYCJUMP" => make!(self.stmt_tryccall_node(false, EraNode::StmtTryCJump)),
-                b"TRYCJUMPFORM" => make!(self.stmt_tryccall_node(true, EraNode::StmtTryCJump)),
+                b"TRYCJUMP" => make!(self.stmt_tryccall_node(span, false, EraNode::StmtTryCJump)),
+                b"TRYCJUMPFORM" => {
+                    make!(self.stmt_tryccall_node(span, true, EraNode::StmtTryCJump))
+                }
                 b"TIMES" => make!(self.stmt_times()),
                 b"NOP" => make!(EraNode::StmtNop),
                 b"CONTINUE" => make!(EraNode::StmtContinue),
@@ -3073,6 +3085,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         let mut can_else = true;
         let cp = self.o.b.checkpoint();
 
+        let old_block_start_span = self.block_start_span.replace(self.span_to_now(span));
+
         // Condition
         let cond = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
         self.o.b.push_child(cond);
@@ -3085,14 +3099,14 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             let (stmts, should_continue) = self.statements_list_with(|s| {
                 if can_else && s.try_match_command("ELSEIF") {
                     // Transition to next condition
-                    _ = s.o.bump();
+                    s.block_start_span = Some(s.o.bump().token.span);
                     cond = Some(s.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into()));
                     _ = s.expect_sync_to_newline();
                     ControlFlow::Break(Some(true))
                 } else if can_else && s.try_match_command("ELSE") {
                     // Transition to else block
                     can_else = false;
-                    _ = s.o.bump();
+                    s.block_start_span = Some(s.o.bump().token.span);
                     ControlFlow::Break(Some(true))
                 } else if s.try_match_command("ENDIF") {
                     // End of if block
@@ -3113,6 +3127,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                     self.o.peek_token(Mode::Normal).token.span,
                     "unexpected end of block in IF; did you forget to close a block?",
                 );
+                if let Some(span) = self.block_start_span {
+                    diag.span_note(Default::default(), span, "block started here");
+                }
                 self.o.emit_diag(diag);
                 break;
             };
@@ -3121,6 +3138,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             }
             _ = self.expect_sync_to_newline();
         }
+
+        self.block_start_span = old_block_start_span;
+
         let extra_data = self
             .o
             .node_arena
@@ -3132,6 +3152,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     }
 
     fn stmt_sif(&mut self, span: SrcSpan) -> EraNodeRef {
+        let old_block_start_span = self.block_start_span.replace(self.span_to_now(span));
+
         // Condition
         let cond = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
         _ = self.expect_sync_to_newline();
@@ -3148,6 +3170,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                         self.o.peek_token(Mode::Normal).token.span,
                         "unexpected end of block in SIF; did you forget to close a block?",
                     );
+                    if let Some(span) = self.block_start_span {
+                        diag.span_note(Default::default(), span, "block started here");
+                    }
                     self.o.emit_diag(diag);
                     self.or_sync_to(|_| Err(()), Terminal::LineBreak.into())
                 }
@@ -3159,6 +3184,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 .node_arena
                 .add_node(EraNode::ListStmt(stmts), span, span)
         };
+
+        self.block_start_span = old_block_start_span;
 
         let extra_data = self
             .o
@@ -3174,6 +3201,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         let mut can_else = true;
         let mut last_is_case = false;
         let cp = self.o.b.checkpoint();
+
+        let old_block_start_span = self.block_start_span.replace(self.span_to_now(span));
 
         // Expression
         let expr = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
@@ -3230,6 +3259,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                     self.o.peek_token(Mode::Normal).token.span,
                     "unexpected end of block in SELECTCASE; did you forget to close a block?",
                 );
+                if let Some(span) = self.block_start_span {
+                    diag.span_note(Default::default(), span, "block started here");
+                }
                 self.o.emit_diag(diag);
                 break;
             };
@@ -3239,6 +3271,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             _ = self.expect_sync_to_newline();
             last_is_case = true;
         }
+
+        self.block_start_span = old_block_start_span;
 
         let (extra_ref, _) = self
             .o
@@ -3346,6 +3380,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     }
 
     fn stmt_while(&mut self, span: SrcSpan) -> EraNodeRef {
+        let old_block_start_span = self.block_start_span.replace(self.span_to_now(span));
+
         let cond = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
         _ = self.expect_sync_to_newline();
         let (stmts, cmd_ended) = self.statements_list(Some("WEND"));
@@ -3356,8 +3392,14 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 self.o.peek_token(Mode::Normal).token.span,
                 "unexpected end of block in WHILE; did you forget to close a block?",
             );
+            if let Some(span) = self.block_start_span {
+                diag.span_note(Default::default(), span, "block started here");
+            }
             self.o.emit_diag(diag);
         }
+
+        self.block_start_span = old_block_start_span;
+
         let span = self.span_to_now(span);
         self.o
             .node_arena
@@ -3365,6 +3407,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     }
 
     fn stmt_repeat(&mut self, span: SrcSpan) -> EraNodeRef {
+        let old_block_start_span = self.block_start_span.replace(self.span_to_now(span));
+
         let count = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
         _ = self.expect_sync_to_newline();
         let (stmts, cmd_ended) = self.statements_list(Some("REND"));
@@ -3375,8 +3419,14 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 self.o.peek_token(Mode::Normal).token.span,
                 "unexpected end of block in REPEAT; did you forget to close a block?",
             );
+            if let Some(span) = self.block_start_span {
+                diag.span_note(Default::default(), span, "block started here");
+            }
             self.o.emit_diag(diag);
         }
+
+        self.block_start_span = old_block_start_span;
+
         let span = self.span_to_now(span);
         self.o
             .node_arena
@@ -3384,6 +3434,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     }
 
     fn stmt_for(&mut self, span: SrcSpan) -> EraNodeRef {
+        let old_block_start_span = self.block_start_span.replace(self.span_to_now(span));
+
         let terminals = Terminal::Comma | Terminal::LineBreak;
         let var = self.or_sync_to(|s| s.expression(true), terminals);
         self.eat_sync(Mode::Normal, Token::Comma, terminals);
@@ -3408,8 +3460,14 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 self.o.peek_token(Mode::Normal).token.span,
                 "unexpected end of block in FOR; did you forget to close a block?",
             );
+            if let Some(span) = self.block_start_span {
+                diag.span_note(Default::default(), span, "block started here");
+            }
             self.o.emit_diag(diag);
         }
+
+        self.block_start_span = old_block_start_span;
+
         let (extra_ref, _) = self
             .o
             .node_arena
@@ -3421,6 +3479,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     }
 
     fn stmt_do_loop(&mut self, span: SrcSpan) -> EraNodeRef {
+        let old_block_start_span = self.block_start_span.replace(self.span_to_now(span));
+
         _ = self.expect_sync_to_newline();
         let (stmts, cmd_ended) = self.statements_list(Some("LOOP"));
         if !cmd_ended {
@@ -3430,8 +3490,14 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 self.o.peek_token(Mode::Normal).token.span,
                 "unexpected end of block in DO-LOOP; did you forget to close a block?",
             );
+            if let Some(span) = self.block_start_span {
+                diag.span_note(Default::default(), span, "block started here");
+            }
             self.o.emit_diag(diag);
         }
+
+        self.block_start_span = old_block_start_span;
+
         let cond = self.or_sync_to(|s| s.expression(true), Terminal::LineBreak.into());
         let span = self.span_to_now(span);
         self.o
@@ -3458,10 +3524,12 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         f(func, args)
     }
 
-    fn stmt_tryccall_node<F>(&mut self, is_form: bool, f: F) -> EraNode
+    fn stmt_tryccall_node<F>(&mut self, span: SrcSpan, is_form: bool, f: F) -> EraNode
     where
         F: FnOnce(EraNodeRef, EraExtraDataRef) -> EraNode,
     {
+        let old_block_start_span = self.block_start_span.replace(self.span_to_now(span));
+
         let (func, args) = self.stmt_call_part(is_form);
         _ = self.expect_sync_to_newline();
 
@@ -3473,6 +3541,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 self.o.peek_token(Mode::Normal).token.span,
                 "unexpected end of block in TRYCCALL; did you forget to close a block?",
             );
+            if let Some(span) = self.block_start_span {
+                diag.span_note(Default::default(), span, "block started here");
+            }
             self.o.emit_diag(diag);
         }
         let (catch_stmts, good) = self.statements_list(Some("ENDCATCH"));
@@ -3483,8 +3554,13 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 self.o.peek_token(Mode::Normal).token.span,
                 "unexpected end of block in TRYCCALL; did you forget to close a block?",
             );
+            if let Some(span) = self.block_start_span {
+                diag.span_note(Default::default(), span, "block started here");
+            }
             self.o.emit_diag(diag);
         }
+
+        self.block_start_span = old_block_start_span;
 
         let (extra_data, _) = self
             .o
@@ -3594,6 +3670,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 token.span,
                 "unexpected end of function; did you forget to close a block?",
             );
+            if let Some(span) = self.block_start_span {
+                diag.span_note(Default::default(), span, "block started here");
+            }
             self.o.emit_diag(diag);
             false
         } else {

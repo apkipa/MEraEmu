@@ -89,6 +89,9 @@
     <Filter Include="Assets\Fonts">
       <UniqueIdentifier>{451f82c4-8b18-45a6-9ff1-947c10eb4a8d}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Settings">
+      <UniqueIdentifier>{9bd24905-7621-4be2-a387-7a6994c13074}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <None Include="PropertySheet.props" />
