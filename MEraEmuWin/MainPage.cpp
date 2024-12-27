@@ -123,8 +123,10 @@ namespace winrt::MEraEmuWin::implementation {
         });
 
         // Automatically start the game engine
-        dq.TryEnqueue(DispatcherQueuePriority::Low, [this]() {
-            BootstrapEngine();
+        dq.TryEnqueue(DispatcherQueuePriority::Low, [weak_this = get_weak()] {
+            auto self = weak_this.get();
+            if (!self) { return; }
+            self->BootstrapEngine();
         });
     }
 
@@ -153,7 +155,9 @@ namespace winrt::MEraEmuWin::implementation {
     void MainPage::BootstrapEngine() {
         hstring game_base_dir{ L".\\" };
         try {
-            MainEngineControl().as<EngineControl>()->Bootstrap(game_base_dir);
+            auto engine_ctrl = MainEngineControl().try_as<EngineControl>();
+            if (!engine_ctrl) { return; }
+            engine_ctrl->Bootstrap(game_base_dir);
         }
         catch (hresult_error const& e) {
             ShowSimpleContentDialog(L"启动引擎时出错", hstring(

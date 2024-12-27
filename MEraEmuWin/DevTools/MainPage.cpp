@@ -216,6 +216,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         if (!engine) { return; }
 
         m_engine_ctrl = engine.as<MEraEmuWin::implementation::EngineControl>().get();
+        m_weak_engine_ctrl = engine;
         m_et_EngineExecutionInterrupted = m_engine_ctrl->EngineExecutionInterrupted({ this, &MainPage::OnEngineExecutionInterrupted });
 
         //InitFromEngineControlAsync();
@@ -525,8 +526,10 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         // WARN: Init & Uninit operations must not be async because of APIs exposed to EngineControl
         if (m_engine_ctrl) {
             m_engine_running = false;
-            m_engine_ctrl->EngineExecutionInterrupted(m_et_EngineExecutionInterrupted);
-            ApplyEngineBreakpointsAsync(false);
+            if (auto strong = m_weak_engine_ctrl.get()) {
+                m_engine_ctrl->EngineExecutionInterrupted(m_et_EngineExecutionInterrupted);
+                ApplyEngineBreakpointsAsync(false);
+            }
             m_engine_ctrl = nullptr;
             InitFromEngineControlAsync();
         }

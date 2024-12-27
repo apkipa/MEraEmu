@@ -85,6 +85,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         void ResumeEngineExecutionPossiblySteppingPastBreakpoint();
 
         winrt::MEraEmuWin::implementation::EngineControl* m_engine_ctrl{ nullptr };
+        weak_ref<MEraEmuWin::EngineControl> m_weak_engine_ctrl;
         event_token m_et_EngineExecutionInterrupted{};
         Windows::Foundation::Collections::IObservableVector<MEraEmuWin::DevTools::QuickActionItem> m_filtered_quick_action_items{
             single_threaded_observable_vector<MEraEmuWin::DevTools::QuickActionItem>()

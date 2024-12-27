@@ -178,7 +178,12 @@ impl EraBcChunkBuilder {
     }
 
     fn finish(self) -> EraBcChunk {
-        EraBcChunk::new(Default::default(), self.bc, self.src_spans)
+        // TODO: Fix cst parser SrcSpan logic
+        EraBcChunk::new(
+            Default::default(),
+            self.bc,
+            self.src_spans.into_iter().map(|x| (x, 1)).collect(),
+        )
     }
 
     fn rollback_to(&mut self, checkpoint: EraBcChunkCheckpoint) {

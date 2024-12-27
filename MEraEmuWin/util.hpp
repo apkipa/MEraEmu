@@ -304,11 +304,12 @@ namespace util {
                             }
 
                             // Nothing to read here. Exit if the sender is closed.
-                            if (!data->is_open()) { return val; }
+                            bool is_open = data->is_open();
+                            data->is_vacant.notify_all();
+                            if (!is_open) { return val; }
 
                             // Sender is alive at this point.
                             // Wait for the sender to write to or close the channel.
-                            data->is_vacant.notify_all();
                             if (val) { break; }
                             data->is_vacant.wait(true, std::memory_order_acquire);
                             continue;

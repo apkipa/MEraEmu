@@ -42,11 +42,14 @@ pub struct EraCodeGenerator<'ctx, 'i, Callback> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct EraBcChunkCheckpoint(usize);
+struct EraBcChunkCheckpoint(u32, u32);
 
 impl EraBcChunkCheckpoint {
     fn pos(&self) -> usize {
-        self.0
+        self.0 as _
+    }
+    fn instruction_index(&self) -> usize {
+        self.1 as _
     }
 }
 
@@ -83,7 +86,7 @@ impl EraBcChunkJumpPoint {
 #[derive(Debug, Default)]
 struct EraBcChunkBuilder {
     bc: Vec<u8>,
-    src_spans: Vec<SrcSpan>,
+    src_spans: Vec<(SrcSpan, u8)>,
 }
 
 impl EraBcChunkBuilder {
@@ -95,7 +98,7 @@ impl EraBcChunkBuilder {
     }
 
     fn checkpoint(&self) -> EraBcChunkCheckpoint {
-        EraBcChunkCheckpoint(self.bc.len())
+        EraBcChunkCheckpoint(self.bc.len() as _, self.src_spans.len() as _)
     }
 
     fn get_len(&self) -> usize {
@@ -107,36 +110,36 @@ impl EraBcChunkBuilder {
     }
 
     fn rollback_to(&mut self, checkpoint: EraBcChunkCheckpoint) {
-        assert!(checkpoint.0 <= self.bc.len(), "invalid checkpoint");
-        self.bc.truncate(checkpoint.0);
-        self.src_spans.truncate(checkpoint.0);
+        let pos = checkpoint.pos();
+        assert!(pos <= self.bc.len(), "invalid checkpoint");
+        self.bc.truncate(pos);
+        self.src_spans.truncate(checkpoint.instruction_index());
     }
 
     fn push_bc(&mut self, bc: EraBytecodeKind, span: SrcSpan) {
         let bc = bc.to_bytes();
         self.bc.extend_from_slice(&bc);
-        self.src_spans
-            .extend(std::iter::repeat(span).take(bc.len()));
+        self.src_spans.push((span, bc.len() as u8));
     }
 
     fn push_u8(&mut self, value: u8, span: SrcSpan) {
         self.bc.push(value);
-        self.src_spans.push(span);
+        self.src_spans.push((span, 1));
     }
 
     fn push_u16(&mut self, value: u16, span: SrcSpan) {
-        self.push_u8((value & 0xff) as u8, span);
-        self.push_u8((value >> 8) as u8, span);
+        self.bc.extend_from_slice(&value.to_le_bytes());
+        self.src_spans.push((span, 2));
     }
 
     fn push_u32(&mut self, value: u32, span: SrcSpan) {
-        self.push_u16((value & 0xffff) as u16, span);
-        self.push_u16((value >> 16) as u16, span);
+        self.bc.extend_from_slice(&value.to_le_bytes());
+        self.src_spans.push((span, 4));
     }
 
     fn push_u64(&mut self, value: u64, span: SrcSpan) {
-        self.push_u32((value & 0xffffffff) as u32, span);
-        self.push_u32((value >> 32) as u32, span);
+        self.bc.extend_from_slice(&value.to_le_bytes());
+        self.src_spans.push((span, 8));
     }
 
     #[must_use]
@@ -179,12 +182,11 @@ impl EraBcChunkBuilder {
     }
 
     fn complete_jump(&mut self, jump_point: EraBcChunkJumpPoint, dest: EraBcChunkCheckpoint) {
-        let mut delta: i32 = dest
-            .0
+        let mut delta: i32 = (dest.0 as usize)
             .abs_diff(jump_point.0)
             .try_into()
             .expect("jump offset overflow");
-        if dest.0 < jump_point.0 {
+        if (dest.0 as usize) < jump_point.0 {
             delta = -delta;
         }
 

@@ -4558,6 +4558,10 @@ struct PackedSrcSpans {
     starts: (u8, Vec<u8>),
     // (num_size, lens)
     lens: (u8, Vec<u8>),
+    // Length of each run (instruction) of bytecodes. Used to run-length encode the spans.
+    // NOTE: We rely on the fact that no instruction is longer than 15 bytes, i.e.
+    //       bc_sizes can be seen as Vec<NonZero<u4>>.
+    bc_sizes: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -4568,14 +4572,24 @@ pub struct EraBcChunk {
 }
 
 impl EraBcChunk {
-    pub fn new(name: ArcStr, bc: Vec<u8>, src_spans: Vec<SrcSpan>) -> Self {
+    pub fn new(name: ArcStr, bc: Vec<u8>, src_spans: Vec<(SrcSpan, u8)>) -> Self {
         let mut bc = bc;
         bc.shrink_to_fit();
         let packed_src_spans = {
             use crate::util::pack_u32_from_iter;
-            let starts = pack_u32_from_iter(src_spans.iter().map(|span| span.start().0));
-            let lens = pack_u32_from_iter(src_spans.iter().map(|span| span.len()));
-            PackedSrcSpans { starts, lens }
+            let starts = pack_u32_from_iter(src_spans.iter().map(|span| span.0.start().0));
+            let lens = pack_u32_from_iter(src_spans.iter().map(|span| span.0.len()));
+            let mut bc_sizes = Vec::with_capacity((src_spans.len() + 1) / 2);
+            let mut it = src_spans.chunks_exact(2);
+            bc_sizes.extend(it.by_ref().map(|x| x[0].1 | (x[1].1 << 4)));
+            if let Some(x) = it.remainder().first() {
+                bc_sizes.push(x.1);
+            }
+            PackedSrcSpans {
+                starts,
+                lens,
+                bc_sizes,
+            }
         };
 
         EraBcChunk {
@@ -4597,6 +4611,26 @@ impl EraBcChunk {
 
     pub fn lookup_src(&self, idx: usize) -> Option<SrcSpan> {
         use crate::util::read_packed_u32;
+        // Translate bytecode bytes index to instruction index
+        let idx = (|| {
+            let mut i = 0;
+            let mut acc = 0;
+            for size in self
+                .packed_src_spans
+                .bc_sizes
+                .iter()
+                .map(|&x| x as usize)
+                .map(|x| [x & 0xF, x >> 4])
+                .flatten()
+            {
+                acc += size;
+                if idx < acc {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            None
+        })()?;
         let start = {
             let num_size = self.packed_src_spans.starts.0 as usize;
             let range = (num_size * idx)..(num_size * (idx + 1));
@@ -4616,19 +4650,28 @@ impl EraBcChunk {
         use crate::util::read_packed_u32;
         let starts_num_size = self.packed_src_spans.starts.0;
         let lens_num_size = self.packed_src_spans.lens.0;
-        (0..self.bc.len()).map(move |i| {
-            let start = read_packed_u32(
-                starts_num_size,
-                &self.packed_src_spans.starts.1
-                    [i * starts_num_size as usize..(i + 1) * starts_num_size as usize],
-            );
-            let len = read_packed_u32(
-                lens_num_size,
-                &self.packed_src_spans.lens.1
-                    [i * lens_num_size as usize..(i + 1) * lens_num_size as usize],
-            );
-            SrcSpan::new(SrcPos(start), len)
-        })
+        let inst_count = self.packed_src_spans.lens.1.len() / lens_num_size as usize;
+        (0..inst_count)
+            .map(move |i| {
+                let start = read_packed_u32(
+                    starts_num_size,
+                    &self.packed_src_spans.starts.1
+                        [i * starts_num_size as usize..(i + 1) * starts_num_size as usize],
+                );
+                let len = read_packed_u32(
+                    lens_num_size,
+                    &self.packed_src_spans.lens.1
+                        [i * lens_num_size as usize..(i + 1) * lens_num_size as usize],
+                );
+                // let bc_len = self.packed_src_spans.bc_sizes[i] as usize;
+                let bc_len = if i % 2 == 0 {
+                    self.packed_src_spans.bc_sizes[i / 2] as usize & 0xF
+                } else {
+                    self.packed_src_spans.bc_sizes[i / 2] as usize >> 4
+                };
+                std::iter::repeat(SrcSpan::new(SrcPos(start), len)).take(bc_len)
+            })
+            .flatten()
     }
 
     pub fn clear(&mut self) {
