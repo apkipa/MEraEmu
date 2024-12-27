@@ -1212,7 +1212,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         // Initialize input countdown timer
         m_input_countdown_timer.Interval(std::chrono::milliseconds{ 1 });
-        m_input_countdown_timer.Tick({ this, &EngineControl::OnInputCountDownTick });
+        m_input_countdown_timer.Tick({ get_weak(), &EngineControl::OnInputCountDownTick });
     }
     void EngineControl::ReturnToTitle() {
         m_outstanding_input_req = nullptr;
