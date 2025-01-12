@@ -544,31 +544,17 @@ std::optional<std::vector<uint8_t>> MEraEngine::read_bytecode(uint32_t chunk_idx
 void MEraEngine::patch_bytecode(uint32_t chunk_idx, uint32_t offset, std::span<const uint8_t> data) const {
     do_rpc("patch_bytecode", { { "chunk_idx", chunk_idx }, { "offset", offset }, { "data", data } });
 }
-std::optional<Value> MEraEngine::read_stack_value(uint32_t slot) const {
-    auto r = do_rpc("read_stack_value", { { "slot", slot } });
-    if (r.is_null()) {
-        return std::nullopt;
-    }
-    return r.get<Value>();
-}
-std::optional<Value> MEraEngine::read_variable_with_slot(uint32_t slot, bool in_global_frame) const {
-    auto r = do_rpc("read_variable_with_slot", { { "slot", slot }, { "in_global_frame", in_global_frame } });
-    if (r.is_null()) {
-        return std::nullopt;
-    }
-    return r.get<Value>();
-}
-ScalarValue MEraEngine::evaluate_expr(std::string_view expr, std::optional<uint32_t> scope_idx) const {
-    return do_rpc("evaluate_expr", { { "expr", expr }, { "scope_idx", ret_to_json(scope_idx) } }).get<ScalarValue>();
-}
-Value MEraEngine::evaluate_var_at_scope(std::string_view name, std::optional<uint32_t> scope_idx) const {
-    return do_rpc("evaluate_var_at_scope", { { "name", name }, { "scope_idx", ret_to_json(scope_idx) } }).get<Value>();
+EraEvaluateExprResult MEraEngine::evaluate_expr(std::string_view expr, std::optional<uint32_t> scope_idx, uint64_t offset, uint64_t count, uint64_t eval_limit) const {
+    return do_rpc("evaluate_expr", { { "expr", expr }, { "scope_idx", scope_idx }, { "offset", offset }, { "count", count }, { "eval_limit", eval_limit } }).get<EraEvaluateExprResult>();
 }
 std::vector<std::string> MEraEngine::get_functions_list() const {
     return do_rpc("get_functions_list", {}).get<std::vector<std::string>>();
 }
 std::vector<EraDumpFunctionBytecodeEntry> MEraEngine::dump_function_bytecode(std::string_view name) const {
     return do_rpc("dump_function_bytecode", { { "name", name } }).get<std::vector<EraDumpFunctionBytecodeEntry>>();
+}
+nlohmann::json MEraEngine::dump_stack() const {
+    return do_rpc("dump_stack", {});
 }
 nlohmann::json MEraEngine::do_rpc(std::string_view method, nlohmann::json params) const {
     auto json = make_jsonrpc(method, std::move(params));

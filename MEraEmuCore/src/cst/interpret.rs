@@ -399,7 +399,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
                             ));
                         };
                         let result = if let Some(arg) = args.next() {
-                            let dims = var_val.dims().unwrap();
+                            let dims = var_val.dims().clone();
                             let var_dim = self.unwrap_int(arg.0.coerce_int(), arg.1)?;
                             let var_dim = var_dim as usize;
                             match dims.get(var_dim) {
@@ -416,7 +416,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
                                 }
                             }
                         } else {
-                            *var_val.dims().unwrap().last().unwrap() as _
+                            *var_val.dims().last().unwrap() as _
                         };
                         ScalarValue::Int(result)
                     }
@@ -607,7 +607,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
                     dims.insert(0, crate::v2::engine::INITIAL_CHARA_CAP);
                 }
 
-                Value::new_int_arr(dims, inits)
+                ArrayValue::new_int_arr(dims, inits)
             }
             EraDeclItemNodeKind::VarSDecl(decl) => {
                 (name_key, name_span) = decl
@@ -686,7 +686,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
                     dims.insert(0, crate::v2::engine::INITIAL_CHARA_CAP);
                 }
 
-                Value::new_str_arr(dims, inits)
+                ArrayValue::new_str_arr(dims, inits)
             }
             // Ignore other kinds of declarations
             _ => return Err(EraInterpretError::Others),
@@ -733,7 +733,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
         })
     }
 
-    pub fn make_diag(&self) -> Diagnostic<'static> {
+    pub fn make_diag(&self) -> Diagnostic {
         Diagnostic::with_file(self.ctx.active_source.clone())
     }
 
@@ -769,11 +769,14 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
         }
     }
 
-    fn resolve_variable_node<'a>(&mut self, name: EraIdentLeaf<'a>) -> InterpretResult<'a, Value> {
+    fn resolve_variable_node<'a>(
+        &mut self,
+        name: EraIdentLeaf<'a>,
+    ) -> InterpretResult<'a, &ArrayValue> {
         let token = name.token();
-        let name = name.resolve_text(self.ctx.node_cache.interner());
+        let name = name.resolve_text(self.ctx.interner());
 
-        let Some(var_info) = self.ctx.variables.get_var_info_by_name(name) else {
+        let Some(var_info) = self.ctx.variables.get_var_info_by_name_mut(name) else {
             // NOTE: Don't emit diagnostics here; let the caller decide and retry
             // let mut diag = self.make_diag();
             // diag.span_err(
@@ -784,10 +787,12 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
             // self.ctx.emit_diag(diag);
             return Err(EraInterpretError::VarNotFound(token.into()));
         };
+        let var_info: &mut EraVarInfo = unsafe { std::mem::transmute(var_info) };
 
         var_info.val.ensure_alloc();
 
         if self.is_const && !var_info.is_const {
+            drop(var_info);
             let mut diag = self.make_diag();
             diag.span_err(
                 Default::default(),
@@ -798,7 +803,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
             return Err(EraInterpretError::Others);
         }
 
-        Ok(var_info.val.clone())
+        Ok(&var_info.val)
     }
 
     fn resolve_var_node_with_idx<'a>(
@@ -809,8 +814,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
         let token = name.token();
 
         match self.resolve_variable_node(name)?.as_unpacked() {
-            RefFlatValue::ArrInt(x) => {
-                let x = x.borrow();
+            FlatArrayValueRef::ArrInt(x) => {
                 let Some(x) = x.get(idxs) else {
                     let mut diag = self.make_diag();
                     diag.span_err(
@@ -823,8 +827,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, Callback>
                 };
                 Ok(ScalarValue::Int(x.val))
             }
-            RefFlatValue::ArrStr(x) => {
-                let x = x.borrow();
+            FlatArrayValueRef::ArrStr(x) => {
                 let Some(x) = x.get(idxs) else {
                     let mut diag = self.make_diag();
                     diag.span_err(

@@ -31,31 +31,38 @@ pub struct EraInterpretedVarDecl {
     pub is_dynamic: bool,
 }
 
-pub struct EraInterpreter<'ctx, 'i, 'n, Callback> {
-    ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
+pub struct EraInterpreter<'ctx, 'i, 'n, T: ?Sized> {
+    diag_emit: &'ctx mut T,
+    ctx: &'ctx EraCompilerCtxInner<'i>,
     node_arena: &'n EraNodeArena,
     is_const: bool,
 }
 
-impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, Callback> {
+impl<'ctx, 'i, 'n, T: EraEmitDiagnostic + ?Sized> EraInterpreter<'ctx, 'i, 'n, T> {
     pub fn new(
-        ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
+        diag_emit: &'ctx mut T,
+        ctx: &'ctx EraCompilerCtxInner<'i>,
         node_arena: &'n EraNodeArena,
         is_const: bool,
     ) -> Self {
         Self {
+            diag_emit,
             ctx,
             node_arena,
             is_const,
         }
     }
 
-    pub fn get_ctx(&self) -> &EraCompilerCtx<'i, Callback> {
+    pub fn get_ctx(&self) -> &'ctx EraCompilerCtxInner<'i> {
         self.ctx
     }
 
-    pub fn get_ctx_mut(&mut self) -> &mut EraCompilerCtx<'i, Callback> {
-        self.ctx
+    // pub fn get_ctx_mut(&mut self) -> &mut EraCompilerCtxInner<'i> {
+    //     self.ctx
+    // }
+
+    pub fn get_diag_emit(&mut self) -> &mut T {
+        self.diag_emit
     }
 
     /// Interpret an expression node, with global context.
@@ -98,7 +105,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                         let op_span = self.node_arena.get_node_token_span(expr);
                         let mut diag = self.make_diag();
                         diag.span_err(Default::default(), op_span, "invalid unary operator");
-                        self.ctx.emit_diag(diag);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(EraInterpretError::Others);
                     }
                 }
@@ -111,7 +118,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                         let op_span = self.node_arena.get_node_token_span(expr);
                         let mut diag = self.make_diag();
                         diag.span_err(Default::default(), op_span, "invalid unary operator");
-                        self.ctx.emit_diag(diag);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(EraInterpretError::Others);
                     }
                 }
@@ -138,7 +145,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                                 op_span,
                                 "invalid operand types for binary operator",
                             );
-                            self.ctx.emit_diag(diag);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(EraInterpretError::Others);
                         }
                     },
@@ -159,7 +166,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                                     lhs_span,
                                     "negative integer cannot be used as string multiplier",
                                 );
-                                self.ctx.emit_diag(diag);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(EraInterpretError::Others);
                             }
                             ScalarValue::Str(rhs.repeat(lhs as _))
@@ -172,7 +179,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                                     rhs_span,
                                     "negative integer cannot be used as string multiplier",
                                 );
-                                self.ctx.emit_diag(diag);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(EraInterpretError::Others);
                             }
                             ScalarValue::Str(lhs.repeat(rhs as _))
@@ -184,7 +191,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                                 op_span,
                                 "invalid operand types for binary operator",
                             );
-                            self.ctx.emit_diag(diag);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(EraInterpretError::Others);
                         }
                     },
@@ -194,7 +201,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                         if rhs == 0 {
                             let mut diag = self.make_diag();
                             diag.span_err(Default::default(), rhs_span, "division by zero");
-                            self.ctx.emit_diag(diag);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(EraInterpretError::Others);
                         }
                         ScalarValue::Int(lhs.wrapping_div(rhs))
@@ -205,7 +212,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                         if rhs == 0 {
                             let mut diag = self.make_diag();
                             diag.span_err(Default::default(), rhs_span, "division by zero");
-                            self.ctx.emit_diag(diag);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(EraInterpretError::Others);
                         }
                         ScalarValue::Int(lhs.wrapping_rem(rhs))
@@ -268,7 +275,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                     _ => {
                         let mut diag = self.make_diag();
                         diag.span_err(Default::default(), op_span, "invalid binary operator");
-                        self.ctx.emit_diag(diag);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(EraInterpretError::Others);
                     }
                 }
@@ -303,7 +310,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                         else_expr_span,
                         format!("false branch is of type {}", else_expr.kind()),
                     );
-                    self.ctx.emit_diag(diag);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(EraInterpretError::Others);
                 }
                 if cond != 0 {
@@ -329,7 +336,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                 let EraNode::Identifier(name) = self.node_arena.get_node(name) else {
                     let mut diag = self.make_diag();
                     diag.span_err(Default::default(), name_span, "invalid function name");
-                    self.ctx.emit_diag(diag);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(EraInterpretError::Others);
                 };
                 let name = self.ctx.node_cache.interner().resolve(name);
@@ -347,11 +354,11 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                         let Some(var_val) = self.ctx.variables.get_var(&var_name) else {
                             let mut diag = self.make_diag();
                             diag.span_err(Default::default(), var_name_span, "variable not found");
-                            self.ctx.emit_diag(diag);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(EraInterpretError::VarNotFound(var_name, var_name_span));
                         };
                         let result = if let Some((arg, arg_span)) = args.next() {
-                            let dims = var_val.dims().unwrap();
+                            let dims = var_val.dims().clone();
                             let var_dim = self.unwrap_int(arg, arg_span)?;
                             let var_dim = var_dim as usize;
                             match dims.get(var_dim) {
@@ -363,12 +370,12 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                                         arg_span,
                                         "variable dimension out of bounds",
                                     );
-                                    self.ctx.emit_diag(diag);
+                                    self.ctx.emit_diag_to(diag, self.diag_emit);
                                     return Err(EraInterpretError::Others);
                                 }
                             }
                         } else {
-                            *var_val.dims().unwrap().last().unwrap() as _
+                            *var_val.dims().last().unwrap() as _
                         };
                         ScalarValue::Int(result)
                     }
@@ -381,7 +388,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                                 "function `{name}` is not defined or has no matching overloads"
                             ),
                         );
-                        self.ctx.emit_diag(diag);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(EraInterpretError::Others);
                     }
                 }
@@ -414,7 +421,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                                 part_span,
                                 "width and alignment are not supported yet",
                             );
-                            self.ctx.emit_diag(diag);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(EraInterpretError::Others);
                         }
                         part.expr
@@ -432,7 +439,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                                 part_span,
                                 format!("invalid string part value: {:?}", x),
                             );
-                            self.ctx.emit_diag(diag);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(EraInterpretError::Others);
                         }
                     }
@@ -446,7 +453,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                     expr_span,
                     format!("invalid expression node: {:?}", expr),
                 );
-                self.ctx.emit_diag(diag);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(EraInterpretError::Others);
             }
         })
@@ -462,7 +469,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                     var_span,
                     format!("undefined variable `{var_name}`"),
                 );
-                self.ctx.emit_diag(diag);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 None
             }
             _ => None,
@@ -511,7 +518,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
         else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), decl_span, "not a variable declaration");
-            self.ctx.emit_diag(diag);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(EraInterpretError::Others);
         };
 
@@ -537,7 +544,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                     qualifier_span,
                     "invalid variable qualifier",
                 );
-                self.ctx.emit_diag(diag);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(EraInterpretError::Others);
             };
             match qualifier {
@@ -566,7 +573,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                         qualifier_span,
                         "invalid variable qualifier",
                     );
-                    self.ctx.emit_diag(diag);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(EraInterpretError::Others);
                 }
             }
@@ -590,7 +597,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                             span,
                             "REF variable dimension must be zero or omitted",
                         );
-                        self.ctx.emit_diag(diag);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(EraInterpretError::Others);
                     }
                     if !is_ref && x == 0 {
@@ -600,7 +607,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                             span,
                             "non-REF variable dimension cannot be zero or omitted",
                         );
-                        self.ctx.emit_diag(diag);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(EraInterpretError::Others);
                     }
                     x.try_into().map_err(|_| {
@@ -610,7 +617,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                             span,
                             "expression does not evaluate to a valid variable dimension",
                         );
-                        self.ctx.emit_diag(diag);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         EraInterpretError::Others
                     })
                 })
@@ -628,7 +635,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                     decl_span,
                     "REF variable cannot be DYNAMIC",
                 );
-                self.ctx.emit_diag(diag);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(EraInterpretError::Others);
             }
             if is_charadata {
@@ -638,7 +645,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                     decl_span,
                     "REF variable cannot be CHARADATA",
                 );
-                self.ctx.emit_diag(diag);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(EraInterpretError::Others);
             }
         }
@@ -667,14 +674,14 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                         decl_span,
                         "REF variable cannot have initializers",
                     );
-                    self.ctx.emit_diag(diag);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(EraInterpretError::Others);
                 }
                 if omitted_dims {
                     *dims.last_mut().unwrap() = inits.len().max(1) as _;
                 }
             }
-            Value::new_str_arr(dims, inits)
+            ArrayValue::new_str_arr(dims, inits)
         } else {
             let inits: Vec<_> = self
                 .node_arena
@@ -691,14 +698,14 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                         decl_span,
                         "REF variable cannot have initializers",
                     );
-                    self.ctx.emit_diag(diag);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(EraInterpretError::Others);
                 }
                 if omitted_dims {
                     *dims.last_mut().unwrap() = inits.len().max(1) as _;
                 }
             }
-            Value::new_int_arr(dims, inits)
+            ArrayValue::new_int_arr(dims, inits)
         };
 
         // Create variable
@@ -719,7 +726,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
         })
     }
 
-    pub fn make_diag(&self) -> Diagnostic<'static> {
+    pub fn make_diag(&self) -> Diagnostic {
         Diagnostic::with_file(self.ctx.active_source.clone())
     }
 
@@ -733,7 +740,7 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                     span,
                     "expression does not evaluate to integer",
                 );
-                self.ctx.emit_diag(diag);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 Err(EraInterpretError::Others)
             }
         }
@@ -749,13 +756,13 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                     span,
                     "expression does not evaluate to string",
                 );
-                self.ctx.emit_diag(diag);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 Err(EraInterpretError::Others)
             }
         }
     }
 
-    fn resolve_variable_node(&mut self, name: EraNodeRef) -> InterpretResult<Value> {
+    fn resolve_variable_node(&mut self, name: EraNodeRef) -> InterpretResult<&ArrayValue> {
         let name_span = self.node_arena.get_node_span(name);
         let name_token = match self.node_arena.get_node(name) {
             EraNode::Identifier(x) => x,
@@ -766,17 +773,17 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                     name_span,
                     "namespaced variable not yet supported",
                 );
-                self.ctx.emit_diag(diag);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(EraInterpretError::Others);
             }
             _ => {
                 let mut diag = self.make_diag();
                 diag.span_err(Default::default(), name_span, "invalid variable name node");
-                self.ctx.emit_diag(diag);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(EraInterpretError::Others);
             }
         };
-        let name = self.ctx.node_cache.interner().resolve(name_token);
+        let name = self.ctx.interner().resolve(name_token);
 
         let Some(var_info) = self.ctx.variables.get_var_info_by_name(name) else {
             // NOTE: Don't emit diagnostics here; let the caller decide and retry
@@ -786,11 +793,11 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
             //     token.text_range().into(),
             //     format!("variable `{}` not found", name),
             // );
-            // self.ctx.emit_diag(diag);
+            // self.ctx.emit_diag_to(diag, self.emit_diag);
             return Err(EraInterpretError::VarNotFound(name.into(), name_span));
         };
 
-        var_info.val.ensure_alloc();
+        // var_info.val.ensure_alloc();
 
         if self.is_const && !var_info.is_const {
             let mut diag = self.make_diag();
@@ -799,11 +806,11 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
                 name_span,
                 format!("variable `{name}` cannot be used in constant context"),
             );
-            self.ctx.emit_diag(diag);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(EraInterpretError::Others);
         }
 
-        Ok(var_info.val.clone())
+        Ok(&var_info.val)
     }
 
     fn resolve_var_node_with_idx(
@@ -814,22 +821,20 @@ impl<'ctx, 'i, 'n, Callback: EraCompilerCallback> EraInterpreter<'ctx, 'i, 'n, C
         let name_span = self.node_arena.get_node_span(name);
 
         match self.resolve_variable_node(name)?.as_unpacked() {
-            RefFlatValue::ArrInt(x) => {
-                let x = x.borrow();
-                let Some(x) = x.get(idxs) else {
+            FlatArrayValueRef::ArrInt(x) => {
+                let Some(x) = x.get_val_safe(idxs) else {
                     let mut diag = self.make_diag();
                     diag.span_err(Default::default(), name_span, "index out of bounds");
-                    self.ctx.emit_diag(diag);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(EraInterpretError::Others);
                 };
                 Ok(ScalarValue::Int(x.val))
             }
-            RefFlatValue::ArrStr(x) => {
-                let x = x.borrow();
-                let Some(x) = x.get(idxs) else {
+            FlatArrayValueRef::ArrStr(x) => {
+                let Some(x) = x.get_val_safe(idxs) else {
                     let mut diag = self.make_diag();
                     diag.span_err(Default::default(), name_span, "index out of bounds");
-                    self.ctx.emit_diag(diag);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(EraInterpretError::Others);
                 };
                 Ok(ScalarValue::Str(x.val.as_str().to_owned()))

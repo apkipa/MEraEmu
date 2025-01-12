@@ -5,6 +5,7 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     marker::PhantomData,
+    mem::ManuallyDrop,
     ops::{ControlFlow, Deref, DerefMut},
 };
 
@@ -17,7 +18,7 @@ use cstree::{
 use either::Either;
 use hashbrown::HashMap;
 use indexmap::IndexMap;
-use rclite::Rc;
+use rclite::{Arc, Rc};
 use rustc_hash::FxBuildHasher;
 use safer_ffi::{derive_ReprC, prelude::VirtualPtr};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -795,7 +796,7 @@ impl EraMacroMap {
 pub struct EraSourceFile {
     pub filename: ArcStr,
     /// The original source text.
-    pub text: Option<String>,
+    pub text: Option<arcstr::ArcStr>,
     /// The compressed original source text. Reduces memory usage.
     pub compressed_text: Option<Box<[u8]>>,
     /// The root AST node of the lossless syntax tree, with macros replaced.
@@ -819,29 +820,49 @@ pub struct EraCompilerCtx<'i, Callback> {
     // TODO: Wrap callback in Mutex; this makes it easier for concurrent access, while also
     //       ensuring zero overhead for single-threaded access (i.e. &mut Ctx).
     pub callback: Callback,
+    pub i: EraCompilerCtxInner<'i>,
+}
+
+impl<'i, Callback> Deref for EraCompilerCtx<'i, Callback> {
+    type Target = EraCompilerCtxInner<'i>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.i
+    }
+}
+
+impl<'i, Callback> DerefMut for EraCompilerCtx<'i, Callback> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.i
+    }
+}
+
+#[derive(Debug)]
+pub struct EraCompilerCtxInner<'i> {
     /// Replacements defined in `_Rename.csv`.
     pub global_replace: EraDefineScope,
     /// `#define`'s from erh files are considered global.
     // global_define: EraDefineScope<'static>,
     pub global_define: EraDefineScope,
     /// The source file map.
-    pub source_map: Rc<FxIndexMap<ArcStr, EraSourceFile>>,
+    pub source_map: Arc<FxIndexMap<ArcStr, EraSourceFile>>,
     /// Current active source file name. Empty if no source file is active.
     pub active_source: ArcStr,
-    pub variables: EraVarPool,
     /// The list of character templates. Used by runtime.
     pub chara_templates: BTreeMap<u32, EraCharaInitTemplate>,
     /// The list of CSV contextual indices. Used by CSV variable access.
     pub csv_indices: FxHashMap<Ascii<ArcStr>, Vec<(EraCsvVarKind, u32)>>,
     // NOTE: We usually never remove chunks, so we use `Vec` instead of `HashMap`.
-    pub bc_chunks: Rc<Vec<EraBcChunk>>,
+    pub bc_chunks: Arc<Vec<EraBcChunk>>,
     /// The list of function entries. Note that the value is wrapped in `Option` to
     /// allow for soft deletion.
-    pub func_entries: Rc<FxIndexMap<&'i Ascii<str>, Option<EraFuncInfo<'i>>>>,
+    pub func_entries: Arc<FxIndexMap<&'i Ascii<str>, Option<EraFuncInfo<'i>>>>,
     // TODO: Always use `&'i ThreadedRodeo`. We also need to implement a `ThreadedNodeCache` later.
     //       This helps with concurrent interning, and also helps to eliminate the usage of `unsafe`.
     /// The node cache used for CST building.
     pub node_cache: cstree::build::NodeCache<'i, &'i ThreadedTokenInterner>,
+    /// All globally stored variables.
+    pub variables: EraVarPool,
 }
 
 trait IndexMapExt {
@@ -869,31 +890,44 @@ impl<'i, Callback: EraCompilerCallback> EraCompilerCtx<'i, Callback> {
     pub fn new(callback: Callback, interner: &'i ThreadedTokenInterner) -> Self {
         EraCompilerCtx {
             callback,
-            global_replace: EraDefineScope::new(),
-            global_define: EraDefineScope::new(),
-            source_map: Default::default(),
-            active_source: ArcStr::default(),
-            variables: EraVarPool::new(),
-            node_cache: cstree::build::NodeCache::from_interner(interner),
-            chara_templates: BTreeMap::new(),
-            csv_indices: FxHashMap::default(),
-            bc_chunks: Rc::new(Vec::new()),
-            func_entries: Default::default(),
+            i: EraCompilerCtxInner {
+                global_replace: EraDefineScope::new(),
+                global_define: EraDefineScope::new(),
+                source_map: Default::default(),
+                active_source: ArcStr::default(),
+                node_cache: cstree::build::NodeCache::from_interner(interner),
+                chara_templates: BTreeMap::new(),
+                csv_indices: FxHashMap::default(),
+                bc_chunks: Arc::new(Vec::new()),
+                func_entries: Default::default(),
+                variables: EraVarPool::new(),
+            },
         }
     }
 
-    pub fn make_diag(&self) -> Diagnostic<'static> {
+    pub fn emit_diag(&mut self, diag: Diagnostic) {
+        self.i.emit_diag_to(diag, &mut self.callback);
+    }
+}
+
+impl<'i> EraCompilerCtxInner<'i> {
+    pub fn make_diag(&self) -> Diagnostic {
         Diagnostic::with_file(self.active_source.clone())
     }
 
-    pub fn emit_diag(&mut self, diag: Diagnostic) {
-        let provider = DiagnosticProvider::new(
-            &diag,
-            Some(&self.source_map),
-            Some(self.node_cache.interner()),
-        );
-        self.callback.emit_diag(&provider);
-        diag.cancel();
+    pub fn make_diag_resolver(&self) -> DiagnosticResolver {
+        DiagnosticResolver {
+            src_map: Some(&self.source_map),
+            resolver: Some(self.interner()),
+        }
+    }
+
+    pub fn make_diag_provider(&self, diag: Diagnostic) -> DiagnosticProvider {
+        DiagnosticProvider::new(diag, self.make_diag_resolver())
+    }
+
+    pub fn emit_diag_to<T: EraEmitDiagnostic + ?Sized>(&self, diag: Diagnostic, target: &mut T) {
+        target.emit_diag(self.make_diag_provider(diag));
     }
 
     pub fn resolve_src_span(
@@ -901,31 +935,13 @@ impl<'i, Callback: EraCompilerCallback> EraCompilerCtx<'i, Callback> {
         filename: &str,
         span: SrcSpan,
     ) -> Option<DiagnosticResolveSrcSpanResult> {
-        // NOTE: No need to cancel since the diagnostic is empty.
-        let diag = Diagnostic::new();
-        let provider = DiagnosticProvider::new(
-            &diag,
-            Some(&self.source_map),
-            Some(self.node_cache.interner()),
-        );
-        provider.resolve_src_span(filename, span)
+        let resolver = self.make_diag_resolver();
+        resolver.resolve_src_span(&Diagnostic::new(), filename, span)
     }
 
     pub fn interner(&self) -> &'i ThreadedTokenInterner {
         self.node_cache.interner()
     }
-
-    // pub fn interner_mut(&mut self) -> &mut ThreadedTokenInterner {
-    //     self.node_cache.interner_mut()
-    // }
-
-    // /// # Safety
-    // ///
-    // /// You must ensure that the returned reference is not used after the `EraCompilerCtx` is dropped.
-    // /// [`lasso::Rodeo`] guarantees that the strings are not deallocated until the interner is dropped.
-    // pub fn resolve_static_str(&self, key: TokenKey) -> &'static str {
-    //     unsafe { std::mem::transmute(self.interner().resolve(key)) }
-    // }
 
     pub fn resolve_str(&self, key: TokenKey) -> &'i str {
         self.interner().resolve(key)
@@ -979,9 +995,45 @@ impl<'i, Callback: EraCompilerCallback> EraCompilerCtx<'i, Callback> {
     }
 }
 
+pub trait EraEmitDiagnostic {
+    fn emit_diag(&mut self, diag: DiagnosticProvider);
+}
+
+impl<T: EraCompilerCallback> EraEmitDiagnostic for T {
+    fn emit_diag(&mut self, diag: DiagnosticProvider) {
+        EraCompilerCallback::emit_diag(self, diag)
+    }
+}
+
+pub struct EraDiagnosticAccumulator {
+    diags: Vec<Diagnostic>,
+}
+
+impl EraDiagnosticAccumulator {
+    pub fn new() -> Self {
+        Self { diags: Vec::new() }
+    }
+
+    pub fn push(&mut self, diag: Diagnostic) {
+        self.diags.push(diag);
+    }
+
+    pub fn emit_all_to(self, emit_diag: &mut impl EraEmitDiagnostic, ctx: &EraCompilerCtxInner) {
+        for diag in self.diags {
+            ctx.emit_diag_to(diag, emit_diag);
+        }
+    }
+}
+
+impl EraEmitDiagnostic for EraDiagnosticAccumulator {
+    fn emit_diag(&mut self, diag: DiagnosticProvider) {
+        self.push(diag.into_diag());
+    }
+}
+
 pub trait EraCompilerCallback {
     // ----- Diagnostics -----
-    fn emit_diag(&mut self, diag: &DiagnosticProvider);
+    fn emit_diag(&mut self, diag: DiagnosticProvider);
     // ----- Virtual Machine -----
     fn on_get_rand(&mut self) -> u64;
     fn on_print(&mut self, content: &str, flags: EraPrintExtendedFlags);
@@ -1148,6 +1200,7 @@ impl std::io::Seek for dyn EraCompilerHostFile {
 
 #[derive_ReprC]
 #[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EraCompilerFileSeekMode {
     Start,
     End,
@@ -1157,6 +1210,7 @@ pub enum EraCompilerFileSeekMode {
 #[derive_ReprC]
 #[repr(u32)]
 #[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EraExecutionBreakReason {
     /// User requested break from inside the callback.
     CallbackBreak,
@@ -1178,6 +1232,7 @@ pub enum EraExecutionBreakReason {
     IllegalArguments,
     /// An exception occurred during execution.
     InternalError,
+    UserDefinedBreakReasonStart = 100001,
 }
 
 impl Default for EraExecutionBreakReason {
@@ -1301,36 +1356,36 @@ pub struct DiagnosticEntry {
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 /// A collection of diagnostics. Note that it is an error for a `Diagnostic` not to be
 /// emitted or canceled before it is dropped, i.e. `Diagnostic` is linear.
-pub struct Diagnostic<'a> {
+pub struct Diagnostic {
     filename: ArcStr,
-    src: &'a [u8],
+    src: Option<Box<[u8]>>,
     entries: Vec<DiagnosticEntry>,
 }
 
-impl<'a> Diagnostic<'a> {
-    pub const fn new() -> Diagnostic<'static> {
+impl Diagnostic {
+    pub const fn new() -> Diagnostic {
         Diagnostic {
             filename: ArcStr::new(),
-            src: &[],
+            src: None,
             entries: Vec::new(),
         }
     }
 
-    pub const fn with_file(filename: ArcStr) -> Diagnostic<'a> {
+    pub const fn with_file(filename: ArcStr) -> Diagnostic {
         Diagnostic {
             filename,
-            src: &[],
+            src: None,
             entries: Vec::new(),
         }
     }
 
-    pub fn with_src(filename: ArcStr, src: &'a [u8]) -> Diagnostic<'a> {
+    pub fn with_src(filename: ArcStr, src: &[u8]) -> Diagnostic {
         Diagnostic {
             filename,
-            src,
+            src: Some(src.into()),
             entries: Vec::new(),
         }
     }
@@ -1405,7 +1460,8 @@ impl<'a> Diagnostic<'a> {
     }
 }
 
-impl Drop for Diagnostic<'_> {
+#[cfg(debug_assertions)]
+impl Drop for Diagnostic {
     fn drop(&mut self) {
         // Is unwinding?
         if std::thread::panicking() {
@@ -1421,44 +1477,64 @@ impl Drop for Diagnostic<'_> {
 
 #[derive_ReprC]
 #[repr(opaque)]
-pub struct DiagnosticProvider<'a, 'src> {
-    diag: &'a Diagnostic<'src>,
+pub struct DiagnosticProvider<'a> {
+    diag: Diagnostic,
+    resolver: DiagnosticResolver<'a>,
+}
+
+impl<'a> DiagnosticProvider<'a> {
+    pub fn new(diag: Diagnostic, resolver: DiagnosticResolver<'a>) -> Self {
+        DiagnosticProvider { diag, resolver }
+    }
+
+    pub fn into_diag(self) -> Diagnostic {
+        self.diag
+    }
+
+    pub fn get_entries(&self) -> &[DiagnosticEntry] {
+        &self.diag.entries
+    }
+
+    pub fn resolve_src_span(
+        &self,
+        filename: &str,
+        span: SrcSpan,
+    ) -> Option<DiagnosticResolveSrcSpanResult> {
+        self.resolver.resolve_src_span(&self.diag, filename, span)
+    }
+}
+
+#[derive_ReprC]
+#[repr(opaque)]
+pub struct DiagnosticResolver<'a> {
     src_map: Option<&'a FxIndexMap<ArcStr, EraSourceFile>>,
     resolver: Option<&'a ThreadedTokenInterner>,
 }
 
-impl<'a, 'src> DiagnosticProvider<'a, 'src> {
+impl<'a> DiagnosticResolver<'a> {
     pub fn new(
-        diag: &'a Diagnostic<'src>,
         src_map: Option<&'a FxIndexMap<ArcStr, EraSourceFile>>,
         resolver: Option<&'a ThreadedTokenInterner>,
     ) -> Self {
-        DiagnosticProvider {
-            diag,
-            src_map,
-            resolver,
-        }
-    }
-
-    pub fn get_entries(&self) -> &'a [DiagnosticEntry] {
-        &self.diag.entries
+        DiagnosticResolver { src_map, resolver }
     }
 
     // NOTE: Use empty filename to resolve from default file, if there is one.
     pub fn resolve_src_span(
         &self,
+        diag: &Diagnostic,
         filename: &str,
         span: SrcSpan,
     ) -> Option<DiagnosticResolveSrcSpanResult> {
         use bstr::ByteSlice;
 
         let src = if filename.is_empty() {
-            if self.diag.filename.is_empty() {
+            if diag.filename.is_empty() {
                 return None;
             }
-            Cow::Borrowed(self.diag.src)
-        } else if self.diag.filename.as_str() == filename && !self.diag.src.is_empty() {
-            Cow::Borrowed(self.diag.src)
+            Cow::Borrowed(diag.src.as_deref()?)
+        } else if diag.filename.as_str() == filename && !diag.src.is_none() {
+            Cow::Borrowed(diag.src.as_deref()?)
         } else {
             let input_span = span;
             let len = span.len();
@@ -1671,6 +1747,12 @@ impl Serialize for IntValue {
     }
 }
 
+impl<'de> Deserialize<'de> for IntValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        i64::deserialize(deserializer).map(Self::new)
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StrValue {
     pub val: ArcStr,
@@ -1682,24 +1764,28 @@ impl Serialize for StrValue {
     }
 }
 
+impl<'de> Deserialize<'de> for StrValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        ArcStr::deserialize(deserializer).map(Self::new)
+    }
+}
+
 // NOTE: Arr*Value are used as variable references
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArrIntValue {
     pub vals: Vec<IntValue>,
     pub dims: EraVarDims,
-    #[serde(skip)]
     pub flags: EraValueFlags,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArrStrValue {
     pub vals: Vec<StrValue>,
     pub dims: EraVarDims,
-    #[serde(skip)]
     pub flags: EraValueFlags,
 }
 
-pub trait ArrayLikeValue {
-    type Item;
+pub trait ArrayLikeValue: std::hash::Hash {
+    type Item: std::hash::Hash + Default;
 
     fn flat_get(&self, idx: usize) -> Option<&Self::Item>;
     fn flat_get_mut(&mut self, idx: usize) -> Option<&mut Self::Item>;
@@ -1710,6 +1796,55 @@ pub trait ArrayLikeValue {
 
     fn flat_get_val(&self, idx: usize) -> Option<Self::Item>;
     fn flat_set_val(&mut self, idx: usize, val: Self::Item) -> Option<Self::Item>;
+
+    fn hash_value<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+
+        self.get_vals().hash(state);
+        self.get_dims().hash(state);
+        // self.get_flags().hash(state);
+    }
+    fn mem_usage(&self) -> usize;
+    fn is_default(&self) -> bool;
+    fn is_allocated(&self) -> bool {
+        !self.get_vals().is_empty()
+    }
+    fn flat_get_val_safe(&self, idx: usize) -> Option<Self::Item> {
+        if self.is_allocated() {
+            self.flat_get_val(idx)
+        } else {
+            let size: usize = self.get_dims().iter().map(|&x| x as usize).product();
+            (idx < size).then(|| Self::Item::default())
+        }
+    }
+    fn get_val_safe(&self, idxs: &[u32]) -> Option<Self::Item> {
+        if self.is_allocated() {
+            let idx = self.calc_idx(idxs)?;
+            self.flat_get_val(idx)
+        } else {
+            self.calc_idx(idxs).map(|_| Self::Item::default())
+        }
+    }
+    fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
+        let dims = self.get_dims();
+        if idxs.len() > dims.len() {
+            return None;
+        }
+        if idxs.iter().zip(dims.iter()).any(|(&a, &b)| a >= b) {
+            return None;
+        }
+        let (_, idx) = dims
+            .iter()
+            .enumerate()
+            .rev()
+            .fold((1, 0), |(stride, idx), (i, &dim)| {
+                (
+                    stride * (dim as usize),
+                    idx + idxs.get(i).map(|&x| x as usize).unwrap_or(0) * stride,
+                )
+            });
+        Some(idx)
+    }
 }
 
 impl ArrayLikeValue for ArrIntValue {
@@ -1745,6 +1880,14 @@ impl ArrayLikeValue for ArrIntValue {
 
     fn flat_set_val(&mut self, idx: usize, val: IntValue) -> Option<IntValue> {
         self.vals.get_mut(idx).map(|x| std::mem::replace(x, val))
+    }
+
+    fn mem_usage(&self) -> usize {
+        self.vals.capacity() * std::mem::size_of::<IntValue>()
+    }
+
+    fn is_default(&self) -> bool {
+        self.vals.iter().all(|x| x.val == 0)
     }
 }
 
@@ -1782,6 +1925,14 @@ impl ArrayLikeValue for ArrStrValue {
     fn flat_set_val(&mut self, idx: usize, val: StrValue) -> Option<StrValue> {
         self.vals.get_mut(idx).map(|x| std::mem::replace(x, val))
     }
+
+    fn mem_usage(&self) -> usize {
+        self.vals.capacity() * std::mem::size_of::<StrValue>()
+    }
+
+    fn is_default(&self) -> bool {
+        self.vals.iter().all(|x| x.val.is_empty())
+    }
 }
 
 #[modular_bitfield::bitfield]
@@ -1793,6 +1944,18 @@ pub struct EraValueFlags {
     pub is_charadata: bool,
     #[skip]
     __: modular_bitfield::specifiers::B5,
+}
+
+impl Serialize for EraValueFlags {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        u8::from(*self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for EraValueFlags {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        u8::deserialize(deserializer).map(Self::from)
+    }
 }
 
 impl IntValue {
@@ -1829,27 +1992,6 @@ impl ArrIntValue {
         let index = self.calc_idx(idxs)?;
         self.vals.get_mut(index)
     }
-    #[inline]
-    pub fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
-        if idxs.len() > self.dims.len() {
-            return None;
-        }
-        if idxs.iter().zip(self.dims.iter()).any(|(&a, &b)| a >= b) {
-            return None;
-        }
-        let (_, idx) =
-            self.dims
-                .iter()
-                .enumerate()
-                .rev()
-                .fold((1, 0), |(stride, idx), (i, &dim)| {
-                    (
-                        stride * (dim as usize),
-                        idx + idxs.get(i).map(|&x| x as usize).unwrap_or(0) * stride,
-                    )
-                });
-        Some(idx)
-    }
     pub fn ensure_alloc(&mut self) {
         if self.vals.is_empty() {
             let size = self.dims.iter().fold(1, |acc, x| acc * (*x as usize));
@@ -1885,28 +2027,6 @@ impl ArrStrValue {
         let index = self.calc_idx(idxs)?;
         self.vals.get_mut(index)
     }
-    #[must_use]
-    #[inline]
-    pub fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
-        if idxs.len() > self.dims.len() {
-            return None;
-        }
-        if idxs.iter().zip(self.dims.iter()).any(|(&a, &b)| a >= b) {
-            return None;
-        }
-        let (_, idx) =
-            self.dims
-                .iter()
-                .enumerate()
-                .rev()
-                .fold((1, 0), |(stride, idx), (i, &dim)| {
-                    (
-                        stride * (dim as usize),
-                        idx + idxs.get(i).map(|&x| x as usize).unwrap_or(0) * stride,
-                    )
-                });
-        Some(idx)
-    }
     pub fn ensure_alloc(&mut self) {
         if self.vals.is_empty() {
             let size = self.dims.iter().fold(1, |acc, x| acc * (*x as usize));
@@ -1919,6 +2039,33 @@ impl ArrStrValue {
     }
 }
 
+/// Types for stack values, dedicated for VM.
+#[derive_ReprC]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, Serialize, Deserialize)]
+pub enum StackValueKind {
+    Int,
+    Str,
+    ArrRef,
+}
+
+impl StackValueKind {
+    pub fn is_arr(&self) -> bool {
+        use StackValueKind::*;
+        match self {
+            ArrRef => true,
+            Int | Str => false,
+        }
+    }
+    pub fn is_int(&self) -> bool {
+        matches!(self, StackValueKind::Int)
+    }
+    pub fn is_str(&self) -> bool {
+        matches!(self, StackValueKind::Str)
+    }
+}
+
+/// Types for concrete values.
 #[derive_ReprC]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, Serialize, Deserialize)]
@@ -1973,189 +2120,382 @@ impl ValueKind {
 //     Rc<RefCell<ArrIntValue>>,
 //     Rc<RefCell<ArrStrValue>>,
 // >;
-pub type ValueInner = FlatValue;
+pub type StackValueInner = FlatStackValue;
 
-impl Serialize for FlatValue {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use FlatValue::*;
+/// Types for array values.
+#[derive_ReprC]
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, Serialize, Deserialize)]
+pub enum ArrayValueKind {
+    ArrInt,
+    ArrStr,
+}
+
+impl ArrayValueKind {
+    pub fn is_int(&self) -> bool {
+        matches!(self, ArrayValueKind::ArrInt)
+    }
+    pub fn is_str(&self) -> bool {
+        matches!(self, ArrayValueKind::ArrStr)
+    }
+    pub fn to_scalar(&self) -> ScalarValueKind {
+        use ArrayValueKind::*;
         match self {
-            Int(x) => Serializer::serialize_newtype_variant(serializer, "FlatValue", 0, "Int", x),
-            Str(x) => Serializer::serialize_newtype_variant(serializer, "FlatValue", 1, "Str", x),
-            ArrInt(x) => {
-                Serializer::serialize_newtype_variant(serializer, "FlatValue", 2, "ArrInt", &**x)
-            }
-            ArrStr(x) => {
-                Serializer::serialize_newtype_variant(serializer, "FlatValue", 3, "ArrStr", &**x)
-            }
+            ArrInt => ScalarValueKind::Int,
+            ArrStr => ScalarValueKind::Str,
+        }
+    }
+    pub fn with_arr(&self) -> ValueKind {
+        use ArrayValueKind::*;
+        match self {
+            ArrInt => ValueKind::ArrInt,
+            ArrStr => ValueKind::ArrStr,
+        }
+    }
+    pub fn without_arr(&self) -> ValueKind {
+        use ArrayValueKind::*;
+        match self {
+            ArrInt => ValueKind::Int,
+            ArrStr => ValueKind::Str,
         }
     }
 }
 
-impl<'de> Deserialize<'de> for FlatValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        todo!()
+pub type ArrayValue = ptr_union::Union2<Box<ArrIntValue>, Box<ArrStrValue>>;
+
+pub trait ArrayValueExt: Sized {
+    fn new_int_arr(dims: EraVarDims, vals: Vec<IntValue>) -> Self;
+    fn new_str_arr(dims: EraVarDims, vals: Vec<StrValue>) -> Self;
+    fn new_int_0darr(val: i64) -> Self {
+        Self::new_int_arr(smallvec::smallvec![1], vec![IntValue { val }])
+    }
+    fn new_str_0darr(val: ArcStr) -> Self {
+        Self::new_str_arr(smallvec::smallvec![1], vec![StrValue { val }])
+    }
+    fn as_unpacked(&self) -> FlatArrayValueRef;
+    fn as_unpacked_mut(&mut self) -> FlatArrayValueRefMut;
+    unsafe fn as_unpacked_mut_unchecked(&self) -> FlatArrayValueRefMut;
+    fn into_unpacked(self) -> FlatArrayValue;
+    fn is_default(&self) -> bool;
+    fn dims(&self) -> &EraVarDims {
+        self.as_unpacked().dims()
+    }
+    fn dims_cnt(&self) -> usize {
+        self.as_unpacked().dims().len()
+    }
+    fn flags(&self) -> EraValueFlags {
+        self.as_unpacked().flags()
+    }
+    fn ensure_alloc(&mut self) {
+        self.as_unpacked_mut().ensure_alloc()
+    }
+    fn clear_alloc(&mut self) {
+        self.as_unpacked_mut().clear_alloc()
+    }
+    fn as_arrint(&self) -> Option<&ArrIntValue> {
+        match self.as_unpacked() {
+            FlatArrayValueRef::ArrInt(x) => Some(x),
+            _ => None,
+        }
+    }
+    fn as_arrint_mut(&mut self) -> Option<&mut ArrIntValue> {
+        match self.as_unpacked_mut() {
+            FlatArrayValueRefMut::ArrInt(x) => Some(x),
+            _ => None,
+        }
+    }
+    unsafe fn as_arrint_mut_unchecked(&self) -> Option<&mut ArrIntValue> {
+        match self.as_unpacked_mut_unchecked() {
+            FlatArrayValueRefMut::ArrInt(x) => Some(x),
+            _ => None,
+        }
+    }
+    fn as_arrstr(&self) -> Option<&ArrStrValue> {
+        match self.as_unpacked() {
+            FlatArrayValueRef::ArrStr(x) => Some(x),
+            _ => None,
+        }
+    }
+    fn as_arrstr_mut(&mut self) -> Option<&mut ArrStrValue> {
+        match self.as_unpacked_mut() {
+            FlatArrayValueRefMut::ArrStr(x) => Some(x),
+            _ => None,
+        }
+    }
+    unsafe fn as_arrstr_mut_unchecked(&self) -> Option<&mut ArrStrValue> {
+        match self.as_unpacked_mut_unchecked() {
+            FlatArrayValueRefMut::ArrStr(x) => Some(x),
+            _ => None,
+        }
+    }
+    fn kind(&self) -> ArrayValueKind {
+        match self.as_unpacked() {
+            FlatArrayValueRef::ArrInt(_) => ArrayValueKind::ArrInt,
+            FlatArrayValueRef::ArrStr(_) => ArrayValueKind::ArrStr,
+        }
+    }
+    fn mem_usage(&self) -> usize {
+        match self.as_unpacked() {
+            FlatArrayValueRef::ArrInt(x) => x.mem_usage(),
+            FlatArrayValueRef::ArrStr(x) => x.mem_usage(),
+        }
+    }
+    fn is_arrint(&self) -> bool {
+        matches!(self.as_unpacked(), FlatArrayValueRef::ArrInt(_))
+    }
+    fn is_arrstr(&self) -> bool {
+        matches!(self.as_unpacked(), FlatArrayValueRef::ArrStr(_))
+    }
+    fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
+        self.as_unpacked().calc_idx(idxs)
+    }
+}
+
+impl ArrayValueExt for ArrayValue {
+    fn new_int_arr(dims: EraVarDims, vals: Vec<IntValue>) -> Self {
+        ARRAY_VALUE_BUILDER.a(Box::new(ArrIntValue {
+            dims,
+            vals,
+            flags: EraValueFlags::new(),
+        }))
+    }
+
+    fn new_str_arr(dims: EraVarDims, vals: Vec<StrValue>) -> Self {
+        ARRAY_VALUE_BUILDER.b(Box::new(ArrStrValue {
+            dims,
+            vals,
+            flags: EraValueFlags::new(),
+        }))
+    }
+
+    fn as_unpacked(&self) -> FlatArrayValueRef {
+        use ptr_union::Enum2;
+        match unsafe { self.as_deref_unchecked().unpack() } {
+            Enum2::A(x) => FlatArrayValueRef::ArrInt(x),
+            Enum2::B(x) => FlatArrayValueRef::ArrStr(x),
+        }
+    }
+
+    fn as_unpacked_mut(&mut self) -> FlatArrayValueRefMut {
+        // SAFETY: By mutable self reference, the produced mutable reference is guaranteed to be unique.
+        unsafe { self.as_unpacked_mut_unchecked() }
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the produced mutable reference is unique.
+    unsafe fn as_unpacked_mut_unchecked(&self) -> FlatArrayValueRefMut {
+        use crate::util::erase_lt_mut;
+        use erasable::ErasablePtr;
+        let erased = self.as_untagged_ptr();
+        unsafe {
+            if self.is_a() {
+                let mut r = ManuallyDrop::new(Box::unerase(erased));
+                FlatArrayValueRefMut::ArrInt(erase_lt_mut(&mut r))
+            } else {
+                let mut r = ManuallyDrop::new(Box::unerase(erased));
+                FlatArrayValueRefMut::ArrStr(erase_lt_mut(&mut r))
+            }
+        }
+    }
+
+    fn into_unpacked(self) -> FlatArrayValue {
+        use ptr_union::Enum2;
+        match self.unpack() {
+            Enum2::A(x) => FlatArrayValue::ArrInt(x),
+            Enum2::B(x) => FlatArrayValue::ArrStr(x),
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        match self.as_unpacked() {
+            FlatArrayValueRef::ArrInt(x) => x.is_default(),
+            FlatArrayValueRef::ArrStr(x) => x.is_default(),
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Value(ValueInner);
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FlatValue {
+pub enum FlatArrayValue {
+    ArrInt(Box<ArrIntValue>),
+    ArrStr(Box<ArrStrValue>),
+}
+
+static ARRAY_VALUE_BUILDER: ptr_union::Builder2<Box<ArrIntValue>, Box<ArrStrValue>> =
+    unsafe { ptr_union::Builder2::new_unchecked() };
+
+impl From<FlatArrayValue> for ArrayValue {
+    fn from(value: FlatArrayValue) -> Self {
+        match value {
+            FlatArrayValue::ArrInt(x) => ARRAY_VALUE_BUILDER.a(x),
+            FlatArrayValue::ArrStr(x) => ARRAY_VALUE_BUILDER.b(x),
+        }
+    }
+}
+
+impl From<ArrayValue> for FlatArrayValue {
+    fn from(value: ArrayValue) -> Self {
+        use ptr_union::Enum2;
+        match value.unpack() {
+            Enum2::A(x) => FlatArrayValue::ArrInt(x),
+            Enum2::B(x) => FlatArrayValue::ArrStr(x),
+        }
+    }
+}
+
+impl FlatArrayValue {
+    pub fn new_int_arr(dims: EraVarDims, vals: Vec<IntValue>) -> Self {
+        FlatArrayValue::ArrInt(Box::new(ArrIntValue {
+            dims,
+            vals,
+            flags: EraValueFlags::new(),
+        }))
+    }
+
+    pub fn new_str_arr(dims: EraVarDims, vals: Vec<StrValue>) -> Self {
+        FlatArrayValue::ArrStr(Box::new(ArrStrValue {
+            dims,
+            vals,
+            flags: EraValueFlags::new(),
+        }))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum FlatArrayValueRef<'a> {
+    ArrInt(&'a ArrIntValue),
+    ArrStr(&'a ArrStrValue),
+}
+
+impl<'a> FlatArrayValueRef<'a> {
+    pub fn dims(&self) -> &'a EraVarDims {
+        use FlatArrayValueRef::*;
+        match self {
+            ArrInt(x) => &x.dims,
+            ArrStr(x) => &x.dims,
+        }
+    }
+
+    pub fn flags(&self) -> EraValueFlags {
+        use FlatArrayValueRef::*;
+        match self {
+            ArrInt(x) => x.flags,
+            ArrStr(x) => x.flags,
+        }
+    }
+
+    pub fn calc_idx(&self, idxs: &[u32]) -> Option<usize> {
+        use FlatArrayValueRef::*;
+        match self {
+            ArrInt(x) => x.calc_idx(idxs),
+            ArrStr(x) => x.calc_idx(idxs),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub enum FlatArrayValueRefMut<'a> {
+    ArrInt(&'a mut ArrIntValue),
+    ArrStr(&'a mut ArrStrValue),
+}
+
+impl<'a> FlatArrayValueRefMut<'a> {
+    pub fn ensure_alloc(&mut self) {
+        use FlatArrayValueRefMut::*;
+        match self {
+            ArrInt(x) => x.ensure_alloc(),
+            ArrStr(x) => x.ensure_alloc(),
+        }
+    }
+
+    pub fn clear_alloc(&mut self) {
+        use FlatArrayValueRefMut::*;
+        match self {
+            ArrInt(x) => x.clear_alloc(),
+            ArrStr(x) => x.clear_alloc(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariablePlaceRef {
+    pub is_dynamic: bool,
+    /// Absolute index into the variable place.
+    pub index: usize,
+}
+
+/// A stack value that can be either an integer, a string, or an reference (index) to an array.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackValue(StackValueInner);
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlatStackValue {
     Int(IntValue),
     Str(StrValue),
-    ArrInt(Rc<RefCell<ArrIntValue>>),
-    ArrStr(Rc<RefCell<ArrStrValue>>),
+    ArrRef(VariablePlaceRef),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RefFlatValue<'a> {
+pub enum RefFlatStackValue<'a> {
     Int(&'a IntValue),
     Str(&'a StrValue),
-    ArrInt(&'a Rc<RefCell<ArrIntValue>>),
-    ArrStr(&'a Rc<RefCell<ArrStrValue>>),
+    ArrRef(&'a VariablePlaceRef),
 }
-impl RefFlatValue<'_> {
-    pub fn kind(&self) -> ValueKind {
-        use RefFlatValue::*;
+impl RefFlatStackValue<'_> {
+    pub fn kind(&self) -> StackValueKind {
+        use RefFlatStackValue::*;
         match self {
-            Int(_) => ValueKind::Int,
-            Str(_) => ValueKind::Str,
-            ArrInt(_) => ValueKind::ArrInt,
-            ArrStr(_) => ValueKind::ArrStr,
+            Int(_) => StackValueKind::Int,
+            Str(_) => StackValueKind::Str,
+            ArrRef(_) => StackValueKind::ArrRef,
         }
     }
 }
 #[derive(Debug, PartialEq, Eq)]
-pub enum RefFlatValueMut<'a> {
+pub enum RefFlatStackValueMut<'a> {
     Int(&'a mut IntValue),
     Str(&'a mut StrValue),
-    ArrInt(&'a mut Rc<RefCell<ArrIntValue>>),
-    ArrStr(&'a mut Rc<RefCell<ArrStrValue>>),
+    ArrRef(&'a mut VariablePlaceRef),
 }
-impl RefFlatValueMut<'_> {
-    pub fn kind(&self) -> ValueKind {
-        use RefFlatValueMut::*;
+impl RefFlatStackValueMut<'_> {
+    pub fn kind(&self) -> StackValueKind {
+        use RefFlatStackValueMut::*;
         match self {
-            Int(_) => ValueKind::Int,
-            Str(_) => ValueKind::Str,
-            ArrInt(_) => ValueKind::ArrInt,
-            ArrStr(_) => ValueKind::ArrStr,
+            Int(_) => StackValueKind::Int,
+            Str(_) => StackValueKind::Str,
+            ArrRef(_) => StackValueKind::ArrRef,
         }
     }
 }
 
-impl Value {
-    pub fn inner_hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        use std::hash::Hash;
-
-        match self.as_unpacked() {
-            RefFlatValue::Int(x) => x.val.hash(state),
-            RefFlatValue::Str(x) => x.val.hash(state),
-            RefFlatValue::ArrInt(x) => {
-                let x = x.borrow();
-                x.dims.hash(state);
-                x.vals.hash(state);
-            }
-            RefFlatValue::ArrStr(x) => {
-                let x = x.borrow();
-                x.dims.hash(state);
-                x.vals.hash(state);
-            }
-        }
-    }
-
-    pub fn mem_usage(&self) -> usize {
-        use FlatValue::*;
-        let base_size = std::mem::size_of::<Value>();
-        match &self.0 {
-            Int(_) | Str(_) => base_size,
-            ArrInt(x) => base_size + x.borrow().vals.capacity() * std::mem::size_of::<IntValue>(),
-            ArrStr(x) => base_size + x.borrow().vals.capacity() * std::mem::size_of::<StrValue>(),
-        }
-    }
-}
-
-impl Value {
+impl StackValue {
     #[inline]
     pub fn new_int(val: i64) -> Self {
-        Value(ValueInner::Int(IntValue { val }))
+        StackValue(StackValueInner::Int(IntValue { val }))
     }
     #[inline]
     pub fn new_str(val: ArcStr) -> Self {
-        Value(ValueInner::Str(StrValue { val }))
+        StackValue(StackValueInner::Str(StrValue { val }))
     }
     #[inline]
-    pub fn new_int_obj(val: IntValue) -> Self {
-        Value(ValueInner::Int(val))
+    pub fn new_arr_ref(val: VariablePlaceRef) -> Self {
+        StackValue(StackValueInner::ArrRef(val))
     }
-    #[inline]
-    pub fn new_str_obj(val: StrValue) -> Self {
-        Value(ValueInner::Str(val))
+    pub fn into_unpacked(self) -> FlatStackValue {
+        self.0
     }
-    pub fn new_int_arr(mut dims: EraVarDims, mut vals: Vec<IntValue>) -> Self {
-        if dims.is_empty() {
-            dims.push(1);
-        }
-        let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
-        //assert_ne!(size, 0, "dimension must not contain zero");
-        if !vals.is_empty() {
-            vals.resize(size, Default::default());
-        }
-        Value(ValueInner::ArrInt(Rc::new(RefCell::new(ArrIntValue {
-            vals,
-            dims,
-            flags: EraValueFlags::new(),
-        }))))
-    }
-    pub fn new_str_arr(mut dims: EraVarDims, mut vals: Vec<StrValue>) -> Self {
-        if dims.is_empty() {
-            dims.push(1);
-        }
-        let size = dims.iter().fold(1, |acc, x| acc * (*x as usize));
-        //assert_ne!(size, 0, "dimension must not contain zero");
-        if !vals.is_empty() {
-            vals.resize(size, Default::default());
-        }
-        Value(ValueInner::ArrStr(Rc::new(RefCell::new(ArrStrValue {
-            vals,
-            dims,
-            flags: EraValueFlags::new(),
-        }))))
-    }
-    pub fn new_int_0darr(val: i64) -> Self {
-        Self::new_int_arr(smallvec::smallvec![1], vec![IntValue { val }])
-    }
-    pub fn new_str_0darr(val: ArcStr) -> Self {
-        Self::new_str_arr(smallvec::smallvec![1], vec![StrValue { val }])
-    }
-    pub fn into_unpacked(self) -> FlatValue {
-        use ptr_union::Enum4::*;
-        use FlatValue::*;
-        match self.0 {
-            Int(x) => Int(x),
-            Str(x) => Str(x),
-            ArrInt(x) => ArrInt(x),
-            ArrStr(x) => ArrStr(x),
-        }
-    }
-    pub fn as_unpacked(&self) -> RefFlatValue {
-        use FlatValue::*;
+    pub fn as_unpacked(&self) -> RefFlatStackValue {
+        use FlatStackValue::*;
         match &self.0 {
-            Int(x) => RefFlatValue::Int(x),
-            Str(x) => RefFlatValue::Str(x),
-            ArrInt(x) => RefFlatValue::ArrInt(x),
-            ArrStr(x) => RefFlatValue::ArrStr(x),
+            Int(x) => RefFlatStackValue::Int(x),
+            Str(x) => RefFlatStackValue::Str(x),
+            ArrRef(x) => RefFlatStackValue::ArrRef(x),
         }
     }
-    pub fn as_unpacked_mut(&mut self) -> RefFlatValueMut {
-        use FlatValue::*;
+    pub fn as_unpacked_mut(&mut self) -> RefFlatStackValueMut {
+        use FlatStackValue::*;
         match &mut self.0 {
-            Int(x) => RefFlatValueMut::Int(x),
-            Str(x) => RefFlatValueMut::Str(x),
-            ArrInt(x) => RefFlatValueMut::ArrInt(x),
-            ArrStr(x) => RefFlatValueMut::ArrStr(x),
+            Int(x) => RefFlatStackValueMut::Int(x),
+            Str(x) => RefFlatStackValueMut::Str(x),
+            ArrRef(x) => RefFlatStackValueMut::ArrRef(x),
         }
     }
     pub fn deep_clone(&self) -> Self {
@@ -2168,95 +2508,59 @@ impl Value {
         // }
         self.clone().into_unpacked().deep_clone().into_packed()
     }
-    pub fn kind(&self) -> ValueKind {
+    pub fn kind(&self) -> StackValueKind {
         self.as_unpacked().kind()
     }
     pub fn is_default(&self) -> bool {
-        use RefFlatValue::*;
+        use RefFlatStackValue::*;
         match self.as_unpacked() {
             Int(x) => x.val == 0,
             Str(x) => x.val.is_empty(),
-            ArrInt(x) => x.borrow().vals.iter().all(|x| x.val == 0),
-            ArrStr(x) => x.borrow().vals.iter().all(|x| x.val.is_empty()),
+            ArrRef(_) => false,
         }
     }
     pub fn as_int(&self) -> Option<&IntValue> {
         match self.as_unpacked() {
-            RefFlatValue::Int(x) => Some(x),
+            RefFlatStackValue::Int(x) => Some(x),
             _ => None,
         }
     }
     pub fn as_str(&self) -> Option<&StrValue> {
         match self.as_unpacked() {
-            RefFlatValue::Str(x) => Some(x),
+            RefFlatStackValue::Str(x) => Some(x),
+            _ => None,
+        }
+    }
+    pub fn as_arr_ref(&self) -> Option<&VariablePlaceRef> {
+        match self.as_unpacked() {
+            RefFlatStackValue::ArrRef(x) => Some(x),
             _ => None,
         }
     }
     pub fn as_int_mut(&mut self) -> Option<&mut IntValue> {
         match self.as_unpacked_mut() {
-            RefFlatValueMut::Int(x) => Some(x),
+            RefFlatStackValueMut::Int(x) => Some(x),
             _ => None,
         }
     }
     pub fn as_str_mut(&mut self) -> Option<&mut StrValue> {
         match self.as_unpacked_mut() {
-            RefFlatValueMut::Str(x) => Some(x),
+            RefFlatStackValueMut::Str(x) => Some(x),
             _ => None,
-        }
-    }
-    pub fn as_arrint(&self) -> Option<&Rc<RefCell<ArrIntValue>>> {
-        match self.as_unpacked() {
-            RefFlatValue::ArrInt(x) => Some(x),
-            _ => None,
-        }
-    }
-    pub fn as_arrstr(&self) -> Option<&Rc<RefCell<ArrStrValue>>> {
-        match self.as_unpacked() {
-            RefFlatValue::ArrStr(x) => Some(x),
-            _ => None,
-        }
-    }
-    pub fn dims(&self) -> Option<EraVarDims> {
-        match self.as_unpacked() {
-            RefFlatValue::ArrInt(x) => Some(x.borrow().dims.clone()),
-            RefFlatValue::ArrStr(x) => Some(x.borrow().dims.clone()),
-            _ => None,
-        }
-    }
-    pub fn dims_cnt(&self) -> Option<usize> {
-        match self.as_unpacked() {
-            RefFlatValue::ArrInt(x) => Some(x.borrow().dims.len()),
-            RefFlatValue::ArrStr(x) => Some(x.borrow().dims.len()),
-            _ => None,
-        }
-    }
-    pub fn ensure_alloc(&self) {
-        match self.as_unpacked() {
-            RefFlatValue::ArrInt(x) => x.borrow_mut().ensure_alloc(),
-            RefFlatValue::ArrStr(x) => x.borrow_mut().ensure_alloc(),
-            _ => {}
-        }
-    }
-    pub fn clear_alloc(&self) {
-        match self.as_unpacked() {
-            RefFlatValue::ArrInt(x) => x.borrow_mut().clear_alloc(),
-            RefFlatValue::ArrStr(x) => x.borrow_mut().clear_alloc(),
-            _ => {}
         }
     }
 }
-impl FlatValue {
-    pub fn into_packed(self) -> Value {
-        use FlatValue::*;
-        Value(match self {
-            Int(x) => ValueInner::Int(x),
-            Str(x) => ValueInner::Str(x),
-            ArrInt(x) => ValueInner::ArrInt(x),
-            ArrStr(x) => ValueInner::ArrStr(x),
+impl FlatStackValue {
+    pub fn into_packed(self) -> StackValue {
+        use FlatStackValue::*;
+        StackValue(match self {
+            Int(x) => StackValueInner::Int(x),
+            Str(x) => StackValueInner::Str(x),
+            ArrRef(x) => StackValueInner::ArrRef(x),
         })
     }
     pub fn deep_clone(&self) -> Self {
-        use FlatValue::*;
+        use FlatStackValue::*;
         match self {
             // NOTE: We cannot mutate IntValue and StrValue, so it is safe to perform
             //       shallow copies on them
@@ -2264,16 +2568,14 @@ impl FlatValue {
             // Str(x) => Str(x.deref().clone().into()),
             Int(x) => Int(x.clone()),
             Str(x) => Str(x.clone()),
-            ArrInt(x) => ArrInt(x.deref().clone().into()),
-            ArrStr(x) => ArrStr(x.deref().clone().into()),
+            ArrRef(x) => ArrRef(x.clone()),
         }
     }
-    pub fn kind(&self) -> ValueKind {
+    pub fn kind(&self) -> StackValueKind {
         match self {
-            FlatValue::Int(_) => ValueKind::Int,
-            FlatValue::Str(_) => ValueKind::Str,
-            FlatValue::ArrInt(_) => ValueKind::ArrInt,
-            FlatValue::ArrStr(_) => ValueKind::ArrStr,
+            FlatStackValue::Int(_) => StackValueKind::Int,
+            FlatStackValue::Str(_) => StackValueKind::Str,
+            FlatStackValue::ArrRef(_) => StackValueKind::ArrRef,
         }
     }
 }
@@ -2288,13 +2590,13 @@ pub struct EraVarPool {
     normal_var_idxs: Vec<usize>,
     vars: Vec<EraVarInfo>,
     /// Initial values for variables. Used when resetting variables.
-    init_vars: Vec<(usize, Value)>,
+    init_vars: Vec<(usize, ArrayValue)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EraVarInfo {
     pub name: Ascii<ArcStr>,
-    pub val: Value,
+    pub val: ArrayValue,
     // TODO: Compress with modular-bitfield
     pub is_const: bool,
     pub is_charadata: bool,
@@ -2303,7 +2605,7 @@ pub struct EraVarInfo {
 }
 
 impl EraVarInfo {
-    pub fn new(name: ArcStr, val: Value) -> Self {
+    pub fn new(name: ArcStr, val: ArrayValue) -> Self {
         EraVarInfo {
             name: Ascii::new(name),
             val,
@@ -2341,7 +2643,7 @@ impl EraVarPool {
         if !info.is_const && !info.val.is_default() {
             // When resetting, we need to keep original variable values
             self.init_vars.push((var_idx, info.val.clone()));
-            info.val = info.val.deep_clone();
+            info.val = info.val.clone();
         }
 
         if info.is_charadata {
@@ -2383,7 +2685,7 @@ impl EraVarPool {
         if !info.is_const && !info.val.is_default() {
             // When resetting, we need to keep original variable values
             self.init_vars.push((var_idx, info.val.clone()));
-            info.val = info.val.deep_clone();
+            info.val = info.val.clone();
         }
 
         if info.is_charadata {
@@ -2396,26 +2698,26 @@ impl EraVarPool {
     }
 
     #[must_use]
-    pub fn get_var(&self, name: &str) -> Option<&Value> {
+    pub fn get_var(&self, name: &str) -> Option<&ArrayValue> {
         self.var_names
             .get(Ascii::new_str(name))
             .map(|x| &self.vars[*x].val)
     }
 
     #[must_use]
-    pub fn get_var_mut(&mut self, name: &str) -> Option<&mut Value> {
+    pub fn get_var_mut(&mut self, name: &str) -> Option<&mut ArrayValue> {
         self.var_names
             .get_mut(Ascii::new_str(name))
             .map(|x| &mut self.vars[*x].val)
     }
 
     #[must_use]
-    pub fn get_var_by_idx(&self, idx: usize) -> Option<&Value> {
+    pub fn get_var_by_idx(&self, idx: usize) -> Option<&ArrayValue> {
         self.vars.get(idx).map(|x| &x.val)
     }
 
     #[must_use]
-    pub fn get_var_by_idx_mut(&mut self, idx: usize) -> Option<&mut Value> {
+    pub fn get_var_by_idx_mut(&mut self, idx: usize) -> Option<&mut ArrayValue> {
         self.vars.get_mut(idx).map(|x| &mut x.val)
     }
 
@@ -2430,37 +2732,90 @@ impl EraVarPool {
     }
 
     #[must_use]
+    pub fn get_var_info_mut(&mut self, idx: usize) -> Option<&mut EraVarInfo> {
+        self.vars.get_mut(idx)
+    }
+
+    #[must_use]
     pub fn get_var_info_by_name(&self, name: &str) -> Option<&EraVarInfo> {
         self.get_var_idx(name).and_then(|idx| self.vars.get(idx))
+    }
+
+    #[must_use]
+    pub fn get_var_info_by_name_mut(&mut self, name: &str) -> Option<&mut EraVarInfo> {
+        self.get_var_idx(name)
+            .and_then(|idx| self.vars.get_mut(idx))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &EraVarInfo> {
         self.vars.iter()
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut EraVarInfo> {
+        self.vars.iter_mut()
+    }
+
     pub fn chara_vars_iter(&self) -> impl Iterator<Item = &EraVarInfo> {
         self.chara_var_idxs.iter().map(|&x| &self.vars[x])
+    }
+
+    pub fn chara_vars_iter_mut(&mut self) -> impl Iterator<Item = &mut EraVarInfo> {
+        unsafe {
+            let vars = &mut self.vars[..];
+            (self.chara_var_idxs.iter()).map(|&x| &mut *std::ptr::addr_of_mut!(vars[x]))
+        }
     }
 
     pub fn normal_vars_iter(&self) -> impl Iterator<Item = &EraVarInfo> {
         self.normal_var_idxs.iter().map(|&x| &self.vars[x])
     }
 
+    pub fn normal_vars_iter_mut(&mut self) -> impl Iterator<Item = &mut EraVarInfo> {
+        unsafe {
+            let vars = &mut self.vars[..];
+            (self.normal_var_idxs.iter()).map(|&x| &mut *std::ptr::addr_of_mut!(vars[x]))
+        }
+    }
+
+    /// Reset variables to their default values. Some variables are not reset if they
+    /// are meant to persist across multiple runs.
+    pub fn reset_variables(&mut self) {
+        for var in self.vars.iter_mut() {
+            if var.is_const {
+                continue;
+            }
+            if var.val.flags().is_trap() {
+                continue;
+            }
+
+            match var.val.as_unpacked_mut() {
+                FlatArrayValueRefMut::ArrInt(x) => {
+                    let should_reset = var.is_charadata
+                        || !(var.is_global || matches!(var.name.as_ref(), "GLOBAL" | "ITEMPRICE"));
+                    if should_reset {
+                        x.vals.fill(Default::default());
+                    }
+                }
+                FlatArrayValueRefMut::ArrStr(x) => {
+                    let should_reset = var.is_charadata
+                        || !(var.is_global || matches!(var.name.as_ref(), "GLOBALS" | "STR"));
+                    if should_reset {
+                        x.vals.fill(Default::default());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reinitialize variables with their initial values if they have initializers.
     pub fn reinit_variables(&mut self) {
         for var in &self.init_vars {
-            use RefFlatValue::*;
-            let (var, init_val) = (&self.vars[var.0], &var.1);
-            // SAFETY: d and s are guaranteed not to point to the same array in
-            //         add_var_ex()
-            match (var.val.as_unpacked(), init_val.as_unpacked()) {
-                (ArrInt(d), ArrInt(s)) => {
-                    let mut d = d.borrow_mut();
-                    let s = s.borrow();
+            let (var, init_val) = (&mut self.vars[var.0], &var.1);
+            match (var.val.as_unpacked_mut(), init_val.as_unpacked()) {
+                (FlatArrayValueRefMut::ArrInt(d), FlatArrayValueRef::ArrInt(s)) => {
                     d.vals.clone_from(&s.vals);
                 }
-                (ArrStr(d), ArrStr(s)) => {
-                    let mut d = d.borrow_mut();
-                    let s = s.borrow();
+                (FlatArrayValueRefMut::ArrStr(d), FlatArrayValueRef::ArrStr(s)) => {
                     d.vals.clone_from(&s.vals);
                 }
                 _ => unreachable!(),
@@ -2469,9 +2824,7 @@ impl EraVarPool {
     }
 
     pub fn charas_var_capacity(&self) -> Option<u32> {
-        self.chara_vars_iter()
-            .next()
-            .map(|x| x.val.dims().unwrap()[0])
+        self.chara_vars_iter().next().map(|x| x.val.dims()[0])
     }
 
     pub fn grow_charas_var_capacity(&mut self, additional_cap: u32) {
@@ -2479,12 +2832,11 @@ impl EraVarPool {
             return;
         }
 
-        for var in self.chara_vars_iter() {
+        for var in self.chara_vars_iter_mut() {
             var.val.ensure_alloc();
-            let val = var.val.as_unpacked();
+            let val = var.val.as_unpacked_mut();
             match val {
-                RefFlatValue::ArrInt(x) => {
-                    let mut x = x.borrow_mut();
+                FlatArrayValueRefMut::ArrInt(x) => {
                     let size: usize = x.dims.iter().skip(1).map(|&x| x as usize).product();
                     let add_cap = (additional_cap as usize) * size;
                     x.vals.reserve_exact(add_cap);
@@ -2492,8 +2844,7 @@ impl EraVarPool {
                     x.vals.resize(new_cap, Default::default());
                     x.dims[0] += additional_cap;
                 }
-                RefFlatValue::ArrStr(x) => {
-                    let mut x = x.borrow_mut();
+                FlatArrayValueRefMut::ArrStr(x) => {
                     let size: usize = x.dims.iter().skip(1).map(|&x| x as usize).product();
                     let add_cap = (additional_cap as usize) * size;
                     x.vals.reserve_exact(add_cap);
@@ -4720,8 +5071,8 @@ pub struct EraFuncFrameVarInfo {
     pub in_local_frame: bool,
     /// Index of the variable in the frame.
     pub var_idx: u32,
-    /// The type of the variable. Only `Arr*` are used for now.
-    pub var_kind: ValueKind,
+    /// The type of the variable.
+    pub var_kind: ArrayValueKind,
     /// The dimension count of the variable.
     pub dims_cnt: u8,
 }
@@ -5009,5 +5360,35 @@ where
 {
     fn len(&self) -> usize {
         self.max_len - self.index
+    }
+}
+
+// TODO: Remove this; wrongly designed type
+pub enum RayonExecPool<'a, 'scope> {
+    SingleThreaded,
+    Global,
+    Scoped(&'a rayon::Scope<'scope>),
+}
+
+impl Default for RayonExecPool<'_, '_> {
+    fn default() -> Self {
+        Self::SingleThreaded
+    }
+}
+
+impl<'a, 'scope> RayonExecPool<'a, 'scope> {
+    pub fn is_single_threaded(&self) -> bool {
+        matches!(self, Self::SingleThreaded)
+    }
+
+    pub fn scope<F>(&self, f: F)
+    where
+        F: FnOnce(Option<&rayon::Scope<'scope>>) + Send,
+    {
+        match *self {
+            Self::SingleThreaded => f(None),
+            Self::Global => rayon::scope(|s| f(Some(s))),
+            Self::Scoped(scope) => f(Some(scope)),
+        }
     }
 }

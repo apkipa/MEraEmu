@@ -64,6 +64,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         Windows::Foundation::IAsyncOperation<Microsoft::UI::Xaml::Controls::TabViewItem> OpenOrCreateSourcesFuncAsmTabAsync(hstring path, hstring func_name);
         MEraEmuWin::DevTools::CodeEditControl CodeEditorControlFromSourcesFileTabViewItem(Microsoft::UI::Xaml::Controls::TabViewItem const& tab);
         Windows::Foundation::IAsyncAction OpenOrCreateSourcesFileTabAtSrcSpanAsync(hstring path, SrcSpan span);
+        Windows::Foundation::IAsyncAction OpenOrCreateSourcesFuncAsmTabAtIpAsync(hstring path, hstring func_name, std::optional<uint32_t> ip_offset);
         void InitializeCodeEditorControl(MEraEmuWin::DevTools::CodeEditControl const& editor_ctrl);
         void CodeEditorControl_MarginClick(WinUIEditor::Editor const& sender, WinUIEditor::MarginClickEventArgs const& e);
         fire_forget PositionSourcesTabWatchTabCurrentItemTextBox(uint32_t index);
@@ -73,6 +74,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         void CloseGlobalQuickActionsBaseFlyout();
         Windows::Foundation::IAsyncAction UpdateFilteredQuickActionItemsAsync();
         Windows::Foundation::IAsyncAction DumpBytecodeForFunctionAtCaretAsync();
+        Windows::Foundation::IAsyncAction DumpCurrentStackAsync();
         Microsoft::UI::Xaml::Controls::TabViewItem GetCurrentSourcesFileTabViewItem(hstring const& target_path = {});
         Windows::Foundation::IAsyncOperation<Windows::UI::Xaml::Controls::ContentDialogResult> ShowSimpleDialogAsync(hstring const& title, hstring const& content);
         void AddNewBreakpoint(hstring const& path, SrcSpan span, bool temporary);

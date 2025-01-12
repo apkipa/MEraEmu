@@ -102,9 +102,7 @@ SrcSpan PositionToLineSpan(WinUIEditor::Editor const& editor, int64_t position) 
     return { (uint32_t)line_start_pos, (uint32_t)(editor.GetLineEndPosition(line) - line_start_pos) };
 }
 
-static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, Value const& value) {
-    const size_t MAX_BRIEF_VALUE_LENGTH = 4;
-
+static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesTabWatchTabItem item, EraEvaluateExprResult const& value) {
     auto escape_to_literal_sink = [](std::wstring& sink, std::wstring_view sv) {
         for (auto ch : sv) {
             if (ch == L'\\' || ch == L'"') {
@@ -114,84 +112,31 @@ static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesT
         }
     };
 
-    item.SubItems().Clear();
+    auto sub_items = item.SubItems();
+    sub_items.Clear();
 
-    if (value.is_int()) {
-        item.BriefValue(to_hstring(*value.as_int()));
+    // Brief value
+    if (value.value.is_int()) {
+        item.BriefValue(to_hstring(*value.value.as_int()));
     }
-    else if (value.is_str()) {
-        std::wstring result = L"\"";
-        escape_to_literal_sink(result, to_hstring(*value.as_str()));
-        result += L"\"";
-        item.BriefValue(result);
+    else if (value.value.is_str()) {
+        item.BriefValue(to_hstring(*value.value.as_str()));
     }
-    else if (value.is_arr_int()) {
-        std::wstring result;
-        // Brief value
-        for (size_t count = 0; const auto & val : value.as_arr_int()->vals) {
-            if (result.empty()) {
-                result = L"[" + std::to_wstring(val);
-            }
-            else {
-                result += L", " + std::to_wstring(val);
-            }
 
-            if (++count >= MAX_BRIEF_VALUE_LENGTH) {
-                result += L", ...";
-                break;
-            }
+    // Sub items
+    for (auto& [key, val] : value.children) {
+        auto sub_item = MEraEmuWin::DevTools::SourcesTabWatchTabItem();
+        sub_item.Expression(to_hstring(key));
+        if (val.is_int()) {
+            sub_item.BriefValue(to_hstring(*val.as_int()));
         }
-        if (result.empty()) {
-            result = L"[]";
-        }
-        else {
-            result += L"]";
-        }
-        result += L" (" + std::to_wstring(value.as_arr_int()->vals.size()) + L")";
-        item.BriefValue(result);
-        // Sub items
-        for (size_t i = 0; const auto & val : value.as_arr_int()->vals) {
-            auto sub_item = MEraEmuWin::DevTools::SourcesTabWatchTabItem();
-            sub_item.Expression(to_hstring(i));
-            sub_item.BriefValue(to_hstring(val));
-            item.SubItems().Append(sub_item);
-            i++;
-        }
-    }
-    else if (value.is_arr_str()) {
-        std::wstring result;
-        // Brief value
-        for (size_t count = 0; const auto & val : value.as_arr_str()->vals) {
-            if (result.empty()) {
-                result = L"[\"";
-            }
-            else {
-                result += L", \"";
-            }
-            escape_to_literal_sink(result, to_hstring(val));
+        else if (val.is_str()) {
+            std::wstring result = L"\"";
+            escape_to_literal_sink(result, to_hstring(*val.as_str()));
             result += L"\"";
-
-            if (++count >= MAX_BRIEF_VALUE_LENGTH) {
-                result += L", ...";
-                break;
-            }
+            sub_item.BriefValue(result);
         }
-        if (result.empty()) {
-            result = L"[]";
-        }
-        else {
-            result += L"]";
-        }
-        result += L" (" + std::to_wstring(value.as_arr_str()->vals.size()) + L")";
-        item.BriefValue(result);
-        // Sub items
-        for (size_t i = 0; const auto & val : value.as_arr_str()->vals) {
-            auto sub_item = MEraEmuWin::DevTools::SourcesTabWatchTabItem();
-            sub_item.Expression(to_hstring(i));
-            sub_item.BriefValue(to_hstring(val));
-            item.SubItems().Append(sub_item);
-            i++;
-        }
+        sub_items.Append(sub_item);
     }
 }
 
@@ -199,10 +144,12 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     MainPage::~MainPage() {
     }
     fire_forget MainPage::final_release(std::unique_ptr<MainPage> self) noexcept {
+        auto dq = DispatcherQueue::GetForCurrentThread();
         self->CleanupEngineConnection();
         // FIXME: Keep alive to prevent crash; should properly wait for all async tasks to finish instead.
         using namespace std::chrono_literals;
         co_await 1s;
+        co_await resume_foreground(dq);
     }
     void MainPage::InitializeComponent() {
         MainPageT::InitializeComponent();
@@ -897,6 +844,40 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         // Focus the editor
         editor_ctrl.Focus(FocusState::Programmatic);
     }
+    IAsyncAction MainPage::OpenOrCreateSourcesFuncAsmTabAtIpAsync(hstring path, hstring func_name, std::optional<uint32_t> ip_offset) {
+        auto strong_this = get_strong();
+        auto tvi = co_await OpenOrCreateSourcesFuncAsmTabAsync(path, func_name);
+        auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
+        if (!editor_ctrl) { co_return; }
+        auto editor = editor_ctrl.Editor();
+
+        editor_ctrl.Focus(FocusState::Programmatic);
+        if (!ip_offset) { co_return; }
+        // Search through the editor for the IP offset (offset is at the beginning of the line)
+        for (int64_t cur_line_num = 0;; cur_line_num++) {
+            auto line = editor.GetLine(cur_line_num);
+            if (line.empty()) { break; }
+            std::wstring_view line_view = line;
+            while (!line_view.empty() && std::isspace(line_view.front())) {
+                line_view.remove_prefix(1);
+            }
+            if (line_view.empty()) { continue; }
+            std::string digit_buf;
+            size_t digit_len = 0;
+            while (digit_len < line_view.size() && std::iswdigit(line_view[digit_len])) {
+                digit_buf.push_back((char)line_view[digit_len]);
+                digit_len++;
+            }
+            auto line_offset = std::stoul(digit_buf);
+            if (line_offset == *ip_offset) {
+                // Found the line, move caret to the line and highlight it
+                editor.MarkerDeleteAll(YellowBackgroundMarker);
+                editor.MarkerAdd(cur_line_num, YellowBackgroundMarker);
+                editor.GotoLine(cur_line_num);
+                break;
+            }
+        }
+    }
     void MainPage::InitializeCodeEditorControl(MEraEmuWin::DevTools::CodeEditControl const& editor_ctrl) {
         if (!editor_ctrl) { return; }
 
@@ -1015,9 +996,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         try {
             auto watch_value = co_await m_engine_ctrl->ExecEngineTask([expression](MEraEngine const& e) {
-                // TODO: Properly implement this
-                //return e.evaluate_expr(expression);
-                return e.evaluate_var_at_scope(expression, std::nullopt);
+                return e.evaluate_expr(expression, std::nullopt, 0, 16, 100'000);
             });
             UpdateSourcesTabWatchTabItemFromValue(item, watch_value);
         }
@@ -1081,6 +1060,9 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
                 };
                 push_item(L"Dump bytecode for the function at caret", RelayCommand([](auto&& sender) {
                     sender.as<MainPage>()->DumpBytecodeForFunctionAtCaretAsync();
+                }));
+                push_item(L"Dump current stack", RelayCommand([](auto&& sender) {
+                    sender.as<MainPage>()->DumpCurrentStackAsync();
                 }));
                 push_item(L"Open current file in File Explorer", RelayCommand([](auto&& sender) {
                     auto that = sender.as<MainPage>();
@@ -1197,20 +1179,28 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         auto editor = editor_ctrl.Editor();
         auto caret_pos = editor.CurrentPos();
         auto span = PositionToLineSpan(editor, caret_pos);
+        EraExecIp ip;
         auto func_name = co_await m_engine_ctrl->ExecEngineTask([&](MEraEngine const& e) {
-            auto ip = e.get_ip_from_src(to_string(src_item.FullPath()), span).value();
+            ip = e.get_ip_from_src(to_string(src_item.FullPath()), span).value();
             auto func_name = e.get_func_info_by_ip(ip).value().name;
             return func_name;
         });
 
         // Create a new tab to place the disassembled bytecode
-        auto tvi = co_await OpenOrCreateSourcesFuncAsmTabAsync(src_item.FullPath(), to_hstring(func_name));
-        if (tvi) {
-            auto editor_ctrl = CodeEditorControlFromSourcesFileTabViewItem(tvi);
-            if (editor_ctrl) {
-                editor_ctrl.Focus(FocusState::Programmatic);
-            }
-        }
+        co_await OpenOrCreateSourcesFuncAsmTabAtIpAsync(src_item.FullPath(), to_hstring(func_name), ip.offset);
+    }
+    IAsyncAction MainPage::DumpCurrentStackAsync() {
+        auto strong_this = get_strong();
+        auto stack_trace = co_await m_engine_ctrl->ExecEngineTask([](MEraEngine const& e) {
+            return e.dump_stack();
+        });
+        auto stack_trace_str = stack_trace.dump(4);
+        // Copy to clipboard
+        Windows::ApplicationModel::DataTransfer::DataPackage data_package;
+        data_package.RequestedOperation(Windows::ApplicationModel::DataTransfer::DataPackageOperation::Copy);
+        data_package.SetText(to_hstring(stack_trace_str));
+        Windows::ApplicationModel::DataTransfer::Clipboard::SetContent(data_package);
+        ShowSimpleDialogAsync(L"Dump current stack", L"Stack has been copied to clipboard.");
     }
     muxc::TabViewItem MainPage::GetCurrentSourcesFileTabViewItem(hstring const& target_path) {
         auto src_tabview = SourceFilesTabView();
@@ -1236,6 +1226,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         dialog.Title(box_value(title));
         dialog.Content(box_value(content));
         dialog.PrimaryButtonText(L"OK");
+        dialog.DefaultButton(ContentDialogButton::Primary);
         return dialog.ShowAsync();
     }
     void MainPage::AddNewBreakpoint(hstring const& path, SrcSpan span, bool temporary) {

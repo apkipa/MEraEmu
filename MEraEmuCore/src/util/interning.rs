@@ -12,6 +12,9 @@ pub struct ThreadedTokenInterner {
     strings: UnsafeCell<Vec<&'static str>>,
 }
 
+unsafe impl Sync for ThreadedTokenInterner {}
+unsafe impl Send for ThreadedTokenInterner {}
+
 impl Default for ThreadedTokenInterner {
     fn default() -> Self {
         Self::new()

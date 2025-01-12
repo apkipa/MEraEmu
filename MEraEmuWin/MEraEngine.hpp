@@ -4,6 +4,8 @@
 
 #include "pch.h"
 
+#define JSON_USE_IMPLICIT_CONVERSIONS 0
+
 #include <nlohmann/json.hpp>
 #include <stdatomic.h>
 #include <optional>
@@ -11,6 +13,25 @@
 #include <span>
 
 #include "ffi/MEraEmuCore.rust.h"
+
+// https://github.com/nlohmann/json/issues/1749
+namespace nlohmann {
+    template <class T>
+    void to_json(nlohmann::json& j, const std::optional<T>& v) {
+        if (v.has_value())
+            j = *v;
+        else
+            j = nullptr;
+    }
+
+    template <class T>
+    void from_json(const nlohmann::json& j, std::optional<T>& v) {
+        if (j.is_null())
+            v = std::nullopt;
+        else
+            v = j.get<T>();
+    }
+}
 
 #define MEE_DEBUG_BREAK_BYTECODE ((uint8_t)0x01)
 
@@ -99,32 +120,6 @@ struct EraDiagnosticEntry {
     std::string_view message;
 };
 
-template<typename T> void to_json(nlohmann::json& data, const std::optional<T>& opt) {
-    data = opt ? nlohmann::json(*opt) : nlohmann::json(nullptr);
-}
-
-template<typename T> nlohmann::json ret_to_json(const std::optional<T>& opt) {
-    return opt ? nlohmann::json(*opt) : nlohmann::json(nullptr);
-}
-
-struct EraExecIp {
-    uint32_t chunk, offset;
-    auto operator<=>(const EraExecIp&) const = default;
-};
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraExecIp, chunk, offset);
-
-struct EraFuncExecFrame {
-    uint32_t stack_start;
-    EraExecIp ip, ret_ip;
-    bool ignore_return_value, is_transient;
-};
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraFuncExecFrame, stack_start, ip, ret_ip, ignore_return_value, is_transient);
-
-struct EraEngineStackTrace {
-    std::vector<EraFuncExecFrame> frames;
-};
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraEngineStackTrace, frames);
-
 struct ScalarValue_Void {};
 struct ScalarValue_Empty {};
 
@@ -182,6 +177,32 @@ inline void from_json(nlohmann::json const& j, ScalarValue& v) {
         }
     }
 }
+
+struct EraExecIp {
+    uint32_t chunk, offset;
+    auto operator<=>(const EraExecIp&) const = default;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraExecIp, chunk, offset);
+
+struct EraFuncExecFrame {
+    uint32_t stack_start;
+    EraExecIp ip, ret_ip;
+    bool ignore_return_value, is_transient;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraFuncExecFrame, stack_start, ip, ret_ip, ignore_return_value, is_transient);
+
+struct EraEngineStackTrace {
+    std::vector<EraFuncExecFrame> frames;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraEngineStackTrace, frames);
+
+struct EraEvaluateExprResult {
+    ScalarValue value;
+    std::vector<std::pair<std::string, ScalarValue>> children;
+    uint64_t offset, count;
+    std::optional<uint64_t> children_total_count;
+};
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(EraEvaluateExprResult, value, children, offset, count, children_total_count);
 
 struct ArrIntValue {
     std::vector<int64_t> vals;
@@ -451,12 +472,12 @@ struct MEraEngine {
     std::vector<std::string> get_loaded_files_list() const;
     std::optional<std::vector<uint8_t>> read_bytecode(uint32_t chunk_idx, uint32_t offset, uint32_t size) const;
     void patch_bytecode(uint32_t chunk_idx, uint32_t offset, std::span<const uint8_t> data) const;
-    std::optional<Value> read_stack_value(uint32_t slot) const;
-    std::optional<Value> read_variable_with_slot(uint32_t slot, bool in_global_frame) const;
-    ScalarValue evaluate_expr(std::string_view expr, std::optional<uint32_t> scope_idx) const;
-    Value evaluate_var_at_scope(std::string_view name, std::optional<uint32_t> scope_idx) const;
+    EraEvaluateExprResult evaluate_expr(std::string_view expr, std::optional<uint32_t> scope_idx,
+        uint64_t offset, uint64_t count, uint64_t eval_limit) const;
     std::vector<std::string> get_functions_list() const;
     std::vector<EraDumpFunctionBytecodeEntry> dump_function_bytecode(std::string_view name) const;
+    // TODO: Properly return the result
+    nlohmann::json dump_stack() const;
 
     nlohmann::json do_rpc(std::string_view method, nlohmann::json params) const;
 

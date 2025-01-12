@@ -339,6 +339,7 @@ pub enum EraNode {
     StmtBar(EraNodeRef),
     StmtBarL(EraNodeRef),
     StmtAddChara(EraNodeRef),
+    StmtAddVoidChara,
     StmtPickUpChara(EraNodeRef),
     StmtDelChara(EraNodeRef),
     StmtSwapChara(EraNodeRef),
@@ -800,7 +801,8 @@ pub struct EraParsedProgram {
 }
 
 pub struct EraParser<'a, 'b, 'i> {
-    callback: &'b mut dyn EraCompilerCallback,
+    diag_emit: &'b mut dyn EraEmitDiagnostic,
+    ctx: &'b EraCompilerCtxInner<'i>,
     lexer: &'b mut EraLexer<'a>,
     interner: &'i ThreadedTokenInterner,
     replaces: &'b EraDefineScope,
@@ -811,7 +813,8 @@ pub struct EraParser<'a, 'b, 'i> {
 
 impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
     pub fn new(
-        callback: &'b mut dyn EraCompilerCallback,
+        diag_emit: &'b mut dyn EraEmitDiagnostic,
+        ctx: &'b EraCompilerCtxInner<'i>,
         lexer: &'b mut EraLexer<'a>,
         interner: &'i ThreadedTokenInterner,
         replaces: &'b EraDefineScope,
@@ -820,7 +823,8 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
         is_header: bool,
     ) -> Self {
         EraParser {
-            callback,
+            diag_emit,
+            ctx,
             lexer,
             interner,
             replaces,
@@ -833,7 +837,8 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
     pub fn parse_program(&mut self) -> EraParsedProgram {
         let builder = EraNodeBuilder::with_interner(self.interner);
         let mut site = EraParserSite::new(
-            self.callback,
+            self.diag_emit,
+            self.ctx,
             self.lexer,
             builder,
             self.replaces,
@@ -854,7 +859,8 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
 }
 
 struct EraParserOuter<'a, 'b, 'i> {
-    callback: &'b mut dyn EraCompilerCallback,
+    diag_emit: &'b mut dyn EraEmitDiagnostic,
+    ctx: &'b EraCompilerCtxInner<'i>,
     // lexer
     l: &'b mut EraLexer<'a>,
     // builder
@@ -928,7 +934,8 @@ impl EraParserMacroPlace<'_> {
 
 impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
     fn new(
-        callback: &'b mut dyn EraCompilerCallback,
+        diag_emit: &'b mut dyn EraEmitDiagnostic,
+        ctx: &'b EraCompilerCtxInner<'i>,
         l: &'b mut EraLexer<'a>,
         b: EraNodeBuilder<'i, ThreadedTokenInterner>,
         replaces: &'b EraDefineScope,
@@ -939,7 +946,8 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
         let mut macro_place = EraParserMacroPlace::default();
         macro_place.2 = l.get_src();
         EraParserOuter {
-            callback,
+            diag_emit,
+            ctx,
             l,
             b,
             replaces,
@@ -961,14 +969,12 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
         self.is_panicking = is_panicking;
     }
 
-    fn emit_diag(&mut self, diag: Diagnostic<'a>) {
+    fn emit_diag(&mut self, diag: Diagnostic) {
         if self.is_panicking {
             diag.cancel();
             return;
         }
-        let provider = DiagnosticProvider::new(&diag, None, None);
-        self.callback.emit_diag(&provider);
-        diag.cancel();
+        self.ctx.emit_diag_to(diag, self.diag_emit);
     }
 
     fn next_token(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
@@ -989,7 +995,8 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
             let result: EraLexerNextResult = unsafe {
                 std::mem::transmute(self.l.read(
                     mode,
-                    self.callback,
+                    self.diag_emit,
+                    self.ctx,
                     self.replaces,
                     &[self.defines, &self.local_defines],
                 ))
@@ -1013,7 +1020,8 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
             let result: EraLexerNextResult = unsafe {
                 std::mem::transmute(self.l.peek(
                     mode,
-                    self.callback,
+                    self.diag_emit,
+                    self.ctx,
                     self.replaces,
                     &[self.defines, &self.local_defines],
                 ))
@@ -1023,7 +1031,8 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
             }
             let result = self.l.read(
                 mode,
-                self.callback,
+                self.diag_emit,
+                self.ctx,
                 self.replaces,
                 &[self.defines, &self.local_defines],
             );
@@ -1062,13 +1071,14 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
 
 struct EraParserSite<'a, 'b, 'i> {
     o: EraParserOuter<'a, 'b, 'i>,
-    base_diag: Diagnostic<'a>,
+    base_diag: Diagnostic,
     local_str_vars: FxHashSet<&'i Ascii<str>>,
 }
 
 impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     fn new(
-        callback: &'b mut dyn EraCompilerCallback,
+        diag_emit: &'b mut dyn EraEmitDiagnostic,
+        ctx: &'b EraCompilerCtxInner<'i>,
         l: &'b mut EraLexer<'a>,
         b: EraNodeBuilder<'i, ThreadedTokenInterner>,
         replaces: &'b EraDefineScope,
@@ -1077,7 +1087,16 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         is_header: bool,
     ) -> Self {
         let base_diag = l.make_diag();
-        let o = EraParserOuter::new(callback, l, b, replaces, defines, is_str_var_fn, is_header);
+        let o = EraParserOuter::new(
+            diag_emit,
+            ctx,
+            l,
+            b,
+            replaces,
+            defines,
+            is_str_var_fn,
+            is_header,
+        );
         EraParserSite {
             o,
             base_diag,
@@ -2725,6 +2744,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 b"BAR" => make!(EraNode::StmtBar(self.cmd_arg_limit(3, 3))),
                 b"BARL" => make!(EraNode::StmtBarL(self.cmd_arg_limit(3, 3))),
                 b"ADDCHARA" => make!(EraNode::StmtAddChara(self.command_arg(CmdArg::Expression))),
+                b"ADDVOIDCHARA" => make!(EraNode::StmtAddVoidChara),
                 b"PICKUPCHARA" => {
                     make!(EraNode::StmtPickUpChara(
                         self.command_arg(CmdArg::Expression)

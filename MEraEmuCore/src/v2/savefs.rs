@@ -114,7 +114,7 @@ pub trait EraSaveFileReadExt {
     fn read_var(
         &mut self,
         var_type: EraSaveDataType,
-        dst: &EraVarInfo,
+        dst: &mut EraVarInfo,
         chara_i: Option<u32>,
     ) -> anyhow::Result<()>;
 }
@@ -491,17 +491,13 @@ impl<T: std::io::Read> EraSaveFileReadExt for T {
     fn read_var(
         &mut self,
         var_type: EraSaveDataType,
-        var: &EraVarInfo,
+        var: &mut EraVarInfo,
         chara_i: Option<u32>,
     ) -> anyhow::Result<()> {
         use EraSaveDataType::*;
         match var_type {
             Int | IntArray | IntArray2D | IntArray3D => {
-                let mut var_val = var
-                    .val
-                    .as_arrint()
-                    .context("variable type mismatch")?
-                    .borrow_mut();
+                let mut var_val = var.val.as_arrint_mut().context("variable type mismatch")?;
                 var_val.ensure_alloc();
                 match var_type {
                     Int => self.read_int_array_0d(&mut var_val, chara_i)?,
@@ -512,11 +508,7 @@ impl<T: std::io::Read> EraSaveFileReadExt for T {
                 }
             }
             Str | StrArray | StrArray2D | StrArray3D => {
-                let mut var_val = var
-                    .val
-                    .as_arrstr()
-                    .context("variable type mismatch")?
-                    .borrow_mut();
+                let mut var_val = var.val.as_arrstr_mut().context("variable type mismatch")?;
                 var_val.ensure_alloc();
                 match var_type {
                     Str => self.read_str_array_0d(&mut var_val, chara_i)?,

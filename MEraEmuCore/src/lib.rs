@@ -2,6 +2,7 @@
 mod bytecode;
 #[cfg(feature = "legacy_v1")]
 mod compiler;
+#[cfg(feature = "legacy_cst")]
 pub mod cst;
 #[cfg(feature = "legacy_v1")]
 mod csv;
@@ -409,7 +410,7 @@ impl<E: std::error::Error> ErrorExt for E {
 #[derive_ReprC(dyn)]
 trait MEraEngineSysCallbackFfi {
     /// Callback for script errors.
-    fn on_error(&mut self, diag: DiagnosticProviderFfi<'_, '_, '_>);
+    fn on_error(&mut self, diag: DiagnosticProviderFfi<'_, '_>);
     /// Callback for RAND statements. Note that you should always return a fully
     /// filled random u64; the engine will internally cache entropy to reduce
     /// the total amount of syscalls.
@@ -1022,12 +1023,12 @@ fn mee_engine_do_rpc(engine: &mut MEraEngineFfi, request: char_p::Ref<'_>) -> st
 
 #[derive_ReprC]
 #[repr(C)]
-pub struct DiagnosticProviderFfi<'p, 'a, 'src> {
-    i: &'p DiagnosticProvider<'a, 'src>,
+pub struct DiagnosticProviderFfi<'p, 'a> {
+    i: &'p DiagnosticProvider<'a>,
 }
 
 #[ffi_export]
-fn mee_diag_get_entry_count(diag: DiagnosticProviderFfi<'_, '_, '_>) -> u64 {
+fn mee_diag_get_entry_count(diag: DiagnosticProviderFfi<'_, '_>) -> u64 {
     diag.i.get_entries().len() as u64
 }
 
@@ -1054,7 +1055,7 @@ impl Default for DiagnosticEntryFfi<'_> {
 
 #[ffi_export]
 fn mee_diag_get_entry<'p>(
-    diag: DiagnosticProviderFfi<'p, '_, '_>,
+    diag: DiagnosticProviderFfi<'p, '_>,
     idx: u64,
 ) -> RustOption<DiagnosticEntryFfi<'p>> {
     let Some(entry) = diag.i.get_entries().get(idx as usize) else {
@@ -1095,7 +1096,7 @@ impl Default for DiagnosticResolveSrcSpanResultFfi {
 
 #[ffi_export]
 fn mee_diag_resolve_src_span<'p>(
-    diag: DiagnosticProviderFfi<'p, '_, '_>,
+    diag: DiagnosticProviderFfi<'p, '_>,
     filename: string::str_ref<'_>,
     span: SrcSpan,
 ) -> RustOption<DiagnosticResolveSrcSpanResultFfi> {
@@ -1113,7 +1114,12 @@ fn mee_diag_resolve_src_span<'p>(
 }
 
 #[ffi_export]
-fn mee_do_nothing_to_export_types_eagerly(v1: ScalarValueKind, v2: ValueKind) {}
+fn mee_do_nothing_to_export_types_eagerly(
+    _v1: ValueKind,
+    _v2: ScalarValueKind,
+    _v3: StackValueKind,
+) {
+}
 // ----- End of FFI Exports -----
 
 #[cfg(test)]

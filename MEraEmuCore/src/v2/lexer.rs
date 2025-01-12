@@ -77,14 +77,8 @@ struct EraLexerOuterState<'a> {
 }
 
 impl<'a> EraLexerOuterState<'a> {
-    fn new_diag(&self) -> Diagnostic<'a> {
-        Diagnostic::with_src(self.filename.clone(), self.src)
-    }
-
-    fn emit_diag(&self, diag: Diagnostic, callback: &mut dyn EraCompilerCallback) {
-        let provider = DiagnosticProvider::new(&diag, None, None);
-        callback.emit_diag(&provider);
-        diag.cancel();
+    fn new_diag(&self) -> Diagnostic {
+        Diagnostic::with_file(self.filename.clone())
     }
 }
 
@@ -119,7 +113,7 @@ impl<'a> EraLexer<'a> {
         &self.o.filename
     }
 
-    pub fn make_diag(&self) -> Diagnostic<'a> {
+    pub fn make_diag(&self) -> Diagnostic {
         self.o.new_diag()
     }
 
@@ -127,7 +121,8 @@ impl<'a> EraLexer<'a> {
     pub fn peek(
         &mut self,
         mode: EraLexerMode,
-        callback: &mut dyn EraCompilerCallback,
+        diag_emit: &mut dyn EraEmitDiagnostic,
+        ctx: &EraCompilerCtxInner,
         replaces: &EraDefineScope,
         defines: &[&EraDefineScope],
     ) -> EraLexerNextResult {
@@ -142,7 +137,7 @@ impl<'a> EraLexer<'a> {
         // Load new token
         let mut next_inner = self.i.clone();
         let result =
-            unsafe { next_inner.next_token(mode, &mut self.o, callback, replaces, defines) };
+            unsafe { next_inner.next_token(mode, &mut self.o, diag_emit, ctx, replaces, defines) };
         self.next_i = Some((mode, result, next_inner));
 
         self.next_i.as_ref().unwrap().1
@@ -151,11 +146,12 @@ impl<'a> EraLexer<'a> {
     pub fn read(
         &mut self,
         mode: EraLexerMode,
-        callback: &mut dyn EraCompilerCallback,
+        diag_emit: &mut dyn EraEmitDiagnostic,
+        ctx: &EraCompilerCtxInner,
         replaces: &EraDefineScope,
         defines: &[&EraDefineScope],
     ) -> EraLexerNextResult {
-        _ = self.peek(mode, callback, replaces, defines);
+        _ = self.peek(mode, diag_emit, ctx, replaces, defines);
         let (_, result, i) = self.next_i.take().unwrap();
         self.i = i;
         // Swap strings to avoid lifetime issues (strs[1] is used for `peek` replacement storage)
@@ -275,7 +271,8 @@ impl EraLexerInnerState {
         &mut self,
         mode: EraLexerMode,
         outer: &mut EraLexerOuterState<'_>,
-        callback: &mut dyn EraCompilerCallback,
+        diag_emit: &mut dyn EraEmitDiagnostic,
+        ctx: &EraCompilerCtxInner,
         replaces: &EraDefineScope,
         defines: &[&EraDefineScope],
     ) -> EraLexerNextResult<'static> {
@@ -284,7 +281,8 @@ impl EraLexerInnerState {
         let mut site = EraLexerInnerSite {
             o: outer,
             i: self,
-            callback,
+            diag_emit,
+            ctx,
             replaces,
             defines,
             cur_lexeme_start: std::ptr::null(),
@@ -335,10 +333,11 @@ impl EraLexerInnerState {
 }
 
 // #[derive(Debug)]
-struct EraLexerInnerSite<'a, 'c> {
+struct EraLexerInnerSite<'a, 'c, 'i> {
     o: &'c mut EraLexerOuterState<'a>,
     i: &'c mut EraLexerInnerState,
-    callback: &'c mut dyn EraCompilerCallback,
+    diag_emit: &'c mut dyn EraEmitDiagnostic,
+    ctx: &'c EraCompilerCtxInner<'i>,
     replaces: &'c EraDefineScope,
     defines: &'c [&'c EraDefineScope],
     cur_lexeme_start: *const u8,
@@ -346,7 +345,7 @@ struct EraLexerInnerSite<'a, 'c> {
     has_replaced: bool,
 }
 
-impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
+impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
     pub fn next_token(&mut self, mode: EraLexerMode) -> EraTokenKind {
         use crate::util::bmatch_caseless;
         use EraLexerMode as Mode;
@@ -375,7 +374,7 @@ impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
             ) -> EraTokenKind;
             fn read_newline_with_space(&mut self, starts_with_newline: bool) -> EraTokenKind;
         }
-        impl Adhoc for EraLexerInnerSite<'_, '_> {
+        impl Adhoc for EraLexerInnerSite<'_, '_, '_> {
             fn match_token2(
                 &mut self,
                 seconds: &[(u8, EraTokenKind)],
@@ -452,7 +451,7 @@ impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
                             SrcSpan::new(SrcPos(initial_src_pos as _), 1),
                             "unexpected `}`",
                         );
-                        self.o.emit_diag(diag, self.callback);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Invalid;
                     }
                 }
@@ -668,7 +667,7 @@ impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
                     trait Adhoc {
                         fn read_fn(&mut self) -> Option<Box<[u8]>>;
                     }
-                    impl Adhoc for EraLexerInnerSite<'_, '_> {
+                    impl Adhoc for EraLexerInnerSite<'_, '_, '_> {
                         fn read_fn(&mut self) -> Option<Box<[u8]>> {
                             let lexeme_start = self.cur_lexeme_len;
                             loop {
@@ -697,7 +696,7 @@ impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
                             lexeme_span,
                             "expected `]` to close the macro line",
                         );
-                        self.o.emit_diag(diag, self.callback);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Invalid;
                     };
 
@@ -716,7 +715,7 @@ impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
                             lexeme_span,
                             format!("unknown macro line `[{}]`", lexeme.as_bstr()),
                         );
-                        self.o.emit_diag(diag, self.callback);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Invalid;
                     }
 
@@ -739,7 +738,7 @@ impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
                                     lexeme_span,
                                     "macro block started here",
                                 );
-                                self.o.emit_diag(diag, self.callback);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
 
                                 break;
                             };
@@ -777,7 +776,7 @@ impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
                         SrcSpan::new(SrcPos(initial_src_pos as _), len as _),
                         format!("illegal character `{}`", std::ascii::escape_default(ch)),
                     );
-                    self.o.emit_diag(diag, self.callback);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     Invalid
                 }
             },
@@ -1102,7 +1101,7 @@ impl<'a, 'c> EraLexerInnerSite<'a, 'c> {
                     SrcSpan::new(SrcPos(old_src_pos as _), replace_len as _),
                     format!("replacement `{}` not found", in_replace),
                 );
-                self.o.emit_diag(diag, self.callback);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return;
             };
             // SAFETY: The data is guaranteed to be valid, since removal of a replacement is forbidden in safe Rust

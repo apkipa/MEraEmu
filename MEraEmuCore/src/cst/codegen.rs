@@ -5,7 +5,7 @@ use cstree::{
 use hashbrown::HashMap;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use rclite::Rc;
+use rclite::{Arc, Rc};
 use rustc_hash::{FxBuildHasher, FxHasher};
 use smallvec::smallvec;
 use yoke::Yoke;
@@ -389,11 +389,11 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
             ),
         > = Default::default();
 
-        let bc_chunks = Rc::get_mut(&mut self.ctx.bc_chunks).unwrap();
+        let bc_chunks = Arc::get_mut(&mut self.ctx.i.bc_chunks).unwrap();
         let sources = filenames
             .iter()
             .map(|filename| {
-                let program = Rc::get_mut(&mut self.ctx.source_map)
+                let program = Arc::get_mut(&mut self.ctx.i.source_map)
                     .unwrap()
                     .get_mut(filename)
                     .expect("source not found");
@@ -407,17 +407,16 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                     let src = std::str::from_utf8(&src).unwrap();
                     let mut lexer = EraLexer::new(program.filename.clone(), src, false);
                     let mut is_str_var_fn = |x: &str| {
-                        self.ctx
-                            .variables
+                        (self.ctx.variables)
                             .get_var(x)
                             .map_or(false, |x| x.kind().is_str())
                     };
                     let mut parser = super::parser::EraParser::new(
                         &mut self.ctx.callback,
                         &mut lexer,
-                        &mut self.ctx.node_cache,
-                        &self.ctx.global_replace,
-                        &self.ctx.global_define,
+                        &mut self.ctx.i.node_cache,
+                        &self.ctx.i.global_replace,
+                        &self.ctx.i.global_define,
                         &mut is_str_var_fn,
                         is_header,
                     );
@@ -437,7 +436,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                             .cst_root
                             .as_ref()
                             .unwrap()
-                            .display::<Token, _>(self.ctx.node_cache.interner());
+                            .display::<Token, _>(self.ctx.i.node_cache.interner());
                         let src = program.macro_map.translate_source(&src);
                         let compressed = lz4_flex::compress_prepend_size(src.as_bytes());
                         compressed.into()
@@ -513,7 +512,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
         drop(site);
 
         // Merge prebuild functions into global function table
-        let func_entries = Rc::get_mut(&mut self.ctx.func_entries).unwrap();
+        let func_entries = Arc::get_mut(&mut self.ctx.func_entries).unwrap();
         for (func_name, (_, prebuild_info, func_info)) in &mut prebuild_funcs {
             let func_info = func_info.take().unwrap();
             let (idx, _) = func_entries.insert_full(func_name, Some(func_info));
@@ -576,7 +575,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
         self.ctx.active_source = ArcStr::default();
 
         // Finialize bytecode chunks
-        let func_entries = Rc::get_mut(&mut self.ctx.func_entries).unwrap();
+        let func_entries = Arc::get_mut(&mut self.ctx.func_entries).unwrap();
         for (func_idx, func_offset) in func_offsets {
             let func_info = func_entries
                 .get_index_mut(func_idx as _)
@@ -586,7 +585,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                 .unwrap();
             func_info.bc_offset = func_offset;
         }
-        let bc_chunks = Rc::get_mut(&mut self.ctx.bc_chunks).unwrap();
+        let bc_chunks = Arc::get_mut(&mut self.ctx.bc_chunks).unwrap();
         for (chunk_idx, (chunk, _)) in compile_units {
             let mut chunk = chunk.finish();
             chunk.name = bc_chunks[chunk_idx as usize].name.clone();
@@ -969,7 +968,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
         }
 
         // Now materialize LOCAL(S), ARG(S) variables
-        let mut add_builtin_var = |var_name, var_val: Value| -> CompileResult<()> {
+        let mut add_builtin_var = |var_name, var_val: StackValue| -> CompileResult<()> {
             let var_kind = var_val.kind();
             let (var_idx, _) = interp.get_ctx_mut().variables.add_var_force(EraVarInfo {
                 name: Ascii::new(rcstr::format!("{var_name}@{name_str}")),
@@ -1014,19 +1013,19 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
         };
         _ = add_builtin_var(
             "LOCAL",
-            Value::new_int_arr(smallvec![var_local_size], Vec::new()),
+            StackValue::new_int_arr(smallvec![var_local_size], Vec::new()),
         );
         _ = add_builtin_var(
             "LOCALS",
-            Value::new_str_arr(smallvec![var_locals_size], Vec::new()),
+            StackValue::new_str_arr(smallvec![var_locals_size], Vec::new()),
         );
         _ = add_builtin_var(
             "ARG",
-            Value::new_int_arr(smallvec![var_arg_size], Vec::new()),
+            StackValue::new_int_arr(smallvec![var_arg_size], Vec::new()),
         );
         _ = add_builtin_var(
             "ARGS",
-            Value::new_str_arr(smallvec![var_args_size], Vec::new()),
+            StackValue::new_str_arr(smallvec![var_args_size], Vec::new()),
         );
 
         // Stage 2 - Process argument bindings
@@ -2794,7 +2793,7 @@ impl<'o, 'ctx, 'i, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, '
                 let args = stmt.arguments().ok_or(())?;
                 let ty = self.builtin_func_call("LOADDATA", stmt_span, args, false)?;
                 assert_eq!(ty, ScalarValueKind::Int);
-                let args = &[ValueKind::Int];
+                let args = &[StackValueKind::Int];
                 let func_idx = self.match_user_func_sig(
                     "SYSPROC_LOADDATAEND",
                     stmt_span,
@@ -6011,8 +6010,8 @@ impl<'o, 'ctx, 'i, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, '
                 // Fill default value if argument is omitted
                 let arg = if arg.is_empty() {
                     match target_param.var_kind {
-                        ValueKind::Int => self.chunk.push_load_imm(0, arg_span),
-                        ValueKind::Str => self.chunk.push_build_string(0, arg_span),
+                        StackValueKind::Int => self.chunk.push_load_imm(0, arg_span),
+                        StackValueKind::Str => self.chunk.push_build_string(0, arg_span),
                         _ => unreachable!(),
                     }
                     target_param.var_kind.to_scalar()
@@ -6606,7 +6605,7 @@ impl<'o, 'ctx, 'i, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, '
                 let func_idx = site.match_user_func_sig(
                     "SYSFUNC_ALIGN_INT_TO_STR",
                     name_span,
-                    &[ValueKind::Int],
+                    &[StackValueKind::Int],
                     ScalarValueKind::Str,
                 )?;
                 site.chunk.push_load_imm(func_idx as _, name_span);
@@ -7245,7 +7244,7 @@ impl<'o, 'ctx, 'i, 'b, Callback: EraCompilerCallback> EraCodeGenSite<'o, 'ctx, '
         &mut self,
         func_name: &str,
         span: SrcSpan,
-        args: &[ValueKind],
+        args: &[StackValueKind],
         ret: ScalarValueKind,
     ) -> CompileResult<usize> {
         let Some((func_idx, _, Some(func_info))) =
@@ -7322,7 +7321,7 @@ enum EraPseudoVariableKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EraIdVariableKind {
-    Normal(ValueKind),
+    Normal(StackValueKind),
     Pseudo(EraPseudoVariableKind),
 }
 
@@ -7335,7 +7334,7 @@ impl EraIdVariableKind {
         matches!(self, Self::Pseudo(_))
     }
 
-    fn as_normal(&self) -> Option<ValueKind> {
+    fn as_normal(&self) -> Option<StackValueKind> {
         match self {
             Self::Normal(kind) => Some(*kind),
             _ => None,

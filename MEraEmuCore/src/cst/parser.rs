@@ -200,14 +200,14 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
         self.is_panicking = is_panicking;
     }
 
-    fn emit_diag(&mut self, diag: Diagnostic<'a>) {
+    fn emit_diag(&mut self, diag: Diagnostic) {
         if self.is_panicking {
             diag.cancel();
             return;
         }
-        let provider = DiagnosticProvider::new(&diag, None, None);
-        self.callback.emit_diag(&provider);
-        diag.cancel();
+        let resolver = DiagnosticResolver::new(None, None);
+        let provider = DiagnosticProvider::new(diag, resolver);
+        self.callback.emit_diag(provider);
     }
 
     fn next_token(&mut self, mode: EraLexerMode) -> EraLexerNextResult {
@@ -329,7 +329,7 @@ impl<'a, 'b, 'cache, 'i> EraParserOuter<'a, 'b, 'cache, 'i> {
 
 struct EraParserSite<'a, 'b, 'cache, 'i> {
     o: EraParserOuter<'a, 'b, 'cache, 'i>,
-    base_diag: Diagnostic<'a>,
+    base_diag: Diagnostic,
     // eat_syncs: Vec<(Mode, Token)>,
     local_str_vars: HashSet<Ascii<ArcStr>, FxBuildHasher>,
 }

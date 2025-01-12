@@ -1,17 +1,17 @@
 use std::borrow::Cow;
 
-use cstree::interning::InternKey;
-use cstree::interning::Interner;
-use cstree::interning::Resolver;
-use cstree::interning::TokenKey;
+use cstree::interning::{InternKey, Interner, Resolver, TokenKey};
 use hashbrown::HashMap;
 use indexmap::IndexMap;
 use itertools::Itertools;
+use rayon::prelude::*;
+use rclite::Arc;
 use rclite::Rc;
 use rustc_hash::{FxBuildHasher, FxHasher};
 use smallvec::smallvec;
 use yoke::Yoke;
 
+use crate::util::iter::SequentialBridge;
 use crate::v2::parser::*;
 use crate::v2::routines;
 use crate::{
@@ -312,17 +312,19 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
         &mut self,
         filenames: &[ArcStr],
         mut progress_callback: impl FnMut(usize),
+        use_rayon: bool,
     ) {
+        let mut t = std::time::Instant::now();
+
         let mut prebuild_funcs: FxIndexMap<
             &'i Ascii<str>,
             (EraArcNodeRef, EraFuncPrebuildInfo, Option<EraFuncInfo<'i>>),
         > = Default::default();
 
-        let bc_chunks = Rc::get_mut(&mut self.ctx.bc_chunks).unwrap();
         let sources = filenames
             .iter()
             .map(|filename| {
-                let program = Rc::get_mut(&mut self.ctx.source_map)
+                let program = Arc::get_mut(&mut self.ctx.i.source_map)
                     .unwrap()
                     .get_mut(filename)
                     .expect("source not found");
@@ -332,31 +334,28 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                     None => {
                         // Rebuild AST
                         let is_header = program.is_header;
-                        let src = program
-                            .text
-                            .as_deref()
-                            .map(Cow::Borrowed)
-                            .unwrap_or_else(|| {
-                                let compressed = program
-                                    .compressed_text
-                                    .as_ref()
-                                    .expect("compressed text not set");
-                                let src = lz4_flex::decompress_size_prepended(compressed).unwrap();
-                                Cow::Owned(String::from_utf8(src).unwrap())
-                            });
+                        let src = program.text.clone().unwrap_or_else(|| {
+                            let compressed = program
+                                .compressed_text
+                                .as_ref()
+                                .expect("compressed text not set");
+                            let src = lz4_flex::decompress_size_prepended(compressed).unwrap();
+                            let src = simdutf8::basic::from_utf8(&src).expect("invalid utf-8");
+                            arcstr::ArcStr::from(src)
+                        });
                         let mut lexer = EraLexer::new(program.filename.clone(), &src, false);
                         let mut is_str_var_fn = |x: &str| {
-                            self.ctx
-                                .variables
+                            (self.ctx.i.variables)
                                 .get_var(x)
                                 .map_or(false, |x| x.kind().is_str())
                         };
                         let mut parser = EraParser::new(
                             &mut self.ctx.callback,
+                            &self.ctx.i,
                             &mut lexer,
-                            self.ctx.node_cache.interner(),
-                            &self.ctx.global_replace,
-                            &self.ctx.global_define,
+                            self.ctx.i.interner(),
+                            &self.ctx.i.global_replace,
+                            &self.ctx.i.global_define,
                             &mut is_str_var_fn,
                             is_header,
                         );
@@ -365,6 +364,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                     }
                 };
                 // Reuse chunk or allocate new chunk
+                let bc_chunks = Arc::get_mut(&mut self.ctx.i.bc_chunks).unwrap();
                 let chunk_idx = bc_chunks
                     .iter()
                     .position(|x| x.name == *filename)
@@ -377,6 +377,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                 (chunk_idx, filename, program)
             })
             .collect_vec();
+        let bc_chunks = Arc::get_mut(&mut self.ctx.i.bc_chunks).unwrap();
         let sources_iter = sources
             .iter()
             .map(|(chunk_idx, filename, program)| (*chunk_idx, *filename, program));
@@ -428,8 +429,11 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
         }
         drop(site);
 
+        println!("Prebuild time: {:?}", t.elapsed());
+        t = std::time::Instant::now();
+
         // Merge prebuild functions into global function table
-        let func_entries = Rc::get_mut(&mut self.ctx.func_entries).unwrap();
+        let func_entries = Arc::get_mut(&mut self.ctx.func_entries).unwrap();
         for (func_name, (_, prebuild_info, func_info)) in &mut prebuild_funcs {
             let func_info = func_info.take().unwrap();
             let (idx, _) = func_entries.insert_full(func_name, Some(func_info));
@@ -456,43 +460,101 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
 
         drop(sources);
 
+        println!("Prebuild merge time: {:?}", t.elapsed());
+        t = std::time::Instant::now();
+
         // Now start compiling functions
         let mut current_progress = 0;
         let mut func_offsets = Vec::with_capacity(funcs_cnt);
-        for (chunk, funcs) in compile_units.values_mut() {
-            let funcs = std::mem::take(funcs);
-            for (name, node, prebuild_info) in funcs {
-                let func_idx = prebuild_info.func_idx;
-                let func_info = self
-                    .ctx
-                    .func_entries
-                    .get_index(func_idx as _)
-                    .unwrap()
-                    .1
-                    .as_ref()
-                    .unwrap();
-                let chunk_idx = func_info.chunk_idx;
-                let filename = self.ctx.bc_chunks[chunk_idx as usize].name.clone();
-                self.ctx.active_source = filename.clone();
-                let func_offset: u32 = chunk
-                    .get_len()
-                    .try_into()
-                    .expect("function offset overflow");
-                EraCodeGenSite::gen_function(self, filename, chunk, node, prebuild_info);
-                let func_size = chunk.get_len() - func_offset as usize;
-                func_offsets.push((func_idx, func_offset, func_size as _));
-                chunk.push_bc(BcKind::DebugBreak, SrcSpan::default());
-            }
+        // Try parallelizing if possible
+        if !use_rayon {
+            for (chunk, funcs) in compile_units.values_mut() {
+                let funcs = std::mem::take(funcs);
+                for (name, node, prebuild_info) in funcs {
+                    let func_idx = prebuild_info.func_idx;
+                    let func_info = self
+                        .ctx
+                        .func_entries
+                        .get_index(func_idx as _)
+                        .unwrap()
+                        .1
+                        .as_ref()
+                        .unwrap();
+                    let chunk_idx = func_info.chunk_idx;
+                    let filename = self.ctx.bc_chunks[chunk_idx as usize].name.clone();
+                    let func_offset: u32 = chunk
+                        .get_len()
+                        .try_into()
+                        .expect("function offset overflow");
+                    EraCodeGenSite::gen_function(
+                        &mut self.ctx.callback,
+                        &self.ctx.i,
+                        filename,
+                        chunk,
+                        node,
+                        prebuild_info,
+                    );
+                    let func_size = chunk.get_len() - func_offset as usize;
+                    func_offsets.push((func_idx, func_offset, func_size as _));
+                    chunk.push_bc(BcKind::DebugBreak, SrcSpan::default());
+                }
 
-            // Update progress
-            current_progress += 1;
-            progress_callback(current_progress);
+                // Update progress
+                current_progress += 1;
+                progress_callback(current_progress);
+            }
+        } else {
+            // Uses inherited rayon environment
+            let it = compile_units.par_values_mut().map(|(chunk, funcs)| {
+                let mut local_func_offsets = Vec::new();
+                let funcs = std::mem::take(funcs);
+                let mut err_accum = EraDiagnosticAccumulator::new();
+                for (name, node, prebuild_info) in funcs {
+                    let func_idx = prebuild_info.func_idx;
+                    let func_info = (self.ctx.i.func_entries)
+                        .get_index(func_idx as _)
+                        .unwrap()
+                        .1
+                        .as_ref()
+                        .unwrap();
+                    let chunk_idx = func_info.chunk_idx;
+                    let filename = self.ctx.i.bc_chunks[chunk_idx as usize].name.clone();
+                    let func_offset: u32 = chunk
+                        .get_len()
+                        .try_into()
+                        .expect("function offset overflow");
+                    EraCodeGenSite::gen_function(
+                        &mut err_accum,
+                        &self.ctx.i,
+                        filename,
+                        chunk,
+                        node,
+                        prebuild_info,
+                    );
+                    let func_size = chunk.get_len() - func_offset as usize;
+                    chunk.push_bc(BcKind::DebugBreak, SrcSpan::default());
+                    local_func_offsets.push((func_idx, func_offset, func_size as u32));
+                }
+                (local_func_offsets, err_accum)
+            });
+            it.seq_for_each(|(v, err_accum)| {
+                err_accum.emit_all_to(&mut self.ctx.callback, &self.ctx.i);
+                for (func_idx, func_offset, func_size) in v {
+                    func_offsets.push((func_idx, func_offset, func_size));
+                    // Update progress
+                    current_progress += 1;
+                    progress_callback(current_progress);
+                }
+            });
         }
+
+        println!("Compilation time: {:?}", t.elapsed());
+        t = std::time::Instant::now();
 
         self.ctx.active_source = ArcStr::default();
 
         // Finialize bytecode chunks
-        let func_entries = Rc::get_mut(&mut self.ctx.func_entries).unwrap();
+        let func_entries = Arc::get_mut(&mut self.ctx.func_entries).unwrap();
         for (func_idx, func_offset, func_size) in func_offsets {
             let func_info = func_entries
                 .get_index_mut(func_idx as _)
@@ -503,12 +565,14 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
             func_info.bc_offset = func_offset;
             func_info.bc_size = func_size;
         }
-        let bc_chunks = Rc::get_mut(&mut self.ctx.bc_chunks).unwrap();
+        let bc_chunks = Arc::get_mut(&mut self.ctx.bc_chunks).unwrap();
         for (chunk_idx, (chunk, _)) in compile_units {
             let mut chunk = chunk.finish();
             chunk.name = bc_chunks[chunk_idx as usize].name.clone();
             bc_chunks[chunk_idx as usize] = chunk;
         }
+
+        println!("Finalization time: {:?}", t.elapsed());
     }
 }
 
@@ -522,10 +586,10 @@ struct EraCodeGenPrebuildSite<'o, 'ctx, 'i, Callback> {
 
 impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ctx, 'i, Callback> {
     fn new(o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>) -> Self {
-        let var_local_size = o.ctx.variables.get_var("LOCAL").unwrap().dims().unwrap()[0];
-        let var_locals_size = o.ctx.variables.get_var("LOCALS").unwrap().dims().unwrap()[0];
-        let var_arg_size = o.ctx.variables.get_var("ARG").unwrap().dims().unwrap()[0];
-        let var_args_size = o.ctx.variables.get_var("ARGS").unwrap().dims().unwrap()[0];
+        let var_local_size = o.ctx.variables.get_var("LOCAL").unwrap().dims()[0];
+        let var_locals_size = o.ctx.variables.get_var("LOCALS").unwrap().dims()[0];
+        let var_arg_size = o.ctx.variables.get_var("ARG").unwrap().dims()[0];
+        let var_args_size = o.ctx.variables.get_var("ARGS").unwrap().dims()[0];
 
         Self {
             o,
@@ -573,7 +637,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                         decl_span,
                         "redundant event kind declaration",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.o.ctx.i.emit_diag_to(diag, &mut self.o.ctx.callback);
                     continue;
                 }
                 event_func_kind = Some(kind);
@@ -596,7 +660,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                 prev_func_span,
                 "previous definition here",
             );
-            diag.emit_to(self.o.ctx);
+            self.o.ctx.i.emit_diag_to(diag, &mut self.o.ctx.callback);
             return Err(());
         }
 
@@ -617,9 +681,9 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
             is_transient: false,
         };
         let interner = self.o.ctx.interner();
-        let mut interp = EraInterpreter::new(self.o.ctx, arena, true);
+        // let mut interp = EraInterpreter::new(&mut self.o.ctx.callback, &self.o.ctx.i, arena, true);
 
-        let mut add_frame_var_or_diag = |interp: &mut EraInterpreter<Callback>,
+        let mut add_frame_var_or_diag = |ctx: &mut EraCompilerCtx<Callback>,
                                          name: TokenKey,
                                          var_info: EraFuncFrameVarInfo|
          -> CompileResult<()> {
@@ -637,12 +701,12 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                     name_span,
                     format!("redefinition of variable `{}`", name_str),
                 );
-                diag.emit_to(interp.get_ctx_mut());
+                ctx.i.emit_diag_to(diag, &mut ctx.callback);
                 return Err(());
             }
 
             // Warn about variable shadowing
-            if let Some(var) = interp.get_ctx().variables.get_var(name_str) {
+            if let Some(var) = ctx.i.variables.get_var(name_str) {
                 // let var_span = var.src_span();
                 let mut diag = make_diag_fn();
                 diag.span_warn(
@@ -655,20 +719,16 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                 //     var_span,
                 //     "previous definition here",
                 // );
-                diag.emit_to(interp.get_ctx_mut());
+                ctx.i.emit_diag_to(diag, &mut ctx.callback);
             }
-            if interp
-                .get_ctx()
-                .csv_indices
-                .contains_key(Ascii::new_str(name_str))
-            {
+            if (ctx.i.csv_indices).contains_key(Ascii::new_str(name_str)) {
                 let mut diag = make_diag_fn();
                 diag.span_warn(
                     Default::default(),
                     name_span,
                     "this declaration might be shadowed by a CSV index name",
                 );
-                diag.emit_to(interp.get_ctx_mut());
+                ctx.i.emit_diag_to(diag, &mut ctx.callback);
             }
 
             Ok(())
@@ -696,11 +756,13 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                             decl_span,
                             "cannot use event kind declaration in non-event function",
                         );
-                        diag.emit_to(interp.get_ctx_mut());
+                        self.o.ctx.i.emit_diag_to(diag, &mut self.o.ctx.callback);
                     }
                 }
                 EraNode::DeclLocalSize(size) => {
                     let size_span = arena.get_node_span(size);
+                    let mut interp =
+                        EraInterpreter::new(&mut self.o.ctx.callback, &self.o.ctx.i, arena, true);
                     let Some(size) = interp.interpret_int_expr_ok(size) else {
                         continue;
                     };
@@ -711,13 +773,15 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                             size_span,
                             "LOCAL size is either too large or too small",
                         );
-                        diag.emit_to(interp.get_ctx_mut());
+                        self.o.ctx.i.emit_diag_to(diag, &mut self.o.ctx.callback);
                         continue;
                     };
                     var_local_size = size;
                 }
                 EraNode::DeclLocalSSize(size) => {
                     let size_span = arena.get_node_span(size);
+                    let mut interp =
+                        EraInterpreter::new(&mut self.o.ctx.callback, &self.o.ctx.i, arena, true);
                     let Some(size) = interp.interpret_int_expr_ok(size) else {
                         continue;
                     };
@@ -728,7 +792,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                             size_span,
                             "LOCALS size is either too large or too small",
                         );
-                        diag.emit_to(interp.get_ctx_mut());
+                        self.o.ctx.i.emit_diag_to(diag, &mut self.o.ctx.callback);
                         continue;
                     };
                     var_locals_size = size;
@@ -738,6 +802,8 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                 }
                 _ => {
                     // Assume variable definitions
+                    let mut interp =
+                        EraInterpreter::new(&mut self.o.ctx.callback, &self.o.ctx.i, arena, true);
                     let var_decl = match interp.interpret_var_decl(decl) {
                         Ok(x) => x,
                         Err(EraInterpretError::VarNotFound(var, var_span)) => {
@@ -747,7 +813,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                                 var_span,
                                 format!("undefined variable `{var}`"),
                             );
-                            diag.emit_to(interp.get_ctx_mut());
+                            self.o.ctx.i.emit_diag_to(diag, &mut self.o.ctx.callback);
                             continue;
                         }
                         _ => continue,
@@ -757,14 +823,13 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                         .var_info
                         .val
                         .dims_cnt()
-                        .unwrap()
                         .try_into()
                         .expect("too many dimensions");
 
                     // Materialize var_decl
                     if var_decl.is_dynamic {
                         // Dynamic variable; allocate on stack
-                        use std::hash::Hasher;
+                        use std::hash::{Hash, Hasher};
 
                         // TODO: Maybe use a dedicated const var intern pool?
                         let mut var_info = var_decl.var_info;
@@ -773,13 +838,19 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                         let is_charadata = var_info.is_charadata;
                         let prefix = if var_kind.is_str() { "S" } else { "I" };
                         let mut hasher = FxHasher::default();
-                        var_info.val.inner_hash(&mut hasher);
+                        var_info.val.hash(&mut hasher);
                         let const_name = rcstr::format!("$CONSTVAL@{prefix}{:x}", hasher.finish());
                         var_info.name = Ascii::new(const_name);
-                        let (var_idx, _) = interp.get_ctx_mut().variables.add_var_force(var_info);
+                        let (var_idx, _) = self.o.ctx.variables.add_var_force(var_info);
+                        interp = EraInterpreter::new(
+                            &mut self.o.ctx.callback,
+                            &self.o.ctx.i,
+                            arena,
+                            true,
+                        );
                         let var_idx = var_idx.try_into().expect("too many variables");
                         if add_frame_var_or_diag(
-                            &mut interp,
+                            self.o.ctx,
                             var_decl.name_key,
                             EraFuncFrameVarInfo {
                                 name: var_decl.name_key,
@@ -801,7 +872,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                         // Simply point variable to the argument slot
                         // NOTE: We will do this in a later stage
                         if add_frame_var_or_diag(
-                            &mut interp,
+                            self.o.ctx,
                             var_decl.name_key,
                             EraFuncFrameVarInfo {
                                 name: var_decl.name_key,
@@ -827,9 +898,15 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                             Ascii::new(rcstr::format!("{}@{}", var_info.name, name_str));
                         let var_kind = var_info.val.kind();
                         let is_charadata = var_info.is_charadata;
-                        let (var_idx, _) = interp.get_ctx_mut().variables.add_var_force(var_info);
+                        let (var_idx, _) = self.o.ctx.variables.add_var_force(var_info);
+                        interp = EraInterpreter::new(
+                            &mut self.o.ctx.callback,
+                            &self.o.ctx.i,
+                            arena,
+                            true,
+                        );
                         if add_frame_var_or_diag(
-                            &mut interp,
+                            self.o.ctx,
                             var_decl.name_key,
                             EraFuncFrameVarInfo {
                                 name: var_decl.name_key,
@@ -861,15 +938,15 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                     name_span,
                     "transient function cannot have variables or arguments",
                 );
-                diag.emit_to(interp.get_ctx_mut());
+                self.o.ctx.i.emit_diag_to(diag, &mut self.o.ctx.callback);
                 return Err(());
             }
         }
 
         // Now materialize LOCAL(S), ARG(S) variables
-        let mut add_builtin_var = |var_name, var_val: Value| -> CompileResult<()> {
+        let mut add_builtin_var = |var_name, var_val: ArrayValue| -> CompileResult<()> {
             let var_kind = var_val.kind();
-            let (var_idx, _) = interp.get_ctx_mut().variables.add_var_force(EraVarInfo {
+            let (var_idx, _) = self.o.ctx.variables.add_var_force(EraVarInfo {
                 name: Ascii::new(rcstr::format!("{var_name}@{name_str}")),
                 val: var_val,
                 is_const: false,
@@ -877,7 +954,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                 is_global: false,
                 never_trap: true,
             });
-            let var_name_key = interp.get_ctx_mut().interner().get_or_intern(var_name);
+            let var_name_key = self.o.ctx.interner().get_or_intern(var_name);
             // HACK: Use function name span for now
             let var_span = name_span;
             if func_info
@@ -905,26 +982,26 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                     name_span,
                     format!("redefinition of variable `{var_name}`"),
                 );
-                diag.emit_to(interp.get_ctx_mut());
+                self.o.ctx.i.emit_diag_to(diag, &mut self.o.ctx.callback);
                 return Err(());
             }
             Ok(())
         };
         _ = add_builtin_var(
             "LOCAL",
-            Value::new_int_arr(smallvec![var_local_size], Vec::new()),
+            ArrayValue::new_int_arr(smallvec![var_local_size], Vec::new()),
         );
         _ = add_builtin_var(
             "LOCALS",
-            Value::new_str_arr(smallvec![var_locals_size], Vec::new()),
+            ArrayValue::new_str_arr(smallvec![var_locals_size], Vec::new()),
         );
         _ = add_builtin_var(
             "ARG",
-            Value::new_int_arr(smallvec![var_arg_size], Vec::new()),
+            ArrayValue::new_int_arr(smallvec![var_arg_size], Vec::new()),
         );
         _ = add_builtin_var(
             "ARGS",
-            Value::new_str_arr(smallvec![var_args_size], Vec::new()),
+            ArrayValue::new_str_arr(smallvec![var_args_size], Vec::new()),
         );
 
         // Stage 2 - Process argument bindings
@@ -935,11 +1012,14 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
         };
         let node_args = arena.get_extra_data_view(node_args);
         for (arg_idx, arg) in node_args.iter().map(|x| EraNodeRef(*x)).enumerate() {
+            let mut interp =
+                EraInterpreter::new(&mut self.o.ctx.callback, &self.o.ctx.i, arena, true);
+
             let arg_span = arena.get_node_span(arg);
             let arg_idx = arg_idx.try_into().map_err(|_| {
                 let mut diag = make_diag_fn();
                 diag.span_err(Default::default(), arg_span, "too many arguments");
-                diag.emit_to(interp.get_ctx_mut());
+                interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                 ()
             })?;
 
@@ -958,7 +1038,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                         arena.get_node_token_span(arg),
                         format!("unexpected operator `{op:?}`"),
                     );
-                    diag.emit_to(interp.get_ctx_mut());
+                    interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                     return Err(());
                 }
                 let Some(rhs) = interp.interpret_expr_ok(rhs) else {
@@ -988,7 +1068,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                                 idx_span,
                                 "argument index is either too large or too small",
                             );
-                            diag.emit_to(interp.get_ctx_mut());
+                            interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                             ()
                         })
                     })
@@ -1002,7 +1082,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
             let EraNode::Identifier(target) = arena.get_node(target) else {
                 let mut diag = make_diag_fn();
                 diag.span_err(Default::default(), target_span, "expected identifier");
-                diag.emit_to(interp.get_ctx_mut());
+                interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                 return Err(());
             };
             let target_str = interp.get_ctx().interner().resolve(target);
@@ -1026,7 +1106,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                             target_span,
                             "cannot specify dimensions for REF variable in argument list",
                         );
-                        diag.emit_to(interp.get_ctx_mut());
+                        interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                         return Err(());
                     }
                     if init_val != ScalarValue::Empty {
@@ -1036,7 +1116,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                             target_span,
                             "cannot assign to REF variable in argument list",
                         );
-                        diag.emit_to(interp.get_ctx_mut());
+                        interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                         return Err(());
                     }
                     // Update local variable info
@@ -1054,7 +1134,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                             previous_bound_span,
                             "previous binding here",
                         );
-                        diag.emit_to(interp.get_ctx_mut());
+                        interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                         return Err(());
                     }
                     local_var.var_idx = arg_idx;
@@ -1066,14 +1146,14 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                         target_span,
                         "cannot assign to CONST variable",
                     );
-                    diag.emit_to(interp.get_ctx_mut());
+                    interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                     return Err(());
                 }
                 var_kind = local_var.var_kind;
             } else if let Some(global_var) =
                 interp.get_ctx().variables.get_var_info_by_name(target_str)
             {
-                global_var.val.ensure_alloc();
+                // global_var.val.ensure_alloc();
 
                 if global_var.is_const {
                     let mut diag = make_diag_fn();
@@ -1082,7 +1162,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                         target_span,
                         "cannot assign to CONST variable",
                     );
-                    diag.emit_to(interp.get_ctx_mut());
+                    interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                     return Err(());
                 }
                 var_kind = global_var.val.kind();
@@ -1094,7 +1174,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                     target_span,
                     format!("undefined variable `{var_name}`"),
                 );
-                diag.emit_to(interp.get_ctx_mut());
+                interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                 return Err(());
             }
 
@@ -1106,7 +1186,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                         target_span,
                         "incompatible types in assignment",
                     );
-                    diag.emit_to(interp.get_ctx_mut());
+                    interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
                     return Err(());
                 }
             }
@@ -1145,7 +1225,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                     var.span,
                     "REF variable must be bound to an argument",
                 );
-                diag.emit_to(interp.get_ctx_mut());
+                self.o.ctx.i.emit_diag_to(diag, &mut self.o.ctx.callback);
                 return Err(());
             }
         }
@@ -1216,8 +1296,9 @@ struct EraLoopStructCodeMetadata {
     break_cp: EraBcChunkCheckpoint,
 }
 
-struct EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, Callback> {
-    o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>,
+struct EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
+    diag_emit: &'diag mut dyn EraEmitDiagnostic,
+    ctx: &'ctx EraCompilerCtxInner<'i>,
     filename: ArcStr,
     chunk: &'b mut EraBcChunkBuilder,
     arena: &'arena EraNodeArena,
@@ -1245,9 +1326,7 @@ struct EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, Callback> {
     cur_loop_struct: Option<EraLoopStructCodeQueue>,
 }
 
-impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
-    EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, Callback>
-{
+impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
     fn allocate_scope_id(&mut self, parent_scope: u32, stack_size: u32) -> u32 {
         let id = self.scope_generation_id;
         self.scope_generation_id += 1;
@@ -1256,7 +1335,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         id
     }
 
-    fn make_diag(&self) -> Diagnostic<'static> {
+    fn make_diag(&self) -> Diagnostic {
         Diagnostic::with_file(self.filename.clone())
     }
 
@@ -1264,7 +1343,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
     /// never fails, since `prebuild_function` should have already checked for errors which would
     /// prevent the function from being compiled.
     fn gen_function(
-        o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>,
+        diag_emit: &'diag mut dyn EraEmitDiagnostic,
+        ctx: &'ctx EraCompilerCtxInner<'i>,
         filename: ArcStr,
         chunk: &'b mut EraBcChunkBuilder,
         node: EraArcNodeRef,
@@ -1279,7 +1359,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let name = prebuild_info.name;
         // Lock down func_entries so that lifetime is decoupled from ctx, and content is freezed
         // (i.e. prevents modifications)
-        let func_entries = o.ctx.func_entries.clone();
+        let func_entries = ctx.func_entries.clone();
         // SAFETY: We pretend that func_entries is 'static in order to use it in Yoke
         let func_info_yoke: Yoke<&EraFuncInfo, &FxIndexMap<&Ascii<str>, Option<EraFuncInfo>>> = unsafe {
             Yoke::attach_to_cart(std::mem::transmute(&*func_entries), |x| {
@@ -1301,21 +1381,20 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             let arg_idx = arg.local_slot as _;
 
             // Load target
-            let target_str = o.ctx.interner().resolve(arg.target);
+            let target_str = ctx.interner().resolve(arg.target);
             let (target_in_local_frame, target_idx, is_mdarray);
             if let Some(local_var) = func_info.frame_info.vars.get(Ascii::new_str(target_str)) {
                 target_in_local_frame = local_var.in_local_frame;
                 target_idx = local_var.var_idx;
                 is_mdarray = local_var.dims_cnt > 1;
-            } else if let Some(global_var_idx) = o
-                .ctx
+            } else if let Some(global_var_idx) = ctx
                 .variables
-                .get_var_idx(o.ctx.interner().resolve(arg.target))
+                .get_var_idx(ctx.interner().resolve(arg.target))
             {
                 target_in_local_frame = false;
                 target_idx = global_var_idx.try_into().expect("too many variables");
-                let var = o.ctx.variables.get_var_by_idx(target_idx as _).unwrap();
-                is_mdarray = var.dims_cnt().unwrap() > 1;
+                let var = ctx.variables.get_var_by_idx(target_idx as _).unwrap();
+                is_mdarray = var.dims_cnt() > 1;
             } else {
                 unreachable!("variable not found");
             }
@@ -1327,8 +1406,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     arg.span,
                 );
             } else {
-                let var = o.ctx.variables.get_var_by_idx(target_idx as _).unwrap();
-                var.ensure_alloc();
+                let var = ctx.variables.get_var_by_idx(target_idx as _).unwrap();
+                // var.ensure_alloc();
                 chunk.push_bc(BcKind::LoadVarWW { idx: target_idx }, arg.span);
             }
             for dim in arg.dims.iter().copied() {
@@ -1357,7 +1436,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         // Generate function body
         let body_start_pos = chunk.checkpoint();
         let mut site = EraCodeGenSite {
-            o,
+            diag_emit,
+            ctx,
             filename,
             chunk,
             arena,
@@ -1384,7 +1464,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
 
         // Generate function epilogue (return)
         let EraCodeGenSite {
-            o,
+            diag_emit,
+            ctx,
             filename,
             chunk,
             arena: _,
@@ -1416,7 +1497,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
 
         // Complete `GOTO` jumps
         for jump in pending_goto_jumps {
-            let jump_target = o.ctx.interner().resolve(jump.target);
+            let jump_target = ctx.interner().resolve(jump.target);
             let Some(jump_target) = goto_labels.get(Ascii::new_str(jump_target)) else {
                 let mut diag = make_diag_fn();
                 diag.span_err(
@@ -1429,7 +1510,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     name_span,
                     "function definition starts here",
                 );
-                diag.emit_to(o.ctx);
+                ctx.emit_diag_to(diag, diag_emit);
                 // NOTE: We ignore the unresolved GOTO for now
                 jump.backtrack.discard();
                 continue;
@@ -1443,7 +1524,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     "this jump will corrupt the integrity of control flow",
                 );
                 diag.span_note(Default::default(), jump_target.span, "label defined here");
-                diag.emit_to(o.ctx);
+                ctx.emit_diag_to(diag, diag_emit);
                 jump.backtrack.discard();
                 continue;
             }
@@ -1468,7 +1549,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
     fn safe_statement(&mut self, stmt: EraNodeRef, cur_scope: u32) {
         if self.statement(stmt, cur_scope).is_err() {
             let stmt_span = self.arena.get_node_span(stmt);
-            let err_msg = self.o.ctx.interner().get_or_intern("Invalid code");
+            let err_msg = self.ctx.interner().get_or_intern("Invalid code");
             self.chunk.push_bc(
                 BcKind::LoadConstStr {
                     idx: err_msg.into_u32(),
@@ -1489,10 +1570,10 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let EraNode::Identifier(label) = self.arena.get_node(label) else {
                     let mut diag = self.make_diag();
                     diag.span_err(Default::default(), label_span, "expected identifier");
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
-                let label_str = self.o.ctx.resolve_str(label);
+                let label_str = self.ctx.resolve_str(label);
                 if let Some(previous_label) = self.goto_labels.insert(
                     Ascii::new_str(label_str),
                     EraGotoLabelInfo {
@@ -1512,7 +1593,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         previous_label.span,
                         "previous definition here",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
             }
@@ -1531,7 +1612,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             expr_span,
                             "`==` has no side effects, converting to assignment for compatibility with Emuera; did you misspell?",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
 
                         self.var_idx_set(lhs, |this| this.expression(rhs), false)?;
                     }
@@ -1553,7 +1634,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             EraNode::StmtResultCmdCall(cmd, args) => {
                 let cmd_span = self.arena.get_node_span(cmd);
                 let cmd = self.unwrap_identifier(cmd)?;
-                let cmd = self.o.ctx.resolve_str(cmd);
+                let cmd = self.ctx.resolve_str(cmd);
                 self.builtin_func_call(cmd, cmd_span, args, true)?;
             }
             EraNode::StmtDebugPrint(flags, args) => {
@@ -1564,7 +1645,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     stmt_span,
                     "DEBUGPRINT is not yet supported and will be ignored for now",
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
             }
             EraNode::StmtPrint(flags, args) => {
                 let args = self.unwrap_list_expr(args)?;
@@ -1685,7 +1766,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     val_span,
                                     "cannot return void value",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         }
@@ -1711,7 +1792,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     if values.len() > 1 {
                         let mut diag = self.make_diag();
                         diag.span_err(Default::default(), stmt_span, "too many return values");
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
 
@@ -1737,7 +1818,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         stmt_span,
                         "cannot CONTINUE outside loops",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 cur_loop_struct
@@ -1748,7 +1829,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let Some(cur_loop_struct) = &mut self.cur_loop_struct else {
                     let mut diag = self.make_diag();
                     diag.span_err(Default::default(), stmt_span, "cannot BREAK outside loops");
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 cur_loop_struct
@@ -1816,12 +1897,13 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             EraNode::StmtTimes(var, factor) => {
                 let factor_span = self.arena.get_node_span(factor);
                 let factor: f64 = {
-                    let mut interp = EraInterpreter::new(self.o.ctx, self.arena, true);
+                    let mut interp =
+                        EraInterpreter::new(self.diag_emit, self.ctx, self.arena, true);
                     let factor = interp.interpret_str_expr_ok(factor).ok_or(())?;
                     let Ok(factor) = factor.parse() else {
                         let mut diag = self.make_diag();
                         diag.span_err(Default::default(), factor_span, "invalid factor");
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     };
                     factor
@@ -1841,7 +1923,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         args_span,
                         format!("expected at least 2 arguments, found {args_count}"),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 let target = EraNodeRef(args[0]);
@@ -1868,7 +1950,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         args_span,
                         format!("expected at least 2 arguments, found {args_count}"),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 let target = EraNodeRef(args[0]);
@@ -1895,7 +1977,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         args_span,
                         format!("expected at least 2 arguments, found {args_count}"),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 let target = EraNodeRef(args[0]);
@@ -1956,7 +2038,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         stmt_span,
                         "cannot swap variables of different types",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 // TODO: Use dedicated bytecode SwapVar
@@ -2001,7 +2083,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 if let EraExprOrSpan::Expr(ordering) = ordering {
                     let ordering_span = self.arena.get_node_span(ordering);
                     let ordering = self.unwrap_identifier(ordering)?;
-                    let ordering = self.o.ctx.resolve_str(ordering);
+                    let ordering = self.ctx.resolve_str(ordering);
                     if ordering.eq_ignore_ascii_case("FORWARD") {
                         is_ascending = true;
                     } else if ordering.eq_ignore_ascii_case("BACK") {
@@ -2013,7 +2095,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             ordering_span,
                             "invalid ordering in ARRAYSORT",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                 }
@@ -2036,7 +2118,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         stmt_span,
                         "missing primary array in ARRAYMSORT",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 // TODO: Do deeper dimensions checking
@@ -2047,16 +2129,6 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 for sub in args.iter().skip(1).map(|x| EraNodeRef(*x)) {
                     let sub_span = self.arena.get_node_span(sub);
                     let sub = self.norm_var(sub)?;
-                    if primary != sub {
-                        let mut diag = self.make_diag();
-                        diag.span_err(
-                            Default::default(),
-                            sub_span,
-                            "incompatible types in ARRAYMSORT",
-                        );
-                        diag.emit_to(self.o.ctx);
-                        return Err(());
-                    }
                     subs_cnt += 1;
                 }
                 self.chunk
@@ -2078,7 +2150,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         stmt_span,
                         "incompatible types in ARRAYCOPY",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 self.chunk.push_bc(BcKind::ArrayCopy, stmt_span);
@@ -2215,7 +2287,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let ([procedure], []) = self.unpack_list_expr(args)?;
                 let proc_span = self.arena.get_node_span(procedure);
                 let procedure = self.unwrap_identifier(procedure)?;
-                let procedure = self.o.ctx.resolve_str(procedure).to_ascii_uppercase();
+                let procedure = self.ctx.resolve_str(procedure).to_ascii_uppercase();
                 let (func_name, reset_exec) = match procedure.as_bytes() {
                     b"FIRST" => ("SYSPROC_BEGIN_FIRST", false),
                     b"TITLE" => ("SYSPROC_BEGIN_TITLE", false),
@@ -2231,13 +2303,13 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             proc_span,
                             "invalid procedure name in BEGIN",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                 };
                 // Find internal function
                 let Some((func_idx, _, Some(func_info))) =
-                    self.o.ctx.func_entries.get_full(Ascii::new_str(func_name))
+                    self.ctx.func_entries.get_full(Ascii::new_str(func_name))
                 else {
                     let mut diag = self.make_diag();
                     diag.span_err(
@@ -2245,7 +2317,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         proc_span,
                         format!("internal function `{func_name}` not found"),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 if !func_info.frame_info.args.is_empty() {
@@ -2255,7 +2327,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         proc_span,
                         format!("internal function `{func_name}` must not have arguments"),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 // Execute function
@@ -2300,7 +2372,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let ([alignment], []) = self.unpack_list_expr(args)?;
                 let align_span = self.arena.get_node_span(alignment);
                 let alignment = self.unwrap_identifier(alignment)?;
-                let alignment = self.o.ctx.resolve_str(alignment).to_ascii_uppercase();
+                let alignment = self.ctx.resolve_str(alignment).to_ascii_uppercase();
                 let alignment = match alignment.as_bytes() {
                     b"LEFT" => EraAlignmentKind::Left,
                     b"CENTER" => EraAlignmentKind::Center,
@@ -2312,7 +2384,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             align_span,
                             "invalid alignment in ALIGNMENT",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                 };
@@ -2343,7 +2415,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     stmt_span,
                     "RANDOMIZE is not yet supported; ignoring",
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
             }
             EraNode::StmtDumpRand => {
                 // TODO: DumpRandStmt
@@ -2353,7 +2425,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     stmt_span,
                     "DUMPRAND is not yet supported; ignoring",
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
             }
             EraNode::StmtInitRand => {
                 // TODO: InitRandStmt
@@ -2363,7 +2435,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     stmt_span,
                     "INITRAND is not yet supported; ignoring",
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
             }
             EraNode::StmtBar(args) => {
                 let ([value, max_value, length], []) = self.unpack_list_expr(args)?;
@@ -2387,6 +2459,9 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     self.int_expr(chara)?;
                     self.chunk.push_bc(BcKind::AddChara, stmt_span);
                 }
+            }
+            EraNode::StmtAddVoidChara => {
+                self.chunk.push_bc(BcKind::AddVoidChara, stmt_span);
             }
             EraNode::StmtPickUpChara(args) => {
                 let args = self.unwrap_list_expr(args)?;
@@ -2433,7 +2508,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         stmt_span,
                         "expected at least 2 arguments in SAVECHARA",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 let filename = EraNodeRef(args[0]);
@@ -2577,7 +2652,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     stmt_span,
                     "DEBUGCLEAR is not yet supported; ignoring",
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
             }
             EraNode::StmtResetData => {
                 self.chunk.push_bc(BcKind::ResetData, stmt_span);
@@ -2593,11 +2668,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         self.int_var_static_idx("RESULT", span, 0)?;
                     }
                 }
-                let key = self
-                    .o
-                    .ctx
-                    .interner()
-                    .get_or_intern("表示するセーブデータ数");
+                let key = self.ctx.interner().get_or_intern("表示するセーブデータ数");
                 self.chunk.push_load_const_str(key, stmt_span);
                 self.chunk.push_bc(BcKind::GetConfig, stmt_span);
                 self.chunk.push_bc(BcKind::SetArrValFlat, stmt_span);
@@ -2605,7 +2676,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             _ => {
                 let mut diag = self.make_diag();
                 diag.span_err(Default::default(), stmt_span, "invalid statement");
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
         }
@@ -2622,7 +2693,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 stmt_span,
                 "invalid row assignment statement",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let EraNode::ExprBinary(target, _, first_value) = self.arena.get_node(base_assign) else {
@@ -2632,7 +2703,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(base_assign),
                 "invalid left-hand side in assignment",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let EraNode::ListExpr(extra_values) = self.arena.get_node(extra_values) else {
@@ -2642,7 +2713,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(extra_values),
                 "invalid right-hand side in assignment",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let extra_values = self.arena.get_extra_data_view(extra_values);
@@ -2680,7 +2751,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     rhs_span,
                     "incompatible types in assignment",
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
             rhs_count += 1;
@@ -2731,7 +2802,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         // let EraNode::ListExpr(data) = self.arena.get_node(data) else {
         //     let mut diag = self.make_diag();
         //     diag.span_err(Default::default(), span, "invalid STRDATA statement");
-        //     diag.emit_to(self.o.ctx);
+        //     self.ctx.emit_diag_to(diag, self.diag_emit);
         //     return Err(());
         // };
         // let data = self.arena.get_extra_data_view(data);
@@ -2750,7 +2821,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 EraNode::ListExpr(part) => {
                     let part = self.arena.get_extra_data_view(part);
                     let mut parts_cnt = 0;
-                    let newline_key = self.o.ctx.interner().get_or_intern("\n");
+                    let newline_key = self.ctx.interner().get_or_intern("\n");
                     for part in part.iter().map(|x| EraNodeRef(*x)) {
                         if parts_cnt != 0 {
                             self.chunk.push_load_const_str(newline_key, part_span);
@@ -2801,7 +2872,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let EraNode::StmtIf(stmt) = self.arena.get_node(stmt) else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid IF statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let stmt = self.arena.get_extra_data_view(stmt);
@@ -2843,7 +2914,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let EraNode::StmtSelectCase(value, body) = self.arena.get_node(stmt) else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid IF statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let body = self.arena.get_list_extra_data(body);
@@ -2857,7 +2928,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 value_span,
                 "SELECTCASE value cannot be void or empty",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
 
@@ -2880,7 +2951,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     preds_span,
                     "invalid SELECTCASE predicates",
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             };
             let preds = self.arena.get_extra_data_view(preds);
@@ -2903,7 +2974,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     value_span,
                                     "invalid SELECTCASE predicate",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         };
@@ -2922,7 +2993,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                 start_span,
                                 "incompatible types in SELECTCASE range condition",
                             );
-                            diag.emit_to(self.o.ctx);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(());
                         }
                         let bc = match start {
@@ -2935,7 +3006,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     start_span,
                                     "invalid SELECTCASE range condition",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         };
@@ -2962,7 +3033,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                         op_span,
                                         "invalid operator in SELECTCASE condition",
                                     );
-                                    diag.emit_to(self.o.ctx);
+                                    self.ctx.emit_diag_to(diag, self.diag_emit);
                                     return Err(());
                                 }
                             },
@@ -2980,7 +3051,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                         op_span,
                                         "invalid operator in SELECTCASE condition",
                                     );
-                                    diag.emit_to(self.o.ctx);
+                                    self.ctx.emit_diag_to(diag, self.diag_emit);
                                     return Err(());
                                 }
                             },
@@ -2991,7 +3062,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     rhs_span,
                                     "invalid SELECTCASE condition",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         };
@@ -3005,7 +3076,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             pred_span,
                             "invalid SELECTCASE predicate",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                 };
@@ -3016,7 +3087,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         pred_span,
                         "type of SELECTCASE condition is incompatible with value",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 jp_bodies.push(self.chunk.push_jump_if(pred_span));
@@ -3061,7 +3132,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let EraNode::StmtWhile(cond, body) = self.arena.get_node(stmt) else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid WHILE statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let cond_span = self.arena.get_node_span(cond);
@@ -3089,14 +3160,14 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid CALL statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
 
         if let EraNode::Identifier(name_key) = self.arena.get_node(name) {
             // Prefer static function call
             let name_span = self.arena.get_node_span(name);
-            let name_str = self.o.ctx.resolve_str(name_key);
+            let name_str = self.ctx.resolve_str(name_key);
             let result = self.static_func_call(name_str, name_span, args, false)?;
             if result.is_value() {
                 self.chunk.push_pop_all(1, stmt_span);
@@ -3118,14 +3189,14 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid TRYCALL statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
 
         if let EraNode::Identifier(name_key) = self.arena.get_node(name) {
             // Prefer static function call
             let name_span = self.arena.get_node_span(name);
-            let name_str = self.o.ctx.resolve_str(name_key);
+            let name_str = self.ctx.resolve_str(name_key);
             let result = self.static_func_call(name_str, name_span, args, true)?;
             if result.is_value() {
                 self.chunk.push_pop_all(1, stmt_span);
@@ -3151,14 +3222,14 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid TRYCCALL statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
 
         if let EraNode::Identifier(name_key) = self.arena.get_node(name) {
             // Prefer static function call
             let name_span = self.arena.get_node_span(name);
-            let name_str = self.o.ctx.resolve_str(name_key);
+            let name_str = self.ctx.resolve_str(name_key);
             let result = self.static_func_call(name_str, name_span, args, true)?;
             if result.is_value() {
                 self.chunk.push_pop_all(1, stmt_span);
@@ -3205,7 +3276,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let EraNode::StmtRepeat(count, stmts) = self.arena.get_node(stmt) else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid REPEAT statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let count_span = self.arena.get_node_span(count);
@@ -3219,7 +3290,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 stmt_span,
                 "COUNT variable must be integer",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         self.chunk.push_duplicate_all(2, stmt_span);
@@ -3234,7 +3305,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 count_span,
                 "REPEAT loop count must be an integer",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         self.chunk.push_load_imm(1, stmt_span);
@@ -3326,7 +3397,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid FOR statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let var_span = self.arena.get_node_span(var);
@@ -3425,7 +3496,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let EraNode::StmtDoLoop(stmts, cond) = self.arena.get_node(stmt) else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid DO statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let cond_span = self.arena.get_node_span(cond);
@@ -3452,7 +3523,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid SETCOLOR statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let args = self.unwrap_list_expr(args)?;
@@ -3486,7 +3557,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     stmt_span,
                     format!("SETCOLOR does not take {args_count} arguments"),
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
         }
@@ -3510,7 +3581,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 stmt_span,
                 "invalid RESETCOLOR statement",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         self.int_var_static_idx(dest_var, stmt_span, 0)?;
@@ -3537,7 +3608,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 stmt_span,
                 "invalid PRINTBUTTON statement",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let ([content, value], []) = self.unpack_list_expr(args)?;
@@ -3558,7 +3629,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     stmt_span,
                     "void cannot be used as a value here",
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
         }
@@ -3572,7 +3643,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid INPUT statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let ([], [default_value, can_click, allow_skip]) = self.unpack_list_expr(args)?;
@@ -3601,7 +3672,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid TINPUT statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let ([time_limit, default_value], [show_prompt, expiry_msg, can_click]) =
@@ -3632,7 +3703,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid ONEINPUT statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let ([], [default_value]) = self.unpack_list_expr(args)?;
@@ -3660,7 +3731,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), stmt_span, "invalid TONEINPUT statement");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let ([time_limit, default_value], [show_prompt, expiry_msg, can_click]) =
@@ -3740,7 +3811,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             lhs_span,
                             "left-hand side of logical operator must be an integer",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                     self.chunk.push_duplicate_all(1, op_span);
@@ -3758,7 +3829,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             rhs_span,
                             "right-hand side of logical operator must be an integer",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                     jp_end.complete_here(self.chunk);
@@ -3782,7 +3853,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             lhs_span,
                             "cannot assign to pseudo-variable",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     };
                     let lhs = lhs.to_scalar();
@@ -3807,7 +3878,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `+` have incompatible types",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -3823,7 +3894,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `-` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -3843,7 +3914,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "cannot multiply by string",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -3859,7 +3930,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `/` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -3875,7 +3946,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `%` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -3891,7 +3962,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `&` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -3907,7 +3978,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `|` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -3923,7 +3994,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `^` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -3951,7 +4022,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `+` have incompatible types",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -3967,7 +4038,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `-` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -3992,7 +4063,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "cannot multiply string by string",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4008,7 +4079,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `/` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4024,7 +4095,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `%` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4044,7 +4115,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `==` must be of the same type",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4064,7 +4135,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `!=` must be of the same type",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4084,7 +4155,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `<` must be of the same type",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4104,7 +4175,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `<=` must be of the same type",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4124,7 +4195,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `>` must be of the same type",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4144,7 +4215,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `>=` must be of the same type",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4160,7 +4231,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `&` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4176,7 +4247,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `|` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4192,7 +4263,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `^` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4208,7 +4279,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `<<` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4224,7 +4295,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operands to binary `>>` must be integers",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4252,7 +4323,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         cond_span,
                         "condition in ternary operator must be an integer",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 let jp_else = self.chunk.push_jump_if_not(cond_span);
@@ -4278,7 +4349,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         else_span,
                         format!("false branch is of type `{else_t}`"),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 Ok(then_t)
@@ -4309,7 +4380,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                         expr_span,
                                         "invalid expression in string interpolation",
                                     );
-                                    diag.emit_to(self.o.ctx);
+                                    self.ctx.emit_diag_to(diag, self.diag_emit);
                                     return Err(());
                                 }
                             }
@@ -4319,7 +4390,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     let mut flags = EraPadStringFlags::new();
                                     let align_span = self.arena.get_node_span(align);
                                     let align = self.unwrap_identifier(align)?;
-                                    let align = self.o.ctx.interner().resolve(align);
+                                    let align = self.ctx.interner().resolve(align);
                                     if align.eq_ignore_ascii_case("LEFT") {
                                         flags.set_left_pad(true);
                                     } else if align.eq_ignore_ascii_case("RIGHT") {
@@ -4331,7 +4402,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                             align_span,
                                             "invalid alignment in string interpolation",
                                         );
-                                        diag.emit_to(self.o.ctx);
+                                        self.ctx.emit_diag_to(diag, self.diag_emit);
                                         return Err(());
                                     }
                                     flags
@@ -4365,7 +4436,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             rhs_span,
                             "cannot assign to pseudo-variable",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     };
                     let rhs = rhs.to_scalar();
@@ -4386,7 +4457,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "cannot increment string",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4402,7 +4473,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "cannot decrement string",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4422,7 +4493,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operand to unary `+` must be an integer",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4438,7 +4509,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operand to unary `-` must be an integer",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4454,7 +4525,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operand to unary `~` must be an integer",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4470,7 +4541,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     op_span,
                                     "operand to unary `!` must be an integer",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                                 return Err(());
                             }
                         },
@@ -4491,7 +4562,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         lhs_span,
                         "cannot assign to pseudo-variable",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 let lhs = lhs.to_scalar();
@@ -4510,7 +4581,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         _ => {
                             let mut diag = self.make_diag();
                             diag.span_err(Default::default(), op_span, "cannot increment string");
-                            diag.emit_to(self.o.ctx);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(());
                         }
                     },
@@ -4523,7 +4594,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         _ => {
                             let mut diag = self.make_diag();
                             diag.span_err(Default::default(), op_span, "cannot decrement string");
-                            diag.emit_to(self.o.ctx);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(());
                         }
                     },
@@ -4537,7 +4608,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             EraNode::ExprFunCall(name, args) => {
                 let name_span = self.arena.get_node_span(name);
                 let name = self.unwrap_identifier(name)?;
-                let name = self.o.ctx.resolve_str(name);
+                let name = self.ctx.resolve_str(name);
                 self.static_func_call(name, name_span, args, false)
             }
             _ => {
@@ -4547,7 +4618,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     expr_span,
                     format!("invalid expression {:?}", expr),
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 Err(())
             }
         }
@@ -4559,20 +4630,20 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let name_str = match self.arena.get_node(var) {
             EraNode::Identifier(name_key) => {
                 name = Some(name_key);
-                self.o.ctx.interner().resolve(name_key)
+                self.ctx.interner().resolve(name_key)
             }
             EraNode::ExprVarNamespace(var_name, namespace) => {
                 name = None;
                 let var_name = self.unwrap_identifier(var_name)?;
                 let namespace = self.unwrap_identifier(namespace)?;
-                let var_name = self.o.ctx.interner().resolve(var_name);
-                let namespace = self.o.ctx.interner().resolve(namespace);
+                let var_name = self.ctx.interner().resolve(var_name);
+                let namespace = self.ctx.interner().resolve(namespace);
                 &format!("{var_name}@{namespace}")
             }
             _ => {
                 let mut diag = self.make_diag();
                 diag.span_err(Default::default(), var_span, "invalid variable expression");
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
         };
@@ -4587,8 +4658,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     self.chunk
                         .push_bc(BcKind::LoadLocalVar { idx: var_idx as _ }, var_span);
                 } else {
-                    let var_info = self.o.ctx.variables.get_var_info(var_idx as _).unwrap();
-                    var_info.val.ensure_alloc();
+                    let var_info = self.ctx.variables.get_var_info(var_idx as _).unwrap();
+                    // var_info.val.ensure_alloc();
                     self.chunk
                         .push_bc(BcKind::LoadVarWW { idx: var_idx }, var_span);
                 }
@@ -4601,14 +4672,14 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
             }
         }
 
-        if let Some(var_idx) = self.o.ctx.variables.get_var_idx(name_str) {
-            let var_info = self.o.ctx.variables.get_var_info(var_idx).unwrap();
-            var_info.val.ensure_alloc();
+        if let Some(var_idx) = self.ctx.variables.get_var_idx(name_str) {
+            let var_info = self.ctx.variables.get_var_info(var_idx).unwrap();
+            // var_info.val.ensure_alloc();
             self.chunk
                 .push_bc(BcKind::LoadVarWW { idx: var_idx as _ }, var_span);
             Ok(EraIdVariableInfo {
                 kind: EraIdVariableKind::Normal(var_info.val.kind()),
-                dims_cnt: var_info.val.dims_cnt().unwrap().try_into().unwrap(),
+                dims_cnt: var_info.val.dims_cnt().try_into().unwrap(),
                 name_token: name,
                 is_charadata: var_info.is_charadata,
             })
@@ -4640,7 +4711,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 var_span,
                 format!("undefined variable `{}`", name_str),
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             Err(())
         }
     }
@@ -4684,7 +4755,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let is_charadata = id_info.is_charadata;
                 let (is_chara_nodim, csv_var_kind);
                 if let Some(name_token) = id_info.name_token {
-                    let name = self.o.ctx.interner().resolve(name_token);
+                    let name = self.ctx.interner().resolve(name_token);
                     is_chara_nodim = routines::is_chara_nodim(name);
                     csv_var_kind = EraCsvVarKind::try_from_var(name);
                 } else {
@@ -4704,7 +4775,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 if idxs_cnt > dims_cnt {
                     let mut diag = self.make_diag();
                     diag.span_err(Default::default(), node_span, "too many indices into array");
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 if dims_cnt > 1 && idxs_cnt < dims_cnt {
@@ -4723,7 +4794,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                 node_span,
                                 "too few indices into CHARADATA variable",
                             );
-                            diag.emit_to(self.o.ctx);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             // Push implicit 0 as last index to workaround bugs in some game code
                             append_zeros_cnt += dims_cnt - idxs_cnt;
                             idxs_cnt = dims_cnt;
@@ -4735,7 +4806,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             node_span,
                             format!("non-compliant use of {}-D array variable", dims_cnt),
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                     }
                 }
                 if dims_cnt == 1 && idxs_cnt < dims_cnt {
@@ -4746,10 +4817,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
 
                 // Compile indices
                 if prepend_target {
-                    let target = self
-                        .o
-                        .ctx
-                        .variables
+                    let target = (self.ctx.variables)
                         .get_var_idx("TARGET")
                         .expect("TARGET not found");
                     self.chunk
@@ -4769,11 +4837,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     {
                         let csv_var_kind = csv_var_kind.unwrap();
                         let name = self.unwrap_identifier(idx).unwrap();
-                        let name = self.o.ctx.interner().resolve(name);
-                        if let Some(idx) = self
-                            .o
-                            .ctx
-                            .csv_indices
+                        let name = self.ctx.interner().resolve(name);
+                        if let Some(idx) = (self.ctx.csv_indices)
                             .get(Ascii::new_str(name))
                             .and_then(|x| x.iter().find(|x| x.0 == csv_var_kind))
                             .map(|x| x.1)
@@ -4797,7 +4862,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                     idx_span,
                                     "using strings as array indices is discouraged; consider wrapping in `GETNUM`",
                                 );
-                                diag.emit_to(self.o.ctx);
+                                self.ctx.emit_diag_to(diag, self.diag_emit);
                             }
                             self.chunk
                                 .push_bc(BcKind::CsvGetNum { kind: csv_var_kind }, idx_span);
@@ -4809,7 +4874,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                 idx_span,
                                 "array indices must be integers",
                             );
-                            diag.emit_to(self.o.ctx);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(());
                         }
                     }
@@ -4837,7 +4902,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             node_span,
                             "`RAND` requires exactly one parameter",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
 
@@ -4851,7 +4916,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             idx_span,
                             "array indices must be integers",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                 }
@@ -4863,7 +4928,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             node_span,
                             "`CHARANUM` cannot be indexed",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                 }
@@ -4875,7 +4940,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             node_span,
                             "`CALLERFUNCNAME` cannot be indexed",
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                 }
@@ -4929,7 +4994,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         node_span,
                         format!("incompatible types in assignment (expected {kind}, found {value_kind})"),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 self.chunk.push_bc(BcKind::SetArrValFlat, node_span);
@@ -4946,7 +5011,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     node_span,
                     "cannot assign to pseudo-variable",
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
         }
@@ -4962,21 +5027,21 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
     ) -> CompileResult<ScalarValueKind> {
         // TODO: Maybe also support searching in function scope?
 
-        let Some(var_idx) = self.o.ctx.variables.get_var_idx(name) else {
+        let Some(var_idx) = self.ctx.variables.get_var_idx(name) else {
             let mut diag = self.make_diag();
             diag.span_err(
                 Default::default(),
                 name_span,
                 format!("undefined variable `{}`", name),
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
-        let var_info = self.o.ctx.variables.get_var_info(var_idx).unwrap();
+        let var_info = self.ctx.variables.get_var_info(var_idx).unwrap();
         let var_kind = var_info.val.kind().to_scalar();
 
         // Load variable
-        var_info.val.ensure_alloc();
+        // var_info.val.ensure_alloc();
         self.chunk.push_bc(
             BcKind::LoadVarWW {
                 idx: var_idx.try_into().unwrap(),
@@ -5005,8 +5070,8 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.chunk
                     .push_bc(BcKind::LoadLocalVar { idx: var_idx as _ }, name_span);
             } else {
-                let var_info = self.o.ctx.variables.get_var_info(var_idx as _).unwrap();
-                var_info.val.ensure_alloc();
+                let var_info = self.ctx.variables.get_var_info(var_idx as _).unwrap();
+                // var_info.val.ensure_alloc();
                 self.chunk
                     .push_bc(BcKind::LoadVarWW { idx: var_idx }, name_span);
             }
@@ -5017,21 +5082,21 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
     }
 
     fn var_static(&mut self, name: &str, name_span: SrcSpan) -> CompileResult<ScalarValueKind> {
-        let Some(var_idx) = self.o.ctx.variables.get_var_idx(name) else {
+        let Some(var_idx) = self.ctx.variables.get_var_idx(name) else {
             let mut diag = self.make_diag();
             diag.span_err(
                 Default::default(),
                 name_span,
                 format!("undefined variable `{}`", name),
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
-        let var_info = self.o.ctx.variables.get_var_info(var_idx).unwrap();
+        let var_info = self.ctx.variables.get_var_info(var_idx).unwrap();
         let var_kind = var_info.val.kind().to_scalar();
 
         // Load variable
-        var_info.val.ensure_alloc();
+        // var_info.val.ensure_alloc();
         self.chunk.push_bc(
             BcKind::LoadVarWW {
                 idx: var_idx.try_into().unwrap(),
@@ -5047,7 +5112,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         if ty != ScalarValueKind::Int {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), name_span, "expected integer variable");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         Ok(())
@@ -5058,7 +5123,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         if ty != ScalarValueKind::Str {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), name_span, "expected string variable");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         Ok(())
@@ -5075,7 +5140,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(node),
                 "expected non-pseudo variable",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             Err(())
         }
     }
@@ -5089,7 +5154,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(node),
                 "expected non-pseudo variable",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let ty = ty.to_scalar();
@@ -5100,7 +5165,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(node),
                 "expected integer variable",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         Ok(())
@@ -5115,7 +5180,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(node),
                 "expected non-pseudo variable",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let ty = ty.to_scalar();
@@ -5126,7 +5191,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(node),
                 "expected string variable",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         Ok(())
@@ -5147,7 +5212,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(node),
                 "expected non-pseudo variable",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             Err(())
         }
     }
@@ -5161,7 +5226,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(node),
                 "expected non-pseudo variable",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let ty = ty.to_scalar();
@@ -5172,7 +5237,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(node),
                 "expected integer variable",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         Ok(())
@@ -5187,7 +5252,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(node),
                 "expected non-pseudo variable",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let ty = ty.to_scalar();
@@ -5198,7 +5263,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(node),
                 "expected string variable",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         Ok(())
@@ -5214,7 +5279,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         if ty != ScalarValueKind::Int {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), name_span, "expected integer variable");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         Ok(())
@@ -5230,7 +5295,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         if ty != ScalarValueKind::Str {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), name_span, "expected string variable");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         Ok(())
@@ -5245,7 +5310,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(expr),
                 "expected integer expression",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         Ok(())
@@ -5260,7 +5325,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 self.arena.get_node_span(expr),
                 "expected string expression",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         Ok(())
@@ -5283,7 +5348,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             expr_span,
                             format!("expected integer expression, found {}", expr_ty),
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                 }
@@ -5303,7 +5368,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 match expr_ty {
                     ScalarValueKind::Str => (),
                     ScalarValueKind::Empty => {
-                        let value = self.o.ctx.interner().get_or_intern(fallback);
+                        let value = self.ctx.interner().get_or_intern(fallback);
                         self.chunk.push_bc(
                             BcKind::LoadConstStr {
                                 idx: value.into_u32(),
@@ -5318,13 +5383,13 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             expr_span,
                             format!("expected string expression, found {}", expr_ty),
                         );
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     }
                 }
             }
             EraExprOrSpan::Span(span) => {
-                let value = self.o.ctx.interner().get_or_intern(fallback);
+                let value = self.ctx.interner().get_or_intern(fallback);
                 self.chunk.push_bc(
                     BcKind::LoadConstStr {
                         idx: value.into_u32(),
@@ -5364,7 +5429,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         expr_span,
                         format!("expected {} expression, found {}", ty, expr_ty),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
             }
@@ -5393,7 +5458,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
     //             expr.src_span(),
     //             "expected variable expression",
     //         );
-    //         diag.emit_to(self.o.ctx);
+    //         self.ctx.emit_diag_to(diag, self.diag_emit);
     //         return Err(());
     //     };
     //     Ok(expr)
@@ -5410,19 +5475,19 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
     //             expr.src_span(),
     //             "expected variable expression",
     //         );
-    //         diag.emit_to(self.o.ctx);
+    //         self.ctx.emit_diag_to(diag, self.diag_emit);
     //         return Err(());
     //     };
     //     Ok(expr)
     // }
 
     fn const_eval_int(&mut self, expr: EraNodeRef) -> CompileResult<i64> {
-        let mut interp = EraInterpreter::new(self.o.ctx, self.arena, true);
+        let mut interp = EraInterpreter::new(self.diag_emit, self.ctx, self.arena, true);
         interp.interpret_int_expr_ok(expr).ok_or(())
     }
 
     fn const_eval_str(&mut self, expr: EraNodeRef) -> CompileResult<String> {
-        let mut interp = EraInterpreter::new(self.o.ctx, self.arena, true);
+        let mut interp = EraInterpreter::new(self.diag_emit, self.ctx, self.arena, true);
         interp.interpret_str_expr_ok(expr).ok_or(())
     }
 
@@ -5453,7 +5518,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let EraNode::ListExpr(args) = self.arena.get_node(args) else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), args_span, "expected argument list");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let args = self.arena.get_extra_data_view(args);
@@ -5473,11 +5538,11 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         "reference parameter cannot be omitted",
                     );
                     diag.span_note(
-                        self.o.ctx.bc_chunks[target_chunk_idx].name.clone(),
+                        self.ctx.bc_chunks[target_chunk_idx].name.clone(),
                         target_func.name_span,
                         "see signature of callee",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 if let EraNode::Empty = self.arena.get_node(arg) {
@@ -5488,11 +5553,11 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         "reference parameter cannot be omitted",
                     );
                     diag.span_note(
-                        self.o.ctx.bc_chunks[target_chunk_idx].name.clone(),
+                        self.ctx.bc_chunks[target_chunk_idx].name.clone(),
                         target_func.name_span,
                         "see signature of callee",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 let arg = if let Some(EraNodeExprVarIdx { var_indices }) =
@@ -5504,7 +5569,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         self.arena.get_node_span(arg),
                         "for REF parameters, specifying indices is discouraged, and will not be evaluated",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     let arg = EraNodeRef(var_indices[0]);
                     arg
                 } else {
@@ -5521,7 +5586,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         arg_span,
                         "cannot pass pseudo-variable as reference",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 if arg_kind.to_scalar() != target_param.var_kind.to_scalar() {
@@ -5532,11 +5597,11 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         "incompatible types in reference argument",
                     );
                     diag.span_note(
-                        self.o.ctx.bc_chunks[target_chunk_idx].name.clone(),
+                        self.ctx.bc_chunks[target_chunk_idx].name.clone(),
                         target_func.name_span,
                         "see signature of callee",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 if arg.dims_cnt != target_param.dims_cnt {
@@ -5547,11 +5612,11 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         "incompatible dimensions in reference argument",
                     );
                     diag.span_note(
-                        self.o.ctx.bc_chunks[target_chunk_idx].name.clone(),
+                        self.ctx.bc_chunks[target_chunk_idx].name.clone(),
                         target_func.name_span,
                         "see signature of callee",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
             } else {
@@ -5575,7 +5640,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             let val = target_param.default_value.coerce_as_str().unwrap();
                             self.chunk.push_bc(
                                 BcKind::LoadConstStr {
-                                    idx: self.o.ctx.interner().get_or_intern(val).into_u32(),
+                                    idx: self.ctx.interner().get_or_intern(val).into_u32(),
                                 },
                                 arg_span,
                             );
@@ -5590,7 +5655,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 if arg != target_param.var_kind.to_scalar() {
                     match (arg, target_param.var_kind.to_scalar()) {
                         (ScalarValueKind::Int, ScalarValueKind::Str) => {
-                            // Implicitly cast to string
+                            // TODO: Implicitly cast to string; make this an explicit warning in the future
                             self.chunk.push_bc(BcKind::IntToStr, arg_span);
                         }
                         _ => {
@@ -5601,11 +5666,11 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                                 "incompatible types in argument",
                             );
                             diag.span_note(
-                                self.o.ctx.bc_chunks[target_chunk_idx].name.clone(),
+                                self.ctx.bc_chunks[target_chunk_idx].name.clone(),
                                 target_func.name_span,
                                 "see signature of callee",
                             );
-                            diag.emit_to(self.o.ctx);
+                            self.ctx.emit_diag_to(diag, self.diag_emit);
                             return Err(());
                         }
                     }
@@ -5621,11 +5686,11 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 "too many arguments",
             );
             diag.span_note(
-                self.o.ctx.bc_chunks[target_chunk_idx].name.clone(),
+                self.ctx.bc_chunks[target_chunk_idx].name.clone(),
                 target_func.name_span,
                 "see signature of callee",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
 
@@ -5669,7 +5734,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         let EraNode::ListExpr(args) = self.arena.get_node(args) else {
             let mut diag = self.make_diag();
             diag.span_err(Default::default(), args_span, "expected argument list");
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
         let args = self.arena.get_extra_data_view(args);
@@ -5703,7 +5768,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 name_span,
                 "function name must be a string",
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
 
@@ -5736,33 +5801,29 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
     ) -> CompileResult<ScalarValueKind> {
         use std::ops::{Deref, DerefMut};
 
-        struct Site<'this, 'o, 'ctx, 'i, 'b, 'arena, 'name, Callback> {
-            this: &'this mut EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, Callback>,
+        struct Site<'this, 'o, 'ctx, 'i, 'b, 'arena, 'name> {
+            this: &'this mut EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena>,
             ret_kind: ScalarValueKind,
             name: &'name str,
             name_span: SrcSpan,
             assign_to_result: bool,
         }
 
-        impl<'this, 'o, 'ctx, 'i, 'b, 'arena, Callback> Deref
-            for Site<'this, 'o, 'ctx, 'i, 'b, 'arena, '_, Callback>
-        {
-            type Target = EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, Callback>;
+        impl<'this, 'o, 'ctx, 'i, 'b, 'arena> Deref for Site<'this, 'o, 'ctx, 'i, 'b, 'arena, '_> {
+            type Target = EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena>;
 
             fn deref(&self) -> &Self::Target {
                 self.this
             }
         }
 
-        impl<'this, 'o, 'ctx, 'i, 'b, 'arena, Callback> DerefMut
-            for Site<'this, 'o, 'ctx, 'i, 'b, 'arena, '_, Callback>
-        {
+        impl<'this, 'o, 'ctx, 'i, 'b, 'arena> DerefMut for Site<'this, 'o, 'ctx, 'i, 'b, 'arena, '_> {
             fn deref_mut(&mut self) -> &mut Self::Target {
                 self.this
             }
         }
 
-        impl<'arena, Callback: EraCompilerCallback> Site<'_, '_, '_, '_, '_, 'arena, '_, Callback> {
+        impl<'arena> Site<'_, '_, '_, '_, '_, 'arena, '_> {
             fn result(&mut self) -> CompileResult<()> {
                 self.ret_kind = ScalarValueKind::Int;
                 if !self.assign_to_result {
@@ -5787,7 +5848,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         self.arena.get_node_span(args),
                         "expected argument list",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 Ok(self.arena.get_extra_data_view(args))
@@ -5807,12 +5868,12 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     );
                     if args_cnt < N {
                         diag.span_err(Default::default(), self.name_span, msg);
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                         return Err(());
                     } else {
                         // Gracefully handle excessive arguments
                         diag.span_warn(Default::default(), self.name_span, msg);
-                        diag.emit_to(self.o.ctx);
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                     }
                 }
                 Ok(std::array::from_fn(|i| EraNodeRef(args[i])))
@@ -5835,7 +5896,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             self.name, min_cnt, args_cnt
                         ),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 if args_cnt > N {
@@ -5848,7 +5909,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                             self.name, N, args_cnt
                         ),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 Ok(std::array::from_fn(|i| args.get(i).map(|x| EraNodeRef(*x))))
@@ -6217,7 +6278,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         name_span,
                         "function `MAX` expects at least one argument",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 site.int_expr(a0)?;
@@ -6236,7 +6297,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         name_span,
                         "function `MIN` expects at least one argument",
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 site.int_expr(a0)?;
@@ -6434,14 +6495,14 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let EraNode::Identifier(target) = site.arena.get_node(target) else {
                     let mut diag = self.make_diag();
                     diag.span_err(Default::default(), name_span, "expected identifier");
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
-                let Some(kind) = EraCsvVarKind::try_from_var(site.o.ctx.interner().resolve(target))
+                let Some(kind) = EraCsvVarKind::try_from_var(site.ctx.interner().resolve(target))
                 else {
                     let mut diag = self.make_diag();
                     diag.span_err(Default::default(), name_span, "unknown CSV var type");
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 site.str_expr(index)?;
@@ -6457,7 +6518,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         name_span,
                         format!("`{name}` requires at least 1 argument", name = name),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
                 let a0 = site.expression(a0)?;
@@ -6468,7 +6529,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         name_span,
                         format!("first argument of `{name}` cannot be void", name = name),
                     );
-                    diag.emit_to(self.o.ctx);
+                    self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 }
                 let mut count = 0;
@@ -6611,7 +6672,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 // TODO: Support https://learn.microsoft.com/ja-jp/dotnet/api/system.int64.tostring
                 site.results()?;
                 if is_money {
-                    let key = site.o.ctx.interner().get_or_intern("$");
+                    let key = site.ctx.interner().get_or_intern("$");
                     site.chunk.push_bc(
                         BcKind::LoadConstStr {
                             idx: key.into_u32(),
@@ -6817,11 +6878,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 // The same as GETCONFIG("表示するセーブデータ数")
                 site.result()?;
                 let [] = site.unpack_args(args)?;
-                let key = site
-                    .o
-                    .ctx
-                    .interner()
-                    .get_or_intern("表示するセーブデータ数");
+                let key = site.ctx.interner().get_or_intern("表示するセーブデータ数");
                 site.chunk.push_load_const_str(key, name_span);
                 site.chunk.push_bc(BcKind::GetConfig, name_span);
             }
@@ -6841,7 +6898,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     name_span,
                     format!("function `{name}` is undefined or has no matching overloads"),
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
         }
@@ -6865,7 +6922,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
         ret: ScalarValueKind,
     ) -> CompileResult<usize> {
         let Some((func_idx, _, Some(func_info))) =
-            self.o.ctx.func_entries.get_full(Ascii::new_str(func_name))
+            self.ctx.func_entries.get_full(Ascii::new_str(func_name))
         else {
             let mut diag = self.make_diag();
             diag.span_err(
@@ -6873,7 +6930,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 span,
                 format!("internal function `{func_name}` not found"),
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         };
 
@@ -6888,7 +6945,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     func_info.frame_info.args.len()
                 ),
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
         for i in 0..args.len() {
@@ -6905,7 +6962,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         param
                     ),
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
         }
@@ -6921,7 +6978,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     func_info.ret_kind
                 ),
             );
-            diag.emit_to(self.o.ctx);
+            self.ctx.emit_diag_to(diag, self.diag_emit);
             return Err(());
         }
 
@@ -6935,7 +6992,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                 let node_span = self.arena.get_node_span(node);
                 let mut diag = self.make_diag();
                 diag.span_err(Default::default(), node_span, "expected identifier");
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 Err(())
             }
         }
@@ -6953,7 +7010,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     node_span,
                     format!("expected list of expressions, found {data:?}"),
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 Err(())
             }
         }
@@ -6971,7 +7028,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     node_span,
                     format!("expected list of statements, found {data:?}"),
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 Err(())
             }
         }
@@ -6992,7 +7049,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     node_span,
                     format!("expected {N} arguments, but {exprs_count} were given"),
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
         } else {
@@ -7003,7 +7060,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                     node_span,
                     format!("expected at least {N} arguments, but {exprs_count} were given"),
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
             if exprs_count > N + OPT_N {
@@ -7017,7 +7074,7 @@ impl<'o, 'ctx, 'i, 'b, 'arena, Callback: EraCompilerCallback>
                         exprs_count
                     ),
                 );
-                diag.emit_to(self.o.ctx);
+                self.ctx.emit_diag_to(diag, self.diag_emit);
                 return Err(());
             }
         }
@@ -7037,7 +7094,7 @@ enum EraPseudoVariableKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EraIdVariableKind {
-    Normal(ValueKind),
+    Normal(ArrayValueKind),
     Pseudo(EraPseudoVariableKind),
 }
 
@@ -7050,7 +7107,7 @@ impl EraIdVariableKind {
         matches!(self, Self::Pseudo(_))
     }
 
-    fn as_normal(&self) -> Option<ValueKind> {
+    fn as_normal(&self) -> Option<ArrayValueKind> {
         match self {
             Self::Normal(kind) => Some(*kind),
             _ => None,

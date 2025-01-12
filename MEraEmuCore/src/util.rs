@@ -580,3 +580,55 @@ pub fn swap_slice_with_stride<T>(data: &mut [T], stride: usize, i: usize, j: usi
         std::ptr::swap_nonoverlapping(slice1, slice2, stride);
     }
 }
+
+#[inline(always)]
+pub unsafe fn erase_lt<'a, 'b, T: ?Sized>(this: &'a T) -> &'b T {
+    &*(this as *const T)
+}
+
+#[inline(always)]
+pub unsafe fn erase_lt_mut<'a, 'b, T: ?Sized>(this: &'a mut T) -> &'b mut T {
+    &mut *(this as *mut T)
+}
+
+macro_rules! count_tts {
+    () => { 0 };
+    ($odd:tt $($a:tt $b:tt)*) => { (count_tts!($($a)*) << 1) | 1 };
+    ($($a:tt $even:tt)*) => { count_tts!($($a)*) << 1 };
+}
+
+pub trait Aggregator<T> {
+    const INIT: T;
+
+    fn aggregate(a: T, b: T) -> T;
+}
+
+pub struct SumAggregator;
+
+impl Aggregator<i64> for SumAggregator {
+    const INIT: i64 = 0;
+
+    fn aggregate(a: i64, b: i64) -> i64 {
+        a.wrapping_add(b)
+    }
+}
+
+pub struct MaxAggregator;
+
+impl Aggregator<i64> for MaxAggregator {
+    const INIT: i64 = i64::MIN;
+
+    fn aggregate(a: i64, b: i64) -> i64 {
+        a.max(b)
+    }
+}
+
+pub struct MinAggregator;
+
+impl Aggregator<i64> for MinAggregator {
+    const INIT: i64 = i64::MAX;
+
+    fn aggregate(a: i64, b: i64) -> i64 {
+        a.min(b)
+    }
+}

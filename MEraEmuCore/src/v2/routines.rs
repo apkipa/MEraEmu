@@ -121,6 +121,9 @@ pub fn recognize_printdata_cmd(cmd: &[u8]) -> Option<EraPrintExtendedFlags> {
 }
 
 pub fn parse_int_literal(s: &[u8]) -> Option<i64> {
+    if s.is_empty() {
+        return None;
+    }
     let mut s = s;
     let radix = if s.strip_prefix_inplace(b"0x") || s.strip_prefix_inplace(b"0X") {
         16
@@ -152,10 +155,7 @@ pub fn parse_int_literal(s: &[u8]) -> Option<i64> {
             .and_then(|x| num.checked_shl(x))?;
         s = &[];
     }
-    if !s.is_empty() {
-        return None;
-    }
-    Some(num)
+    s.is_empty().then_some(num)
 }
 
 pub fn parse_int_literal_with_sign(s: &[u8]) -> Option<i64> {
@@ -168,6 +168,18 @@ pub fn parse_int_literal_with_sign(s: &[u8]) -> Option<i64> {
         1
     };
     parse_int_literal(s).map(|x| x.wrapping_mul(sign))
+}
+
+#[test]
+fn test_parse_int_literal_with_sign() -> anyhow::Result<()> {
+    assert_eq!(parse_int_literal_with_sign(b"0"), Some(0));
+    assert_eq!(parse_int_literal_with_sign(b"1"), Some(1));
+    assert_eq!(parse_int_literal_with_sign(b"-1"), Some(-1));
+    assert_eq!(parse_int_literal_with_sign(b"+1"), Some(1));
+    assert_eq!(parse_int_literal_with_sign(b"0x1"), Some(1));
+    assert_eq!(parse_int_literal_with_sign(b"0x10"), Some(16));
+    assert_eq!(parse_int_literal_with_sign(b"6"), Some(6));
+    Ok(())
 }
 
 pub fn int_to_char(v: i64) -> char {

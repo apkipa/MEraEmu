@@ -3,10 +3,12 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     collections::BTreeMap,
+    num::{NonZero, NonZeroUsize},
     ops::{ControlFlow, DerefMut},
-    sync::{atomic::AtomicBool, Arc},
+    sync::atomic::AtomicBool,
 };
 
+use anyhow::Context;
 use bstr::ByteSlice;
 use cstree::{
     build::NodeCache,
@@ -19,7 +21,7 @@ use interning::ThreadedTokenInterner;
 use itertools::Itertools;
 use num_ordinal::{ordinal0, Ordinal, Osize};
 use once_cell::sync::Lazy;
-use rclite::Rc;
+use rclite::{Arc, Rc};
 use rcstr::ArcStr;
 use regex::Regex;
 use rustc_hash::FxBuildHasher;
@@ -27,17 +29,15 @@ use safer_ffi::derive_ReprC;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 
-use crate::{
-    cst::interpret::{EraInterpretError, EraInterpreter},
-    types::*,
-};
+#[cfg(feature = "legacy_cst")]
+use crate::cst::interpret::{EraInterpretError, EraInterpreter};
+use crate::types::*;
 
 use super::{
     codegen::EraCodeGenerator,
     lexer::EraLexer,
     vm::{EraExecIp, EraFuncExecFrame, EraVirtualMachine, EraVirtualMachineState},
 };
-use crate::cst;
 
 use crate::util::syntax::*;
 use crate::util::*;
@@ -91,17 +91,34 @@ impl From<MEraEngineError> for String {
     }
 }
 
-#[derive(Clone)]
+#[derive_ReprC]
+#[derive(Debug, Clone, Copy)]
+#[repr(u32)]
+pub enum MEraEngineVmCacheStrategy {
+    /// No cache.
+    Disabled,
+    /// Cache an array of pointers to subroutines. (unsupported)
+    Simple,
+    /// Generate a list of CALL instructions.
+    FastJit,
+}
+
+#[derive_ReprC]
+#[derive(Debug, Clone)]
+#[repr(C)]
 pub struct MEraEngineConfig {
     /// Memory limit in bytes. 0 means no limit.
     pub memory_limit: u64,
-    /// Number of threads to use for parallel compilation. 0 means auto.
+    /// Number of threads to use for parallel compilation. 0 means auto. Should set to 1
+    /// when debugging MEraEmuCore engine to make things easier.
     pub threads_cnt: u32,
     /// Whether to enable debug mode.
     pub enable_debug: bool,
     /// Whether to disable source map generation. This can reduce memory usage,
     /// but will make debugging harder.
     pub no_src_map: bool,
+    /// Cache strategy for the virtual machine when executing scripts.
+    pub vm_cache_strategy: MEraEngineVmCacheStrategy,
 }
 impl Default for MEraEngineConfig {
     fn default() -> Self {
@@ -110,6 +127,7 @@ impl Default for MEraEngineConfig {
             threads_cnt: 0,
             enable_debug: false,
             no_src_map: false,
+            vm_cache_strategy: MEraEngineVmCacheStrategy::Disabled,
         }
     }
 }
@@ -315,8 +333,9 @@ pub trait MEraEngineSysCallback {
 }
 
 impl<T: MEraEngineSysCallback> EraCompilerCallback for T {
-    fn emit_diag(&mut self, diag: &crate::types::DiagnosticProvider) {
-        self.on_error(diag)
+    fn emit_diag(&mut self, diag: crate::types::DiagnosticProvider) {
+        self.on_error(&diag);
+        diag.into_diag().cancel();
     }
 
     fn on_get_rand(&mut self) -> u64 {
@@ -660,6 +679,7 @@ pub struct MEraEngineBuilder<SysCallback, BuilderCallback> {
     is_header_finished: bool,
     erh_count: usize,
     erb_count: usize,
+    rayon_threadpool: Option<rayon::ThreadPool>,
 }
 
 impl<T: MEraEngineSysCallback> MEraEngineBuilder<T, EmptyCallback> {
@@ -676,6 +696,7 @@ impl<T: MEraEngineSysCallback> MEraEngineBuilder<T, EmptyCallback> {
             is_header_finished: false,
             erh_count: 0,
             erb_count: 0,
+            rayon_threadpool: None,
         };
 
         // Initialize default global variables
@@ -700,6 +721,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             is_header_finished: self.is_header_finished,
             erh_count: self.erh_count,
             erb_count: self.erb_count,
+            rayon_threadpool: self.rayon_threadpool,
         }
     }
     pub fn with_config(mut self, new_config: MEraEngineConfig) -> Self {
@@ -854,7 +876,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             let val = parse_i64_tail(this, val)?;
             _ = this.ctx.variables.add_var(EraVarInfo {
                 name: Ascii::new(ArcStr::from(name)),
-                val: Value::new_int_0darr(val),
+                val: ArrayValue::new_int_0darr(val),
                 is_const: true,
                 is_charadata: false,
                 is_global: false,
@@ -865,7 +887,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         let add_var_str = |this: &mut Self, name: &str, val: &str| -> Result<(), ()> {
             _ = this.ctx.variables.add_var(EraVarInfo {
                 name: Ascii::new(ArcStr::from(name)),
-                val: Value::new_str_0darr(ArcStr::from(val)),
+                val: ArrayValue::new_str_0darr(ArcStr::from(val)),
                 is_const: true,
                 is_charadata: false,
                 is_global: false,
@@ -878,7 +900,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 .split('/')
                 .map(|x| parse_i64_tail(this, x).map(IntValue::new))
                 .collect::<Result<Vec<_>, _>>()?;
-            let val = Value::new_int_arr(smallvec![val.len() as _], val);
+            let val = ArrayValue::new_int_arr(smallvec![val.len() as _], val);
             _ = this.ctx.variables.add_var(EraVarInfo {
                 name: Ascii::new(ArcStr::from(name)),
                 val,
@@ -1418,13 +1440,13 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 var_desc.dims.insert(0, INITIAL_CHARA_CAP);
             }
             // NOTE: May need ensure_alloc() later
-            let val = if var_desc.is_string {
-                Value::new_str_arr(
+            let val: ptr_union::Union2<Box<ArrIntValue>, Box<ArrStrValue>> = if var_desc.is_string {
+                ArrayValue::new_str_arr(
                     var_desc.dims,
                     var_desc.initial_sval.unwrap_or_else(|| Vec::new()),
                 )
             } else {
-                Value::new_int_arr(
+                ArrayValue::new_int_arr(
                     var_desc.dims,
                     var_desc.initial_ival.unwrap_or_else(|| Vec::new()),
                 )
@@ -1454,6 +1476,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         self.load_erb_inner(filename, content, true)
     }
 
+    #[cfg(feature = "legacy_cst")]
     pub fn cst_load_erh(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
         self.cst_load_erb_inner(filename, content, true)
     }
@@ -1468,6 +1491,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         self.finish_load_erh_inner()
     }
 
+    #[cfg(feature = "legacy_cst")]
     pub fn cst_finish_load_erh(&mut self) -> Result<(), MEraEngineError> {
         if self.is_header_finished {
             return Ok(());
@@ -1485,6 +1509,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         self.load_erb_inner(filename, content, false)
     }
 
+    #[cfg(feature = "legacy_cst")]
     pub fn cst_load_erb(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
         self.cst_load_erb_inner(filename, content, false)
     }
@@ -1501,6 +1526,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
         self.optimize_interner();
 
+        self.ensure_rayon_threadpool();
+
         // Process .erb files
         let filenames = self
             .ctx
@@ -1514,7 +1541,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             self.config.no_src_map,
             !self.config.no_src_map,
         );
-        codegen.compile_merge_many_programs(&filenames, |progress| {
+        let progress_callback = |progress| {
             if let Some(callback) = &mut self.builder_callback {
                 callback.on_build_progress(
                     "erb",
@@ -1524,12 +1551,19 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                     },
                 );
             }
-        });
+        };
+        if let Some(rayon_threadpool) = &self.rayon_threadpool {
+            rayon_threadpool.in_place_scope(move |_| {
+                codegen.compile_merge_many_programs(&filenames, progress_callback, true);
+            });
+        } else {
+            codegen.compile_merge_many_programs(&filenames, progress_callback, false);
+        }
 
         self.optimize_interner();
 
         if self.config.no_src_map {
-            // let src_map = Rc::get_mut(&mut self.ctx.source_map).unwrap();
+            // let src_map = Arc::get_mut(&mut self.ctx.source_map).unwrap();
             // for (_, src_file) in src_map {
             //     src_file.final_root = None;
             // }
@@ -1553,6 +1587,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         })
     }
 
+    #[cfg(feature = "legacy_cst")]
     pub fn cst_build(mut self) -> Result<MEraEngine<T>, MEraEngineError> {
         _ = self.finish_load_csv()?;
         _ = self.cst_finish_load_erh()?;
@@ -1593,7 +1628,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         self.optimize_interner();
 
         if self.config.no_src_map {
-            // let src_map = Rc::get_mut(&mut self.ctx.source_map).unwrap();
+            // let src_map = Arc::get_mut(&mut self.ctx.source_map).unwrap();
             // for (_, src_file) in src_map {
             //     src_file.final_root = None;
             // }
@@ -1623,9 +1658,9 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         watch: bool,
     ) -> Result<(), MEraEngineError> {
         let val = if is_string {
-            Value::new_str_arr(smallvec![dimension], Vec::new())
+            ArrayValue::new_str_arr(smallvec![dimension], Vec::new())
         } else {
-            Value::new_int_arr(smallvec![dimension], Vec::new())
+            ArrayValue::new_int_arr(smallvec![dimension], Vec::new())
         };
         let name = ArcStr::from(name);
         let var_idx = self
@@ -1644,6 +1679,28 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             self.watching_vars.insert(Ascii::new(name));
         }
         Ok(())
+    }
+
+    pub fn ensure_rayon_threadpool(&mut self) {
+        if self.rayon_threadpool.is_some() {
+            return;
+        }
+        // let parallelism = NonZeroUsize::new(self.config.threads_cnt as _)
+        //     .unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(1));
+        // if parallelism.get() > 1 {
+        //     let pool = rayon::ThreadPoolBuilder::new()
+        //         .num_threads(parallelism.get())
+        //         .build()
+        //         .unwrap();
+        //     self.rayon_threadpool = Some(pool);
+        // }
+        if self.config.threads_cnt != 1 {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(self.config.threads_cnt as _)
+                .build()
+                .unwrap();
+            self.rayon_threadpool = Some(pool);
+        }
     }
 
     fn optimize_interner(&mut self) {
@@ -1671,24 +1728,56 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             .unwrap_or(content);
         let content = simdutf8::basic::from_utf8(content)
             .map_or_else(|_| String::from_utf8_lossy(content), |s| Cow::Borrowed(s));
+        let content: arcstr::ArcStr = content.into();
         let filename = ArcStr::from(filename);
+
+        // Add source map entry early so that we can refer to its source in error messages
+        let newline_pos = Vec::new();
+        self.ctx.active_source = ArcStr::default();
+        let source_map = Arc::get_mut(&mut self.ctx.source_map).unwrap();
+        let src_file = source_map.insert(
+            filename.clone(),
+            EraSourceFile {
+                filename: filename.clone(),
+                text: Some(content.clone()),
+                // compressed_text: lz4_flex::compress_prepend_size(content.as_bytes()).into(),
+                compressed_text: None,
+                cst_root: None,
+                ast_data: None,
+                macro_map: Default::default(),
+                defines: Default::default(),
+                is_header,
+                newline_pos,
+            },
+        );
+
+        if let Some(src_file) = src_file {
+            let content = src_file.text.as_ref().unwrap();
+            let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
+            diag.span_err(
+                Default::default(),
+                Default::default(),
+                "file already loaded; overriding previous content",
+            );
+            self.ctx.emit_diag(diag);
+        }
 
         // Parse ERB file into AST
         self.ctx.active_source = filename.clone();
         // let node_cache = &mut self.node_cache;
         let mut lexer = EraLexer::new(filename.clone(), &content, false);
         let mut is_str_var_fn = |x: &str| {
-            self.ctx
-                .variables
+            (self.ctx.i.variables)
                 .get_var(x)
                 .map_or(false, |x| x.kind().is_str())
         };
         let mut parser = EraParser::new(
             &mut self.ctx.callback,
+            &self.ctx.i,
             &mut lexer,
-            self.ctx.node_cache.interner(),
-            &self.ctx.global_replace,
-            &self.ctx.global_define,
+            self.ctx.i.node_cache.interner(),
+            &self.ctx.i.global_replace,
+            &self.ctx.i.global_define,
             &mut is_str_var_fn,
             is_header,
         );
@@ -1721,38 +1810,12 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 self.ctx.emit_diag(diag);
             }
         }
-        // let newline_pos = lexer.newline_positions();
-        let newline_pos = Vec::new();
-        self.ctx.active_source = ArcStr::default();
 
-        // Add source map entry
-        let source_map = Rc::get_mut(&mut self.ctx.source_map).unwrap();
-        let src_file = source_map.insert(
-            filename.clone(),
-            EraSourceFile {
-                filename: filename.clone(),
-                text: Some(content.into()),
-                // compressed_text: lz4_flex::compress_prepend_size(content.as_bytes()).into(),
-                compressed_text: None,
-                cst_root: None,
-                ast_data: Some((root_node, nodes)),
-                macro_map,
-                defines: Default::default(),
-                is_header,
-                newline_pos,
-            },
-        );
-
-        if let Some(src_file) = src_file {
-            let content = src_file.text.as_ref().unwrap();
-            let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
-            diag.span_err(
-                Default::default(),
-                Default::default(),
-                "file already loaded; overriding previous content",
-            );
-            self.ctx.emit_diag(diag);
-        }
+        // Complete source map entry
+        let source_map = Arc::get_mut(&mut self.ctx.source_map).unwrap();
+        let src_file = source_map.get_mut(&filename).unwrap();
+        src_file.ast_data = Some((root_node, nodes));
+        src_file.macro_map = macro_map;
 
         // Count files
         if is_header {
@@ -1764,6 +1827,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         Ok(())
     }
 
+    #[cfg(feature = "legacy_cst")]
     fn cst_load_erb_inner(
         &mut self,
         filename: &str,
@@ -1786,17 +1850,16 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         // let node_cache = &mut self.node_cache;
         let mut lexer = EraLexer::new(filename.clone(), content, false);
         let mut is_str_var_fn = |x: &str| {
-            self.ctx
-                .variables
+            (self.ctx.variables)
                 .get_var(x)
                 .map_or(false, |x| x.kind().is_str())
         };
         let mut parser = cst::parser::EraParser::new(
             &mut self.ctx.callback,
             &mut lexer,
-            &mut self.ctx.node_cache,
-            &self.ctx.global_replace,
-            &self.ctx.global_define,
+            &mut self.ctx.i.node_cache,
+            &self.ctx.i.global_replace,
+            &self.ctx.i.global_define,
             &mut is_str_var_fn,
             is_header,
         );
@@ -1843,7 +1906,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         self.ctx.active_source = ArcStr::default();
 
         // Add source map entry
-        let source_map = Rc::get_mut(&mut self.ctx.source_map).unwrap();
+        let source_map = Arc::get_mut(&mut self.ctx.source_map).unwrap();
         let src_file = source_map.insert(
             filename.clone(),
             EraSourceFile {
@@ -1880,12 +1943,13 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         Ok(())
     }
 
+    #[cfg(feature = "legacy_cst")]
     fn cst_finish_load_erh_inner(&mut self) -> Result<(), MEraEngineError> {
         use crate::cst::ast::*;
 
         // Materialize .erh variable definitions
         let mut unresolved_vars = Vec::new();
-        let source_map = Rc::clone(&self.ctx.source_map);
+        let source_map = Arc::clone(&self.ctx.source_map);
         let mut interp = EraInterpreter::new(&mut self.ctx, true);
 
         for (i, erh) in source_map.values().filter(|x| x.is_header).enumerate() {
@@ -2014,12 +2078,11 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
         // Materialize .erh variable definitions
         let mut unresolved_vars = Vec::new();
-        let source_map = Rc::clone(&self.ctx.source_map);
+        let source_map = Arc::clone(&self.ctx.source_map);
 
         for (i, erh) in source_map.values().filter(|x| x.is_header).enumerate() {
             self.ctx.active_source = erh.filename.clone();
             let (program_ref, node_arena) = erh.ast_data.as_ref().unwrap();
-            let mut interp = EraInterpreter::new(&mut self.ctx, node_arena, true);
 
             let EraNode::Program(program_children) = node_arena.get_node(*program_ref) else {
                 unreachable!("ast_data is not a Program node");
@@ -2030,16 +2093,18 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                     continue;
                 }
                 let decl_span = node_arena.get_node_span(decl);
+                let mut interp =
+                    EraInterpreter::new(&mut self.ctx.callback, &self.ctx.i, node_arena, true);
                 let var_info = match interp.interpret_var_decl(decl) {
                     Ok(x) => {
                         if x.is_ref || x.is_dynamic {
-                            let mut diag = interp.make_diag();
+                            let mut diag = self.ctx.make_diag();
                             diag.span_err(
                                 Default::default(),
                                 decl_span,
                                 "global variable definition cannot be REF or DYNAMIC",
                             );
-                            interp.get_ctx_mut().emit_diag(diag);
+                            self.ctx.emit_diag(diag);
                             continue;
                         }
                         x.var_info
@@ -2055,14 +2120,14 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
                 // Create variable
                 // TODO: Report where the previous definition was
-                if interp.get_ctx_mut().variables.add_var(var_info).is_none() {
-                    let mut diag = interp.make_diag();
+                if self.ctx.variables.add_var(var_info).is_none() {
+                    let mut diag = self.ctx.make_diag();
                     diag.span_err(
                         Default::default(),
                         decl_span,
                         format!("variable `{var_name}` already defined"),
                     );
-                    interp.get_ctx_mut().emit_diag(diag);
+                    self.ctx.emit_diag(diag);
                     continue;
                 }
 
@@ -2087,20 +2152,21 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             unresolved_vars.retain(|&(erh, decl)| {
                 self.ctx.active_source = erh.filename.clone();
                 let (program_ref, node_arena) = erh.ast_data.as_ref().unwrap();
-                let mut interp = EraInterpreter::new(&mut self.ctx, node_arena, true);
+                let mut interp =
+                    EraInterpreter::new(&mut self.ctx.callback, &self.ctx.i, node_arena, true);
 
                 let decl_span = node_arena.get_node_span(decl);
 
                 let var_info = match interp.interpret_var_decl(decl) {
                     Ok(x) => {
                         if x.is_ref || x.is_dynamic {
-                            let mut diag = interp.make_diag();
+                            let mut diag = self.ctx.make_diag();
                             diag.span_err(
                                 Default::default(),
                                 decl_span,
                                 "global variable definition cannot be REF or DYNAMIC",
                             );
-                            interp.get_ctx_mut().emit_diag(diag);
+                            self.ctx.emit_diag(diag);
                             return false;
                         }
                         x.var_info
@@ -2115,14 +2181,14 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
                 // Create variable
                 // TODO: Report where the previous definition was
-                if interp.get_ctx_mut().variables.add_var(var_info).is_none() {
-                    let mut diag = interp.make_diag();
+                if self.ctx.variables.add_var(var_info).is_none() {
+                    let mut diag = self.ctx.make_diag();
                     diag.span_err(
                         Default::default(),
                         decl_span,
                         format!("variable `{var_name}` already defined"),
                     );
-                    interp.get_ctx_mut().emit_diag(diag);
+                    self.ctx.emit_diag(diag);
                     return false;
                 }
 
@@ -2447,8 +2513,8 @@ pub struct EraFuncFrameVarInfo {
     pub in_local_frame: bool,
     /// Index of the variable in the frame.
     pub var_idx: u32,
-    /// The type of the variable. Only `Arr*` are used for now.
-    pub var_kind: ValueKind,
+    /// The type of the variable.
+    pub var_kind: ArrayValueKind,
     /// The dimension count of the variable.
     pub dims_cnt: u8,
 }
@@ -2537,6 +2603,21 @@ pub struct EraDumpFunctionBytecodeEntry {
     pub opcode_str: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EraEvaluateExprResult {
+    /// The value of the expression. When result is a compound value, this will be the digest
+    /// (string result) of the value.
+    pub value: ScalarValue,
+    /// The children of the value, if it is a compound value.
+    pub children: Vec<(String, ScalarValue)>,
+    /// The unmodified offset argument.
+    pub offset: u64,
+    /// The unmodified count argument.
+    pub count: u64,
+    /// The total number of children in the value, if it is a compound value.
+    pub children_total_count: Option<u64>,
+}
+
 #[easy_jsonrpc::rpc]
 pub trait MEraEngineRpc {
     fn reset_exec_to_ip(&mut self, ip: EraExecIp) -> Result<(), MEraEngineError>;
@@ -2564,25 +2645,28 @@ pub trait MEraEngineRpc {
         offset: u32,
         data: Vec<u8>,
     ) -> Result<(), MEraEngineError>;
+    // TODO: enumerate_scope_vars
     // fn enumerate_scope_vars(&self, scope_idx: Option<u32>) -> !;
-    fn read_stack_value(&self, slot: u32) -> Option<Value>;
-    fn read_variable_with_slot(&self, slot: u32, in_global_frame: bool) -> Option<Value>;
+    /// Evaluates an expression in the specified scope. The offset and count arguments are used to
+    /// retrieve a range of sub items from the result, if the result is a compound value. The expression
+    /// may have side effects, i.e. it may modify the global variables, but engine will make sure
+    /// the VM state (such as call stack) remains unchanged after the call.
+    ///
+    /// * `scope_idx`: 0 => global, 1.. => local, None => current (topmost) scope
     fn evaluate_expr(
-        &self,
+        &mut self,
         expr: &str,
         scope_idx: Option<u32>,
-    ) -> Result<ScalarValue, MEraEngineError>;
-    // scope_idx: 0 => global, 1.. => local, None => current (topmost) scope
-    fn evaluate_var_at_scope(
-        &self,
-        name: &str,
-        scope_idx: Option<u32>,
-    ) -> Result<Value, MEraEngineError>;
+        offset: u64,
+        count: u64,
+        eval_limit: u64,
+    ) -> Result<EraEvaluateExprResult, MEraEngineError>;
     fn get_functions_list(&self) -> Vec<String>;
     fn dump_function_bytecode(
         &self,
         name: &str,
     ) -> Result<Vec<EraDumpFunctionBytecodeEntry>, MEraEngineError>;
+    fn dump_stack(&self) -> Vec<StackValue>;
 }
 
 impl<Callback> MEraEngine<Callback> {
@@ -2615,6 +2699,79 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
             easy_jsonrpc::MaybeReply::DontReply => String::new(),
             easy_jsonrpc::MaybeReply::Reply(reply) => reply.to_string(),
         }
+    }
+
+    fn resolve_variable_place(&self, place: VariablePlaceRef) -> Option<&ArrayValue> {
+        let var_idx = place.index as usize;
+        if place.is_dynamic {
+            self.vm_state.get_var_stack_value(var_idx)
+        } else {
+            self.ctx.variables.get_var_by_idx(var_idx)
+        }
+    }
+
+    fn resolve_variable_place_mut(&mut self, place: VariablePlaceRef) -> Option<&mut ArrayValue> {
+        let var_idx = place.index as usize;
+        if place.is_dynamic {
+            self.vm_state.get_var_stack_value_mut(var_idx)
+        } else {
+            self.ctx.variables.get_var_by_idx_mut(var_idx)
+        }
+    }
+
+    // NOTE: Returns None if the variable is not found.
+    fn try_evaluate_var_at_scope(
+        &self,
+        name: &str,
+        scope_idx: Option<u32>,
+    ) -> anyhow::Result<Option<&ArrayValue>> {
+        let scope_idx = scope_idx
+            .map(|x| x as usize)
+            .unwrap_or_else(|| self.vm_state.get_exec_frames().len());
+        let exec_frame = if scope_idx > 0 {
+            let exec_frame = (self.vm_state)
+                .get_exec_frames()
+                .get(scope_idx - 1)
+                .context("scope not found")?;
+            Some(exec_frame)
+        } else {
+            None
+        };
+
+        // Check local scope first
+        if let Some(exec_frame) = exec_frame {
+            let func_info = self
+                .ctx
+                .func_info_from_chunk_pos(exec_frame.ip.chunk as _, exec_frame.ip.offset as _)
+                .context("function info not found")?;
+            if let Some(var_info) = func_info.frame_info.vars.get(Ascii::new_str(name)) {
+                return Ok(Some(if var_info.in_local_frame {
+                    let var_idx = var_info.var_idx as usize + exec_frame.stack_start as usize;
+                    let var = (self.vm_state)
+                        .get_stack_value(var_idx)
+                        .context("variable not found in local frame")?;
+                    let var = var
+                        .as_arr_ref()
+                        .cloned()
+                        .context("variable is not an array")?;
+                    self.resolve_variable_place(var)
+                        .with_context(|| format!("array {:?} not found", var))?
+                } else {
+                    let var_idx = var_info.var_idx as usize;
+                    let var = (self.ctx.variables)
+                        .get_var_by_idx(var_idx)
+                        .context("variable not found in global frame")?;
+                    var
+                }));
+            }
+        }
+
+        // Check global scope
+        if let Some(var) = self.ctx.variables.get_var(name) {
+            return Ok(Some(var));
+        }
+
+        Ok(None)
     }
 }
 
@@ -2736,7 +2893,7 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
     ) -> Result<(), MEraEngineError> {
         let chunk_idx = chunk_idx as usize;
         let offset = offset as usize;
-        let chunk = Rc::get_mut(&mut self.ctx.bc_chunks)
+        let chunk = Arc::get_mut(&mut self.ctx.bc_chunks)
             .unwrap()
             .get_mut(chunk_idx)
             .ok_or_else(|| MEraEngineError::new("chunk not found".to_owned()))?;
@@ -2749,80 +2906,73 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
         Ok(())
     }
 
-    fn read_stack_value(&self, slot: u32) -> Option<Value> {
-        self.vm_state.get_stack_value(slot as _).cloned()
-    }
-
-    fn read_variable_with_slot(&self, slot: u32, in_global_frame: bool) -> Option<Value> {
-        if !in_global_frame {
-            return self.read_stack_value(slot);
-        }
-
-        self.ctx.variables.get_var_by_idx(slot as _).cloned()
-    }
-
     fn evaluate_expr(
-        &self,
+        &mut self,
         expr: &str,
         scope_idx: Option<u32>,
-    ) -> Result<ScalarValue, MEraEngineError> {
-        // TODO...
-        return Err(MEraEngineError::new("not implemented".to_owned()));
-    }
-
-    fn evaluate_var_at_scope(
-        &self,
-        name: &str,
-        scope_idx: Option<u32>,
-    ) -> Result<Value, MEraEngineError> {
-        let scope_idx = scope_idx
-            .map(|x| x as usize)
-            .unwrap_or_else(|| self.vm_state.get_exec_frames().len());
-        let exec_frame = if scope_idx > 0 {
-            let Some(exec_frame) = self.vm_state.get_exec_frames().get(scope_idx - 1) else {
-                return Err(MEraEngineError::new("scope not found".to_owned()));
-            };
-            Some(exec_frame)
-        } else {
-            None
-        };
-
-        // Check local scope first
-        if let Some(exec_frame) = exec_frame {
-            let Some(func_info) = self
-                .ctx
-                .func_info_from_chunk_pos(exec_frame.ip.chunk as _, exec_frame.ip.offset as _)
-            else {
-                return Err(MEraEngineError::new("function info not found".to_owned()));
-            };
-            if let Some(var_info) = func_info.frame_info.vars.get(Ascii::new_str(name)) {
-                return if var_info.in_local_frame {
-                    let var_idx = var_info.var_idx as usize + exec_frame.stack_start as usize;
-                    self.vm_state
-                        .get_stack_value(var_idx)
-                        .cloned()
-                        .ok_or_else(|| {
-                            MEraEngineError::new("variable not found in local frame".to_owned())
-                        })
-                } else {
-                    let var_idx = var_info.var_idx as usize;
-                    self.ctx
-                        .variables
-                        .get_var_by_idx(var_idx)
-                        .cloned()
-                        .ok_or_else(|| {
-                            MEraEngineError::new("variable not found in global frame".to_owned())
-                        })
-                };
+        offset: u64,
+        count: u64,
+        eval_limit: u64,
+    ) -> Result<EraEvaluateExprResult, MEraEngineError> {
+        if let Some(var) = self.try_evaluate_var_at_scope(expr, scope_idx)? {
+            let mut children = Vec::new();
+            let children_total_count = var.dims().iter().map(|&x| x as u64).product();
+            let digest;
+            let digest_limit = 4;
+            let has_ellipsis = children_total_count > digest_limit;
+            let ellipsis_str = if has_ellipsis { ", ..." } else { "" };
+            let vals_range = offset as usize..(offset + count).min(children_total_count) as usize;
+            match var.as_unpacked() {
+                FlatArrayValueRef::ArrInt(x) => {
+                    // NOTE: Must chain with infinite zeros in case the variable is not `ensure_alloc`ed.
+                    digest = format!(
+                        "[{:?}{}] (ArrInt{:?})",
+                        x.vals
+                            .iter()
+                            .map(|x| x.val)
+                            .chain(std::iter::repeat(0))
+                            .take(digest_limit.min(children_total_count) as _)
+                            .format(", "),
+                        ellipsis_str,
+                        x.dims
+                    );
+                    for i in vals_range {
+                        let val = x.flat_get_val_safe(i).map(|x| x.val).unwrap();
+                        children.push((format!("[{i}]"), ScalarValue::Int(val)));
+                    }
+                }
+                FlatArrayValueRef::ArrStr(x) => {
+                    // NOTE: Must chain with infinite zeros in case the variable is not `ensure_alloc`ed.
+                    digest = format!(
+                        "[{:?}{}] (ArrStr{:?})",
+                        x.vals
+                            .iter()
+                            .map(|x| x.val.as_str())
+                            .chain(std::iter::repeat(""))
+                            .take(digest_limit.min(children_total_count) as _)
+                            .format(", "),
+                        ellipsis_str,
+                        x.dims
+                    );
+                    for i in vals_range {
+                        let val = x.flat_get_val_safe(i).map(|x| x.val.to_string()).unwrap();
+                        children.push((format!("[{i}]"), ScalarValue::Str(val)));
+                    }
+                }
             }
+            return Ok(EraEvaluateExprResult {
+                value: ScalarValue::Str(digest),
+                children,
+                offset,
+                count,
+                children_total_count: Some(children_total_count),
+            });
         }
 
-        // Check global scope
-        if let Some(var) = self.ctx.variables.get_var(name) {
-            return Ok(var.clone());
-        }
-
-        Err(MEraEngineError::new("variable not found".to_owned()))
+        // TODO: Finish `evaluate_expr`
+        Err(MEraEngineError::new(
+            "expr eval not yet implemented".to_owned(),
+        ))
     }
 
     fn get_functions_list(&self) -> Vec<String> {
@@ -2880,5 +3030,9 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
             });
         }
         Ok(lines)
+    }
+
+    fn dump_stack(&self) -> Vec<StackValue> {
+        self.vm_state.get_stack().to_owned()
     }
 }
