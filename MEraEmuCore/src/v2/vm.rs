@@ -1576,7 +1576,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                                         })?;
                                     let val = routines::parse_int_literal_with_sign(val.as_bytes())
                                         .with_context(|| {
-                                            format!("string `{}` is not a valid integer", val)
+                                            format!(
+                                                "string {:?} is not a valid integer",
+                                                val.as_str()
+                                            )
                                         })?;
 
                                     let mut diag = Diagnostic::new();
@@ -2537,8 +2540,24 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
     fn instr_str_to_int(&mut self) -> anyhow::Result<()> {
         view_stack!(self, stack_count, val:s);
-        let r = routines::parse_int_literal_with_sign(val.as_bytes())
-            .with_context(|| format!("string `{}` is not a valid integer", val))?;
+        // let r = routines::parse_int_literal_with_sign(val.as_bytes())
+        //     .with_context(|| format!("string {:?} is not a valid integer", val.as_str()))?;
+        let r = if let Some(r) = routines::parse_int_literal_with_sign(val.as_bytes()) {
+            r
+        } else {
+            // Don't fail, return 0 instead, just like Emuera
+            let mut diag = Diagnostic::new();
+            diag.span_err(
+                self.o.cur_filename(),
+                self.o.cur_bc_span(),
+                format!(
+                    "string {:?} is not a valid integer",
+                    val.as_str()
+                ),
+            );
+            self.o.ctx.emit_diag(diag);
+            0
+        };
         let r = StackValue::new_int(r);
         self.o.stack.replace_tail(stack_count, [r]);
         self.add_ip_offset(Bc::StrToInt.bytes_len() as i32);
