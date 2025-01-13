@@ -431,22 +431,34 @@ MEraEngineBuilder::~MEraEngineBuilder() {
     if (!m_builder) { return; }
     mee_drop_engine_builder(m_builder);
 }
-void MEraEngineBuilder::load_csv(const char* filename, std::span<const uint8_t> content, EraCsvLoadKind kind) {
+MEraEngineConfig MEraEngineBuilder::get_config() const {
+    return mee_engine_builder_get_config(m_builder);
+}
+void MEraEngineBuilder::set_config(MEraEngineConfig config) const {
+    unwrap_rust(mee_engine_builder_set_config(m_builder, config));
+}
+void MEraEngineBuilder::load_csv(const char* filename, std::span<const uint8_t> content, EraCsvLoadKind kind) const {
     unwrap_rust(mee_engine_builder_load_csv(m_builder, filename, TO_RUST_SLICE(content), static_cast<EraCsvLoadKind_t>(kind)));
 }
-void MEraEngineBuilder::load_erh(const char* filename, std::span<const uint8_t> content) {
+void MEraEngineBuilder::load_erh(const char* filename, std::span<const uint8_t> content) const {
     unwrap_rust(mee_engine_builder_load_erh(m_builder, filename, TO_RUST_SLICE(content)));
 }
-void MEraEngineBuilder::load_erb(const char* filename, std::span<const uint8_t> content) {
+void MEraEngineBuilder::load_erb(const char* filename, std::span<const uint8_t> content) const {
     unwrap_rust(mee_engine_builder_load_erb(m_builder, filename, TO_RUST_SLICE(content)));
 }
-void MEraEngineBuilder::finish_load_csv() {
+MEraEngineAsyncErbLoader MEraEngineBuilder::start_async_erb_loader() const {
+    return MEraEngineAsyncErbLoader(mee_engine_builder_start_async_erb_loader(m_builder));
+}
+void MEraEngineBuilder::wait_for_async_loader() const {
+    unwrap_rust(mee_engine_builder_wait_for_async_loader(m_builder));
+}
+void MEraEngineBuilder::finish_load_csv() const {
     unwrap_rust(mee_engine_builder_finish_load_csv(m_builder));
 }
-void MEraEngineBuilder::finish_load_erh() {
+void MEraEngineBuilder::finish_load_erh() const {
     unwrap_rust(mee_engine_builder_finish_load_erh(m_builder));
 }
-void MEraEngineBuilder::register_variable(const char* name, bool is_string, uint32_t dimension, bool watch) {
+void MEraEngineBuilder::register_variable(const char* name, bool is_string, uint32_t dimension, bool watch) const {
     unwrap_rust(mee_engine_builder_register_variable(m_builder, name, is_string, dimension, watch));
 }
 MEraEngine MEraEngineBuilder::build() {

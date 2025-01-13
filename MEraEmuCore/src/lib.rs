@@ -34,8 +34,8 @@ use itertools::Itertools;
 use safer_ffi::{prelude::*, slice, string};
 use types::*;
 use v2::engine::{
-    EmptyCallback, EraCsvLoadKind, MEraEngine, MEraEngineBuilder, MEraEngineHostFile,
-    MEraEngineSysCallback,
+    EmptyCallback, EraCsvLoadKind, MEraEngine, MEraEngineAsyncErbLoader, MEraEngineBuilder,
+    MEraEngineConfig, MEraEngineHostFile, MEraEngineSysCallback,
 };
 #[cfg(feature = "legacy_v1")]
 pub use vm::{EraColorMatrix, MEraEngineFileSeekMode};
@@ -924,6 +924,11 @@ fn mee_drop_engine(engine: repr_c::Box<MEraEngineFfi>) {
 }
 
 #[ffi_export]
+fn mee_drop_engine_async_erb_loader(loader: repr_c::Box<MEraEngineAsyncErbLoader>) {
+    drop(loader);
+}
+
+#[ffi_export]
 fn mee_build_engine(
     builder: repr_c::Box<MEraEngineBuilderFfi>,
 ) -> MeeResult<Option<repr_c::Box<MEraEngineFfi>>> {
@@ -940,7 +945,29 @@ fn mee_build_engine(
     }
 }
 
-// TODO: Export MEraEngineConfig
+#[ffi_export]
+fn mee_engine_async_erb_loader_load_erb(
+    loader: &mut MEraEngineAsyncErbLoader,
+    filename: char_p::Ref<'_>,
+    content: c_slice::Ref<'_, u8>,
+) -> MeeResult<()> {
+    loader
+        .load_erb(filename.to_str(), &content)
+        .into_mee_result()
+}
+
+#[ffi_export]
+fn mee_engine_builder_get_config(builder: &mut MEraEngineBuilderFfi) -> MEraEngineConfig {
+    builder.i.get_config()
+}
+
+#[ffi_export]
+fn mee_engine_builder_set_config(
+    builder: &mut MEraEngineBuilderFfi,
+    config: MEraEngineConfig,
+) -> MeeResult<()> {
+    builder.i.set_config(config).into_mee_result()
+}
 
 #[ffi_export]
 fn mee_engine_builder_load_csv(
@@ -987,6 +1014,18 @@ fn mee_engine_builder_load_erb(
         .i
         .load_erb(filename.to_str(), &content)
         .into_mee_result()
+}
+
+#[ffi_export]
+fn mee_engine_builder_start_async_erb_loader(
+    builder: &mut MEraEngineBuilderFfi,
+) -> repr_c::Box<MEraEngineAsyncErbLoader> {
+    Box::new(builder.i.start_async_erb_loader()).into()
+}
+
+#[ffi_export]
+fn mee_engine_builder_wait_for_async_loader(builder: &mut MEraEngineBuilderFfi) -> MeeResult<()> {
+    builder.i.wait_for_async_loader().into_mee_result()
 }
 
 #[ffi_export]
@@ -2458,8 +2497,7 @@ mod tests {
                                erb_path: std::path::PathBuf,
                                is_header: bool|
          -> anyhow::Result<()> {
-            let mut erb = std::fs::read(&erb_path)?;
-            let erb = erb.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&erb);
+            let erb = &std::fs::read(&erb_path)?;
             let result = if is_header {
                 builder.load_erh(&erb_path.to_string_lossy(), erb)
             } else {
@@ -2500,8 +2538,21 @@ mod tests {
         let erh_parse_time = start_time.elapsed();
         start_time = std::time::Instant::now();
 
-        for erb_path in erbs.into_iter() {
-            load_erb_fn(&mut builder, erb_path, false)?;
+        let threaded_parse = std::env::var("ERA_THREADED_PARSE").is_ok();
+        if threaded_parse {
+            let loader = builder.start_async_erb_loader();
+            std::thread::spawn(move || {
+                for erb_path in erbs.into_iter() {
+                    let filename = erb_path.to_string_lossy();
+                    let content = std::fs::read(&erb_path).unwrap();
+                    loader.load_erb(&filename, &content).unwrap();
+                }
+            });
+            builder.wait_for_async_loader()?;
+        } else {
+            for erb_path in erbs.into_iter() {
+                load_erb_fn(&mut builder, erb_path, false)?;
+            }
         }
         println!("Loaded {}/{} files", pass_cnt, total_cnt);
         println!("Top 10 files with highest memory consumption:");
@@ -2528,7 +2579,9 @@ mod tests {
         start_time = std::time::Instant::now();
 
         #[cfg(feature = "dhat-heap")]
-        drop(_profiler);
+        if std::env::var("ERA_LATE_DROP_DHAT").is_err() {
+            drop(_profiler);
+        }
 
         // {
         //     let mem_usage = builder.get_mem_usage().unwrap();

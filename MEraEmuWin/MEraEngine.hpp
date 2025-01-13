@@ -439,6 +439,36 @@ struct MEraEngineSysCallback {
     virtual int64_t on_get_key_state(int64_t key_code) = 0;
 };
 
+class MEraEngineAsyncErbLoader {
+public:
+    MEraEngineAsyncErbLoader(std::nullptr_t) noexcept : m_loader(nullptr) {}
+    ~MEraEngineAsyncErbLoader() {
+        if (m_loader) {
+            mee_drop_engine_async_erb_loader(m_loader);
+        }
+    }
+
+    MEraEngineAsyncErbLoader(const MEraEngineAsyncErbLoader&) = delete;
+    MEraEngineAsyncErbLoader(MEraEngineAsyncErbLoader&& other) noexcept : m_loader(other.m_loader) {
+        other.m_loader = nullptr;
+    }
+    MEraEngineAsyncErbLoader& operator=(MEraEngineAsyncErbLoader other) noexcept {
+        std::swap(m_loader, other.m_loader);
+        return *this;
+    }
+
+    void load_erb(const char* filename, std::span<const uint8_t> content) const {
+        mee_engine_async_erb_loader_load_erb(m_loader, filename, { content.data(), content.size() });
+    }
+
+private:
+    friend struct MEraEngineBuilder;
+
+    MEraEngineAsyncErbLoader(MEraEngineAsyncErbLoader_t* loader) : m_loader(loader) {}
+
+    MEraEngineAsyncErbLoader_t* m_loader;
+};
+
 struct MEraEngine {
     ~MEraEngine();
     MEraEngine(std::nullptr_t) noexcept : m_engine() {}
@@ -506,12 +536,16 @@ struct MEraEngineBuilder {
         return m_builder;
     }
 
-    void load_csv(const char* filename, std::span<const uint8_t> content, EraCsvLoadKind kind);
-    void load_erh(const char* filename, std::span<const uint8_t> content);
-    void load_erb(const char* filename, std::span<const uint8_t> content);
-    void finish_load_csv();
-    void finish_load_erh();
-    void register_variable(const char* name, bool is_string, uint32_t dimension, bool watch);
+    MEraEngineConfig get_config() const;
+    void set_config(MEraEngineConfig config) const;
+    void load_csv(const char* filename, std::span<const uint8_t> content, EraCsvLoadKind kind) const;
+    void load_erh(const char* filename, std::span<const uint8_t> content) const;
+    void load_erb(const char* filename, std::span<const uint8_t> content) const;
+    MEraEngineAsyncErbLoader start_async_erb_loader() const;
+    void wait_for_async_loader() const;
+    void finish_load_csv() const;
+    void finish_load_erh() const;
+    void register_variable(const char* name, bool is_string, uint32_t dimension, bool watch) const;
     MEraEngine build();
 
 private:

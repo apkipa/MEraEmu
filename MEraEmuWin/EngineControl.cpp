@@ -1430,12 +1430,22 @@ namespace winrt::MEraEmuWin::implementation {
             try {
                 sd->ui_is_alive.wait(false, std::memory_order_acquire);
 
+                // TODO: Enable threaded loading when we upgrade mimalloc to v2.1.9
+                //       (see https://github.com/microsoft/mimalloc/issues/944)
+                const bool threaded_load = false;
+
                 MEraEmuWinEngineSysCallback* callback{};
                 auto builder = [&] {
                     auto callback_box = std::make_unique<MEraEmuWinEngineSysCallback>(sd.get(), &ui_task_tx);
                     callback = callback_box.get();
                     return MEraEngineBuilder(std::move(callback_box));
                 }();
+
+                if (!threaded_load) {
+                    auto cfg = builder.get_config();
+                    cfg.threads_cnt = 1;
+                    builder.set_config(cfg);
+                }
 
                 // Register global variables
                 // Engine -- register int
@@ -1548,14 +1558,30 @@ namespace winrt::MEraEmuWin::implementation {
 
                     // Use a dedicated thread to read ERB files
                     auto [erb_tx, erb_rx] = util::sync::spsc::sync_channel<std::tuple<std::filesystem::path, std::unique_ptr<uint8_t[]>, size_t>>(64);
-                    auto erb_thread = std::jthread([&, erb_tx = std::move(erb_tx)] {
-                        for (auto& erb : erbs) {
-                            if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
-                            auto [data, size] = read_utf8_file(erb);
-                            std::tuple<std::filesystem::path, std::unique_ptr<uint8_t[]>, size_t> erb_data{ erb, std::move(data), size };
-                            if (!erb_tx.send(erb_data)) { return; }
-                        }
-                    });
+                    std::jthread erb_thread;
+                    MEraEngineAsyncErbLoader async_erb_loader = nullptr;
+                    if (threaded_load) {
+                        // Use async loader from MEraEngineBuilder
+                        async_erb_loader = builder.start_async_erb_loader();
+                        erb_thread = std::jthread([&, async_erb_loader = std::move(async_erb_loader)] {
+                            for (auto& erb : erbs) {
+                                if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
+                                auto [data, size] = read_utf8_file(erb);
+                                async_erb_loader.load_erb(to_string(erb.c_str()).c_str(), { data.get(), size });
+                            }
+                        });
+                    }
+                    else {
+                        // Use our own channel
+                        erb_thread = std::jthread([&, erb_tx = std::move(erb_tx)] {
+                            for (auto& erb : erbs) {
+                                if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
+                                auto [data, size] = read_utf8_file(erb);
+                                std::tuple<std::filesystem::path, std::unique_ptr<uint8_t[]>, size_t> erb_data{ erb, std::move(data), size };
+                                if (!erb_tx.send(erb_data)) { return; }
+                            }
+                        });
+                    }
                     auto se_erb_rx = tenkai::cpp_utils::ScopeExit([&] {
                         erb_rx = nullptr;
                     });
@@ -1614,17 +1640,16 @@ namespace winrt::MEraEmuWin::implementation {
                         builder.load_erh(to_string(erh.c_str()).c_str(), { data.get(), size });
                     }
                     builder.finish_load_erh();
-                    /*for (auto& erb : erbs) {
-                        if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
-                        try_handle_thread_event();
-                        auto [data, size] = read_utf8_file(erb);
-                        builder.load_erb(to_string(erb.c_str()).c_str(), { data.get(), size });
-                    }*/
-                    while (auto erb_opt = erb_rx.recv()) {
-                        if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
-                        try_handle_thread_event();
-                        auto& [name, data, size] = *erb_opt;
-                        builder.load_erb(to_string(name.c_str()).c_str(), { data.get(), size });
+                    if (threaded_load) {
+                        builder.wait_for_async_loader();
+                    }
+                    else {
+                        while (auto erb_opt = erb_rx.recv()) {
+                            if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
+                            try_handle_thread_event();
+                            auto& [name, data, size] = *erb_opt;
+                            builder.load_erb(to_string(name.c_str()).c_str(), { data.get(), size });
+                        }
                     }
                 }
 

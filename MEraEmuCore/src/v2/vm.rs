@@ -2550,10 +2550,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             diag.span_err(
                 self.o.cur_filename(),
                 self.o.cur_bc_span(),
-                format!(
-                    "string {:?} is not a valid integer",
-                    val.as_str()
-                ),
+                format!("string {:?} is not a valid integer", val.as_str()),
             );
             self.o.ctx.emit_diag(diag);
             0

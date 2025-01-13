@@ -18,9 +18,11 @@ use either::Either;
 use hashbrown::{HashMap, HashSet};
 use indoc::indoc;
 use interning::ThreadedTokenInterner;
+use iter::{IndexedSequentialParallelBridge, ParallelIndexedSequentialBridge};
 use itertools::Itertools;
 use num_ordinal::{ordinal0, Ordinal, Osize};
 use once_cell::sync::Lazy;
+use rayon::iter::ParallelIterator;
 use rclite::{Arc, Rc};
 use rcstr::ArcStr;
 use regex::Regex;
@@ -92,7 +94,7 @@ impl From<MEraEngineError> for String {
 }
 
 #[derive_ReprC]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum MEraEngineVmCacheStrategy {
     /// No cache.
@@ -104,7 +106,7 @@ pub enum MEraEngineVmCacheStrategy {
 }
 
 #[derive_ReprC]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[repr(C)]
 pub struct MEraEngineConfig {
     /// Memory limit in bytes. 0 means no limit.
@@ -680,6 +682,7 @@ pub struct MEraEngineBuilder<SysCallback, BuilderCallback> {
     erh_count: usize,
     erb_count: usize,
     rayon_threadpool: Option<rayon::ThreadPool>,
+    erb_loader_rx: Option<std::sync::mpsc::Receiver<MEraEngineAsyncErbLoaderMsg>>,
 }
 
 impl<T: MEraEngineSysCallback> MEraEngineBuilder<T, EmptyCallback> {
@@ -697,12 +700,41 @@ impl<T: MEraEngineSysCallback> MEraEngineBuilder<T, EmptyCallback> {
             erh_count: 0,
             erb_count: 0,
             rayon_threadpool: None,
+            erb_loader_rx: None,
         };
 
         // Initialize default global variables
         this.add_initial_vars();
 
         this
+    }
+}
+
+struct MEraEngineAsyncErbLoaderMsg {
+    pub filename: ArcStr,
+    pub content: arcstr::ArcStr,
+}
+
+#[derive_ReprC]
+#[repr(opaque)]
+pub struct MEraEngineAsyncErbLoader {
+    tx: std::sync::mpsc::Sender<MEraEngineAsyncErbLoaderMsg>,
+}
+
+impl MEraEngineAsyncErbLoader {
+    pub fn load_erb(&self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
+        // Handle UTF-8 BOM
+        let content = content
+            .strip_prefix("\u{feff}".as_bytes())
+            .unwrap_or(content);
+        let content = simdutf8::basic::from_utf8(content)
+            .map_or_else(|_| String::from_utf8_lossy(content), |s| Cow::Borrowed(s));
+        let content: arcstr::ArcStr = content.into();
+        let filename = ArcStr::from(filename);
+
+        self.tx
+            .send(MEraEngineAsyncErbLoaderMsg { filename, content })
+            .map_err(|e| MEraEngineError::new(format!("failed to send message: {e}")))
     }
 }
 
@@ -722,11 +754,21 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             erh_count: self.erh_count,
             erb_count: self.erb_count,
             rayon_threadpool: self.rayon_threadpool,
+            erb_loader_rx: self.erb_loader_rx,
         }
     }
     pub fn with_config(mut self, new_config: MEraEngineConfig) -> Self {
         self.config = new_config;
         self
+    }
+
+    pub fn get_config(&self) -> MEraEngineConfig {
+        self.config.clone()
+    }
+
+    pub fn set_config(&mut self, new_config: MEraEngineConfig) -> Result<(), MEraEngineError> {
+        self.config = new_config;
+        Ok(())
     }
 
     pub fn load_csv(
@@ -1512,6 +1554,178 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
     #[cfg(feature = "legacy_cst")]
     pub fn cst_load_erb(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
         self.cst_load_erb_inner(filename, content, false)
+    }
+
+    pub fn start_async_erb_loader(&mut self) -> MEraEngineAsyncErbLoader {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.erb_loader_rx = Some(rx);
+        MEraEngineAsyncErbLoader { tx }
+    }
+
+    pub fn wait_for_async_loader(&mut self) -> Result<(), MEraEngineError> {
+        self.ensure_rayon_threadpool();
+
+        // Handle parallel erb loading
+        if let Some(erb_rx) = self.erb_loader_rx.take() {
+            use crate::v2::parser::{EraParsedProgram, EraParser};
+
+            if self.rayon_threadpool.is_some() {
+                let srcs_map = Arc::into_inner(std::mem::take(&mut self.ctx.source_map)).unwrap();
+                let s = &mut *scopeguard::guard((self, srcs_map), |s| {
+                    let (this, srcs_map) = s;
+                    this.ctx.source_map = Arc::new(srcs_map);
+                });
+                let rayon_threadpool = s.0.rayon_threadpool.as_ref().unwrap();
+
+                let interner = s.0.ctx.interner();
+                let EraCompilerCtx { callback, i } = &mut s.0.ctx;
+
+                rayon_threadpool.in_place_scope(|_| {
+                    let it = erb_rx.into_iter().par_idx_bridge().map(|(idx, item)| {
+                        let MEraEngineAsyncErbLoaderMsg { filename, content } = item;
+
+                        // Parse ERB file into AST
+                        let mut lexer = EraLexer::new(filename.clone(), &content, false);
+                        let mut is_str_var_fn = |x: &str| {
+                            (i.variables)
+                                .get_var(x)
+                                .map_or(false, |x| x.kind().is_str())
+                        };
+                        let mut err_accum = EraDiagnosticAccumulator::new();
+                        let mut parser = EraParser::new(
+                            &mut err_accum,
+                            i,
+                            &mut lexer,
+                            i.node_cache.interner(),
+                            &i.global_replace,
+                            &i.global_define,
+                            &mut is_str_var_fn,
+                            false,
+                        );
+                        let EraParsedProgram {
+                            root_node,
+                            nodes,
+                            macro_map,
+                            defines: _,
+                        } = parser.parse_program();
+
+                        let src_file = EraSourceFile {
+                            filename: filename.clone(),
+                            text: Some(content.clone()),
+                            // compressed_text: lz4_flex::compress_prepend_size(content.as_bytes()).into(),
+                            compressed_text: None,
+                            cst_root: None,
+                            ast_data: Some((root_node, nodes)),
+                            macro_map,
+                            defines: Default::default(),
+                            is_header: false,
+                            newline_pos: Vec::new(),
+                        };
+
+                        (idx, (src_file, err_accum))
+                    });
+                    it.par_seq_for_each(|(src_file, mut err_accum)| {
+                        let filename = src_file.filename.clone();
+                        let source_map = &mut s.1;
+                        let src_file = source_map.insert(filename.clone(), src_file);
+
+                        if let Some(src_file) = src_file {
+                            let content = src_file.text.as_ref().unwrap();
+                            let mut diag =
+                                Diagnostic::with_src(filename.clone(), content.as_bytes());
+                            diag.span_err(
+                                Default::default(),
+                                Default::default(),
+                                "file already loaded; overriding previous content",
+                            );
+                            let diag_resolver = DiagnosticResolver::new(None, None);
+                            EraEmitDiagnostic::emit_diag(
+                                callback,
+                                DiagnosticProvider::new(diag, diag_resolver),
+                            );
+                        }
+
+                        // Count files
+                        s.0.erb_count += 1;
+
+                        // Emit diagnostics
+                        let diag_resolver = DiagnosticResolver::new(Some(&s.1), Some(interner));
+                        err_accum.emit_all_to_with_resolver(callback, &diag_resolver);
+                    });
+                });
+            } else {
+                // Fall back to single-threaded loading
+                for MEraEngineAsyncErbLoaderMsg { filename, content } in erb_rx {
+                    // Add source map entry early so that we can refer to its source in error messages
+                    let newline_pos = Vec::new();
+                    self.ctx.active_source = ArcStr::default();
+                    let source_map = Arc::get_mut(&mut self.ctx.source_map).unwrap();
+                    let src_file = source_map.insert(
+                        filename.clone(),
+                        EraSourceFile {
+                            filename: filename.clone(),
+                            text: Some(content.clone()),
+                            // compressed_text: lz4_flex::compress_prepend_size(content.as_bytes()).into(),
+                            compressed_text: None,
+                            cst_root: None,
+                            ast_data: None,
+                            macro_map: Default::default(),
+                            defines: Default::default(),
+                            is_header: false,
+                            newline_pos,
+                        },
+                    );
+
+                    if let Some(src_file) = src_file {
+                        let content = src_file.text.as_ref().unwrap();
+                        let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
+                        diag.span_err(
+                            Default::default(),
+                            Default::default(),
+                            "file already loaded; overriding previous content",
+                        );
+                        self.ctx.emit_diag(diag);
+                    }
+
+                    // Parse ERB file into AST
+                    self.ctx.active_source = filename.clone();
+                    // let node_cache = &mut self.node_cache;
+                    let mut lexer = EraLexer::new(filename.clone(), &content, false);
+                    let mut is_str_var_fn = |x: &str| {
+                        (self.ctx.i.variables)
+                            .get_var(x)
+                            .map_or(false, |x| x.kind().is_str())
+                    };
+                    let mut parser = EraParser::new(
+                        &mut self.ctx.callback,
+                        &self.ctx.i,
+                        &mut lexer,
+                        self.ctx.i.node_cache.interner(),
+                        &self.ctx.i.global_replace,
+                        &self.ctx.i.global_define,
+                        &mut is_str_var_fn,
+                        false,
+                    );
+                    let EraParsedProgram {
+                        root_node,
+                        nodes,
+                        macro_map,
+                        defines: _,
+                    } = parser.parse_program();
+
+                    // Complete source map entry
+                    let source_map = Arc::get_mut(&mut self.ctx.source_map).unwrap();
+                    let src_file = source_map.get_mut(&filename).unwrap();
+                    src_file.ast_data = Some((root_node, nodes));
+                    src_file.macro_map = macro_map;
+
+                    // Count files
+                    self.erb_count += 1;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn build(mut self) -> Result<MEraEngine<T>, MEraEngineError> {

@@ -1023,6 +1023,16 @@ impl EraDiagnosticAccumulator {
             ctx.emit_diag_to(diag, emit_diag);
         }
     }
+
+    pub fn emit_all_to_with_resolver(
+        &mut self,
+        emit_diag: &mut impl EraEmitDiagnostic,
+        resolver: &DiagnosticResolver,
+    ) {
+        for diag in self.diags.drain(..) {
+            emit_diag.emit_diag(DiagnosticProvider::new(diag, resolver.clone()));
+        }
+    }
 }
 
 impl EraEmitDiagnostic for EraDiagnosticAccumulator {
@@ -1506,6 +1516,7 @@ impl<'a> DiagnosticProvider<'a> {
 
 #[derive_ReprC]
 #[repr(opaque)]
+#[derive(Debug, Clone)]
 pub struct DiagnosticResolver<'a> {
     src_map: Option<&'a FxIndexMap<ArcStr, EraSourceFile>>,
     resolver: Option<&'a ThreadedTokenInterner>,
