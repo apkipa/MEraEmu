@@ -24,6 +24,8 @@ dependencies = [
  "cstree",
  "csv",
  "dhat",
+ "dynasm",
+ "dynasmrt",
  "easy-jsonrpc",
  "educe",
  "either",
@@ -779,6 +781,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynasm"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "697c04882d6b25c9eb2583d2737bea1947a28c9d7544dddec76d85e6e1545c92"
+dependencies = [
+ "bitflags",
+ "byteorder",
+ "lazy_static",
+ "proc-macro-error2",
+ "proc-macro2 1.0.92",
+ "quote 1.0.37",
+ "syn 2.0.91",
+]
+
+[[package]]
+name = "dynasmrt"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1718a074cf8317b3509228d7ea9a99d7014b17483109d701c733699065fe5e35"
+dependencies = [
+ "byteorder",
+ "dynasm",
+ "fnv",
+ "memmap2",
+]
+
+[[package]]
 name = "easy-jsonrpc"
 version = "0.5.3"
 source = "git+https://github.com/apkipa/easy-jsonrpc#61c81fdbf5612f210d57eddd72dbc1f76f6c55ca"
@@ -1470,6 +1499,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
+name = "memmap2"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd3f7eed9d3848f8b98834af67102b720745c4ec028fcd0aa0239277e7de374f"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "memory-stats"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1881,6 +1919,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecf48c7ca261d60b74ab1a7b20da18bede46776b2e55535cb958eb595c5fa7b"
 dependencies = [
  "toml_edit",
+]
+
+[[package]]
+name = "proc-macro-error-attr2"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
+dependencies = [
+ "proc-macro2 1.0.92",
+ "quote 1.0.37",
+]
+
+[[package]]
+name = "proc-macro-error2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802"
+dependencies = [
+ "proc-macro-error-attr2",
+ "proc-macro2 1.0.92",
+ "quote 1.0.37",
+ "syn 2.0.91",
 ]
 
 [[package]]

@@ -113,6 +113,8 @@ bitvec = "1.0.1"
 educe = "0.6.0"
 erasable = "1.2.1"
 atomic-wait = "1.1.0"
+dynasm = "3.0.1"
+dynasmrt = "3.0.1"
 # snmalloc-rs = "0.3.5"
 # rpmalloc = "0.2.2"
 

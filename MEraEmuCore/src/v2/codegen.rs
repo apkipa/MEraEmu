@@ -2014,9 +2014,9 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 self.chunk.push_bc(BcKind::VarSet, stmt_span);
             }
             EraNode::StmtCVarSet(args) => {
-                let ([target, index], [value, start_id, end_id]) = self.unpack_list_expr(args)?;
+                let ([target], [index, value, start_id, end_id]) = self.unpack_list_expr(args)?;
                 let target = self.norm_var(target)?;
-                self.int_expr(index)?;
+                self.int_expr_or(index, 0)?;
                 self.expr_or_default(value, target)?;
                 self.int_expr_or(start_id, 0)?;
                 self.int_expr_or(end_id, -1)?;
