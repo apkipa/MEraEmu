@@ -30,7 +30,11 @@
             <muxc:MenuBar x:Name="MainMenuBar" Grid.Column="1" Background="{x:Null}">
                 <muxc:MenuBarItem Title="文件" IsTabStop="False">
                     <MenuFlyoutItem Text="重置引擎" Click="MenuFile_ResetEngine_Click" />
-                    <MenuFlyoutItem Text="回到标题页面" Click="MenuFile_ReturnToTitle_Click" />
+                    <MenuFlyoutItem Text="回到标题页面" Click="MenuFile_ReturnToTitle_Click">
+                        <MenuFlyoutItem.KeyboardAccelerators>
+                            <KeyboardAccelerator Key="F2" />
+                        </MenuFlyoutItem.KeyboardAccelerators>
+                    </MenuFlyoutItem>
                     <MenuFlyoutSeparator />
                     <MenuFlyoutItem Text="退出" Click="MenuFile_Exit_Click" />
                 </muxc:MenuBarItem>

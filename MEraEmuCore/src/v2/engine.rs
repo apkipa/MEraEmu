@@ -61,6 +61,7 @@ pub struct MEraEngine<Callback> {
     ctx: EraCompilerCtx<'static, Callback>,
     interner: Arc<ThreadedTokenInterner>,
     vm_state: EraVirtualMachineState,
+    config: MEraEngineConfig,
 }
 
 // Charas variables grow dynamically. The initial capacity is 128, and it grows by 8 each time.
@@ -94,7 +95,7 @@ impl From<MEraEngineError> for String {
 }
 
 #[derive_ReprC]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum MEraEngineVmCacheStrategy {
     /// No cache.
@@ -1798,6 +1799,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             ctx: self.ctx,
             interner: self.interner,
             vm_state,
+            config: self.config,
         })
     }
 
@@ -2896,6 +2898,7 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         max_inst_cnt: u64,
     ) -> Result<EraExecutionBreakReason, MEraEngineError> {
         let mut vm = EraVirtualMachine::new(&mut self.ctx, &mut self.vm_state);
+        vm.set_enable_jit(self.config.vm_cache_strategy == MEraEngineVmCacheStrategy::FastJit);
         Ok(vm.execute(run_flag, max_inst_cnt))
     }
 

@@ -961,30 +961,42 @@ impl<'i> EraCompilerCtxInner<'i> {
         Some((&chunk.name, src_span))
     }
 
-    pub fn func_info_from_chunk_pos(
+    pub fn func_idx_and_info_from_chunk_pos(
         &self,
         chunk_idx: usize,
         bc_offset: usize,
-    ) -> Option<&EraFuncInfo<'i>> {
+    ) -> Option<(usize, &EraFuncInfo<'i>)> {
         let chunks = self.bc_chunks.as_ref();
         if chunk_idx >= chunks.len() {
             return None;
         }
         let chunk_idx = chunk_idx as u32;
         let bc_offset = bc_offset as u32;
-        self.func_entries.iter().find_map(|(name, info)| {
-            if info.is_none() {
-                return None;
-            }
-            let info = info.as_ref().unwrap();
-            if info.chunk_idx == chunk_idx
-                && (info.bc_offset..info.bc_offset + info.bc_size).contains(&bc_offset)
-            {
-                Some(info)
-            } else {
-                None
-            }
-        })
+        self.func_entries
+            .iter()
+            .enumerate()
+            .find_map(|(idx, (name, info))| {
+                if info.is_none() {
+                    return None;
+                }
+                let info = info.as_ref().unwrap();
+                if info.chunk_idx == chunk_idx
+                    && (info.bc_offset..info.bc_offset + info.bc_size).contains(&bc_offset)
+                {
+                    Some((idx, info))
+                } else {
+                    None
+                }
+            })
+    }
+
+    pub fn func_info_from_chunk_pos(
+        &self,
+        chunk_idx: usize,
+        bc_offset: usize,
+    ) -> Option<&EraFuncInfo<'i>> {
+        self.func_idx_and_info_from_chunk_pos(chunk_idx, bc_offset)
+            .map(|(_, info)| info)
     }
 
     pub fn get_csv_num(&self, kind: EraCsvVarKind, name: &str) -> Option<u32> {
@@ -2958,6 +2970,17 @@ impl EraCharaCsvPropType {
         })
     }
 }
+impl From<EraCharaCsvPropType> for u8 {
+    fn from(value: EraCharaCsvPropType) -> Self {
+        value.to_i()
+    }
+}
+impl TryFrom<u8> for EraCharaCsvPropType {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::try_from_i(value).ok_or(())
+    }
+}
 
 #[repr(u8)]
 #[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy, PartialEq, Eq)]
@@ -3056,6 +3079,17 @@ impl EraCsvVarKind {
         } else {
             return None;
         })
+    }
+}
+impl From<EraCsvVarKind> for u8 {
+    fn from(value: EraCsvVarKind) -> Self {
+        value.to_i()
+    }
+}
+impl TryFrom<u8> for EraCsvVarKind {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::try_from_i(value).ok_or(())
     }
 }
 
@@ -4438,6 +4472,11 @@ impl EraBytecodeKind {
     // }
 
     pub fn to_bytes(&self) -> ArrayVec<[u8; 12]> {
+        self.to_bytes_inline()
+    }
+
+    #[inline(always)]
+    pub fn to_bytes_inline(&self) -> ArrayVec<[u8; 12]> {
         use EraBytecodeKind::*;
         use EraExtBytecode1 as Ext1;
         use EraPriBytecode as Pri;
@@ -4909,8 +4948,9 @@ impl EraBytecodeKind {
         bytes
     }
 
+    #[inline(always)]
     pub fn bytes_len(&self) -> usize {
-        self.to_bytes().len()
+        self.to_bytes_inline().len()
     }
 }
 

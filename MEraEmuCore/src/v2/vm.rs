@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::Context;
 use cstree::interning::{InternKey, Resolver, TokenKey};
+use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi};
 use hashbrown::HashMap;
 use itertools::Itertools;
 use rustc_hash::FxBuildHasher;
@@ -429,6 +430,7 @@ impl EraVirtualMachineState {
 pub struct EraVirtualMachine<'ctx, 'i, 's, Callback> {
     ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
     state: &'s mut EraVirtualMachineState,
+    enable_jit: bool,
 }
 
 impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's, Callback> {
@@ -436,7 +438,15 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
         ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
         state: &'s mut EraVirtualMachineState,
     ) -> Self {
-        Self { ctx, state }
+        Self {
+            ctx,
+            state,
+            enable_jit: false,
+        }
+    }
+
+    pub fn set_enable_jit(&mut self, enable_jit: bool) {
+        self.enable_jit = enable_jit;
     }
 
     /// Returns Some(()) if the trap variable was successfully added.
@@ -503,13 +513,6 @@ struct EraVmExecSiteOuter<'ctx, 'i, 's, Callback> {
     cur_frame: &'s mut EraFuncExecFrame,
 }
 
-macro_rules! extern_c {
-    (|$($name:ident: $type:ty),*| -> $ret:ty $body:block) => {{
-        extern "C" fn __era_vm_extern_fn($($name: $type),*) -> $ret $body;
-        __era_vm_extern_fn
-    }};
-}
-
 struct EraJitCompiledFunction {
     index: usize,
     code: dynasmrt::ExecutableBuffer,
@@ -520,14 +523,22 @@ impl EraJitCompiledFunction {
         Self { index, code }
     }
 
+    fn new_invalid(index: usize) -> Self {
+        Self {
+            index,
+            code: dynasmrt::ExecutableBuffer::new(0).unwrap(),
+        }
+    }
+
     fn is_invalid(&self) -> bool {
         self.code.is_empty()
     }
 }
 
+#[derive(Debug, Clone)]
 struct EraJitExecFrame {
+    func_idx: u32,
     ip: usize,
-    ret_ip: usize,
 }
 
 struct EraVmExecSite<'ctx, 'i, 's, Callback> {
@@ -541,7 +552,7 @@ struct EraVmExecSite<'ctx, 'i, 's, Callback> {
     run_flag: *const AtomicBool,
     remaining_inst_cnt: u64,
     jit_compiled_functions: Vec<Option<EraJitCompiledFunction>>,
-    jit_side_frame: Vec<StackValue>,
+    jit_side_frame: Vec<EraJitExecFrame>,
 }
 
 impl<Callback> Deref for EraVmExecSite<'_, '_, '_, Callback> {
@@ -1285,7 +1296,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
 }
 
 impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
-    fn ensure_step_instruction(&mut self) -> anyhow::Result<()> {
+    fn ensure_pre_step_instruction(&mut self) -> anyhow::Result<()> {
         let run_flag = unsafe { &*self.run_flag };
         if !run_flag.load(std::sync::atomic::Ordering::Relaxed) {
             self.break_reason = EraExecutionBreakReason::StopFlag;
@@ -1300,7 +1311,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_fail_with_msg(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let msg = if self.o.stack.len() < 1 {
             "<invalid>".to_owned()
@@ -1321,21 +1332,21 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_debug_break(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         self.break_reason = EraExecutionBreakReason::DebugBreakInstruction;
         Err(FireEscapeError(self.break_reason).into())
     }
 
     fn instr_quit(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         self.break_reason = EraExecutionBreakReason::CodeQuit;
         Err(FireEscapeError(self.break_reason).into())
     }
 
     fn instr_throw(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let msg = if self.o.stack.len() < 1 {
             "<invalid>".to_owned()
@@ -1356,18 +1367,21 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_nop(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         self.add_ip_offset(Bc::Nop.bytes_len() as _);
         Ok(())
     }
 
     fn instr_return_void(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // DANGER: Touches the site execution state. Watch out for UB.
         let o = unsafe { self.optr.as_mut() };
-        let cur_frame = o.frames.pop().context("no function to return from")?;
+        if o.frames.len() <= 1 {
+            anyhow::bail!("no function to return from");
+        }
+        let cur_frame = o.frames.pop().unwrap();
         if !cur_frame.is_transient {
             o.stack.truncate(cur_frame.stack_start as _);
             o.var_stack.truncate(cur_frame.vars_stack_start as _);
@@ -1378,13 +1392,16 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_return_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // DANGER: Touches the site execution state. Watch out for UB.
         view_stack!(self, _, val:i);
         let val = val.clone();
         let o = unsafe { self.optr.as_mut() };
-        let cur_frame = o.frames.pop().context("no function to return from")?;
+        if o.frames.len() <= 1 {
+            anyhow::bail!("no function to return from");
+        }
+        let cur_frame = o.frames.pop().unwrap();
         if !cur_frame.is_transient {
             o.stack.truncate(cur_frame.stack_start as _);
             o.var_stack.truncate(cur_frame.vars_stack_start as _);
@@ -1398,13 +1415,16 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_return_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // DANGER: Touches the site execution state. Watch out for UB.
         view_stack!(self, _, val:s);
         let val = val.clone();
         let o = unsafe { self.optr.as_mut() };
-        let cur_frame = o.frames.pop().context("no function to return from")?;
+        if o.frames.len() <= 1 {
+            anyhow::bail!("no function to return from");
+        }
+        let cur_frame = o.frames.pop().unwrap();
         if !cur_frame.is_transient {
             o.stack.truncate(cur_frame.stack_start as _);
             o.var_stack.truncate(cur_frame.vars_stack_start as _);
@@ -1418,7 +1438,12 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_call_fun(&mut self, args_cnt: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.instr_call_fun_with_return_value(args_cnt)?;
+        Ok(())
+    }
+
+    fn instr_call_fun_with_return_value(&mut self, args_cnt: u8) -> anyhow::Result<usize> {
+        self.ensure_pre_step_instruction()?;
 
         // DANGER: Touches the site execution state. Watch out for UB.
         // NOTE: Function index must be Int, not Str (i.e. no dynamic function calls).
@@ -1495,31 +1520,49 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         });
         self.remake_site()?;
 
-        Ok(())
+        Ok(func_idx)
     }
 
     fn instr_try_call_fun(&mut self, args_cnt: u8, is_force: bool) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.instr_try_call_fun_with_return_value(args_cnt, is_force)?;
+        Ok(())
+    }
+
+    fn instr_try_call_fun_with_return_value(
+        &mut self,
+        args_cnt: u8,
+        is_force: bool,
+    ) -> anyhow::Result<usize> {
+        self.ensure_pre_step_instruction()?;
 
         // DANGER: Touches the site execution state. Watch out for UB.
         let instr_len = Bc::TryCallFun { args_cnt }.bytes_len() as u32;
         let args_cnt = args_cnt as usize;
         view_stack!(self, stack_count, args:any:(args_cnt * 2), func_idx:any);
         let mut processed_args = Vec::with_capacity(args_cnt);
+        let mut num_func_idx = usize::MAX; // -1: Function does not exist
         let lookup_result = match func_idx.as_unpacked() {
             RefFlatStackValue::Int(x) => {
                 // Find function by index
                 let idx = x.val as usize;
                 (self.o.ctx.i.func_entries)
                     .get_index(idx)
-                    .and_then(|(&k, v)| v.as_ref().map(|v| (k, v)))
+                    .and_then(|(&k, v)| {
+                        num_func_idx = idx;
+                        v.as_ref().map(|v| (k, v))
+                    })
             }
             RefFlatStackValue::Str(x) => {
                 // Find function by name
                 let idx = x.val.as_str();
                 (self.o.ctx.i.func_entries)
                     .get_full(Ascii::new_str(idx))
-                    .and_then(|(_, &k, v)| v.as_ref().map(|v| (k, v)))
+                    .and_then(|(num_idx, &k, v)| {
+                        v.as_ref().map(|v| {
+                            num_func_idx = num_idx;
+                            (k, v)
+                        })
+                    })
             }
             v => {
                 let msg = format!("expected a function index, got {:?}", v);
@@ -1791,11 +1834,16 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             }
         }
 
-        Ok(())
+        Ok(num_func_idx)
     }
 
     fn instr_restart_exec_at_fun(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.instr_restart_exec_at_fun_with_return_value()?;
+        Ok(())
+    }
+
+    fn instr_restart_exec_at_fun_with_return_value(&mut self) -> anyhow::Result<usize> {
+        self.ensure_pre_step_instruction()?;
 
         // DANGER: Touches the site execution state. Watch out for UB.
         view_stack!(self, _, func_idx:i);
@@ -1849,18 +1897,23 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         });
         self.remake_site()?;
 
-        Ok(())
+        Ok(func_idx)
     }
 
     fn instr_jump_ww(&mut self, offset: i32) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         self.add_ip_offset(offset);
         Ok(())
     }
 
     fn instr_jump_if_ww(&mut self, offset: i32) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.instr_jump_if_ww_with_return_value(offset)?;
+        Ok(())
+    }
+
+    fn instr_jump_if_ww_with_return_value(&mut self, offset: i32) -> anyhow::Result<bool> {
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, cond:i);
         let cond = cond != 0;
@@ -1870,11 +1923,16 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             self.add_ip_offset(Bc::JumpIfWW { offset }.bytes_len() as i32);
         }
         self.o.stack.must_pop_many(stack_count);
-        Ok(())
+        Ok(cond)
     }
 
     fn instr_jump_if_not_ww(&mut self, offset: i32) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.instr_jump_if_not_ww_with_return_value(offset)?;
+        Ok(())
+    }
+
+    fn instr_jump_if_not_ww_with_return_value(&mut self, offset: i32) -> anyhow::Result<bool> {
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, cond:i);
         let cond = cond == 0;
@@ -1884,11 +1942,11 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             self.add_ip_offset(Bc::JumpIfNotWW { offset }.bytes_len() as i32);
         }
         self.o.stack.must_pop_many(stack_count);
-        Ok(())
+        Ok(cond)
     }
 
     fn instr_load_const_str(&mut self, idx: u32) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let interner = self.o.ctx.interner();
         let val = interner.resolve(TokenKey::try_from_u32(idx).context("invalid token key")?);
@@ -1898,7 +1956,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_load_imm8(&mut self, imm: i8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         self.o.stack.push(StackValue::new_int(imm.into()));
         self.add_ip_offset(Bc::LoadImm8 { imm }.bytes_len() as i32);
@@ -1906,7 +1964,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_load_imm16(&mut self, imm: i16) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         self.o.stack.push(StackValue::new_int(imm.into()));
         self.add_ip_offset(Bc::LoadImm16 { imm }.bytes_len() as i32);
@@ -1914,7 +1972,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_load_imm32(&mut self, imm: i32) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         self.o.stack.push(StackValue::new_int(imm.into()));
         self.add_ip_offset(Bc::LoadImm32 { imm }.bytes_len() as i32);
@@ -1922,7 +1980,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_load_imm64(&mut self, imm: i64) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         self.o.stack.push(StackValue::new_int(imm));
         self.add_ip_offset(Bc::LoadImm64 { imm }.bytes_len() as i32);
@@ -1930,7 +1988,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_load_var_ww(&mut self, idx: u32) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let var = (self.o.ctx.variables)
             .get_var_by_idx_mut(idx as _)
@@ -1945,7 +2003,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_load_const_var_ww(&mut self, idx: u32) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let mut var = (self.o.ctx.variables)
             .get_var_by_idx(idx as _)
@@ -1963,7 +2021,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_load_local_var(&mut self, idx: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let var = (self.o.stack.get(idx as usize))
             .with_context(|| format!("local variable index {} not found", idx))?;
@@ -1973,7 +2031,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_pop(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, _, _val:any);
         self.o.stack.must_pop_many(1);
@@ -1982,7 +2040,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_pop_all_n(&mut self, count: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, _, _vals:any:count);
         self.o.stack.must_pop_many(count as _);
@@ -1991,7 +2049,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_pop_one_n(&mut self, idx: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         if idx > 0 {
             view_stack!(self, _, _vals:any:idx);
@@ -2004,7 +2062,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_swap_2(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, _, _a:any, _b:any);
         let slen = self.o.stack.len();
@@ -2014,7 +2072,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_duplicate(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, _, val:any);
         let val = val.clone();
@@ -2024,7 +2082,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_duplicate_all_n(&mut self, count: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, _vals:any:count);
         let start = self.o.stack.len() - stack_count;
@@ -2034,7 +2092,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_duplicate_one_n(&mut self, idx: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         if idx > 0 {
             view_stack!(self, _, _vals:any:idx);
@@ -2047,7 +2105,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_add_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.wrapping_add(b));
@@ -2057,7 +2115,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sub_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.wrapping_sub(b));
@@ -2067,7 +2125,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_mul_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.wrapping_mul(b));
@@ -2077,7 +2135,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_div_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         if b == 0 {
@@ -2090,7 +2148,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_mod_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         if b == 0 {
@@ -2103,7 +2161,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_neg_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i);
         let r = StackValue::new_int(val.wrapping_neg());
@@ -2113,7 +2171,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_bit_and_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a & b);
@@ -2123,7 +2181,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_bit_or_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a | b);
@@ -2133,7 +2191,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_bit_xor_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a ^ b);
@@ -2143,7 +2201,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_bit_not_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i);
         let r = StackValue::new_int(!val);
@@ -2153,7 +2211,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_shl_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.wrapping_shl(b as u32));
@@ -2163,7 +2221,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_shr_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.wrapping_shr(b as u32));
@@ -2173,7 +2231,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_int_lt(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a < b) as i64);
@@ -2183,7 +2241,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_int_leq(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a <= b) as i64);
@@ -2193,7 +2251,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_int_gt(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a > b) as i64);
@@ -2203,7 +2261,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_int_geq(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a >= b) as i64);
@@ -2213,7 +2271,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_int_eq(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a == b) as i64);
@@ -2223,7 +2281,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_int_neq(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a != b) as i64);
@@ -2233,7 +2291,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_str_lt(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:s, b:s);
         let r = StackValue::new_int((a < b) as i64);
@@ -2243,7 +2301,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_str_leq(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:s, b:s);
         let r = StackValue::new_int((a <= b) as i64);
@@ -2253,7 +2311,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_str_gt(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:s, b:s);
         let r = StackValue::new_int((a > b) as i64);
@@ -2263,7 +2321,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_str_geq(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:s, b:s);
         let r = StackValue::new_int((a >= b) as i64);
@@ -2273,7 +2331,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_str_eq(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:s, b:s);
         let r = StackValue::new_int((a == b) as i64);
@@ -2283,7 +2341,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cmp_str_neq(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:s, b:s);
         let r = StackValue::new_int((a != b) as i64);
@@ -2293,7 +2351,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_logical_not(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i);
         let r = StackValue::new_int((val == 0) as i64);
@@ -2303,7 +2361,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_max_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.max(b));
@@ -2313,7 +2371,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_min_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.min(b));
@@ -2323,7 +2381,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_clamp_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i, min:i, max:i);
         let r = StackValue::new_int(val.max(min).min(max));
@@ -2333,7 +2391,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_in_range_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i, min:i, max:i);
         let r = StackValue::new_int((min <= val && val <= max) as i64);
@@ -2343,7 +2401,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_in_range_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:s, min:s, max:s);
         let r = StackValue::new_int((min <= val && val <= max) as i64);
@@ -2353,7 +2411,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_bit(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         if b < 0 || b >= 64 {
@@ -2367,7 +2425,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_set_bit(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         if b < 0 || b >= 64 {
@@ -2381,7 +2439,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_clear_bit(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         if b < 0 || b >= 64 {
@@ -2395,7 +2453,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_invert_bit(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         if b < 0 || b >= 64 {
@@ -2409,7 +2467,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_build_string(&mut self, count: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, vals:any:count);
         let mut buf = String::new();
@@ -2426,7 +2484,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_pad_string(&mut self, flags: EraPadStringFlags) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use unicode_width::UnicodeWidthStr;
         view_stack!(self, stack_count, val:s, width:i);
@@ -2450,7 +2508,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_repeat_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:s, count:i);
         let r = ArcStr::try_repeat(val, count as usize)
@@ -2462,7 +2520,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_build_arr_idx_from_md(&mut self, count: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, vals:any:count);
         // Fetch indices
@@ -2484,7 +2542,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_arr_val_flat(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, idx:i);
         if idx < 0 || idx >= i32::MAX.into() {
@@ -2545,7 +2603,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_set_arr_val_flat(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, _, arr:a, idx:i, _val:any);
         if idx < 0 || idx >= i32::MAX.into() {
@@ -2609,7 +2667,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_times_float(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
         let factor = f64::from_bits(b as u64);
@@ -2620,7 +2678,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_fun_exists(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, func_name:s);
         let exists = (self.o.ctx.func_entries)
@@ -2633,7 +2691,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_replace_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, haystack:s, needle:s, replace_with:s);
         let re = self
@@ -2649,7 +2707,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sub_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, haystack:s, start_pos:i, length:i);
         let haystack = haystack.as_str();
@@ -2677,7 +2735,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_str_find(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, haystack:s, needle:s, start_pos:i);
         let needle = needle.as_str();
@@ -2697,7 +2755,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_str_len(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:s);
         let r = StackValue::new_int(val.chars().count() as i64);
@@ -2707,7 +2765,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_count_sub_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, haystack:s, needle:s);
         let count = haystack.matches(needle.as_str()).count() as i64;
@@ -2718,7 +2776,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_str_char_at(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, haystack:s, pos:i);
         let r = if pos < 0 {
@@ -2736,7 +2794,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_int_to_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i);
         let r = itoa::Buffer::new().format(val).into();
@@ -2747,7 +2805,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_str_to_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:s);
         // let r = routines::parse_int_literal_with_sign(val.as_bytes())
@@ -2772,7 +2830,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_format_int_to_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i, fmt:s);
         let r = csharp_format_i64(val, fmt).context("failed to format integer")?;
@@ -2783,7 +2841,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_str_is_valid_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:s);
         let r = routines::parse_int_literal_with_sign(val.as_bytes()).is_some() as i64;
@@ -2794,7 +2852,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_str_to_upper(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:s);
         let r = val.to_ascii_uppercase();
@@ -2805,7 +2863,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_str_to_lower(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:s);
         let r = val.to_ascii_lowercase();
@@ -2816,7 +2874,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_str_to_half(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use full2half::CharacterWidth;
 
@@ -2829,7 +2887,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_str_to_full(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use full2half::CharacterWidth;
 
@@ -2842,7 +2900,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_build_bar_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use muldiv::MulDiv;
 
@@ -2872,7 +2930,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_escape_regex_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:s);
         let r = regex::escape(val).into();
@@ -2883,7 +2941,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_encode_to_unicode(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, haystack:s, pos:i);
         let r = (pos.try_into().ok())
@@ -2896,7 +2954,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_unicode_to_str(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i);
         let r = (val.try_into().ok().and_then(char::from_u32))
@@ -2908,7 +2966,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_int_to_str_with_base(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i, base:i);
         if base < 2 || base > 36 {
@@ -2923,7 +2981,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_html_tag_split(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // TODO: Honor trapped variables
         view_stack!(self, stack_count, html:s, tags:a, tags_idx:i, count:a, count_idx:i);
@@ -2944,7 +3002,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_html_to_plain_text(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, html:s);
         let r = nanohtml2text::html2text(html);
@@ -2955,7 +3013,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_html_escape(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, html:s);
         let r = htmlize::escape_all_quotes(html.as_str());
@@ -2966,7 +3024,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_power_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, base:i, exp:i);
         let r = base.wrapping_pow(exp as _);
@@ -2977,7 +3035,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sqrt_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use num_integer::Roots;
 
@@ -2993,7 +3051,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_cbrt_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use num_integer::Roots;
 
@@ -3006,7 +3064,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_log_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // FIXME: Use f128 when https://github.com/rust-lang/rust/issues/116909 lands.
         view_stack!(self, stack_count, val:i);
@@ -3018,7 +3076,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_log_10_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i);
         let r = if val <= 0 { 0 } else { val.ilog10().into() };
@@ -3029,7 +3087,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_exponent_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i);
         let r = (val as f64).exp() as _;
@@ -3040,7 +3098,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_abs_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i);
         let r = val.wrapping_abs();
@@ -3051,7 +3109,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sign_int(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i);
         let r = val.signum();
@@ -3062,7 +3120,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_group_match(&mut self, count: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:any, idx:any:count);
         if val.as_arr_ref().is_some() {
@@ -3076,7 +3134,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_array_count_matches(&mut self, dim_pos: i64) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, arr_idx:i, value:any, start_idx:i, end_idx:i);
         let start_idx = start_idx.max(0) as usize;
@@ -3123,7 +3181,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         &mut self,
         dim_pos: i64,
     ) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, arr_idx:i, start_idx:i, end_idx:i);
         let start_idx = start_idx.max(0) as usize;
@@ -3146,7 +3204,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_array_in_range(&mut self, dim_pos: i64) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, arr_idx:i, lower_bound:i, upper_bound:i, start_idx:i, end_idx:i);
         let start_idx = start_idx.max(0) as usize;
@@ -3171,7 +3229,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_array_remove(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, arr_idx:i, start_idx:i, count:i);
         let start_idx = start_idx.max(0) as usize;
@@ -3204,7 +3262,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_array_sort(&mut self, is_asc: bool) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, arr_idx:i, start_idx:i, count:i);
         let start_idx = start_idx.max(0) as usize;
@@ -3243,7 +3301,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_array_multi_sort(&mut self, subs_cnt: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arrs:any:(subs_cnt as usize + 1));
         let prim_arr = arrs[0]
@@ -3331,7 +3389,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_array_copy(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr_from:a, arr_to:a);
         if arr_from != arr_to {
@@ -3378,7 +3436,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_array_shift(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, arr_idx:i, shift_count:i, value:any, start_idx:i, count:i);
         let start_idx = start_idx.max(0) as usize;
@@ -3440,7 +3498,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         &mut self,
         flags: EraPrintExtendedFlags,
     ) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:any);
         match val.as_unpacked() {
@@ -3457,7 +3515,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_reuse_last_line(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, content:s);
         self.o.ctx.callback.on_reuselastline(content);
@@ -3467,7 +3525,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_clear_line(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, count:i);
         self.o.ctx.callback.on_clearline(count);
@@ -3477,7 +3535,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_wait(&mut self, flags: EraWaitFlags) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let any_key = flags.any_key();
         let is_force = flags.is_force();
@@ -3487,7 +3545,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_twait(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, duration:i, is_force:b);
         self.o.ctx.callback.on_twait(duration, is_force);
@@ -3497,7 +3555,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_input(&mut self, flags: EraInputExtendedFlags) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let mut final_stack_count = 0;
         let var_result = self.var_result_place;
@@ -3653,7 +3711,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_kb_get_key_state(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, keycode:i);
         let r = self.o.ctx.callback.on_get_key_state(keycode);
@@ -3664,7 +3722,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_caller_func_name(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // TODO: Make this more efficient without needing to call `remake_site`.
         // DANGER: Touches the site execution state. Watch out for UB.
@@ -3685,7 +3743,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_chara_num(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let r = StackValue::new_int(self.charas_count as _);
         self.o.stack.push(r);
@@ -3694,7 +3752,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_csv_get_num(&mut self, kind: EraCsvVarKind) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, name:s);
         let r = self.o.ctx.get_csv_num(kind, name).map_or(-1, |x| x as _);
@@ -3705,7 +3763,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_random_range(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, min:i, max:i);
         if min >= max {
@@ -3722,7 +3780,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_random_max(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, max:i);
         if max <= 0 {
@@ -3737,7 +3795,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_row_assign(&mut self, vals_cnt: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, arr_idx:i, values:any:vals_cnt);
         let arr_idx = arr_idx as usize;
@@ -3769,7 +3827,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_for_loop_step(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // NOTE: ForLoopStep does not eat any stack values. It only modifies the array,
         //       and pushes a boolean value to the stack to indicate whether the loop
@@ -3788,7 +3846,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_extend_str_to_width(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -3823,7 +3881,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_html_print(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, html:s);
         self.o.ctx.callback.on_html_print(html);
@@ -3833,7 +3891,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_print_button(&mut self, flags: EraPrintExtendedFlags) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, content:s, value:s);
         self.o.ctx.callback.on_print_button(content, value, flags);
@@ -3843,14 +3901,14 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_print_img(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // TODO: PrintImg, PrintImg4 ?
         anyhow::bail!("PrintImg is not yet implemented");
     }
 
     fn instr_split_string(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, input:s, separator:s, dest:a, dest_idx:i, dest_count:a, dest_count_idx:i);
         resolve_array_mut_unsafe!(self, dest:s;dest_idx;-1, dest_count:i;dest_count_idx);
@@ -3867,7 +3925,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_gcreate(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, gid:i, width:i, height:i);
         let r = self.o.ctx.callback.on_gcreate(gid, width, height);
@@ -3878,7 +3936,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_gcreate_from_file(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, gid:i, file_path:s);
         let r = self.o.ctx.callback.on_gcreatefromfile(gid, file_path);
@@ -3889,7 +3947,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_gdispose(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, gid:i);
         let r = self.o.ctx.callback.on_gdispose(gid);
@@ -3900,7 +3958,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_gcreated(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, gid:i);
         let r = self.o.ctx.callback.on_gcreated(gid);
@@ -3911,7 +3969,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_gdraw_sprite(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, gid:i, sprite_name:s, dest_x:i, dest_y:i, dest_width:i, dest_height:i);
         let r = self.o.ctx.callback.on_gdrawsprite(
@@ -3930,7 +3988,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_gdraw_sprite_with_color_matrix(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, gid:i, sprite_name:s, dest_x:i, dest_y:i, dest_width:i, dest_height:i, color_matrix:a);
         // Parse ColorMatrix
@@ -3970,7 +4028,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_gclear(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, gid:i, color:i);
         let r = self.o.ctx.callback.on_gclear(gid, color);
@@ -3981,7 +4039,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sprite_create(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, sprite_name:s, gid:i, x:i, y:i, width:i, height:i);
         let r = (self.o.ctx.callback).on_spritecreate(sprite_name, gid, x, y, width, height);
@@ -3992,7 +4050,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sprite_dispose(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, name:s);
         let r = self.o.ctx.callback.on_spritedispose(name);
@@ -4003,7 +4061,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sprite_created(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, name:s);
         let r = self.o.ctx.callback.on_spritecreated(name);
@@ -4014,7 +4072,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sprite_anime_create(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, name:s, width:i, height:i);
         let r = self
@@ -4029,7 +4087,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sprite_anime_add_frame(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, name:s, gid:i, x:i, y:i, width:i, height:i, offset_x:i, offset_y:i, delay:i);
         let r = (self.o.ctx.callback)
@@ -4041,7 +4099,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sprite_width(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, name:s);
         let r = self.o.ctx.callback.on_spritewidth(name);
@@ -4052,7 +4110,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_sprite_height(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, name:s);
         let r = self.o.ctx.callback.on_spriteheight(name);
@@ -4063,7 +4121,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_check_font(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, font_name:s);
         let r = self.o.ctx.callback.on_check_font(font_name);
@@ -4074,13 +4132,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_save_text(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         anyhow::bail!("SaveText not yet implemented");
     }
 
     fn instr_load_text(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         anyhow::bail!("LoadText not yet implemented");
     }
@@ -4090,7 +4148,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         is_first: bool,
         dim_pos: i64,
     ) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, arr_idx:i, value:any, start_idx:i, end_idx:i);
         let start_idx = start_idx.max(0) as usize;
@@ -4144,7 +4202,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         is_first: bool,
         dim_pos: i64,
     ) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, arr_idx:i, value:any, start_idx:i, end_idx:i, complete_match:b);
         let start_idx = start_idx.max(0) as usize;
@@ -4207,7 +4265,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_var_set(&mut self, dim_pos: i64) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, arr:a, arr_idx:i, value:any, start_idx:i, end_idx:i);
         let start_idx = start_idx.max(0) as usize;
@@ -4240,7 +4298,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_var_size_by_name(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, name:s, dim_pos:i);
         let var = (self.o.get_var_by_name(name))
@@ -4260,7 +4318,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_var_all_size(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let dims = {
             view_stack!(self, _, arr:a);
@@ -4280,7 +4338,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_host_time_raw(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let r = self.o.ctx.callback.on_get_host_time();
         self.o.stack.push(StackValue::new_int(r as _));
@@ -4289,7 +4347,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_host_time(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use chrono::*;
         // NOTE: Native time zone info is used
@@ -4309,7 +4367,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_host_time_s(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use chrono::*;
         // NOTE: Native time zone info is used
@@ -4325,7 +4383,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_csv_get_prop_2(&mut self, csv_kind: EraCharaCsvPropType) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use EraCharaCsvPropType::*;
 
@@ -4376,7 +4434,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_chara_csv_exists(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, chara_no:i);
         let chara_no = chara_no as u32;
@@ -4391,7 +4449,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         &mut self,
         target_arr: &str,
     ) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, value:i, max_lv:i);
         let target_arr = self
@@ -4416,7 +4474,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_add_chara(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, chara_tmpl_no:i);
         if let Some(cur_charas_cap) = (self.o.ctx.variables).charas_var_capacity() {
@@ -4495,7 +4553,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_add_void_chara(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         if let Some(cur_charas_cap) = (self.o.ctx.variables).charas_var_capacity() {
             let chara_reg_slot = self.charas_count;
@@ -4529,7 +4587,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_pick_up_chara(&mut self, charas_cnt: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use crate::util::swap_slice_with_stride;
 
@@ -4569,7 +4627,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_delete_chara(&mut self, charas_cnt: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use crate::util::swap_slice_with_stride;
 
@@ -4624,7 +4682,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_swap_chara(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         use crate::util::swap_slice_with_stride;
 
@@ -4651,13 +4709,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_add_copy_chara(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         anyhow::bail!("AddCopyChara not yet implemented");
     }
 
     fn instr_load_data(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, save_id:i);
         let file = format!(".\\sav\\save{save_id:02}.sav");
@@ -4684,7 +4742,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_save_data(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // TODO: Bc::SaveData
         view_stack!(self, stack_count, save_id:i, save_info:s);
@@ -4703,7 +4761,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_check_data(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         let vresult = self.var_result_place;
         let vresults = self.var_results_place;
@@ -4735,7 +4793,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_chara_reg_num(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, chara_tmpl_no:i);
         let var_no = self.o.get_global_var_int("NO")?;
@@ -4753,7 +4811,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_load_global(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // TODO: Bc::LoadGlobal
         {
@@ -4771,7 +4829,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_save_global(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         // TODO: Bc::SaveGlobal
         {
@@ -4789,7 +4847,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_reset_data(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         self.o.routine_reset_data()?;
         self.charas_count = 0;
@@ -4798,7 +4856,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_reset_chara_stain(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, chara_no:i);
         let chara_no = sanitize_chara_no(chara_no, self.charas_count)?;
@@ -4822,7 +4880,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_save_chara(&mut self, charas_cnt: u8) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, filename:s, memo:s, chara_nos:any:charas_cnt);
         let chara_nos = dedup_chara_numbers(chara_nos, self.charas_count)?;
@@ -4842,7 +4900,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_load_chara(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, filename:s);
         // TODO: Bc::LoadChara
@@ -4861,7 +4919,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_config(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, key:s);
         let r = self.o.ctx.callback.on_get_config_int(key)?;
@@ -4872,7 +4930,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_get_config_s(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, key:s);
         let r = self.o.ctx.callback.on_get_config_str(key)?;
@@ -4883,7 +4941,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_find_chara_data_file(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, filename:s);
         // TODO: Bc::FindCharaDataFile
@@ -4902,10 +4960,1279 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 
     fn instr_raise_illegal_instruction(&mut self) -> anyhow::Result<()> {
-        self.ensure_step_instruction()?;
+        self.ensure_pre_step_instruction()?;
 
         self.break_reason = EraExecutionBreakReason::IllegalInstruction;
         Err(FireEscapeError(self.break_reason).into())
+    }
+
+    fn step_instruction_once(&mut self) -> anyhow::Result<()> {
+        let s = self;
+        let Some(bc_area) =
+            s.o.cur_chunk
+                .get_bc()
+                .get(s.o.cur_frame.ip.offset as usize..)
+        else {
+            let mut diag = Diagnostic::new();
+            diag.span_err(
+                s.o.cur_chunk.name.clone(),
+                s.o.cur_chunk
+                    .lookup_src(s.o.cur_chunk.len() - 1)
+                    .unwrap_or_default(),
+                "unexpected end of bytecode",
+            );
+            s.o.ctx.emit_diag(diag);
+            s.break_reason = EraExecutionBreakReason::IllegalInstruction;
+            return Err(FireEscapeError(s.break_reason).into());
+        };
+        // let bc_span = s
+        //     .cur_chunk
+        //     .lookup_src(s.cur_frame.ip.offset as usize)
+        //     .unwrap_or_default();
+        let Some(inst) = EraBytecodeKind::from_bytes(bc_area) else {
+            let mut diag = Diagnostic::new();
+            diag.span_err(
+                s.o.cur_filename(),
+                s.o.cur_bc_span(),
+                "unexpected end of bytecode",
+            );
+            s.o.ctx.emit_diag(diag);
+            s.break_reason = EraExecutionBreakReason::IllegalInstruction;
+            return Err(FireEscapeError(s.break_reason).into());
+        };
+
+        // dbg!(&s.o.stack);
+        // dbg!((s.o.cur_frame.ip.offset, inst));
+
+        // Execute instruction
+        // NOTE: Execution of instructions is atomic: they are either fully executed or not at all.
+        //       This is important for the stack to remain consistent.
+        match inst {
+            Bc::FailWithMsg => s.instr_fail_with_msg()?,
+            Bc::Nop => s.instr_nop()?,
+            Bc::DebugBreak => s.instr_debug_break()?,
+            Bc::Quit => s.instr_quit()?,
+            Bc::Throw => s.instr_throw()?,
+            Bc::ReturnVoid => s.instr_return_void()?,
+            Bc::ReturnInt => s.instr_return_int()?,
+            Bc::ReturnStr => s.instr_return_str()?,
+            Bc::CallFun { args_cnt } => s.instr_call_fun(args_cnt)?,
+            Bc::TryCallFun { args_cnt } => s.instr_try_call_fun(args_cnt, false)?,
+            Bc::TryCallFunForce { args_cnt } => s.instr_try_call_fun(args_cnt, true)?,
+            Bc::RestartExecAtFun => s.instr_restart_exec_at_fun()?,
+            Bc::JumpWW { offset } => s.instr_jump_ww(offset)?,
+            Bc::JumpIfWW { offset } => s.instr_jump_if_ww(offset)?,
+            Bc::JumpIfNotWW { offset } => s.instr_jump_if_not_ww(offset)?,
+            Bc::LoadConstStr { idx } => s.instr_load_const_str(idx)?,
+            Bc::LoadImm8 { imm } => s.instr_load_imm8(imm)?,
+            Bc::LoadImm16 { imm } => s.instr_load_imm16(imm)?,
+            Bc::LoadImm32 { imm } => s.instr_load_imm32(imm)?,
+            Bc::LoadImm64 { imm } => s.instr_load_imm64(imm)?,
+            Bc::LoadVarWW { idx } => s.instr_load_var_ww(idx)?,
+            Bc::LoadConstVarWW { idx } => s.instr_load_const_var_ww(idx)?,
+            Bc::LoadLocalVar { idx } => s.instr_load_local_var(idx)?,
+            Bc::Pop => s.instr_pop()?,
+            Bc::PopAllN { count } => s.instr_pop_all_n(count)?,
+            Bc::PopOneN { idx } => s.instr_pop_one_n(idx)?,
+            Bc::Swap2 => s.instr_swap_2()?,
+            Bc::Duplicate => s.instr_duplicate()?,
+            Bc::DuplicateAllN { count } => s.instr_duplicate_all_n(count)?,
+            Bc::DuplicateOneN { idx } => s.instr_duplicate_one_n(idx)?,
+            Bc::AddInt => s.instr_add_int()?,
+            Bc::SubInt => s.instr_sub_int()?,
+            Bc::MulInt => s.instr_mul_int()?,
+            Bc::DivInt => s.instr_div_int()?,
+            Bc::ModInt => s.instr_mod_int()?,
+            Bc::NegInt => s.instr_neg_int()?,
+            Bc::BitAndInt => s.instr_bit_and_int()?,
+            Bc::BitOrInt => s.instr_bit_or_int()?,
+            Bc::BitXorInt => s.instr_bit_xor_int()?,
+            Bc::BitNotInt => s.instr_bit_not_int()?,
+            Bc::ShlInt => s.instr_shl_int()?,
+            Bc::ShrInt => s.instr_shr_int()?,
+            Bc::CmpIntLT => s.instr_cmp_int_lt()?,
+            Bc::CmpIntLEq => s.instr_cmp_int_leq()?,
+            Bc::CmpIntGT => s.instr_cmp_int_gt()?,
+            Bc::CmpIntGEq => s.instr_cmp_int_geq()?,
+            Bc::CmpIntEq => s.instr_cmp_int_eq()?,
+            Bc::CmpIntNEq => s.instr_cmp_int_neq()?,
+            Bc::CmpStrLT => s.instr_cmp_str_lt()?,
+            Bc::CmpStrLEq => s.instr_cmp_str_leq()?,
+            Bc::CmpStrGT => s.instr_cmp_str_gt()?,
+            Bc::CmpStrGEq => s.instr_cmp_str_geq()?,
+            Bc::CmpStrEq => s.instr_cmp_str_eq()?,
+            Bc::CmpStrNEq => s.instr_cmp_str_neq()?,
+            Bc::LogicalNot => s.instr_logical_not()?,
+            Bc::MaxInt => s.instr_max_int()?,
+            Bc::MinInt => s.instr_min_int()?,
+            Bc::ClampInt => s.instr_clamp_int()?,
+            Bc::InRangeInt => s.instr_in_range_int()?,
+            Bc::InRangeStr => s.instr_in_range_str()?,
+            Bc::GetBit => s.instr_get_bit()?,
+            Bc::SetBit => s.instr_set_bit()?,
+            Bc::ClearBit => s.instr_clear_bit()?,
+            Bc::InvertBit => s.instr_invert_bit()?,
+            Bc::BuildString { count } => s.instr_build_string(count)?,
+            Bc::PadString { flags } => s.instr_pad_string(flags)?,
+            Bc::RepeatStr => s.instr_repeat_str()?,
+            Bc::BuildArrIdxFromMD { count } => s.instr_build_arr_idx_from_md(count)?,
+            Bc::GetArrValFlat => s.instr_get_arr_val_flat()?,
+            Bc::SetArrValFlat => s.instr_set_arr_val_flat()?,
+            Bc::TimesFloat => s.instr_times_float()?,
+            Bc::FunExists => s.instr_fun_exists()?,
+            Bc::ReplaceStr => s.instr_replace_str()?,
+            Bc::SubStr | Bc::SubStrU => s.instr_sub_str()?,
+            Bc::StrFind | Bc::StrFindU => s.instr_str_find()?,
+            Bc::StrLen | Bc::StrLenU => s.instr_str_len()?,
+            Bc::CountSubStr => s.instr_count_sub_str()?,
+            Bc::StrCharAtU => s.instr_str_char_at()?,
+            Bc::IntToStr => s.instr_int_to_str()?,
+            Bc::StrToInt => s.instr_str_to_int()?,
+            Bc::FormatIntToStr => s.instr_format_int_to_str()?,
+            Bc::StrIsValidInt => s.instr_str_is_valid_int()?,
+            Bc::StrToUpper => s.instr_str_to_upper()?,
+            Bc::StrToLower => s.instr_str_to_lower()?,
+            Bc::StrToHalf => s.instr_str_to_half()?,
+            Bc::StrToFull => s.instr_str_to_full()?,
+            Bc::BuildBarStr => s.instr_build_bar_str()?,
+            Bc::EscapeRegexStr => s.instr_escape_regex_str()?,
+            Bc::EncodeToUnicode => s.instr_encode_to_unicode()?,
+            Bc::UnicodeToStr => s.instr_unicode_to_str()?,
+            Bc::IntToStrWithBase => s.instr_int_to_str_with_base()?,
+            Bc::HtmlTagSplit => s.instr_html_tag_split()?,
+            Bc::HtmlToPlainText => s.instr_html_to_plain_text()?,
+            Bc::HtmlEscape => s.instr_html_escape()?,
+            Bc::PowerInt => s.instr_power_int()?,
+            Bc::SqrtInt => s.instr_sqrt_int()?,
+            Bc::CbrtInt => s.instr_cbrt_int()?,
+            Bc::LogInt => s.instr_log_int()?,
+            Bc::Log10Int => s.instr_log_10_int()?,
+            Bc::ExponentInt => s.instr_exponent_int()?,
+            Bc::AbsInt => s.instr_abs_int()?,
+            Bc::SignInt => s.instr_sign_int()?,
+            Bc::GroupMatch { count } => s.instr_group_match(count)?,
+            Bc::ArrayCountMatches => s.instr_array_count_matches(-1)?,
+            Bc::CArrayCountMatches => s.instr_array_count_matches(0)?,
+            Bc::SumArray => s.instr_array_aggregate::<crate::util::SumAggregator, 1>(-1)?,
+            Bc::SumCArray => s.instr_array_aggregate::<crate::util::SumAggregator, 1>(0)?,
+            Bc::MaxArray => s.instr_array_aggregate::<crate::util::MaxAggregator, 1>(-1)?,
+            Bc::MaxCArray => s.instr_array_aggregate::<crate::util::MaxAggregator, 1>(0)?,
+            Bc::MinArray => s.instr_array_aggregate::<crate::util::MinAggregator, 1>(-1)?,
+            Bc::MinCArray => s.instr_array_aggregate::<crate::util::MinAggregator, 1>(0)?,
+            Bc::InRangeArray => s.instr_array_in_range(-1)?,
+            Bc::InRangeCArray => s.instr_array_in_range(0)?,
+            Bc::ArrayRemove => s.instr_array_remove()?,
+            Bc::ArraySortAsc => s.instr_array_sort(true)?,
+            Bc::ArraySortDesc => s.instr_array_sort(false)?,
+            Bc::ArrayMSort { subs_cnt } => s.instr_array_multi_sort(subs_cnt)?,
+            Bc::ArrayCopy => s.instr_array_copy()?,
+            Bc::ArrayShift => s.instr_array_shift()?,
+            Bc::Print => s.instr_print_with_flags::<1>(EraPrintExtendedFlags::new())?,
+            Bc::PrintLine => {
+                s.instr_print_with_flags::<1>(EraPrintExtendedFlags::new().with_is_line(true))?
+            }
+            Bc::PrintExtended { flags } => s.instr_print_with_flags::<2>(flags)?,
+            Bc::ReuseLastLine => s.instr_reuse_last_line()?,
+            Bc::ClearLine => s.instr_clear_line()?,
+            Bc::Wait { flags } => s.instr_wait(flags)?,
+            Bc::TWait => s.instr_twait()?,
+            Bc::Input { flags } => s.instr_input(flags)?,
+            Bc::KbGetKeyState => s.instr_kb_get_key_state()?,
+            Bc::GetCallerFuncName => s.instr_get_caller_func_name()?,
+            Bc::GetCharaNum => s.instr_get_chara_num()?,
+            Bc::CsvGetNum { kind } => s.instr_csv_get_num(kind)?,
+            Bc::GetRandomRange => s.instr_get_random_range()?,
+            Bc::GetRandomMax => s.instr_get_random_max()?,
+            Bc::RowAssign { vals_cnt } => s.instr_row_assign(vals_cnt)?,
+            Bc::ForLoopStep => s.instr_for_loop_step()?,
+            Bc::ExtendStrToWidth => s.instr_extend_str_to_width()?,
+            Bc::HtmlPrint => s.instr_html_print()?,
+            Bc::PrintButton { flags } => s.instr_print_button(flags)?,
+            Bc::PrintImg | Bc::PrintImg4 => s.instr_print_img()?,
+            Bc::SplitString => s.instr_split_string()?,
+            Bc::GCreate => s.instr_gcreate()?,
+            Bc::GCreateFromFile => s.instr_gcreate_from_file()?,
+            Bc::GDispose => s.instr_gdispose()?,
+            Bc::GCreated => s.instr_gcreated()?,
+            Bc::GDrawSprite => s.instr_gdraw_sprite()?,
+            Bc::GDrawSpriteWithColorMatrix => s.instr_gdraw_sprite_with_color_matrix()?,
+            Bc::GClear => s.instr_gclear()?,
+            Bc::SpriteCreate => s.instr_sprite_create()?,
+            Bc::SpriteDispose => s.instr_sprite_dispose()?,
+            Bc::SpriteCreated => s.instr_sprite_created()?,
+            Bc::SpriteAnimeCreate => s.instr_sprite_anime_create()?,
+            Bc::SpriteAnimeAddFrame => s.instr_sprite_anime_add_frame()?,
+            Bc::SpriteWidth => s.instr_sprite_width()?,
+            Bc::SpriteHeight => s.instr_sprite_height()?,
+            Bc::CheckFont => s.instr_check_font()?,
+            Bc::SaveText => s.instr_save_text()?,
+            Bc::LoadText => s.instr_load_text()?,
+            Bc::FindElement => s.instr_generic_find_element_with_match::<2>(true, -1)?,
+            Bc::FindLastElement => s.instr_generic_find_element_with_match::<2>(false, -1)?,
+            Bc::FindChara => s.instr_generic_find_element::<2>(true, 0)?,
+            Bc::FindLastChara => s.instr_generic_find_element::<2>(false, 0)?,
+            Bc::VarSet => s.instr_var_set(-1)?,
+            Bc::CVarSet => s.instr_var_set(0)?,
+            Bc::GetVarSizeByName => s.instr_get_var_size_by_name()?,
+            Bc::GetVarAllSize => s.instr_get_var_all_size()?,
+            Bc::GetHostTimeRaw => s.instr_get_host_time_raw()?,
+            Bc::GetHostTime => s.instr_get_host_time()?,
+            Bc::GetHostTimeS => s.instr_get_host_time_s()?,
+            Bc::CsvGetProp2 { csv_kind } => s.instr_csv_get_prop_2(csv_kind)?,
+            Bc::CharaCsvExists => s.instr_chara_csv_exists()?,
+            Bc::GetPalamLv => s.instr_generic_get_lv::<2>("PALAMLV")?,
+            Bc::GetExpLv => s.instr_generic_get_lv::<2>("EXPLV")?,
+            Bc::AddChara => s.instr_add_chara()?,
+            Bc::AddVoidChara => s.instr_add_void_chara()?,
+            Bc::PickUpChara { charas_cnt } => s.instr_pick_up_chara(charas_cnt)?,
+            Bc::DeleteChara { charas_cnt } => s.instr_delete_chara(charas_cnt)?,
+            Bc::SwapChara => s.instr_swap_chara()?,
+            Bc::AddCopyChara => s.instr_add_copy_chara()?,
+            Bc::LoadData => s.instr_load_data()?,
+            Bc::SaveData => s.instr_save_data()?,
+            Bc::CheckData => s.instr_check_data()?,
+            Bc::GetCharaRegNum => s.instr_get_chara_reg_num()?,
+            Bc::LoadGlobal => s.instr_load_global()?,
+            Bc::SaveGlobal => s.instr_save_global()?,
+            Bc::ResetData => s.instr_reset_data()?,
+            Bc::ResetCharaStain => s.instr_reset_chara_stain()?,
+            Bc::SaveChara { charas_cnt } => s.instr_save_chara(charas_cnt)?,
+            Bc::LoadChara => s.instr_load_chara()?,
+            Bc::GetConfig => s.instr_get_config()?,
+            Bc::GetConfigS => s.instr_get_config_s()?,
+            Bc::FindCharaDataFile => s.instr_find_chara_data_file()?,
+            // _ => s.instr_raise_illegal_instruction()?,
+            _ => {
+                let mut diag = Diagnostic::new();
+                diag.span_err(
+                    s.o.cur_filename(),
+                    s.o.cur_bc_span(),
+                    format!("unimplemented bytecode `{:?}`", inst),
+                );
+                s.o.ctx.emit_diag(diag);
+                s.break_reason = EraExecutionBreakReason::IllegalInstruction;
+                return Err(FireEscapeError(s.break_reason).into());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Generates JITed code for the given function if it is not already generated, and
+    /// updates the JIT lookup table accordingly.
+    fn ensure_jit_function(&mut self, func_idx: u32) -> anyhow::Result<()> {
+        let jit_func_slot = self
+            .jit_compiled_functions
+            .get_mut(func_idx as usize)
+            .with_context(|| format!("function index {} out of bounds", func_idx))?;
+        match jit_func_slot {
+            Some(jit_func) => {
+                if jit_func.is_invalid() {
+                    // Function is not JITable, give up
+                    anyhow::bail!("function index {} is not JITable", func_idx);
+                }
+                // The function is already JITed, so we skip it
+                return Ok(());
+            }
+            None => (),
+        }
+        *jit_func_slot = Some(EraJitCompiledFunction::new_invalid(func_idx as _));
+
+        // Step 1: Scan for all possible instruction entry points
+        let mut ops = dynasmrt::x64::Assembler::new()?;
+        dynasm!(ops
+            ; .arch x64
+            ; ->main_block_entry:
+        );
+
+        // Gather all ip offsets that need updating
+        // let mut ip_map = {
+        //     let o = unsafe { self.optr.as_mut() };
+        //     let mut ip_map = HashMap::new();
+        //     for (i, frame) in o.frames.iter().enumerate() {
+        //         let jit_frame = &mut self.jit_side_frame[i];
+        //         if jit_frame.func_idx != func_idx {
+        //             continue;
+        //         }
+        //         ip_map.insert(frame.ip.offset, AssemblyOffset(usize::MAX));
+        //         if let Some(next_frame) = o.frames.get(i + 1) {
+        //             ip_map.insert(next_frame.ret_ip.offset, AssemblyOffset(usize::MAX));
+        //         }
+        //     }
+        //     self.remake_site()?;
+        //     ip_map
+        // };
+        let mut ip_map = HashMap::new();
+
+        let func_info = (self.o.ctx.func_entries)
+            .get_index(func_idx as usize)
+            .map(|(_, v)| v.as_ref())
+            .flatten()
+            .with_context(|| format!("function index {} out of bounds", func_idx))?;
+        let func_bc = self.o.ctx.bc_chunks[func_info.chunk_idx as usize].get_bc();
+        let mut bc = func_bc
+            .get(func_info.bc_offset as usize..(func_info.bc_offset + func_info.bc_size) as usize)
+            .with_context(|| format!("invalid function ip {:?}", func_info))?;
+
+        // macro_rules! extern_c {
+        //     (|$($name:ident: $type:ty),*| -> $ret:ty $body:block) => {{
+        //         extern "C" fn __era_vm_extern_fn($($name: $type),*) -> $ret $body;
+        //         __era_vm_extern_fn
+        //     }};
+        // }
+
+        macro_rules! make_subroutine_simple_0 {
+            ($routine:ident) => {{
+                paste::paste! {
+                    extern "win64-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
+                        s: &mut EraVmExecSite<Callback>,
+                    ) {
+                        if let Err(e) = s.$routine() {
+                            std::panic::panic_any(e);
+                        }
+                    }
+                    [<jit_ $routine>]::<Callback>
+                }
+            }};
+            ($alt_name:ident, $($tok:tt)+) => {{
+                paste::paste! {
+                    extern "win64-unwind" fn [<jit_ $alt_name>]<Callback: EraCompilerCallback>(
+                        s: &mut EraVmExecSite<Callback>,
+                    ) {
+                        if let Err(e) = s.$($tok)+() {
+                            std::panic::panic_any(e);
+                        }
+                    }
+                    [<jit_ $alt_name>]::<Callback>
+                }
+            }};
+        }
+        macro_rules! make_subroutine_closure_0 {
+            ($alt_name:ident, $clos:expr) => {{
+                paste::paste! {
+                    extern "win64-unwind" fn [<jit_ $alt_name>]<Callback: EraCompilerCallback>(
+                        s: &mut EraVmExecSite<Callback>,
+                    ) {
+                        if let Err(e) = $clos(s) {
+                            std::panic::panic_any(e);
+                        }
+                    }
+                    [<jit_ $alt_name>]::<Callback>
+                }
+            }};
+        }
+        macro_rules! make_subroutine_simple_n {
+            ($routine:ident, $($arg:ident:$type:ty),*) => {{
+                paste::paste! {
+                    extern "win64-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
+                        s: &mut EraVmExecSite<Callback>,
+                        $($arg: $type),*
+                    ) {
+                        if let Err(e) = s.$routine($($arg.try_into().unwrap()),*) {
+                            std::panic::panic_any(e);
+                        }
+                    }
+                    [<jit_ $routine>]::<Callback>
+                }
+            }};
+        }
+        macro_rules! make_subroutine_closure_n {
+            ($routine:ident, $($arg:ident:$type:ty),*, $clo:expr) => {{
+                paste::paste! {
+                    extern "win64-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
+                        s: &mut EraVmExecSite<Callback>,
+                        $($arg: $type),*
+                    ) {
+                        if let Err(e) = $clo(s, $($arg.into()),*) {
+                            std::panic::panic_any(e);
+                        }
+                    }
+                    [<jit_ $routine>]::<Callback>
+                }
+            }};
+        }
+        macro_rules! make_subroutine_simple_n_ret_bool {
+            ($routine:ident, $($arg:ident:$type:ty),*) => {{
+                paste::paste! {
+                    extern "win64-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
+                        s: &mut EraVmExecSite<Callback>,
+                        $($arg: $type),*
+                    ) -> bool {
+                        match s.$routine($($arg),*) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                std::panic::panic_any(e);
+                            }
+                        }
+                    }
+                    [<jit_ $routine>]::<Callback>
+                }
+            }};
+        }
+
+        macro_rules! call_subroutine_0 {
+            ($routine:ident) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    ; mov rax, QWORD make_subroutine_simple_0!($routine) as _
+                    ; call rax
+                )
+            };
+            ($alt_name:ident, $($tok:tt)+) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    ; mov rax, QWORD make_subroutine_simple_0!($alt_name, $($tok)+) as _
+                    ; call rax
+                )
+            };
+        }
+        macro_rules! call_subroutine_closure_0 {
+            ($routine:ident, $clos:expr) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    ; mov rax, QWORD make_subroutine_closure_0!($routine, $clos) as _
+                    ; call rax
+                )
+            };
+        }
+        macro_rules! call_subroutine_1_any {
+            ($routine:ident, i8, $imm:expr) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    // ; xor eax, eax
+                    ; mov dl, BYTE $imm as _
+                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:i8) as _
+                    ; call rax
+                )
+            };
+            ($routine:ident, u8, $imm:expr) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    // ; xor eax, eax
+                    ; mov dl, BYTE $imm as _
+                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:u8) as _
+                    ; call rax
+                )
+            };
+            ($routine:ident, i16, $imm:expr) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    // ; xor eax, eax
+                    ; mov dx, WORD $imm as _
+                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:i16) as _
+                    ; call rax
+                )
+            };
+            ($routine:ident, i32, $imm:expr) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    ; mov edx, DWORD $imm as _
+                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:i32) as _
+                    ; call rax
+                )
+            };
+            ($routine:ident, u32, $imm:expr) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    ; mov edx, DWORD $imm as _
+                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:u32) as _
+                    ; call rax
+                )
+            };
+            ($routine:ident, i64, $imm:expr) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    ; mov rdx, QWORD $imm as _
+                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:i64) as _
+                    ; call rax
+                )
+            };
+        }
+        macro_rules! call_subroutine_1_any_ret_bool {
+            ($routine:ident, i32, $imm:expr) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    ; mov edx, DWORD $imm as _
+                    ; mov rax, QWORD make_subroutine_simple_n_ret_bool!($routine, a1:i32) as _
+                    ; call rax
+                )
+            };
+        }
+        macro_rules! call_subroutine_closure_1_any {
+            ($routine:ident, i8, $imm:expr, $clo:expr) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    // ; xor eax, eax
+                    ; mov dl, BYTE $imm as _
+                    ; mov rax, QWORD make_subroutine_closure_n!($routine, a1:i8, $clo) as _
+                    ; call rax
+                )
+            };
+            ($routine:ident, u8, $imm:expr, $clo:expr) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    // ; xor eax, eax
+                    ; mov dl, BYTE $imm as _
+                    ; mov rax, QWORD make_subroutine_closure_n!($routine, a1:u8, $clo) as _
+                    ; call rax
+                )
+            };
+        }
+        macro_rules! func_leave_epilogue {
+            () => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; add rsp, 0x28
+                    ; ret
+                )
+            };
+        }
+
+        let mut dyn_labels = HashMap::new();
+        while let Some((inst, len)) = Bc::with_len_from_bytes(&mut bc) {
+            let inst_offset = unsafe { bc.as_ptr().offset_from(func_bc.as_ptr()) as u32 };
+            bc = &bc[len as usize..];
+            // Update ip
+            // if let Some(new_ip) = ip_map.get_mut(&inst_offset) {
+            //     *new_ip = ops.offset();
+            // }
+            ip_map.insert(inst_offset, ops.offset());
+            if let Some(label) = dyn_labels.remove(&inst_offset) {
+                // ops.dynamic_label(label);
+                dynasm!(ops
+                    ; .arch x64
+                    ; =>label
+                );
+            }
+            // Translate bytecode
+            match inst {
+                Bc::FailWithMsg => call_subroutine_0!(instr_fail_with_msg),
+                Bc::Nop => call_subroutine_0!(instr_nop),
+                Bc::DebugBreak => call_subroutine_0!(instr_debug_break),
+                Bc::Quit => call_subroutine_0!(instr_quit),
+                Bc::Throw => call_subroutine_0!(instr_throw),
+                Bc::ReturnVoid => {
+                    // call_subroutine_0!(instr_return_void);
+                    // func_leave_epilogue!();
+                    let subroutine = {
+                        extern "win64-unwind" fn jit_instr_return_void<
+                            Callback: EraCompilerCallback,
+                        >(
+                            site: &mut EraVmExecSite<Callback>,
+                        ) -> usize {
+                            if let Err(e) = site.instr_return_void() {
+                                std::panic::panic_any(e);
+                            }
+                            site.jit_side_frame.pop();
+                            site.jit_side_frame.last().map_or(0, |x| x.ip)
+                        }
+                        jit_instr_return_void::<Callback>
+                    };
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rcx, [rsp+0x20] // self
+                        ; mov rax, QWORD subroutine as _
+                        ; call rax
+                        ; test rax, rax
+                        ; jz >skipcall
+                        ; jmp rax
+                        ; skipcall:
+                        ; add rsp, 0x28
+                        ; ret
+                    );
+                }
+                Bc::ReturnInt => {
+                    // call_subroutine_0!(instr_return_int);
+                    // func_leave_epilogue!();
+                    let subroutine = {
+                        extern "win64-unwind" fn jit_instr_return_int<
+                            Callback: EraCompilerCallback,
+                        >(
+                            site: &mut EraVmExecSite<Callback>,
+                        ) -> usize {
+                            if let Err(e) = site.instr_return_int() {
+                                std::panic::panic_any(e);
+                            }
+                            site.jit_side_frame.pop();
+                            site.jit_side_frame.last().map_or(0, |x| x.ip)
+                        }
+                        jit_instr_return_int::<Callback>
+                    };
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rcx, [rsp+0x20] // self
+                        ; mov rax, QWORD subroutine as _
+                        ; call rax
+                        ; test rax, rax
+                        ; jz >skipcall
+                        ; jmp rax
+                        ; skipcall:
+                        ; add rsp, 0x28
+                        ; ret
+                    );
+                }
+                Bc::ReturnStr => {
+                    // call_subroutine_0!(instr_return_str);
+                    // func_leave_epilogue!();
+                    let subroutine = {
+                        extern "win64-unwind" fn jit_instr_return_str<
+                            Callback: EraCompilerCallback,
+                        >(
+                            site: &mut EraVmExecSite<Callback>,
+                        ) -> usize {
+                            if let Err(e) = site.instr_return_str() {
+                                std::panic::panic_any(e);
+                            }
+                            site.jit_side_frame.pop();
+                            site.jit_side_frame.last().map_or(0, |x| x.ip)
+                        }
+                        jit_instr_return_str::<Callback>
+                    };
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rcx, [rsp+0x20] // self
+                        ; mov rax, QWORD subroutine as _
+                        ; call rax
+                        ; test rax, rax
+                        ; jz >skipcall
+                        ; jmp rax
+                        ; skipcall:
+                        ; add rsp, 0x28
+                        ; ret
+                    );
+                }
+                Bc::CallFun { args_cnt } => {
+                    let subroutine: i64 = {
+                        extern "win64-unwind" fn jit_instr_call_fun<
+                            Callback: EraCompilerCallback,
+                        >(
+                            site: &mut EraVmExecSite<Callback>,
+                            args_cnt: u8,
+                            next_rip: usize,
+                        ) -> usize {
+                            let func_idx = match site.instr_call_fun_with_return_value(args_cnt) {
+                                Ok(x) => x,
+                                Err(e) => std::panic::panic_any(e),
+                            };
+                            site.jit_side_frame.last_mut().unwrap().ip = next_rip;
+                            let asm_ip = site.jit_compiled_functions[func_idx as usize]
+                                .as_ref()
+                                .map_or(0, |x| x.code.ptr(AssemblyOffset(0)) as usize);
+                            site.jit_side_frame.push(EraJitExecFrame {
+                                func_idx: func_idx as _,
+                                ip: asm_ip,
+                            });
+                            asm_ip
+                        }
+                        jit_instr_call_fun::<Callback>
+                    } as _;
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rcx, [rsp+0x20] // self
+                        ; mov dl, BYTE args_cnt as _ // args_cnt
+                        ; lea r8, [>next_instr] // next_rip
+                        ; mov rax, QWORD subroutine as _
+                        ; call rax
+                        ; test rax, rax
+                        ; jz >skipcall
+                        ; jmp rax
+                        ; skipcall:
+                        ; add rsp, 0x28
+                        ; ret
+                        ; next_instr:
+                    );
+                }
+                Bc::TryCallFun { args_cnt } => {
+                    let subroutine: i64 = {
+                        extern "win64-unwind" fn jit_instr_try_call_fun<
+                            Callback: EraCompilerCallback,
+                        >(
+                            site: &mut EraVmExecSite<Callback>,
+                            args_cnt: u8,
+                            next_rip: usize,
+                        ) -> usize {
+                            let func_idx =
+                                match site.instr_try_call_fun_with_return_value(args_cnt, false) {
+                                    Ok(x) => x,
+                                    Err(e) => std::panic::panic_any(e),
+                                };
+                            let frames_changed = func_idx != usize::MAX;
+                            site.jit_side_frame.last_mut().unwrap().ip = next_rip;
+                            if frames_changed {
+                                let asm_ip = site.jit_compiled_functions[func_idx as usize]
+                                    .as_ref()
+                                    .map_or(0, |x| x.code.ptr(AssemblyOffset(0)) as usize);
+                                site.jit_side_frame.push(EraJitExecFrame {
+                                    func_idx: func_idx as _,
+                                    ip: asm_ip,
+                                });
+                                asm_ip
+                            } else {
+                                next_rip
+                            }
+                        }
+                        jit_instr_try_call_fun::<Callback>
+                    } as _;
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rcx, [rsp+0x20] // self
+                        ; mov dl, BYTE args_cnt as _ // args_cnt
+                        ; lea r8, [>next_instr] // next_rip
+                        ; mov rax, QWORD subroutine as _
+                        ; call rax
+                        ; test rax, rax
+                        ; jz >skipcall
+                        ; jmp rax
+                        ; skipcall:
+                        ; add rsp, 0x28
+                        ; ret
+                        ; next_instr:
+                    );
+                }
+                Bc::TryCallFunForce { args_cnt } => {
+                    let subroutine: i64 = {
+                        extern "win64-unwind" fn jit_instr_try_call_fun_force<
+                            Callback: EraCompilerCallback,
+                        >(
+                            site: &mut EraVmExecSite<Callback>,
+                            args_cnt: u8,
+                            next_rip: usize,
+                        ) -> usize {
+                            let func_idx =
+                                match site.instr_try_call_fun_with_return_value(args_cnt, true) {
+                                    Ok(x) => x,
+                                    Err(e) => std::panic::panic_any(e),
+                                };
+                            site.jit_side_frame.last_mut().unwrap().ip = next_rip;
+                            let asm_ip = site.jit_compiled_functions[func_idx as usize]
+                                .as_ref()
+                                .map_or(0, |x| x.code.ptr(AssemblyOffset(0)) as usize);
+                            site.jit_side_frame.push(EraJitExecFrame {
+                                func_idx: func_idx as _,
+                                ip: asm_ip,
+                            });
+                            asm_ip
+                        }
+                        jit_instr_try_call_fun_force::<Callback>
+                    } as _;
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rcx, [rsp+0x20] // self
+                        ; mov dl, BYTE args_cnt as _ // args_cnt
+                        ; lea r8, [>next_instr] // next_rip
+                        ; mov rax, QWORD subroutine as _
+                        ; call rax
+                        ; test rax, rax
+                        ; jz >skipcall
+                        ; jmp rax
+                        ; skipcall:
+                        ; add rsp, 0x28
+                        ; ret
+                        ; next_instr:
+                    );
+                }
+                Bc::RestartExecAtFun => {
+                    let subroutine: i64 = {
+                        extern "win64-unwind" fn jit_instr_restart_exec_at_fun<
+                            Callback: EraCompilerCallback,
+                        >(
+                            site: &mut EraVmExecSite<Callback>,
+                        ) {
+                            let func_idx = match site.instr_restart_exec_at_fun_with_return_value()
+                            {
+                                Ok(x) => x,
+                                Err(e) => std::panic::panic_any(e),
+                            };
+                            site.jit_side_frame.clear();
+                            let asm_ip = site.jit_compiled_functions[func_idx as usize]
+                                .as_ref()
+                                .map_or(0, |x| x.code.ptr(AssemblyOffset(0)) as usize);
+                            site.jit_side_frame.push(EraJitExecFrame {
+                                func_idx: func_idx as _,
+                                ip: asm_ip,
+                            });
+                        }
+                        jit_instr_restart_exec_at_fun::<Callback>
+                    } as _;
+                    dynasm!(ops
+                        ; .arch x64
+                        ; mov rcx, [rsp+0x20] // self
+                        ; mov rax, QWORD subroutine as _
+                        ; call rax
+                        ; add rsp, 0x28
+                        ; ret
+                    );
+                }
+                Bc::JumpWW { offset } => {
+                    call_subroutine_1_any!(instr_jump_ww, i32, offset);
+                    let bc_ip = inst_offset.wrapping_add_signed(offset);
+                    if let Some(asm_ip) = ip_map.get(&bc_ip) {
+                        // Resolve immediately
+                        dynasm!(ops
+                            ; .arch x64
+                            ; jmp ->main_block_entry + asm_ip.0 as _
+                        );
+                    } else {
+                        // Delay resolution
+                        let label = *dyn_labels
+                            .entry(bc_ip)
+                            .or_insert_with(|| ops.new_dynamic_label());
+                        dynasm!(ops
+                            ; .arch x64
+                            ; jmp =>label
+                        );
+                    }
+                }
+                Bc::JumpIfWW { offset } => {
+                    call_subroutine_1_any_ret_bool!(
+                        instr_jump_if_ww_with_return_value,
+                        i32,
+                        offset
+                    );
+                    let bc_ip = inst_offset.wrapping_add_signed(offset);
+                    if let Some(asm_ip) = ip_map.get(&bc_ip) {
+                        // Resolve immediately
+                        dynasm!(ops
+                            ; .arch x64
+                            ; test al, al
+                            ; jnz ->main_block_entry + asm_ip.0 as _
+                        );
+                    } else {
+                        // Delay resolution
+                        let label = *dyn_labels
+                            .entry(bc_ip)
+                            .or_insert_with(|| ops.new_dynamic_label());
+                        dynasm!(ops
+                            ; .arch x64
+                            ; test al, al
+                            ; jnz =>label
+                        );
+                    }
+                }
+                Bc::JumpIfNotWW { offset } => {
+                    call_subroutine_1_any_ret_bool!(
+                        instr_jump_if_not_ww_with_return_value,
+                        i32,
+                        offset
+                    );
+                    let bc_ip = inst_offset.wrapping_add_signed(offset);
+                    if let Some(asm_ip) = ip_map.get(&bc_ip) {
+                        // Resolve immediately
+                        dynasm!(ops
+                            ; .arch x64
+                            ; test al, al
+                            ; jnz ->main_block_entry + asm_ip.0 as _
+                        );
+                    } else {
+                        // Delay resolution
+                        let label = *dyn_labels
+                            .entry(bc_ip)
+                            .or_insert_with(|| ops.new_dynamic_label());
+                        dynasm!(ops
+                            ; .arch x64
+                            ; test al, al
+                            ; jnz =>label
+                        );
+                    }
+                }
+                Bc::LoadConstStr { idx } => {
+                    call_subroutine_1_any!(instr_load_const_str, u32, idx);
+                }
+                Bc::LoadImm8 { imm } => {
+                    call_subroutine_1_any!(instr_load_imm8, i8, imm);
+                }
+                Bc::LoadImm16 { imm } => {
+                    call_subroutine_1_any!(instr_load_imm16, i16, imm);
+                }
+                Bc::LoadImm32 { imm } => {
+                    call_subroutine_1_any!(instr_load_imm32, i32, imm);
+                }
+                Bc::LoadImm64 { imm } => {
+                    call_subroutine_1_any!(instr_load_imm64, i64, imm);
+                }
+                Bc::LoadVarWW { idx } => {
+                    call_subroutine_1_any!(instr_load_var_ww, u32, idx);
+                }
+                Bc::LoadConstVarWW { idx } => {
+                    call_subroutine_1_any!(instr_load_const_var_ww, u32, idx);
+                }
+                Bc::LoadLocalVar { idx } => {
+                    call_subroutine_1_any!(instr_load_local_var, u8, idx);
+                }
+                Bc::Pop => call_subroutine_0!(instr_pop),
+                Bc::PopAllN { count } => call_subroutine_1_any!(instr_pop_all_n, u8, count),
+                Bc::PopOneN { idx } => call_subroutine_1_any!(instr_pop_one_n, u8, idx),
+                Bc::Swap2 => call_subroutine_0!(instr_swap_2),
+                Bc::Duplicate => call_subroutine_0!(instr_duplicate),
+                Bc::DuplicateAllN { count } => {
+                    call_subroutine_1_any!(instr_duplicate_all_n, u8, count)
+                }
+                Bc::DuplicateOneN { idx } => call_subroutine_1_any!(instr_duplicate_one_n, u8, idx),
+                Bc::AddInt => call_subroutine_0!(instr_add_int),
+                Bc::SubInt => call_subroutine_0!(instr_sub_int),
+                Bc::MulInt => call_subroutine_0!(instr_mul_int),
+                Bc::DivInt => call_subroutine_0!(instr_div_int),
+                Bc::ModInt => call_subroutine_0!(instr_mod_int),
+                Bc::NegInt => call_subroutine_0!(instr_neg_int),
+                Bc::BitAndInt => call_subroutine_0!(instr_bit_and_int),
+                Bc::BitOrInt => call_subroutine_0!(instr_bit_or_int),
+                Bc::BitXorInt => call_subroutine_0!(instr_bit_xor_int),
+                Bc::BitNotInt => call_subroutine_0!(instr_bit_not_int),
+                Bc::ShlInt => call_subroutine_0!(instr_shl_int),
+                Bc::ShrInt => call_subroutine_0!(instr_shr_int),
+                Bc::CmpIntLT => call_subroutine_0!(instr_cmp_int_lt),
+                Bc::CmpIntLEq => call_subroutine_0!(instr_cmp_int_leq),
+                Bc::CmpIntGT => call_subroutine_0!(instr_cmp_int_gt),
+                Bc::CmpIntGEq => call_subroutine_0!(instr_cmp_int_geq),
+                Bc::CmpIntEq => call_subroutine_0!(instr_cmp_int_eq),
+                Bc::CmpIntNEq => call_subroutine_0!(instr_cmp_int_neq),
+                Bc::CmpStrLT => call_subroutine_0!(instr_cmp_str_lt),
+                Bc::CmpStrLEq => call_subroutine_0!(instr_cmp_str_leq),
+                Bc::CmpStrGT => call_subroutine_0!(instr_cmp_str_gt),
+                Bc::CmpStrGEq => call_subroutine_0!(instr_cmp_str_geq),
+                Bc::CmpStrEq => call_subroutine_0!(instr_cmp_str_eq),
+                Bc::CmpStrNEq => call_subroutine_0!(instr_cmp_str_neq),
+                Bc::LogicalNot => call_subroutine_0!(instr_logical_not),
+                Bc::MaxInt => call_subroutine_0!(instr_max_int),
+                Bc::MinInt => call_subroutine_0!(instr_min_int),
+                Bc::ClampInt => call_subroutine_0!(instr_clamp_int),
+                Bc::InRangeInt => call_subroutine_0!(instr_in_range_int),
+                Bc::InRangeStr => call_subroutine_0!(instr_in_range_str),
+                Bc::GetBit => call_subroutine_0!(instr_get_bit),
+                Bc::SetBit => call_subroutine_0!(instr_set_bit),
+                Bc::ClearBit => call_subroutine_0!(instr_clear_bit),
+                Bc::InvertBit => call_subroutine_0!(instr_invert_bit),
+                Bc::BuildString { count } => call_subroutine_1_any!(instr_build_string, u8, count),
+                Bc::PadString { flags } => {
+                    call_subroutine_1_any!(instr_pad_string, u8, u8::from(flags))
+                }
+                Bc::RepeatStr => call_subroutine_0!(instr_repeat_str),
+                Bc::BuildArrIdxFromMD { count } => {
+                    call_subroutine_1_any!(instr_build_arr_idx_from_md, u8, count)
+                }
+                Bc::GetArrValFlat => call_subroutine_0!(instr_get_arr_val_flat),
+                Bc::SetArrValFlat => call_subroutine_0!(instr_set_arr_val_flat),
+                Bc::TimesFloat => call_subroutine_0!(instr_times_float),
+                Bc::FunExists => call_subroutine_0!(instr_fun_exists),
+                Bc::ReplaceStr => call_subroutine_0!(instr_replace_str),
+                Bc::SubStr | Bc::SubStrU => call_subroutine_0!(instr_sub_str),
+                Bc::StrFind | Bc::StrFindU => call_subroutine_0!(instr_str_find),
+                Bc::StrLen | Bc::StrLenU => call_subroutine_0!(instr_str_len),
+                Bc::CountSubStr => call_subroutine_0!(instr_count_sub_str),
+                Bc::StrCharAtU => call_subroutine_0!(instr_str_char_at),
+                Bc::IntToStr => call_subroutine_0!(instr_int_to_str),
+                Bc::StrToInt => call_subroutine_0!(instr_str_to_int),
+                Bc::FormatIntToStr => call_subroutine_0!(instr_format_int_to_str),
+                Bc::StrIsValidInt => call_subroutine_0!(instr_str_is_valid_int),
+                Bc::StrToUpper => call_subroutine_0!(instr_str_to_upper),
+                Bc::StrToLower => call_subroutine_0!(instr_str_to_lower),
+                Bc::StrToHalf => call_subroutine_0!(instr_str_to_half),
+                Bc::StrToFull => call_subroutine_0!(instr_str_to_full),
+                Bc::BuildBarStr => call_subroutine_0!(instr_build_bar_str),
+                Bc::EscapeRegexStr => call_subroutine_0!(instr_escape_regex_str),
+                Bc::EncodeToUnicode => call_subroutine_0!(instr_encode_to_unicode),
+                Bc::UnicodeToStr => call_subroutine_0!(instr_unicode_to_str),
+                Bc::IntToStrWithBase => call_subroutine_0!(instr_int_to_str_with_base),
+                Bc::HtmlTagSplit => call_subroutine_0!(instr_html_tag_split),
+                Bc::HtmlToPlainText => call_subroutine_0!(instr_html_to_plain_text),
+                Bc::HtmlEscape => call_subroutine_0!(instr_html_escape),
+                Bc::PowerInt => call_subroutine_0!(instr_power_int),
+                Bc::SqrtInt => call_subroutine_0!(instr_sqrt_int),
+                Bc::CbrtInt => call_subroutine_0!(instr_cbrt_int),
+                Bc::LogInt => call_subroutine_0!(instr_log_int),
+                Bc::Log10Int => call_subroutine_0!(instr_log_10_int),
+                Bc::ExponentInt => call_subroutine_0!(instr_exponent_int),
+                Bc::AbsInt => call_subroutine_0!(instr_abs_int),
+                Bc::SignInt => call_subroutine_0!(instr_sign_int),
+                Bc::GroupMatch { count } => call_subroutine_1_any!(instr_group_match, u8, count),
+                Bc::ArrayCountMatches => {
+                    call_subroutine_closure_0!(
+                        instr_array_count_matches,
+                        |s: &mut EraVmExecSite<Callback>| s.instr_array_count_matches(-1)
+                    )
+                }
+                Bc::CArrayCountMatches => {
+                    call_subroutine_closure_0!(
+                        instr_c_array_count_matches,
+                        |s: &mut EraVmExecSite<Callback>| s.instr_array_count_matches(0)
+                    )
+                }
+                Bc::SumArray => {
+                    call_subroutine_closure_0!(instr_sum_array, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_array_aggregate::<crate::util::SumAggregator, 1>(-1)
+                    })
+                }
+                Bc::SumCArray => {
+                    call_subroutine_closure_0!(instr_sum_c_array, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_array_aggregate::<crate::util::SumAggregator, 1>(0)
+                    })
+                }
+                Bc::MaxArray => {
+                    call_subroutine_closure_0!(instr_max_array, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_array_aggregate::<crate::util::MaxAggregator, 1>(-1)
+                    })
+                }
+                Bc::MaxCArray => {
+                    call_subroutine_closure_0!(instr_max_c_array, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_array_aggregate::<crate::util::MaxAggregator, 1>(0)
+                    })
+                }
+                Bc::MinArray => {
+                    call_subroutine_closure_0!(instr_min_array, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_array_aggregate::<crate::util::MinAggregator, 1>(-1)
+                    })
+                }
+                Bc::MinCArray => {
+                    call_subroutine_closure_0!(instr_min_c_array, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_array_aggregate::<crate::util::MinAggregator, 1>(0)
+                    })
+                }
+                Bc::InRangeArray => {
+                    call_subroutine_closure_0!(instr_in_range_array, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_array_in_range(-1)
+                    })
+                }
+                Bc::InRangeCArray => {
+                    call_subroutine_closure_0!(instr_in_range_c_array, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_array_in_range(0)
+                    })
+                }
+                Bc::ArrayRemove => call_subroutine_0!(instr_array_remove),
+                Bc::ArraySortAsc => {
+                    call_subroutine_closure_0!(instr_array_sort_asc, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_array_sort(true)
+                    })
+                }
+                Bc::ArraySortDesc => {
+                    call_subroutine_closure_0!(instr_array_sort_desc, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_array_sort(false)
+                    })
+                }
+                Bc::ArrayMSort { subs_cnt } => {
+                    call_subroutine_1_any!(instr_array_multi_sort, u8, subs_cnt)
+                }
+                Bc::ArrayCopy => call_subroutine_0!(instr_array_copy),
+                Bc::ArrayShift => call_subroutine_0!(instr_array_shift),
+                Bc::Print => {
+                    call_subroutine_closure_0!(instr_print, |s: &mut EraVmExecSite<Callback>| {
+                        s.instr_print_with_flags::<1>(EraPrintExtendedFlags::new())
+                    })
+                }
+                Bc::PrintLine => {
+                    call_subroutine_closure_0!(instr_print_line, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| {
+                        s.instr_print_with_flags::<1>(
+                            EraPrintExtendedFlags::new().with_is_line(true),
+                        )
+                    })
+                }
+                Bc::PrintExtended { flags } => call_subroutine_closure_1_any!(
+                    instr_print_extended,
+                    u8,
+                    u8::from(flags),
+                    |s: &mut EraVmExecSite<Callback>, flags: u8| {
+                        s.instr_print_with_flags::<2>(flags.into())
+                    }
+                ),
+                Bc::ReuseLastLine => call_subroutine_0!(instr_reuse_last_line),
+                Bc::ClearLine => call_subroutine_0!(instr_clear_line),
+                Bc::Wait { flags } => call_subroutine_1_any!(instr_wait, u8, u8::from(flags)),
+                Bc::TWait => call_subroutine_0!(instr_twait),
+                Bc::Input { flags } => call_subroutine_1_any!(instr_input, u8, u8::from(flags)),
+                Bc::KbGetKeyState => call_subroutine_0!(instr_kb_get_key_state),
+                Bc::GetCallerFuncName => call_subroutine_0!(instr_get_caller_func_name),
+                Bc::GetCharaNum => call_subroutine_0!(instr_get_chara_num),
+                Bc::CsvGetNum { kind } => {
+                    call_subroutine_1_any!(instr_csv_get_num, u8, u8::from(kind))
+                }
+                Bc::GetRandomRange => call_subroutine_0!(instr_get_random_range),
+                Bc::GetRandomMax => call_subroutine_0!(instr_get_random_max),
+                Bc::RowAssign { vals_cnt } => {
+                    call_subroutine_1_any!(instr_row_assign, u8, vals_cnt)
+                }
+                Bc::ForLoopStep => call_subroutine_0!(instr_for_loop_step),
+                Bc::ExtendStrToWidth => call_subroutine_0!(instr_extend_str_to_width),
+                Bc::HtmlPrint => call_subroutine_0!(instr_html_print),
+                Bc::PrintButton { flags } => {
+                    call_subroutine_1_any!(instr_print_button, u8, u8::from(flags))
+                }
+                Bc::PrintImg | Bc::PrintImg4 => call_subroutine_0!(instr_print_img),
+                Bc::SplitString => call_subroutine_0!(instr_split_string),
+                Bc::GCreate => call_subroutine_0!(instr_gcreate),
+                Bc::GCreateFromFile => call_subroutine_0!(instr_gcreate_from_file),
+                Bc::GDispose => call_subroutine_0!(instr_gdispose),
+                Bc::GCreated => call_subroutine_0!(instr_gcreated),
+                Bc::GDrawSprite => call_subroutine_0!(instr_gdraw_sprite),
+                Bc::GDrawSpriteWithColorMatrix => {
+                    call_subroutine_0!(instr_gdraw_sprite_with_color_matrix)
+                }
+                Bc::GClear => call_subroutine_0!(instr_gclear),
+                Bc::SpriteCreate => call_subroutine_0!(instr_sprite_create),
+                Bc::SpriteDispose => call_subroutine_0!(instr_sprite_dispose),
+                Bc::SpriteCreated => call_subroutine_0!(instr_sprite_created),
+                Bc::SpriteAnimeCreate => call_subroutine_0!(instr_sprite_anime_create),
+                Bc::SpriteAnimeAddFrame => call_subroutine_0!(instr_sprite_anime_add_frame),
+                Bc::SpriteWidth => call_subroutine_0!(instr_sprite_width),
+                Bc::SpriteHeight => call_subroutine_0!(instr_sprite_height),
+                Bc::CheckFont => call_subroutine_0!(instr_check_font),
+                Bc::SaveText => call_subroutine_0!(instr_save_text),
+                Bc::LoadText => call_subroutine_0!(instr_load_text),
+                Bc::FindElement => {
+                    call_subroutine_closure_0!(instr_find_element, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| s
+                        .instr_generic_find_element_with_match::<2>(true, -1))
+                }
+                Bc::FindLastElement => {
+                    call_subroutine_closure_0!(instr_find_last_element, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| s
+                        .instr_generic_find_element_with_match::<2>(false, -1))
+                }
+                Bc::FindChara => {
+                    call_subroutine_closure_0!(instr_find_chara, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| s
+                        .instr_generic_find_element::<2>(true, 0))
+                }
+                Bc::FindLastChara => {
+                    call_subroutine_closure_0!(instr_find_last_chara, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| s
+                        .instr_generic_find_element::<2>(false, 0))
+                }
+                Bc::VarSet => {
+                    call_subroutine_closure_0!(instr_var_set, |s: &mut EraVmExecSite<Callback>| s
+                        .instr_var_set(-1))
+                }
+                Bc::CVarSet => {
+                    call_subroutine_closure_0!(instr_c_var_set, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| s
+                        .instr_var_set(0))
+                }
+                Bc::GetVarSizeByName => call_subroutine_0!(instr_get_var_size_by_name),
+                Bc::GetVarAllSize => call_subroutine_0!(instr_get_var_all_size),
+                Bc::GetHostTimeRaw => call_subroutine_0!(instr_get_host_time_raw),
+                Bc::GetHostTime => call_subroutine_0!(instr_get_host_time),
+                Bc::GetHostTimeS => call_subroutine_0!(instr_get_host_time_s),
+                Bc::CsvGetProp2 { csv_kind } => {
+                    call_subroutine_1_any!(instr_csv_get_prop_2, u8, u8::from(csv_kind))
+                }
+                Bc::CharaCsvExists => call_subroutine_0!(instr_chara_csv_exists),
+                Bc::GetPalamLv => {
+                    call_subroutine_closure_0!(instr_get_palam_lv, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| s
+                        .instr_generic_get_lv::<2>("PALAMLV"))
+                }
+                Bc::GetExpLv => {
+                    call_subroutine_closure_0!(instr_get_exp_lv, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| s
+                        .instr_generic_get_lv::<2>("EXPLV"))
+                }
+                Bc::AddChara => call_subroutine_0!(instr_add_chara),
+                Bc::AddVoidChara => call_subroutine_0!(instr_add_void_chara),
+                Bc::PickUpChara { charas_cnt } => {
+                    call_subroutine_1_any!(instr_pick_up_chara, u8, charas_cnt)
+                }
+                Bc::DeleteChara { charas_cnt } => {
+                    call_subroutine_1_any!(instr_delete_chara, u8, charas_cnt)
+                }
+                Bc::SwapChara => call_subroutine_0!(instr_swap_chara),
+                Bc::AddCopyChara => call_subroutine_0!(instr_add_copy_chara),
+                Bc::LoadData => call_subroutine_0!(instr_load_data),
+                Bc::SaveData => call_subroutine_0!(instr_save_data),
+                Bc::CheckData => call_subroutine_0!(instr_check_data),
+                Bc::GetCharaRegNum => call_subroutine_0!(instr_get_chara_reg_num),
+                Bc::LoadGlobal => call_subroutine_0!(instr_load_global),
+                Bc::SaveGlobal => call_subroutine_0!(instr_save_global),
+                Bc::ResetData => call_subroutine_0!(instr_reset_data),
+                Bc::ResetCharaStain => call_subroutine_0!(instr_reset_chara_stain),
+                Bc::SaveChara { charas_cnt } => {
+                    call_subroutine_1_any!(instr_save_chara, u8, charas_cnt)
+                }
+                Bc::LoadChara => call_subroutine_0!(instr_load_chara),
+                Bc::GetConfig => call_subroutine_0!(instr_get_config),
+                Bc::GetConfigS => call_subroutine_0!(instr_get_config_s),
+                Bc::FindCharaDataFile => call_subroutine_0!(instr_find_chara_data_file),
+                _ => anyhow::bail!("unimplemented bytecode {:?}", inst),
+            }
+        }
+        if !bc.is_empty() {
+            anyhow::bail!("found bad bytecode {:?}", bc);
+        }
+
+        if !dyn_labels.is_empty() {
+            anyhow::bail!("unresolved dynamic labels {:?}", dyn_labels);
+        }
+        for (ip, new_ip) in ip_map.iter() {
+            if *new_ip == AssemblyOffset(usize::MAX) {
+                anyhow::bail!("ip offset {} not updated", ip);
+            }
+        }
+
+        ops.commit()?;
+        let buf = ops.finalize().unwrap();
+
+        // Apply ip updates
+        {
+            let o = unsafe { self.optr.as_mut() };
+            for (i, frame) in o.frames.iter().enumerate() {
+                let jit_frame = &mut self.jit_side_frame[i];
+                if jit_frame.func_idx != func_idx {
+                    continue;
+                }
+                // TODO: Store pointer instead to conform to Pointer Provenance
+                jit_frame.ip = buf.ptr(ip_map[&frame.ip.offset]) as usize;
+                if let Some(next_frame) = o.frames.get(i + 1) {
+                    jit_frame.ip = buf.ptr(ip_map[&next_frame.ret_ip.offset]) as usize;
+                }
+            }
+            self.remake_site()?;
+        }
+
+        let jit_func_slot = self
+            .jit_compiled_functions
+            .get_mut(func_idx as usize)
+            .unwrap();
+        *jit_func_slot = Some(EraJitCompiledFunction::new(func_idx as usize, buf));
+
+        Ok(())
     }
 }
 // ----- End of VM Instruction Implementations -----
@@ -4930,256 +6257,106 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
         //       ReturnVoid, we emit `ret` immediately after writing the `call` instruction, so that
         //       we can handle JIT transitions more easily.
 
-        loop {
-            let Some(bc_area) =
-                s.o.cur_chunk
-                    .get_bc()
-                    .get(s.o.cur_frame.ip.offset as usize..)
-            else {
-                let mut diag = Diagnostic::new();
-                diag.span_err(
-                    s.o.cur_chunk.name.clone(),
-                    s.o.cur_chunk
-                        .lookup_src(s.o.cur_chunk.len() - 1)
-                        .unwrap_or_default(),
-                    "unexpected end of bytecode",
-                );
-                s.o.ctx.emit_diag(diag);
-                s.break_reason = EraExecutionBreakReason::IllegalInstruction;
-                break;
-            };
-            // let bc_span = s
-            //     .cur_chunk
-            //     .lookup_src(s.cur_frame.ip.offset as usize)
-            //     .unwrap_or_default();
-            let Some(inst) = EraBytecodeKind::from_bytes(bc_area) else {
-                let mut diag = Diagnostic::new();
-                diag.span_err(
-                    s.o.cur_filename(),
-                    s.o.cur_bc_span(),
-                    "unexpected end of bytecode",
-                );
-                s.o.ctx.emit_diag(diag);
-                s.break_reason = EraExecutionBreakReason::IllegalInstruction;
-                break;
-            };
-
-            // dbg!(&s.o.stack);
-            // dbg!((s.o.cur_frame.ip.offset, inst));
-
-            // Execute instruction
-            // NOTE: Execution of instructions is atomic: they are either fully executed or not at all.
-            //       This is important for the stack to remain consistent.
-            match inst {
-                Bc::FailWithMsg => s.instr_fail_with_msg()?,
-                Bc::Nop => s.instr_nop()?,
-                Bc::DebugBreak => s.instr_debug_break()?,
-                Bc::Quit => s.instr_quit()?,
-                Bc::Throw => s.instr_throw()?,
-                Bc::ReturnVoid => s.instr_return_void()?,
-                Bc::ReturnInt => s.instr_return_int()?,
-                Bc::ReturnStr => s.instr_return_str()?,
-                Bc::CallFun { args_cnt } => s.instr_call_fun(args_cnt)?,
-                Bc::TryCallFun { args_cnt } => s.instr_try_call_fun(args_cnt, false)?,
-                Bc::TryCallFunForce { args_cnt } => s.instr_try_call_fun(args_cnt, true)?,
-                Bc::RestartExecAtFun => s.instr_restart_exec_at_fun()?,
-                Bc::JumpWW { offset } => s.instr_jump_ww(offset)?,
-                Bc::JumpIfWW { offset } => s.instr_jump_if_ww(offset)?,
-                Bc::JumpIfNotWW { offset } => s.instr_jump_if_not_ww(offset)?,
-                Bc::LoadConstStr { idx } => s.instr_load_const_str(idx)?,
-                Bc::LoadImm8 { imm } => s.instr_load_imm8(imm)?,
-                Bc::LoadImm16 { imm } => s.instr_load_imm16(imm)?,
-                Bc::LoadImm32 { imm } => s.instr_load_imm32(imm)?,
-                Bc::LoadImm64 { imm } => s.instr_load_imm64(imm)?,
-                Bc::LoadVarWW { idx } => s.instr_load_var_ww(idx)?,
-                Bc::LoadConstVarWW { idx } => s.instr_load_const_var_ww(idx)?,
-                Bc::LoadLocalVar { idx } => s.instr_load_local_var(idx)?,
-                Bc::Pop => s.instr_pop()?,
-                Bc::PopAllN { count } => s.instr_pop_all_n(count)?,
-                Bc::PopOneN { idx } => s.instr_pop_one_n(idx)?,
-                Bc::Swap2 => s.instr_swap_2()?,
-                Bc::Duplicate => s.instr_duplicate()?,
-                Bc::DuplicateAllN { count } => s.instr_duplicate_all_n(count)?,
-                Bc::DuplicateOneN { idx } => s.instr_duplicate_one_n(idx)?,
-                Bc::AddInt => s.instr_add_int()?,
-                Bc::SubInt => s.instr_sub_int()?,
-                Bc::MulInt => s.instr_mul_int()?,
-                Bc::DivInt => s.instr_div_int()?,
-                Bc::ModInt => s.instr_mod_int()?,
-                Bc::NegInt => s.instr_neg_int()?,
-                Bc::BitAndInt => s.instr_bit_and_int()?,
-                Bc::BitOrInt => s.instr_bit_or_int()?,
-                Bc::BitXorInt => s.instr_bit_xor_int()?,
-                Bc::BitNotInt => s.instr_bit_not_int()?,
-                Bc::ShlInt => s.instr_shl_int()?,
-                Bc::ShrInt => s.instr_shr_int()?,
-                Bc::CmpIntLT => s.instr_cmp_int_lt()?,
-                Bc::CmpIntLEq => s.instr_cmp_int_leq()?,
-                Bc::CmpIntGT => s.instr_cmp_int_gt()?,
-                Bc::CmpIntGEq => s.instr_cmp_int_geq()?,
-                Bc::CmpIntEq => s.instr_cmp_int_eq()?,
-                Bc::CmpIntNEq => s.instr_cmp_int_neq()?,
-                Bc::CmpStrLT => s.instr_cmp_str_lt()?,
-                Bc::CmpStrLEq => s.instr_cmp_str_leq()?,
-                Bc::CmpStrGT => s.instr_cmp_str_gt()?,
-                Bc::CmpStrGEq => s.instr_cmp_str_geq()?,
-                Bc::CmpStrEq => s.instr_cmp_str_eq()?,
-                Bc::CmpStrNEq => s.instr_cmp_str_neq()?,
-                Bc::LogicalNot => s.instr_logical_not()?,
-                Bc::MaxInt => s.instr_max_int()?,
-                Bc::MinInt => s.instr_min_int()?,
-                Bc::ClampInt => s.instr_clamp_int()?,
-                Bc::InRangeInt => s.instr_in_range_int()?,
-                Bc::InRangeStr => s.instr_in_range_str()?,
-                Bc::GetBit => s.instr_get_bit()?,
-                Bc::SetBit => s.instr_set_bit()?,
-                Bc::ClearBit => s.instr_clear_bit()?,
-                Bc::InvertBit => s.instr_invert_bit()?,
-                Bc::BuildString { count } => s.instr_build_string(count)?,
-                Bc::PadString { flags } => s.instr_pad_string(flags)?,
-                Bc::RepeatStr => s.instr_repeat_str()?,
-                Bc::BuildArrIdxFromMD { count } => s.instr_build_arr_idx_from_md(count)?,
-                Bc::GetArrValFlat => s.instr_get_arr_val_flat()?,
-                Bc::SetArrValFlat => s.instr_set_arr_val_flat()?,
-                Bc::TimesFloat => s.instr_times_float()?,
-                Bc::FunExists => s.instr_fun_exists()?,
-                Bc::ReplaceStr => s.instr_replace_str()?,
-                Bc::SubStr | Bc::SubStrU => s.instr_sub_str()?,
-                Bc::StrFind | Bc::StrFindU => s.instr_str_find()?,
-                Bc::StrLen | Bc::StrLenU => s.instr_str_len()?,
-                Bc::CountSubStr => s.instr_count_sub_str()?,
-                Bc::StrCharAtU => s.instr_str_char_at()?,
-                Bc::IntToStr => s.instr_int_to_str()?,
-                Bc::StrToInt => s.instr_str_to_int()?,
-                Bc::FormatIntToStr => s.instr_format_int_to_str()?,
-                Bc::StrIsValidInt => s.instr_str_is_valid_int()?,
-                Bc::StrToUpper => s.instr_str_to_upper()?,
-                Bc::StrToLower => s.instr_str_to_lower()?,
-                Bc::StrToHalf => s.instr_str_to_half()?,
-                Bc::StrToFull => s.instr_str_to_full()?,
-                Bc::BuildBarStr => s.instr_build_bar_str()?,
-                Bc::EscapeRegexStr => s.instr_escape_regex_str()?,
-                Bc::EncodeToUnicode => s.instr_encode_to_unicode()?,
-                Bc::UnicodeToStr => s.instr_unicode_to_str()?,
-                Bc::IntToStrWithBase => s.instr_int_to_str_with_base()?,
-                Bc::HtmlTagSplit => s.instr_html_tag_split()?,
-                Bc::HtmlToPlainText => s.instr_html_to_plain_text()?,
-                Bc::HtmlEscape => s.instr_html_escape()?,
-                Bc::PowerInt => s.instr_power_int()?,
-                Bc::SqrtInt => s.instr_sqrt_int()?,
-                Bc::CbrtInt => s.instr_cbrt_int()?,
-                Bc::LogInt => s.instr_log_int()?,
-                Bc::Log10Int => s.instr_log_10_int()?,
-                Bc::ExponentInt => s.instr_exponent_int()?,
-                Bc::AbsInt => s.instr_abs_int()?,
-                Bc::SignInt => s.instr_sign_int()?,
-                Bc::GroupMatch { count } => s.instr_group_match(count)?,
-                Bc::ArrayCountMatches => s.instr_array_count_matches(-1)?,
-                Bc::CArrayCountMatches => s.instr_array_count_matches(0)?,
-                Bc::SumArray => s.instr_array_aggregate::<crate::util::SumAggregator, 1>(-1)?,
-                Bc::SumCArray => s.instr_array_aggregate::<crate::util::SumAggregator, 1>(0)?,
-                Bc::MaxArray => s.instr_array_aggregate::<crate::util::MaxAggregator, 1>(-1)?,
-                Bc::MaxCArray => s.instr_array_aggregate::<crate::util::MaxAggregator, 1>(0)?,
-                Bc::MinArray => s.instr_array_aggregate::<crate::util::MinAggregator, 1>(-1)?,
-                Bc::MinCArray => s.instr_array_aggregate::<crate::util::MinAggregator, 1>(0)?,
-                Bc::InRangeArray => s.instr_array_in_range(-1)?,
-                Bc::InRangeCArray => s.instr_array_in_range(0)?,
-                Bc::ArrayRemove => s.instr_array_remove()?,
-                Bc::ArraySortAsc => s.instr_array_sort(true)?,
-                Bc::ArraySortDesc => s.instr_array_sort(false)?,
-                Bc::ArrayMSort { subs_cnt } => s.instr_array_multi_sort(subs_cnt)?,
-                Bc::ArrayCopy => s.instr_array_copy()?,
-                Bc::ArrayShift => s.instr_array_shift()?,
-                Bc::Print => s.instr_print_with_flags::<1>(EraPrintExtendedFlags::new())?,
-                Bc::PrintLine => {
-                    s.instr_print_with_flags::<1>(EraPrintExtendedFlags::new().with_is_line(true))?
-                }
-                Bc::PrintExtended { flags } => s.instr_print_with_flags::<2>(flags)?,
-                Bc::ReuseLastLine => s.instr_reuse_last_line()?,
-                Bc::ClearLine => s.instr_clear_line()?,
-                Bc::Wait { flags } => s.instr_wait(flags)?,
-                Bc::TWait => s.instr_twait()?,
-                Bc::Input { flags } => s.instr_input(flags)?,
-                Bc::KbGetKeyState => s.instr_kb_get_key_state()?,
-                Bc::GetCallerFuncName => s.instr_get_caller_func_name()?,
-                Bc::GetCharaNum => s.instr_get_chara_num()?,
-                Bc::CsvGetNum { kind } => s.instr_csv_get_num(kind)?,
-                Bc::GetRandomRange => s.instr_get_random_range()?,
-                Bc::GetRandomMax => s.instr_get_random_max()?,
-                Bc::RowAssign { vals_cnt } => s.instr_row_assign(vals_cnt)?,
-                Bc::ForLoopStep => s.instr_for_loop_step()?,
-                Bc::ExtendStrToWidth => s.instr_extend_str_to_width()?,
-                Bc::HtmlPrint => s.instr_html_print()?,
-                Bc::PrintButton { flags } => s.instr_print_button(flags)?,
-                Bc::PrintImg | Bc::PrintImg4 => s.instr_print_img()?,
-                Bc::SplitString => s.instr_split_string()?,
-                Bc::GCreate => s.instr_gcreate()?,
-                Bc::GCreateFromFile => s.instr_gcreate_from_file()?,
-                Bc::GDispose => s.instr_gdispose()?,
-                Bc::GCreated => s.instr_gcreated()?,
-                Bc::GDrawSprite => s.instr_gdraw_sprite()?,
-                Bc::GDrawSpriteWithColorMatrix => s.instr_gdraw_sprite_with_color_matrix()?,
-                Bc::GClear => s.instr_gclear()?,
-                Bc::SpriteCreate => s.instr_sprite_create()?,
-                Bc::SpriteDispose => s.instr_sprite_dispose()?,
-                Bc::SpriteCreated => s.instr_sprite_created()?,
-                Bc::SpriteAnimeCreate => s.instr_sprite_anime_create()?,
-                Bc::SpriteAnimeAddFrame => s.instr_sprite_anime_add_frame()?,
-                Bc::SpriteWidth => s.instr_sprite_width()?,
-                Bc::SpriteHeight => s.instr_sprite_height()?,
-                Bc::CheckFont => s.instr_check_font()?,
-                Bc::SaveText => s.instr_save_text()?,
-                Bc::LoadText => s.instr_load_text()?,
-                Bc::FindElement => s.instr_generic_find_element_with_match::<2>(true, -1)?,
-                Bc::FindLastElement => s.instr_generic_find_element_with_match::<2>(false, -1)?,
-                Bc::FindChara => s.instr_generic_find_element::<2>(true, 0)?,
-                Bc::FindLastChara => s.instr_generic_find_element::<2>(false, 0)?,
-                Bc::VarSet => s.instr_var_set(-1)?,
-                Bc::CVarSet => s.instr_var_set(0)?,
-                Bc::GetVarSizeByName => s.instr_get_var_size_by_name()?,
-                Bc::GetVarAllSize => s.instr_get_var_all_size()?,
-                Bc::GetHostTimeRaw => s.instr_get_host_time_raw()?,
-                Bc::GetHostTime => s.instr_get_host_time()?,
-                Bc::GetHostTimeS => s.instr_get_host_time_s()?,
-                Bc::CsvGetProp2 { csv_kind } => s.instr_csv_get_prop_2(csv_kind)?,
-                Bc::CharaCsvExists => s.instr_chara_csv_exists()?,
-                Bc::GetPalamLv => s.instr_generic_get_lv::<2>("PALAMLV")?,
-                Bc::GetExpLv => s.instr_generic_get_lv::<2>("EXPLV")?,
-                Bc::AddChara => s.instr_add_chara()?,
-                Bc::AddVoidChara => s.instr_add_void_chara()?,
-                Bc::PickUpChara { charas_cnt } => s.instr_pick_up_chara(charas_cnt)?,
-                Bc::DeleteChara { charas_cnt } => s.instr_delete_chara(charas_cnt)?,
-                Bc::SwapChara => s.instr_swap_chara()?,
-                Bc::AddCopyChara => s.instr_add_copy_chara()?,
-                Bc::LoadData => s.instr_load_data()?,
-                Bc::SaveData => s.instr_save_data()?,
-                Bc::CheckData => s.instr_check_data()?,
-                Bc::GetCharaRegNum => s.instr_get_chara_reg_num()?,
-                Bc::LoadGlobal => s.instr_load_global()?,
-                Bc::SaveGlobal => s.instr_save_global()?,
-                Bc::ResetData => s.instr_reset_data()?,
-                Bc::ResetCharaStain => s.instr_reset_chara_stain()?,
-                Bc::SaveChara { charas_cnt } => s.instr_save_chara(charas_cnt)?,
-                Bc::LoadChara => s.instr_load_chara()?,
-                Bc::GetConfig => s.instr_get_config()?,
-                Bc::GetConfigS => s.instr_get_config_s()?,
-                Bc::FindCharaDataFile => s.instr_find_chara_data_file()?,
-                // _ => s.instr_raise_illegal_instruction()?,
-                _ => {
-                    let mut diag = Diagnostic::new();
-                    diag.span_err(
-                        s.o.cur_filename(),
-                        s.o.cur_bc_span(),
-                        format!("unimplemented bytecode `{:?}`", inst),
-                    );
-                    s.o.ctx.emit_diag(diag);
-                    s.break_reason = EraExecutionBreakReason::IllegalInstruction;
-                    break;
-                }
+        if !self.enable_jit {
+            // Interpret bytecode only
+            loop {
+                s.step_instruction_once()?;
             }
         }
 
-        Ok(s.break_reason)
+        // Interpret bytecode until JIT threshold
+        let enter_jit_threshold: u64 = std::env::var("ERA_JIT_THRESHOLD")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(10000);
+
+        for _ in 0..enter_jit_threshold {
+            s.step_instruction_once()?;
+        }
+
+        // Generate prologue for jumping to JITed code
+        let mut ops = dynasmrt::x64::Assembler::new()?;
+        dynasm!(ops
+            ; .arch x64
+            ; ->jit_entry:
+            // Prepares the stack, then jumps to the JITed code
+            // Local variables:
+            // [rsp+0x28]: return address
+            // [rsp+0x20]: self
+            ; sub rsp, 0x28
+            ; mov [rsp+0x20], rcx
+            ; jmp rdx
+        );
+        ops.commit()?;
+        let prologue_buf = ops.finalize().unwrap();
+        let prologue_fn: unsafe extern "win64-unwind" fn(*mut EraVmExecSite<Callback>, usize) =
+            unsafe { std::mem::transmute(prologue_buf.ptr(AssemblyOffset(0))) };
+
+        // Run JIT loop
+        {
+            let funcs_count = s.o.ctx.func_entries.len();
+            let o = unsafe { s.optr.as_mut() };
+            s.jit_side_frame.clear();
+            for frame in &o.frames {
+                let (func_idx, _) =
+                    s.o.ctx
+                        .func_idx_and_info_from_chunk_pos(frame.ip.chunk as _, frame.ip.offset as _)
+                        .with_context(|| format!("invalid function ip {:?}", frame.ip))?;
+                s.jit_side_frame.push(EraJitExecFrame {
+                    func_idx: func_idx as _,
+                    ip: 0,
+                });
+            }
+            s.jit_compiled_functions.clear();
+            s.jit_compiled_functions.resize_with(funcs_count, || None);
+        }
+        s.remake_site()?;
+        loop {
+            let func_idx = s
+                .jit_side_frame
+                .last()
+                .context("no JIT side frame")?
+                .func_idx;
+            match s.ensure_jit_function(func_idx) {
+                Ok(()) => unsafe {
+                    let ip = s.jit_side_frame.last().unwrap().ip;
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        prologue_fn(&mut s, ip);
+                    }));
+                    if let Err(e) = r {
+                        let e = match e.downcast::<anyhow::Error>() {
+                            Ok(e) => e,
+                            Err(e) => std::panic::resume_unwind(e),
+                        };
+                        return Err(*e);
+                    }
+
+                    // Update JIT frames
+                    let o = s.optr.as_mut();
+                    while o.frames.len() < s.jit_side_frame.len() {
+                        s.jit_side_frame.pop();
+                    }
+                    s.remake_site()?;
+                },
+                Err(e) => {
+                    // If the function is not JITable, we fall back to bytecode interpretation
+                    // and emit diagnostics for the error
+                    {
+                        let mut diag = Diagnostic::new();
+                        diag.span_warn(
+                            s.o.cur_filename(),
+                            s.o.cur_bc_span(),
+                            format!("failed to JIT function: {}", e),
+                        );
+                        s.o.ctx.emit_diag(diag);
+                    }
+
+                    loop {
+                        s.step_instruction_once()?;
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -1432,7 +1432,8 @@ namespace winrt::MEraEmuWin::implementation {
 
                 // TODO: Enable threaded loading when we upgrade mimalloc to v2.1.9
                 //       (see https://github.com/microsoft/mimalloc/issues/944)
-                const bool threaded_load = false;
+                const bool threaded_load = std::getenv("MERAEMU_THREADED_LOAD") != nullptr;
+                const bool enable_jit = std::getenv("MERAEMU_ENABLE_JIT") != nullptr;
 
                 MEraEmuWinEngineSysCallback* callback{};
                 auto builder = [&] {
@@ -1441,9 +1442,14 @@ namespace winrt::MEraEmuWin::implementation {
                     return MEraEngineBuilder(std::move(callback_box));
                 }();
 
-                if (!threaded_load) {
+                {
                     auto cfg = builder.get_config();
-                    cfg.threads_cnt = 1;
+                    if (!threaded_load) {
+                        cfg.threads_cnt = 1;
+                    }
+                    if (enable_jit) {
+                        cfg.vm_cache_strategy = M_ERA_ENGINE_VM_CACHE_STRATEGY_FAST_JIT;
+                    }
                     builder.set_config(cfg);
                 }
 
