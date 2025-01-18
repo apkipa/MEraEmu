@@ -178,6 +178,9 @@ impl RcStr {
             Err(self)
         }
     }
+    pub fn try_repeat(s: &str, n: usize) -> Option<Self> {
+        BoxedRcStr::try_repeat(s, n).map(|s| s.into_rc())
+    }
 }
 
 impl Drop for RcStr {
@@ -329,6 +332,18 @@ impl BoxedRcStr {
     pub fn as_str(&self) -> &str {
         self.i.as_str()
     }
+
+    pub fn try_repeat(s: &str, n: usize) -> Option<Self> {
+        let len = s.len().checked_mul(n)?;
+        if len > u32::MAX as usize {
+            return None;
+        }
+        let mut builder = RcStrBuilder::try_new(len as u32)?;
+        for _ in 0..n {
+            builder.push_str(s);
+        }
+        Some(builder.finish())
+    }
 }
 
 impl Drop for BoxedRcStr {
@@ -412,15 +427,7 @@ impl ArcStr {
         self.i.as_str()
     }
     pub fn try_repeat(s: &str, n: usize) -> Option<Self> {
-        let len = s.len().checked_mul(n)?;
-        if len > u32::MAX as usize {
-            return None;
-        }
-        let mut builder = RcStrBuilder::try_new(len as u32)?;
-        for _ in 0..n {
-            builder.push_str(s);
-        }
-        Some(builder.finish().into_arc())
+        BoxedRcStr::try_repeat(s, n).map(|s| s.into_arc())
     }
 
     /// # Safety

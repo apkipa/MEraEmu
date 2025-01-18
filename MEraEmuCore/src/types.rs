@@ -1754,6 +1754,7 @@ pub struct EraInputExtendedFlags {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(C)]
 pub struct IntValue {
     pub val: i64,
 }
@@ -1771,6 +1772,7 @@ impl<'de> Deserialize<'de> for IntValue {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(C)]
 pub struct StrValue {
     pub val: ArcStr,
 }
@@ -1784,6 +1786,24 @@ impl Serialize for StrValue {
 impl<'de> Deserialize<'de> for StrValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         ArcStr::deserialize(deserializer).map(Self::new)
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(C)]
+pub struct RcStrValue {
+    pub val: RcStr,
+}
+
+impl Serialize for RcStrValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.val.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RcStrValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        RcStr::deserialize(deserializer).map(Self::new)
     }
 }
 
@@ -1986,6 +2006,13 @@ impl StrValue {
     #[inline]
     pub fn new(val: ArcStr) -> Self {
         StrValue { val }
+    }
+}
+
+impl RcStrValue {
+    #[inline]
+    pub fn new(val: RcStr) -> Self {
+        RcStrValue { val }
     }
 }
 

@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    mem::ManuallyDrop,
     num::NonZeroUsize,
     ops::{ControlFlow, Deref, DerefMut},
     ptr::NonNull,
@@ -13,7 +14,6 @@ use hashbrown::HashMap;
 use itertools::Itertools;
 use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
-use zerocopy::IntoBytes;
 
 use crate::{
     types::*,
@@ -50,34 +50,41 @@ impl<'a, T> TailVecRef<'a, T> {
 impl<'a, T> std::ops::Deref for TailVecRef<'a, T> {
     type Target = [T];
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.vec[self.start..]
     }
 }
 
 impl<'a, T> std::ops::DerefMut for TailVecRef<'a, T> {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.vec[self.start..]
     }
 }
 
 impl<T> TailVecRef<'_, T> {
+    #[inline(always)]
     pub fn as_slice(&self) -> &[T] {
         &self.vec[self.start..]
     }
 
+    #[inline(always)]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         &mut self.vec[self.start..]
     }
 
+    #[inline(always)]
     pub fn push(&mut self, value: T) {
         self.vec.push(value);
     }
 
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.vec.len() - self.start
     }
 
+    #[inline(always)]
     pub fn pop(&mut self) -> Option<T> {
         if self.vec.len() > self.start {
             self.vec.pop()
@@ -86,6 +93,7 @@ impl<T> TailVecRef<'_, T> {
         }
     }
 
+    #[inline(always)]
     pub fn drain<R>(&mut self, range: R) -> std::vec::Drain<'_, T>
     where
         R: std::ops::RangeBounds<usize>,
@@ -95,6 +103,7 @@ impl<T> TailVecRef<'_, T> {
         self.vec.drain(range.start + offset..range.end + offset)
     }
 
+    #[inline(always)]
     pub fn splice<R, I>(&mut self, range: R, replace_with: I) -> std::vec::Splice<'_, I::IntoIter>
     where
         R: std::ops::RangeBounds<usize>,
@@ -106,6 +115,7 @@ impl<T> TailVecRef<'_, T> {
             .splice(range.start + offset..range.end + offset, replace_with)
     }
 
+    #[inline(always)]
     pub fn extend<I>(&mut self, iter: I)
     where
         I: IntoIterator<Item = T>,
@@ -147,14 +157,17 @@ impl<T> TailVecRef<'_, T> {
         }
     }
 
+    #[inline(always)]
     pub fn inner(&self) -> &Vec<T> {
         self.vec
     }
 
+    #[inline(always)]
     pub fn inner_mut(&mut self) -> &mut Vec<T> {
         self.vec
     }
 
+    #[inline(always)]
     pub fn must_pop_many(&mut self, count: usize) {
         if self.len() < count {
             panic!(
@@ -166,6 +179,7 @@ impl<T> TailVecRef<'_, T> {
         self.vec.truncate(self.vec.len() - count);
     }
 
+    #[inline(always)]
     pub fn replace_tail(&mut self, count: usize, replace_with: impl IntoIterator<Item = T>) {
         if self.len() < count {
             panic!(
@@ -178,6 +192,54 @@ impl<T> TailVecRef<'_, T> {
         self.vec.splice(start.., replace_with);
     }
 
+    /// # Safety
+    ///
+    /// No bounds checking is performed. Also the function will not call `drop` on the removed elements.
+    #[inline(always)]
+    pub unsafe fn replace_tail_no_drop_unchecked_spec<const N: usize>(
+        &mut self,
+        count: usize,
+        replace_with: [T; N],
+    ) {
+        unsafe {
+            let new_len = self.vec.len() - count;
+            self.vec.set_len(new_len);
+            if N <= count {
+                // Spec extend; hopefully the compiler will optimize the checks away.
+                let dst = self.vec.as_mut_ptr().add(new_len);
+                let src = ManuallyDrop::new(replace_with);
+                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, N);
+                self.vec.set_len(new_len + N);
+            } else {
+                self.vec.extend(replace_with);
+            }
+        }
+    }
+
+    /// # Safety
+    ///
+    /// No bounds checking is performed. Also the function will not call `drop` on the removed elements.
+    #[inline(always)]
+    pub unsafe fn drain_no_drop_unchecked_spec<R>(&mut self, range: R)
+    where
+        R: std::ops::RangeBounds<usize>,
+    {
+        unsafe {
+            let range = self.normalize_range(range);
+            let offset = self.start;
+            let start = range.start + offset;
+            let end = range.end + offset;
+            let len = self.vec.len();
+            let ptr = self.vec.as_mut_ptr();
+            let new_len = len - (end - start);
+            let tail_len = len - end;
+            let tail_ptr = ptr.add(end);
+            std::ptr::copy(tail_ptr, ptr.add(start), tail_len);
+            self.vec.set_len(new_len);
+        }
+    }
+
+    #[inline(always)]
     fn normalize_range<R>(&self, range: R) -> std::ops::Range<usize>
     where
         R: std::ops::RangeBounds<usize>,
@@ -198,6 +260,7 @@ impl<T> TailVecRef<'_, T> {
 }
 
 impl<T: Clone> TailVecRef<'_, T> {
+    #[inline(always)]
     pub fn extend_from_within<R>(&mut self, src: R)
     where
         R: std::ops::RangeBounds<usize>,
@@ -2600,7 +2663,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 StackValue::new_str(val.val.clone())
             }
         };
-        self.o.stack.replace_tail(stack_count, [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::GetArrValFlat.bytes_len() as i32);
         Ok(())
     }
@@ -2664,7 +2729,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         };
         let slen = self.o.stack.len();
         // Keep the value on the stack
-        self.o.stack.drain(slen - 3..slen - 1);
+        unsafe {
+            (self.o.stack).drain_no_drop_unchecked_spec(slen - 3..slen - 1);
+        }
         self.add_ip_offset(Bc::SetArrValFlat.bytes_len() as i32);
         Ok(())
     }
@@ -6251,6 +6318,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         }
 
         // Code generated, now write stack unwinding information
+        // NOTE: Unwind information must be placed aligned.
+        while ops.offset().0 % 4 != 0 {
+            dynasm!(ops
+                ; .arch x64
+                ; nop
+            );
+        }
         let func_size = ops.offset().0 as u32;
         #[allow(non_snake_case)]
         #[allow(non_camel_case_types)]
@@ -6258,7 +6332,6 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         {
             use crate::util::transmute_to_bytes;
             use windows_sys::Win32::System::Diagnostics::Debug::*;
-            use zerocopy::IntoBytes;
 
             /*
                UBYTE: 3	Version
