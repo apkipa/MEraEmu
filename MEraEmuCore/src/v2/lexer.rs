@@ -1,7 +1,6 @@
 use std::hint::unreachable_unchecked;
 
 use bstr::ByteSlice;
-use rclite::Rc;
 
 use crate::{types::*, util::rcstr::ArcStr};
 

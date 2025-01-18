@@ -24,7 +24,6 @@ use num_ordinal::{ordinal0, Ordinal, Osize};
 use once_cell::sync::Lazy;
 use rayon::iter::ParallelIterator;
 use rclite::{Arc, Rc};
-use rcstr::ArcStr;
 use regex::Regex;
 use rustc_hash::FxBuildHasher;
 use safer_ffi::derive_ReprC;
@@ -41,6 +40,7 @@ use super::{
     vm::{EraExecIp, EraFuncExecFrame, EraVirtualMachine, EraVirtualMachineState},
 };
 
+use crate::util::rcstr::{self, ArcStr, RcStr};
 use crate::util::syntax::*;
 use crate::util::*;
 
@@ -1659,7 +1659,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 for MEraEngineAsyncErbLoaderMsg { filename, content } in erb_rx {
                     // Add source map entry early so that we can refer to its source in error messages
                     let newline_pos = Vec::new();
-                    self.ctx.active_source = ArcStr::default();
+                    // self.ctx.active_source = ArcStr::default();
                     let source_map = Arc::get_mut(&mut self.ctx.source_map).unwrap();
                     let src_file = source_map.insert(
                         filename.clone(),

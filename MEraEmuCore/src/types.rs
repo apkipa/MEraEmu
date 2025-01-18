@@ -15,7 +15,6 @@ use cstree::{
     util::NodeOrToken,
     Syntax,
 };
-use either::Either;
 use hashbrown::HashMap;
 use indexmap::IndexMap;
 use rclite::{Arc, Rc};
@@ -24,7 +23,11 @@ use safer_ffi::{derive_ReprC, prelude::VirtualPtr};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tinyvec::ArrayVec;
 
-use crate::util::{interning::ThreadedTokenInterner, rcstr::ArcStr, Ascii};
+use crate::util::{
+    interning::ThreadedTokenInterner,
+    rcstr::{ArcStr, RcStr},
+    Ascii,
+};
 
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 type FxIndexMap<K, V> = IndexMap<K, V, FxBuildHasher>;
@@ -590,15 +593,6 @@ pub struct EraToken {
     pub kind: EraTokenKind,
     pub span: SrcSpan,
 }
-
-// TODO: Remove this
-// TODO: EraAstNode, EraAstCursor, ...
-// NOTE: Primarily for generic AST access, useful for live editing, etc.
-// pub trait EraAstNode {
-//     fn span(&self) -> SrcSpan;
-//     fn kind(&self) -> EraAstNodeKind;
-//     fn text(&self) -> String;
-// }
 
 #[derive(Debug)]
 pub struct EraDefineData {
@@ -1388,7 +1382,7 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    pub const fn new() -> Diagnostic {
+    pub fn new() -> Diagnostic {
         Diagnostic {
             filename: ArcStr::new(),
             src: None,
@@ -1396,7 +1390,7 @@ impl Diagnostic {
         }
     }
 
-    pub const fn with_file(filename: ArcStr) -> Diagnostic {
+    pub fn with_file(filename: ArcStr) -> Diagnostic {
         Diagnostic {
             filename,
             src: None,
@@ -2344,7 +2338,7 @@ pub enum FlatArrayValue {
     ArrStr(Box<ArrStrValue>),
 }
 
-static ARRAY_VALUE_BUILDER: ptr_union::Builder2<Box<ArrIntValue>, Box<ArrStrValue>> =
+const ARRAY_VALUE_BUILDER: ptr_union::Builder2<Box<ArrIntValue>, Box<ArrStrValue>> =
     unsafe { ptr_union::Builder2::new_unchecked() };
 
 impl From<FlatArrayValue> for ArrayValue {

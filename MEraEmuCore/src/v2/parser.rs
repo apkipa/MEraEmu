@@ -6,7 +6,7 @@ use crate::{
     types::*,
     util::{
         interning::ThreadedTokenInterner,
-        rcstr::{self, ArcStr},
+        rcstr::{self, ArcStr, RcStr},
         Ascii,
     },
     v2::routines,

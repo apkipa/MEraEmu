@@ -5,8 +5,7 @@ use hashbrown::HashMap;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use rayon::prelude::*;
-use rclite::Arc;
-use rclite::Rc;
+use rclite::{Arc, Rc};
 use rustc_hash::{FxBuildHasher, FxHasher};
 use smallvec::smallvec;
 use yoke::Yoke;
@@ -17,7 +16,7 @@ use crate::v2::routines;
 use crate::{
     types::*,
     util::{
-        rcstr::{self, ArcStr},
+        rcstr::{self, ArcStr, RcStr},
         Ascii,
     },
 };
@@ -551,7 +550,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
         println!("Compilation time: {:?}", t.elapsed());
         t = std::time::Instant::now();
 
-        self.ctx.active_source = ArcStr::default();
+        // self.ctx.active_source = ArcStr::default();
 
         // Finialize bytecode chunks
         let func_entries = Arc::get_mut(&mut self.ctx.func_entries).unwrap();

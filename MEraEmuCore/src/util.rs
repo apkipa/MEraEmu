@@ -632,3 +632,9 @@ impl Aggregator<i64> for MinAggregator {
         a.min(b)
     }
 }
+
+pub unsafe fn transmute_to_bytes<T: Sized>(value: &T) -> &[u8] {
+    let ptr = value as *const T as *const u8;
+    let len = std::mem::size_of::<T>();
+    unsafe { std::slice::from_raw_parts(ptr, len) }
+}

@@ -13,13 +13,14 @@ use hashbrown::HashMap;
 use itertools::Itertools;
 use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
+use zerocopy::IntoBytes;
 
 use crate::{
     types::*,
     util::{
         number::formatting::csharp_format_i64,
         random::SimpleUniformGenerator,
-        rcstr::{self, ArcStr},
+        rcstr::{self, ArcStr, RcStr},
         Ascii,
     },
     v2::routines,
@@ -553,6 +554,7 @@ struct EraVmExecSite<'ctx, 'i, 's, Callback> {
     remaining_inst_cnt: u64,
     jit_compiled_functions: Vec<Option<EraJitCompiledFunction>>,
     jit_side_frame: Vec<EraJitExecFrame>,
+    jit_unwind_registry: JitUnwindRegistry,
 }
 
 impl<Callback> Deref for EraVmExecSite<'_, '_, '_, Callback> {
@@ -617,6 +619,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVmExecSite<'ctx, 'i, 's, Ca
                 remaining_inst_cnt,
                 jit_compiled_functions: Vec::new(),
                 jit_side_frame: Vec::new(),
+                jit_unwind_registry: JitUnwindRegistry::new(),
             }
         };
         this.remake_site()?;
@@ -5217,7 +5220,48 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         Ok(())
     }
+}
 
+struct JitUnwindRegistry {
+    identifiers: Vec<usize>,
+}
+
+impl JitUnwindRegistry {
+    fn new() -> Self {
+        Self {
+            identifiers: Vec::new(),
+        }
+    }
+
+    fn add_function_table(
+        &mut self,
+        func_table: *const windows_sys::Win32::System::Diagnostics::Debug::IMAGE_RUNTIME_FUNCTION_ENTRY,
+        base_addr: usize,
+    ) {
+        use windows_sys::Win32::System::Diagnostics::Debug::*;
+
+        unsafe {
+            let r = RtlAddFunctionTable(func_table, 1, base_addr as _);
+            if r != 0 {
+                self.identifiers.push(func_table as _);
+            }
+        }
+    }
+}
+
+impl Drop for JitUnwindRegistry {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Diagnostics::Debug::*;
+
+        unsafe {
+            for &id in &self.identifiers {
+                RtlDeleteFunctionTable(id as _);
+            }
+        }
+    }
+}
+
+impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     /// Generates JITed code for the given function if it is not already generated, and
     /// updates the JIT lookup table accordingly.
     fn ensure_jit_function(&mut self, func_idx: u32) -> anyhow::Result<()> {
@@ -6206,6 +6250,75 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             }
         }
 
+        // Code generated, now write stack unwinding information
+        let func_size = ops.offset().0 as u32;
+        #[allow(non_snake_case)]
+        #[allow(non_camel_case_types)]
+        // #[cfg_attr(rustfmt, rustfmt::skip)]
+        {
+            use crate::util::transmute_to_bytes;
+            use windows_sys::Win32::System::Diagnostics::Debug::*;
+            use zerocopy::IntoBytes;
+
+            /*
+               UBYTE: 3	Version
+               UBYTE: 5	Flags
+               UBYTE	Size of prolog
+               UBYTE	Count of unwind codes
+               UBYTE: 4	Frame Register
+               UBYTE: 4	Frame Register offset (scaled)
+               USHORT * n	Unwind codes array
+               variable	Can either be of form (1) or (2) below
+            */
+            #[derive(Clone, Copy, Debug)]
+            #[repr(C)]
+            pub struct UNWIND_INFO_N<const N: usize> {
+                pub VersionFlags: u8,
+                pub SizeOfProlog: u8,
+                pub CountOfCodes: u8,
+                pub FrameRegisterOffset: u8,
+                pub UnwindCode: [UNWIND_CODE; N],
+            }
+            #[derive(Clone, Copy, Debug)]
+            #[repr(C)]
+            pub struct UNWIND_CODE {
+                pub CodeOffset: u8,
+                pub UnwindOpInfo: u8,
+            }
+            pub const UWOP_PUSH_NONVOL: u8 = 0; // info == register number
+            pub const UWOP_ALLOC_LARGE: u8 = 1; // no info, alloc size in next 2 slots
+            pub const UWOP_ALLOC_SMALL: u8 = 2; // info == size of allocation / 8 - 1
+            pub const UWOP_SET_FPREG: u8 = 3; // no info, FP = RSP + UNWIND_INFO.FPRegOffset*16
+            pub const UWOP_SAVE_NONVOL: u8 = 4; // info == register number, offset in next slot
+            pub const UWOP_SAVE_NONVOL_FAR: u8 = 5; // info == register number, offset in next 2 slots
+            pub const UWOP_SAVE_XMM128: u8 = 8; // info == XMM reg number, offset in next slot
+            pub const UWOP_SAVE_XMM128_FAR: u8 = 9; // info == XMM reg number, offset in next 2 slots
+            pub const UWOP_PUSH_MACHFRAME: u8 = 10; // info == 0: no error-code, 1: error-code
+
+            let entry = IMAGE_RUNTIME_FUNCTION_ENTRY {
+                BeginAddress: 0,
+                EndAddress: func_size,
+                Anonymous: IMAGE_RUNTIME_FUNCTION_ENTRY_0 {
+                    UnwindInfoAddress: func_size
+                        + std::mem::size_of::<IMAGE_RUNTIME_FUNCTION_ENTRY>() as u32,
+                },
+            };
+            let unwind_info = UNWIND_INFO_N::<1> {
+                VersionFlags: 1 | (0 << 3),
+                SizeOfProlog: 0,
+                CountOfCodes: 1,
+                FrameRegisterOffset: 0 | (0 << 4),
+                UnwindCode: [UNWIND_CODE {
+                    CodeOffset: 0,
+                    UnwindOpInfo: UWOP_ALLOC_SMALL | (4 << 4),
+                }],
+            };
+            unsafe {
+                ops.extend(transmute_to_bytes(&entry));
+                ops.extend(transmute_to_bytes(&unwind_info));
+            }
+        }
+
         ops.commit()?;
         let buf = ops.finalize().unwrap();
 
@@ -6225,6 +6338,12 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             }
             self.remake_site()?;
         }
+
+        // Invoke RtlAddFunctionTable to support unwinding
+        self.jit_unwind_registry.add_function_table(
+            buf.ptr(AssemblyOffset(func_size as _)) as _,
+            buf.ptr(AssemblyOffset(0)) as _,
+        );
 
         let jit_func_slot = self
             .jit_compiled_functions
@@ -6283,7 +6402,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
             // Local variables:
             // [rsp+0x28]: return address
             // [rsp+0x20]: self
-            ; sub rsp, 0x28
+            ; sub rsp, 0x28 // Align stack to 16 bytes
             ; mov [rsp+0x20], rcx
             ; jmp rdx
         );

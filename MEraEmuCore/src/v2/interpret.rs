@@ -10,7 +10,7 @@ use super::parser::{
 use crate::v2::routines;
 use crate::{
     types::*,
-    util::{rcstr::ArcStr, Ascii},
+    util::{rcstr::RcStr, Ascii},
 };
 
 use EraTokenKind as Token;
