@@ -1043,6 +1043,16 @@ fn mee_engine_builder_register_variable(
 }
 
 #[ffi_export]
+fn mee_engine_get_config(engine: &MEraEngineFfi) -> MEraEngineConfig {
+    engine.i.get_config().clone()
+}
+
+#[ffi_export]
+fn mee_engine_set_config(engine: &mut MEraEngineFfi, config: MEraEngineConfig) -> MeeResult<()> {
+    engine.i.set_config(config).into_mee_result()
+}
+
+#[ffi_export]
 fn mee_engine_do_execution(
     engine: &mut MEraEngineFfi,
     run_flag: &mut bool,

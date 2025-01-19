@@ -1,0 +1,18 @@
+﻿<Page
+    x:Class="MEraEmuWin.Settings.GeneralPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:MEraEmuWin"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Orientation="Vertical" Margin="8,2">
+            <ToggleSwitch Header="启用并行加载 (实验性)"
+                          IsOn="{x:Bind ParentPage.Settings.EnableParallelLoading,Mode=TwoWay}" />
+            <ToggleSwitch Header="启用 JIT 缓存 (实验性)"
+                          IsOn="{x:Bind ParentPage.Settings.EnableJIT,Mode=TwoWay}" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

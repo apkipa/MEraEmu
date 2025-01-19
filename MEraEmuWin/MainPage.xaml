@@ -39,13 +39,14 @@
                     <MenuFlyoutItem Text="退出" Click="MenuFile_Exit_Click" />
                 </muxc:MenuBarItem>
                 <muxc:MenuBarItem Title="帮助" IsTabStop="False">
-                    <MenuFlyoutItem Text="开发者工具" Click="MenuFile_DevTools_Click">
+                    <MenuFlyoutItem Text="开发者工具" Click="MenuHelp_DevTools_Click">
                         <MenuFlyoutItem.KeyboardAccelerators>
                             <KeyboardAccelerator Key="F12" />
                             <KeyboardAccelerator Key="J" Modifiers="Control,Shift" />
                         </MenuFlyoutItem.KeyboardAccelerators>
                     </MenuFlyoutItem>
                     <MenuFlyoutSeparator />
+                    <MenuFlyoutItem Text="设置" Click="MenuHelp_Settings_Click" />
                     <MenuFlyoutItem Text="关于..." Click="MenuHelp_About_Click" />
                 </muxc:MenuBarItem>
             </muxc:MenuBar>

@@ -1,0 +1,10 @@
+import "Settings/MainPage.idl";
+
+namespace MEraEmuWin.Settings {
+    [default_interface]
+    runtimeclass GeneralPage : Windows.UI.Xaml.Controls.Page {
+        GeneralPage();
+
+        MEraEmuWin.Settings.MainPage ParentPage{ get; };
+    };
+}

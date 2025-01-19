@@ -404,6 +404,7 @@ namespace winrt::MEraEmuWin::implementation {
         std::exception_ptr thread_exception{ nullptr };
         bool has_execution_error{ false };
         MEraEngine engine{ nullptr };
+        MEraEmuWin::AppSettingsVM app_settings{};
     };
 
     struct MEraEmuWinEngineSysCallback : ::MEraEngineSysCallback {
@@ -1222,6 +1223,18 @@ namespace winrt::MEraEmuWin::implementation {
         m_ui_lines.clear();
         check_hresult(m_vsis_noref->Resize(0, 0));
     }
+    void EngineControl::ApplySettings(MEraEmuWin::AppSettingsVM settings) {
+        m_app_settings = settings.DeepClone();
+        // Synchronize settings to engine
+        ExecEngineTask([this](auto&&) {
+            m_sd->app_settings = m_app_settings;
+            auto cfg = m_sd->engine.get_config();
+            cfg.vm_cache_strategy = m_app_settings.EnableJIT() ?
+                M_ERA_ENGINE_VM_CACHE_STRATEGY_FAST_JIT :
+                M_ERA_ENGINE_VM_CACHE_STRATEGY_DISABLED;
+            m_sd->engine.set_config(cfg);
+        });
+    }
     bool EngineControl::IsStarted() {
         return m_sd && m_sd->thread_is_alive.load(std::memory_order_relaxed);
     }
@@ -1366,6 +1379,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_sd->ui_dispatcher_queue = DispatcherQueue::GetForCurrentThread();
         //m_sd->ui_ctrl = get_weak();
         m_sd->ui_ctrl = this;
+        m_sd->app_settings = m_app_settings;
         // Create channels
         auto [ui_task_tx, ui_task_rx] = util::sync::spsc::sync_channel<std::move_only_function<void()>>(64);
         auto [engine_task_tx, engine_task_rx] = util::sync::spsc::sync_channel<std::unique_ptr<EngineThreadTask>>(64);
@@ -1432,8 +1446,7 @@ namespace winrt::MEraEmuWin::implementation {
 
                 // TODO: Enable threaded loading when we upgrade mimalloc to v2.1.9
                 //       (see https://github.com/microsoft/mimalloc/issues/944)
-                const bool threaded_load = std::getenv("MERAEMU_THREADED_LOAD") != nullptr;
-                const bool enable_jit = std::getenv("MERAEMU_ENABLE_JIT") != nullptr;
+                auto& appcfg = sd->app_settings;
 
                 MEraEmuWinEngineSysCallback* callback{};
                 auto builder = [&] {
@@ -1444,11 +1457,8 @@ namespace winrt::MEraEmuWin::implementation {
 
                 {
                     auto cfg = builder.get_config();
-                    if (!threaded_load) {
+                    if (!appcfg.EnableParallelLoading()) {
                         cfg.threads_cnt = 1;
-                    }
-                    if (enable_jit) {
-                        cfg.vm_cache_strategy = M_ERA_ENGINE_VM_CACHE_STRATEGY_FAST_JIT;
                     }
                     builder.set_config(cfg);
                 }
@@ -1566,7 +1576,7 @@ namespace winrt::MEraEmuWin::implementation {
                     auto [erb_tx, erb_rx] = util::sync::spsc::sync_channel<std::tuple<std::filesystem::path, std::unique_ptr<uint8_t[]>, size_t>>(64);
                     std::jthread erb_thread;
                     MEraEngineAsyncErbLoader async_erb_loader = nullptr;
-                    if (threaded_load) {
+                    if (appcfg.EnableParallelLoading()) {
                         // Use async loader from MEraEngineBuilder
                         async_erb_loader = builder.start_async_erb_loader();
                         erb_thread = std::jthread([&, async_erb_loader = std::move(async_erb_loader)] {
@@ -1646,7 +1656,7 @@ namespace winrt::MEraEmuWin::implementation {
                         builder.load_erh(to_string(erh.c_str()).c_str(), { data.get(), size });
                     }
                     builder.finish_load_erh();
-                    if (threaded_load) {
+                    if (appcfg.EnableParallelLoading()) {
                         builder.wait_for_async_loader();
                     }
                     else {

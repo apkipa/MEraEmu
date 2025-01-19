@@ -2892,6 +2892,15 @@ impl<Callback> MEraEngine<Callback> {
 }
 
 impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
+    pub fn get_config(&self) -> &MEraEngineConfig {
+        &self.config
+    }
+
+    pub fn set_config(&mut self, config: MEraEngineConfig) -> Result<(), MEraEngineError> {
+        self.config = config;
+        Ok(())
+    }
+
     pub fn do_execution(
         &mut self,
         run_flag: &AtomicBool,

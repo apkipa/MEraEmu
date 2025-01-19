@@ -1,3 +1,5 @@
+import "AppSettingsVM.idl";
+
 namespace MEraEmuWin {
     runtimeclass EngineUnhandledExceptionEventArgs {
         Windows.Foundation.HResult Code{ get; };
@@ -9,6 +11,7 @@ namespace MEraEmuWin {
         EngineControl();
 
         void ReturnToTitle();
+        void ApplySettings(MEraEmuWin.AppSettingsVM settings);
 
         Boolean IsStarted{ get; };
         Boolean IsDevToolsOpen;

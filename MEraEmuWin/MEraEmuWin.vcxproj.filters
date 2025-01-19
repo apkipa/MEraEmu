@@ -14,6 +14,12 @@
     <Page Include="DevTools\CodeEditControl.xaml">
       <Filter>DevTools</Filter>
     </Page>
+    <Page Include="Settings\MainPage.xaml">
+      <Filter>Settings</Filter>
+    </Page>
+    <Page Include="Settings\GeneralPage.xaml">
+      <Filter>Settings</Filter>
+    </Page>
   </ItemGroup>
   <ItemGroup>
     <Midl Include="App.idl" />
@@ -34,6 +40,7 @@
     <Midl Include="DevTools\SourcesTabBreakpointItem.idl">
       <Filter>DevTools</Filter>
     </Midl>
+    <Midl Include="AppSettingsVM.idl" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp" />
@@ -52,6 +59,7 @@
     <ClInclude Include="MEraEngine.hpp" />
     <ClInclude Include="util.hpp" />
     <ClInclude Include="ScintillaModule.hpp" />
+    <ClInclude Include="Shared.hpp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="Assets\Wide310x150Logo.scale-200.png">

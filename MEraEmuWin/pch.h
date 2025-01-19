@@ -6,16 +6,16 @@
 #include <unknwn.h>
 #include <restrictederrorinfo.h>
 #include <hstring.h>
-#ifdef GetCurrentTime
-#undef GetCurrentTime
-#endif
-
+#include <uxtheme.h>
 #include <d3d11_2.h>
 #include <d2d1_2.h>
 #include <d2d1_2helper.h>
 #include <dwrite_3.h>
 #include <wincodec.h>
 #include <Shlobj.h>
+#ifdef GetCurrentTime
+#undef GetCurrentTime
+#endif
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>

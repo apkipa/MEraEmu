@@ -1,0 +1,12 @@
+namespace MEraEmuWin {
+    [bindable]
+    [default_interface]
+    runtimeclass AppSettingsVM {
+        AppSettingsVM();
+
+        AppSettingsVM DeepClone();
+
+        Boolean EnableParallelLoading;
+        Boolean EnableJIT;
+    };
+}

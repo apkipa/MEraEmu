@@ -1,6 +1,7 @@
 ﻿#include "pch.h"
 #include "MainPage.h"
 #include "MainPage.g.cpp"
+#include "Settings/MainPage.h"
 
 #include <winrt/Tenkai.UI.Xaml.h>
 #include <winrt/Tenkai.UI.ViewManagement.h>
@@ -122,6 +123,21 @@ namespace winrt::MEraEmuWin::implementation {
             }
         });
 
+        {
+            // TODO: Load config from file
+
+            // Override settings from environment variables
+            auto is_truthy_env_var = [](const char* name) {
+                auto p = std::getenv(name);
+                return p && (p[0] == '1' || p[0] == 't' || p[0] == 'T' || p[0] == 'y' || p[0] == 'Y');
+            };
+            m_app_settings.EnableParallelLoading(is_truthy_env_var("MERAEMU_ENABLE_PARALLEL_LOADING"));
+            m_app_settings.EnableJIT(is_truthy_env_var("MERAEMU_ENABLE_JIT"));
+
+            // Apply settings
+            engine_ctrl.ApplySettings(m_app_settings);
+        }
+
         // Automatically start the game engine
         dq.TryEnqueue(DispatcherQueuePriority::Low, [weak_this = get_weak()] {
             auto self = weak_this.get();
@@ -139,9 +155,52 @@ namespace winrt::MEraEmuWin::implementation {
     void MainPage::MenuFile_Exit_Click(IInspectable const&, RoutedEventArgs const&) {
         Tenkai::AppService::Quit();
     }
-    void MainPage::MenuFile_DevTools_Click(IInspectable const&, RoutedEventArgs const&) {
+    void MainPage::MenuHelp_DevTools_Click(IInspectable const&, RoutedEventArgs const&) {
         auto ctrl = MainEngineControl();
         ctrl.IsDevToolsOpen(!ctrl.IsDevToolsOpen());
+    }
+    void MainPage::MenuHelp_Settings_Click(IInspectable const&, RoutedEventArgs const&) {
+        auto main_wnd = Tenkai::UI::Xaml::Window::GetCurrentMain();
+        auto settings_wnd = Tenkai::UI::Xaml::Window();
+        auto settings_main_page = Settings::MainPage();
+        settings_main_page.Settings(m_app_settings);
+        settings_wnd.Content(settings_main_page);
+        settings_wnd.Title(L"设置 - MEraEmu");
+        auto main_hwnd = (HWND)main_wnd.View().Id().Value;
+        auto settings_hwnd = (HWND)settings_wnd.View().Id().Value;
+        RECT rt;
+        GetWindowRect(main_hwnd, &rt);
+        auto xmid = rt.left + (rt.right - rt.left) / 2;
+        auto ymid = rt.top + (rt.bottom - rt.top) / 2;
+        auto width = (rt.right - rt.left) * 0.8;
+        auto height = (rt.bottom - rt.top) * 0.8;
+        SetWindowPos(settings_hwnd, 0, xmid - width / 2, ymid - height / 2, width, height, SWP_NOZORDER);
+        // Make modal
+        SetWindowLongPtrW(settings_hwnd, GWL_EXSTYLE, GetWindowLongPtrW(settings_hwnd, GWL_EXSTYLE) | WS_EX_DLGMODALFRAME);
+        SetWindowLongPtrW(settings_hwnd, GWL_STYLE, WS_POPUPWINDOW | WS_DLGFRAME | WS_THICKFRAME);
+        SetWindowLongPtrW(settings_hwnd, GWLP_HWNDPARENT, (LONG_PTR)main_hwnd);
+        EnableWindow(main_hwnd, false);
+        settings_wnd.Activate();
+        auto tear_down_fn = [=] {
+            EnableWindow(main_hwnd, true);
+            ShowWindow(settings_hwnd, SW_HIDE);
+            DispatcherQueue::GetForCurrentThread().TryEnqueue(DispatcherQueuePriority::Low, [settings_wnd = weak_ref(settings_wnd)] {
+                if (auto wnd = settings_wnd.get()) {
+                    wnd.Close();
+                }
+            });
+            // Apply settings
+            MainEngineControl().ApplySettings(m_app_settings);
+        };
+        settings_wnd.View().Closing([=](auto&&, auto&&) {
+            tear_down_fn();
+        });
+        settings_main_page.KeyDown([=](auto&&, auto&& e) {
+            if (e.Key() == VirtualKey::Escape) {
+                e.Handled(true);
+                tear_down_fn();
+            }
+        });
     }
     void MainPage::MenuHelp_About_Click(IInspectable const&, RoutedEventArgs const&) {
         ShowSimpleContentDialog(L"关于 MEraEmu", hstring(std::format(

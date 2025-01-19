@@ -2,9 +2,9 @@
 
 #pragma once
 
-#include "pch.h"
-
+#ifndef JSON_USE_IMPLICIT_CONVERSIONS
 #define JSON_USE_IMPLICIT_CONVERSIONS 0
+#endif
 
 #include <nlohmann/json.hpp>
 #include <stdatomic.h>
@@ -485,6 +485,8 @@ struct MEraEngine {
         return m_engine;
     }
 
+    MEraEngineConfig get_config() const;
+    void set_config(MEraEngineConfig config) const;
     EraExecutionBreakReason do_execution(std::atomic_bool const& run_flag, uint64_t max_inst_cnt) const;
     //bool get_is_halted();
     void reset_exec_to_ip(EraExecIp ip) const;

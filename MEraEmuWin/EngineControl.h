@@ -2,12 +2,9 @@
 
 #include <winrt/Tenkai.h>
 #include <winrt/Tenkai.UI.Xaml.h>
-#include "winrt/Windows.UI.Xaml.h"
-#include "winrt/Windows.UI.Xaml.Markup.h"
-#include "winrt/Windows.UI.Xaml.Interop.h"
-#include "winrt/Windows.UI.Xaml.Controls.Primitives.h"
 #include "EngineUnhandledExceptionEventArgs.g.h"
 #include "EngineControl.g.h"
+#include "AppSettingsVM.h"
 
 #include "MEraEngine.hpp"
 
@@ -70,6 +67,7 @@ namespace winrt::MEraEmuWin::implementation {
         SingleStepAndHalt,
         CustomFunc,
         CustomFuncAndClearHaltState,
+        //SyncSettings,
     };
 
     struct EngineUIPrintLineDataButton {
@@ -106,6 +104,7 @@ namespace winrt::MEraEmuWin::implementation {
         void InitializeComponent();
 
         void ReturnToTitle();
+        void ApplySettings(MEraEmuWin::AppSettingsVM settings);
         bool IsStarted();
         void IsDevToolsOpen(bool value);
         bool IsDevToolsOpen();
@@ -236,6 +235,7 @@ namespace winrt::MEraEmuWin::implementation {
         util::sync::spsc::Receiver<std::move_only_function<void()>> m_ui_task_rx{ nullptr };
         util::sync::spsc::Sender<std::unique_ptr<EngineThreadTask>> m_engine_task_tx{ nullptr };
 
+        MEraEmuWin::AppSettingsVM m_app_settings;
         EraExecutionBreakReason m_last_execution_break_reason = ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
         event<delegate<EraExecutionBreakReason>> m_ev_EngineExecutionInterrupted;
         Tenkai::UI::Xaml::Window m_devtools_wnd{ nullptr };

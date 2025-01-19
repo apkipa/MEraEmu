@@ -1,0 +1,10 @@
+import "AppSettingsVM.idl";
+
+namespace MEraEmuWin.Settings {
+    [default_interface]
+    runtimeclass MainPage : Windows.UI.Xaml.Controls.Page {
+        MainPage();
+
+        MEraEmuWin.AppSettingsVM Settings;
+    }
+}
