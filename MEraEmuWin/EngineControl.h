@@ -67,7 +67,7 @@ namespace winrt::MEraEmuWin::implementation {
         SingleStepAndHalt,
         CustomFunc,
         CustomFuncAndClearHaltState,
-        //SyncSettings,
+        SyncSettingsWithFunc,
     };
 
     struct EngineUIPrintLineDataButton {

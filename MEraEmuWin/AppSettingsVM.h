@@ -27,6 +27,13 @@ namespace winrt::MEraEmuWin::implementation {
 
         NLOHMANN_DEFINE_TYPE_INTRUSIVE(AppSettingsVM, enable_parallel_loading, enable_jit);
 
+        // Non-midl methods
+        std::string to_json_string() {
+            nlohmann::json j;
+            to_json(j, *this);
+            return j.dump(4);
+        }
+
     private:
         bool enable_parallel_loading = false;
         bool enable_jit = false;

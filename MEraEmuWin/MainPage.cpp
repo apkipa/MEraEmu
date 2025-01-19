@@ -124,15 +124,21 @@ namespace winrt::MEraEmuWin::implementation {
         });
 
         {
-            // TODO: Load config from file
+            // Load config from file
+            LoadConfig();
 
             // Override settings from environment variables
-            auto is_truthy_env_var = [](const char* name) {
+            auto is_truthy_env_var = [](const char* name) -> std::optional<bool> {
                 auto p = std::getenv(name);
-                return p && (p[0] == '1' || p[0] == 't' || p[0] == 'T' || p[0] == 'y' || p[0] == 'Y');
+                if (!p) { return std::nullopt; }
+                return p[0] == '1' || p[0] == 't' || p[0] == 'T' || p[0] == 'y' || p[0] == 'Y';
             };
-            m_app_settings.EnableParallelLoading(is_truthy_env_var("MERAEMU_ENABLE_PARALLEL_LOADING"));
-            m_app_settings.EnableJIT(is_truthy_env_var("MERAEMU_ENABLE_JIT"));
+            if (auto p = is_truthy_env_var("MERAEMU_ENABLE_PARALLEL_LOADING")) {
+                m_app_settings.EnableParallelLoading(*p);
+            }
+            if (auto p = is_truthy_env_var("MERAEMU_ENABLE_JIT")) {
+                m_app_settings.EnableJIT(*p);
+            }
 
             // Apply settings
             engine_ctrl.ApplySettings(m_app_settings);
@@ -181,16 +187,20 @@ namespace winrt::MEraEmuWin::implementation {
         SetWindowLongPtrW(settings_hwnd, GWLP_HWNDPARENT, (LONG_PTR)main_hwnd);
         EnableWindow(main_hwnd, false);
         settings_wnd.Activate();
-        auto tear_down_fn = [=] {
+        auto old_config = std::make_shared<std::string>(m_app_settings.as<implementation::AppSettingsVM>()->to_json_string());
+        auto tear_down_fn = [=, settings_wnd = weak_ref(settings_wnd)] {
             EnableWindow(main_hwnd, true);
             ShowWindow(settings_hwnd, SW_HIDE);
-            DispatcherQueue::GetForCurrentThread().TryEnqueue(DispatcherQueuePriority::Low, [settings_wnd = weak_ref(settings_wnd)] {
+            DispatcherQueue::GetForCurrentThread().TryEnqueue(DispatcherQueuePriority::Low, [=] {
                 if (auto wnd = settings_wnd.get()) {
                     wnd.Close();
                 }
             });
             // Apply settings
             MainEngineControl().ApplySettings(m_app_settings);
+            if (*old_config != m_app_settings.as<implementation::AppSettingsVM>()->to_json_string()) {
+                SaveConfig();
+            }
         };
         settings_wnd.View().Closing([=](auto&&, auto&&) {
             tear_down_fn();
@@ -226,6 +236,29 @@ namespace winrt::MEraEmuWin::implementation {
             );
         }
         catch (...) { std::abort(); }
+    }
+    void MainPage::LoadConfig() {
+        std::wstring file_path = L".\\MEraEmu.config.json";
+        file_handle file{ CreateFileW(file_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr) };
+        if (file) {
+            DWORD size = GetFileSize(file.get(), nullptr);
+            std::vector<char> buf(size);
+            DWORD read;
+            std::ignore = ReadFile(file.get(), buf.data(), size, &read, nullptr);
+            if (read == size) {
+                auto j = nlohmann::json::parse(buf);
+                from_json(j, *m_app_settings.as<implementation::AppSettingsVM>());
+            }
+        }
+    }
+    void MainPage::SaveConfig() {
+        std::wstring file_path = L".\\MEraEmu.config.json";
+        file_handle file{ CreateFileW(file_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr) };
+        if (file) {
+            auto s = m_app_settings.as<implementation::AppSettingsVM>()->to_json_string();
+            DWORD written;
+            WriteFile(file.get(), s.data(), s.size(), &written, nullptr);
+        }
     }
     void MainPage::SwitchTitleBar(bool enable) {
         auto wnd = Tenkai::Window::GetCurrentMain();

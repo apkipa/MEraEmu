@@ -19,6 +19,8 @@ namespace winrt::MEraEmuWin::implementation {
 
     private:
         void BootstrapEngine();
+        void LoadConfig();
+        void SaveConfig();
         void SwitchTitleBar(bool enable);
         void ShowSimpleContentDialog(hstring const& title, hstring const& content);
 

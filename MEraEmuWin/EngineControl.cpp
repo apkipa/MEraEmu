@@ -376,6 +376,7 @@ namespace winrt::MEraEmuWin::implementation {
 
     struct EngineThreadTask {
         EngineThreadTask(EngineThreadTaskKind kind) : kind(kind) {}
+        EngineThreadTask(EngineThreadTaskKind kind, std::move_only_function<void()> f) : kind(kind), f(std::move(f)) {}
         EngineThreadTask(std::move_only_function<void()> f, bool clear_halt = false) :
             kind(clear_halt ? EngineThreadTaskKind::CustomFuncAndClearHaltState : EngineThreadTaskKind::CustomFunc),
             f(std::move(f)) {
@@ -1226,14 +1227,9 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::ApplySettings(MEraEmuWin::AppSettingsVM settings) {
         m_app_settings = settings.DeepClone();
         // Synchronize settings to engine
-        ExecEngineTask([this](auto&&) {
+        QueueEngineTask(std::make_unique<EngineThreadTask>(EngineThreadTaskKind::SyncSettingsWithFunc, [this] {
             m_sd->app_settings = m_app_settings;
-            auto cfg = m_sd->engine.get_config();
-            cfg.vm_cache_strategy = m_app_settings.EnableJIT() ?
-                M_ERA_ENGINE_VM_CACHE_STRATEGY_FAST_JIT :
-                M_ERA_ENGINE_VM_CACHE_STRATEGY_DISABLED;
-            m_sd->engine.set_config(cfg);
-        });
+        }));
     }
     bool EngineControl::IsStarted() {
         return m_sd && m_sd->thread_is_alive.load(std::memory_order_relaxed);
@@ -1455,11 +1451,16 @@ namespace winrt::MEraEmuWin::implementation {
                     return MEraEngineBuilder(std::move(callback_box));
                 }();
 
+                auto update_config_fn = [&](MEraEngineConfig& cfg) {
+                    cfg.threads_cnt = appcfg.EnableParallelLoading() ? 0 : 1;
+                    cfg.vm_cache_strategy = appcfg.EnableJIT() ?
+                        M_ERA_ENGINE_VM_CACHE_STRATEGY_FAST_JIT :
+                        M_ERA_ENGINE_VM_CACHE_STRATEGY_DISABLED;
+                };
+
                 {
                     auto cfg = builder.get_config();
-                    if (!appcfg.EnableParallelLoading()) {
-                        cfg.threads_cnt = 1;
-                    }
+                    update_config_fn(cfg);
                     builder.set_config(cfg);
                 }
 
@@ -1519,7 +1520,7 @@ namespace winrt::MEraEmuWin::implementation {
                     if (task->kind == EngineThreadTaskKind::ReturnToTitle) {
                         return_to_title();
                     }
-                    else if (task->kind == EngineThreadTaskKind::CustomFunc) {
+                    else if (task->kind == EngineThreadTaskKind::CustomFunc || task->kind == EngineThreadTaskKind::CustomFuncAndClearHaltState) {
                         task->f();
                     }
                     else {
@@ -1684,11 +1685,19 @@ namespace winrt::MEraEmuWin::implementation {
                 EraExecutionBreakReason stop_reason = ERA_EXECUTION_BREAK_REASON_CALLBACK_BREAK;
                 uint64_t instructions_to_exec = UINT64_MAX;
                 bool force_exec = false;
+                bool need_update_config = false;
                 // (?) Notify UI thread that engine is about to execute instructions
                 queue_ui_work([sd, stop_reason] {
                     sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
                 });
                 while (sd->ui_is_alive.load(std::memory_order_relaxed)) {
+                    if (need_update_config) {
+                        need_update_config = false;
+                        auto cfg = engine.get_config();
+                        update_config_fn(cfg);
+                        engine.set_config(cfg);
+                    }
+
                     // If not reached max instructions, we treat engine as halted
                     auto is_halted = [&] {
                         return is_execution_break_reason_fatal(stop_reason);
@@ -1801,6 +1810,12 @@ namespace winrt::MEraEmuWin::implementation {
                                 task->f();
                             }
                             clear_halted();
+                        }
+                        else if (task->kind == EngineThreadTaskKind::SyncSettingsWithFunc) {
+                            if (task->f) {
+                                task->f();
+                            }
+                            need_update_config = true;
                         }
                         //run_ui_task(std::move(task), true);
                     } while (!engine_task_rx.is_vacant());
