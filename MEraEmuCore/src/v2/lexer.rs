@@ -189,7 +189,7 @@ impl<'a> EraLexer<'a> {
                 if !is_whitespace(*ch) {
                     break;
                 }
-                if *ch == b';' {
+                if *ch == b';' && !matches!(rest, [b'!' | b'^', b';', ..]) {
                     // Skip comments
                     let pos = memchr::memchr2(b'\r', b'\n', rest);
                     self.i.src_pos += pos.unwrap_or(rest.len());
@@ -297,7 +297,7 @@ impl EraLexerInnerState {
 
         let token = {
             let mut token = site.next_token(mode);
-            if token != EraTokenKind::WhiteSpace {
+            if !matches!(token, EraTokenKind::WhiteSpace | EraTokenKind::Comment) {
                 site.i.last_is_newline = matches!(token, EraTokenKind::LineBreak);
             }
             if site.i.last_is_newline && site.is_suppress_newline() {
@@ -486,8 +486,14 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
                 b'@' => self.match_token2(&[(b'"', StringFormStart)], At),
                 b';' => {
                     // Comments
-                    self.skip_char_while(|x| !matches!(x, b'\r' | b'\n'));
-                    Comment
+                    if self.try_eat_any_u8(b"!^") && self.try_eat_u8(b';') {
+                        // Emuera only - non-comment
+                        Comment
+                    } else {
+                        // Normal comment
+                        self.skip_char_until_newline();
+                        Comment
+                    }
                 }
                 b'#' => NumberSign,
                 b',' => Comma,
@@ -752,6 +758,15 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
                                     }
                                     last_is_newline = false;
                                 }
+                                b';' => {
+                                    if matches!(self.next_char(), Some(b'!' | b'^'))
+                                        && matches!(self.next_char(), Some(b';'))
+                                    {
+                                        // Emuera only - non-comment
+                                    } else {
+                                        self.skip_char_until_newline();
+                                    }
+                                }
                                 _ => {
                                     if !is_whitespace(ch) {
                                         last_is_newline = false;
@@ -954,13 +969,35 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
         }
 
         // Handle normal
-        if let [ch, rest @ ..] = self.src() {
+        if let [ch, _rest @ ..] = self.src() {
             self.append_lexeme(self.src().as_ptr());
             self.i.src_pos += 1;
             return Some(*ch);
         }
 
         None
+    }
+
+    pub fn try_eat_u8(&mut self, ch: u8) -> bool {
+        if self.peek_char() == Some(ch) {
+            self.next_char();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn try_eat_any_u8(&mut self, ch: &[u8]) -> bool {
+        if let Some(c) = self.peek_char() {
+            if ch.contains(&c) {
+                self.next_char();
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     }
 
     pub fn next_utf8_char(&mut self) -> Option<char> {
@@ -1138,6 +1175,17 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
     fn skip_char_while(&mut self, mut predicate: impl FnMut(u8) -> bool) {
         while let Some(ch) = self.peek_char() {
             if !predicate(ch) {
+                break;
+            }
+            self.next_char();
+        }
+    }
+
+    fn skip_char_until_newline(&mut self) {
+        // NOTE: Cannot optimize because we need to handle replacement and
+        //       return this information to the caller.
+        while let Some(ch) = self.peek_char() {
+            if ch == b'\r' || ch == b'\n' {
                 break;
             }
             self.next_char();

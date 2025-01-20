@@ -50,9 +50,12 @@ pub use crate::types::EraCompilerHostFile as MEraEngineHostFile;
 struct InitialVarDesc {
     pub is_string: bool,
     pub dims: EraVarDims,
+    pub src_file: ArcStr,
+    pub src_span: SrcSpan,
     pub is_const: bool,
     pub is_charadata: bool,
     pub is_global: bool,
+    pub is_savedata: bool,
     pub initial_sval: Option<Vec<StrValue>>,
     pub initial_ival: Option<Vec<IntValue>>,
 }
@@ -784,8 +787,24 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         let content = content
             .strip_prefix("\u{feff}".as_bytes())
             .unwrap_or(content);
-        let content = &content.to_str_lossy();
+        let content = &arcstr::ArcStr::from(content.to_str_lossy());
         let filename = ArcStr::from(filename);
+
+        // Add to source map
+        Arc::get_mut(&mut self.ctx.source_map).unwrap().insert(
+            filename.clone(),
+            EraSourceFile {
+                filename: filename.clone(),
+                text: Some(content.clone()),
+                compressed_text: None,
+                cst_root: None,
+                ast_data: None,
+                macro_map: Default::default(),
+                defines: EraDefineScope::new(),
+                kind: EraSourceFileKind::Csv,
+                newline_pos: Vec::new(),
+            },
+        );
 
         // Loads key-value pairs from CSV to variables (*NAME arrays). Optional reverse lookup indices
         // are also created if `kind` is provided.
@@ -915,45 +934,57 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             };
 
         // Adds a system variable.
-        let add_var_i64_str = |this: &mut Self, name: &str, val: &str| -> Result<(), ()> {
-            let val = parse_i64_tail(this, val)?;
-            _ = this.ctx.variables.add_var(EraVarInfo {
-                name: Ascii::new(ArcStr::from(name)),
-                val: ArrayValue::new_int_0darr(val),
-                is_const: true,
-                is_charadata: false,
-                is_global: false,
-                never_trap: true,
-            });
-            Ok(())
-        };
-        let add_var_str = |this: &mut Self, name: &str, val: &str| -> Result<(), ()> {
-            _ = this.ctx.variables.add_var(EraVarInfo {
-                name: Ascii::new(ArcStr::from(name)),
-                val: ArrayValue::new_str_0darr(ArcStr::from(val)),
-                is_const: true,
-                is_charadata: false,
-                is_global: false,
-                never_trap: true,
-            });
-            Ok(())
-        };
-        let add_arr_i64_str = |this: &mut Self, name: &str, val: &str| -> Result<(), ()> {
-            let val = val
-                .split('/')
-                .map(|x| parse_i64_tail(this, x).map(IntValue::new))
-                .collect::<Result<Vec<_>, _>>()?;
-            let val = ArrayValue::new_int_arr(smallvec![val.len() as _], val);
-            _ = this.ctx.variables.add_var(EraVarInfo {
-                name: Ascii::new(ArcStr::from(name)),
-                val,
-                is_const: true,
-                is_charadata: false,
-                is_global: false,
-                never_trap: true,
-            });
-            Ok(())
-        };
+        let add_var_i64_str =
+            |this: &mut Self, name: &str, val: &str, span: SrcSpan| -> Result<(), ()> {
+                let val = parse_i64_tail(this, val)?;
+                _ = this.ctx.variables.add_var(EraVarInfo {
+                    name: Ascii::new(ArcStr::from(name)),
+                    val: ArrayValue::new_int_0darr(val),
+                    src_file: filename.clone(),
+                    src_span: span,
+                    is_const: true,
+                    is_charadata: false,
+                    is_global: false,
+                    is_savedata: false,
+                    never_trap: true,
+                });
+                Ok(())
+            };
+        let add_var_str =
+            |this: &mut Self, name: &str, val: &str, span: SrcSpan| -> Result<(), ()> {
+                _ = this.ctx.variables.add_var(EraVarInfo {
+                    name: Ascii::new(ArcStr::from(name)),
+                    val: ArrayValue::new_str_0darr(ArcStr::from(val)),
+                    src_file: filename.clone(),
+                    src_span: span,
+                    is_const: true,
+                    is_charadata: false,
+                    is_global: false,
+                    is_savedata: false,
+                    never_trap: true,
+                });
+                Ok(())
+            };
+        let add_arr_i64_str =
+            |this: &mut Self, name: &str, val: &str, span: SrcSpan| -> Result<(), ()> {
+                let val = val
+                    .split('/')
+                    .map(|x| parse_i64_tail(this, x).map(IntValue::new))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let val = ArrayValue::new_int_arr(smallvec![val.len() as _], val);
+                _ = this.ctx.variables.add_var(EraVarInfo {
+                    name: Ascii::new(ArcStr::from(name)),
+                    val,
+                    src_file: filename.clone(),
+                    src_span: span,
+                    is_const: true,
+                    is_charadata: false,
+                    is_global: false,
+                    is_savedata: false,
+                    never_trap: true,
+                });
+                Ok(())
+            };
 
         match kind {
             EraCsvLoadKind::_Rename => {
@@ -977,6 +1008,10 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 let rows = Self::parse_csv_loose(content);
                 for row in rows {
                     if let [name, size] = row[..] {
+                        let name_span = {
+                            let offset = content.subslice_offset(name).unwrap();
+                            SrcSpan::new(SrcPos(offset as _), name.len() as _)
+                        };
                         let Ok(size) = size.parse() else {
                             let mut diag =
                                 Diagnostic::with_src(filename.clone(), content.as_bytes());
@@ -1014,6 +1049,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                             continue;
                         }
 
+                        var_desc.src_file = filename.clone();
+                        var_desc.src_span = name_span;
                         var_desc.dims[0] = size;
                         // Apply dimension to associated variables
                         let vars_groups = [
@@ -1374,20 +1411,30 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                     let index_span = SrcSpan::new(SrcPos(offset as _), index.len() as _);
 
                     let result = match index {
-                        "コード" => add_var_i64_str(self, "GAMEBASE_GAMECODE", value),
-                        "バージョン" => add_var_i64_str(self, "GAMEBASE_VERSION", value),
+                        "コード" => {
+                            add_var_i64_str(self, "GAMEBASE_GAMECODE", value, index_span)
+                        }
+                        "バージョン" => {
+                            add_var_i64_str(self, "GAMEBASE_VERSION", value, index_span)
+                        }
                         "バージョン違い認める" => {
-                            add_var_i64_str(self, "GAMEBASE_ALLOWVERSION", value)
+                            add_var_i64_str(self, "GAMEBASE_ALLOWVERSION", value, index_span)
                         }
                         "最初からいるキャラ" => {
-                            add_var_i64_str(self, "GAMEBASE_DEFAULTCHARA", value)
+                            add_var_i64_str(self, "GAMEBASE_DEFAULTCHARA", value, index_span)
                         }
-                        "アイテムなし" => add_var_i64_str(self, "GAMEBASE_NOITEM", value),
-                        "タイトル" => add_var_str(self, "GAMEBASE_TITLE", value.into()),
-                        "作者" => add_var_str(self, "GAMEBASE_AUTHER", value)
-                            .and_then(|_| add_var_str(self, "GAMEBASE_AUTHOR", value)),
-                        "製作年" => add_var_str(self, "GAMEBASE_YEAR", value.into()),
-                        "追加情報" => add_var_str(self, "GAMEBASE_INFO", value.into()),
+                        "アイテムなし" => {
+                            add_var_i64_str(self, "GAMEBASE_NOITEM", value, index_span)
+                        }
+                        "タイトル" => {
+                            add_var_str(self, "GAMEBASE_TITLE", value.into(), index_span)
+                        }
+                        "作者" => add_var_str(self, "GAMEBASE_AUTHER", value, index_span)
+                            .and_then(|_| add_var_str(self, "GAMEBASE_AUTHOR", value, index_span)),
+                        "製作年" => add_var_str(self, "GAMEBASE_YEAR", value.into(), index_span),
+                        "追加情報" => {
+                            add_var_str(self, "GAMEBASE_INFO", value.into(), index_span)
+                        }
                         "ウィンドウタイトル" => {
                             // TODO: Window title
                             let mut diag =
@@ -1431,7 +1478,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 }
 
                 // Add default values
-                add_var_i64_str(self, "GAMEBASE_VERSION", "0").unwrap();
+                add_var_i64_str(self, "GAMEBASE_VERSION", "0", Default::default()).unwrap();
             }
             EraCsvLoadKind::_Replace => {
                 for [index, value] in self.parse_csv::<2>(filename.clone(), content) {
@@ -1439,7 +1486,9 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                     let index_span = SrcSpan::new(SrcPos(offset as _), index.len() as _);
 
                     let result = match index {
-                        "汚れの初期値" => add_arr_i64_str(self, "DEFAULT_STAIN", value),
+                        "汚れの初期値" => {
+                            add_arr_i64_str(self, "DEFAULT_STAIN", value, index_span)
+                        }
                         _ => {
                             // TODO: Handle unknown _Replace.csv line
                             let mut diag =
@@ -1459,7 +1508,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 }
 
                 // Add default values
-                add_arr_i64_str(self, "DEFAULT_STAIN", "0/0/2/1/8").unwrap();
+                add_arr_i64_str(self, "DEFAULT_STAIN", "0/0/2/1/8", Default::default()).unwrap();
             }
             _ => {
                 return Err(MEraEngineError::new(
@@ -1500,9 +1549,12 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 .add_var(EraVarInfo {
                     name: Ascii::new(name.clone()),
                     val,
+                    src_file: var_desc.src_file,
+                    src_span: var_desc.src_span,
                     is_const: var_desc.is_const,
                     is_charadata: var_desc.is_charadata,
                     is_global: var_desc.is_global,
+                    is_savedata: var_desc.is_savedata,
                     never_trap: true,
                 })
                 .is_none()
@@ -1619,7 +1671,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                             ast_data: Some((root_node, nodes)),
                             macro_map,
                             defines: Default::default(),
-                            is_header: false,
+                            kind: EraSourceFileKind::Source,
                             newline_pos: Vec::new(),
                         };
 
@@ -1672,7 +1724,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                             ast_data: None,
                             macro_map: Default::default(),
                             defines: Default::default(),
-                            is_header: false,
+                            kind: EraSourceFileKind::Source,
                             newline_pos,
                         },
                     );
@@ -1748,7 +1800,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             .ctx
             .source_map
             .values()
-            .filter(|x| !x.is_header)
+            .filter(|x| x.kind == EraSourceFileKind::Source)
             .map(|x| x.filename.clone())
             .collect::<Vec<_>>();
         let mut codegen = EraCodeGenerator::new(
@@ -1885,9 +1937,12 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             .add_var(EraVarInfo {
                 name: Ascii::new(name.clone()),
                 val,
+                src_file: Default::default(),
+                src_span: Default::default(),
                 is_const: false,
                 is_charadata: false,
                 is_global: false,
+                is_savedata: false,
                 never_trap: !watch,
             })
             .ok_or_else(|| MEraEngineError::new(format!("variable `{name}` already exists")))?;
@@ -1962,7 +2017,11 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 ast_data: None,
                 macro_map: Default::default(),
                 defines: Default::default(),
-                is_header,
+                kind: if is_header {
+                    EraSourceFileKind::Header
+                } else {
+                    EraSourceFileKind::Source
+                },
                 newline_pos,
             },
         );
@@ -2296,7 +2355,11 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         let mut unresolved_vars = Vec::new();
         let source_map = Arc::clone(&self.ctx.source_map);
 
-        for (i, erh) in source_map.values().filter(|x| x.is_header).enumerate() {
+        for (i, erh) in source_map
+            .values()
+            .filter(|x| x.kind == EraSourceFileKind::Header)
+            .enumerate()
+        {
             self.ctx.active_source = erh.filename.clone();
             let (program_ref, node_arena) = erh.ast_data.as_ref().unwrap();
 
@@ -2471,9 +2534,12 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                     InitialVarDesc {
                         is_string,
                         dims,
+                        src_file: Default::default(),
+                        src_span: Default::default(),
                         is_const,
                         is_charadata,
                         is_global,
+                        is_savedata: false,
                         initial_sval: None,
                         initial_ival: None,
                     },

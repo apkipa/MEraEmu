@@ -944,8 +944,21 @@ namespace winrt::MEraEmuWin::implementation {
             return 0;
         }
         std::unique_ptr<MEraEngineHostFile> on_open_host_file(std::string_view path, bool can_write) override {
+            hstring actual_path;
+            if (path.ends_with(".sav")) {
+                // Try to isolate save file by adding `MEraEmu` to the path
+                auto temp = path.substr(0, path.size() - 4);
+                actual_path = to_hstring(temp) + L".MEraEmu.sav";
+                if (!util::fs::file_exists(actual_path.c_str())) {
+                    actual_path = to_hstring(path);
+                }
+            }
+            else {
+                actual_path = to_hstring(path);
+            }
+
             file_handle fh(CreateFileW(
-                to_hstring(path).c_str(),
+                actual_path.c_str(),
                 GENERIC_READ | (can_write ? GENERIC_WRITE : 0),
                 FILE_SHARE_READ,
                 nullptr,
@@ -1240,7 +1253,6 @@ namespace winrt::MEraEmuWin::implementation {
         if (value) {
             m_devtools_wnd = Tenkai::UI::Xaml::Window();
             auto page = make<DevTools::implementation::MainPage>();
-            auto p = page.as<DevTools::implementation::MainPage>();
             m_devtools_wnd.Content(page);
             UpdateDevToolsWindow();
             m_devtools_wnd.Activate();
@@ -1661,10 +1673,25 @@ namespace winrt::MEraEmuWin::implementation {
                         builder.wait_for_async_loader();
                     }
                     else {
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        auto t1 = t0;
+                        size_t load_count{};
                         while (auto erb_opt = erb_rx.recv()) {
                             if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
                             try_handle_thread_event();
                             auto& [name, data, size] = *erb_opt;
+                            t1 = std::chrono::high_resolution_clock::now();
+                            if (t1 - t0 >= std::chrono::milliseconds(10) || sd->has_execution_error) {
+                                // Update UI loading progress periodically
+                                t0 = t1;
+                                sd->has_execution_error = false;
+                                auto msg = winrt::format(L"Loading ERB ({} / {} loaded) `{}`... ",
+                                    load_count, erbs.size(), name.c_str());
+                                queue_ui_work([&, msg = std::move(msg)] {
+                                    sd->ui_ctrl->RoutineReuseLastLine(msg);
+                                });
+                            }
+                            load_count++;
                             builder.load_erb(to_string(name.c_str()).c_str(), { data.get(), size });
                         }
                     }

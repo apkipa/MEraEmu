@@ -332,7 +332,11 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                     Some(x) => x,
                     None => {
                         // Rebuild AST
-                        let is_header = program.is_header;
+                        let is_header = if program.kind == EraSourceFileKind::Header {
+                            true
+                        } else {
+                            false
+                        };
                         let src = program.text.clone().unwrap_or_else(|| {
                             let compressed = program
                                 .compressed_text
@@ -405,9 +409,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                             .get(Ascii::new_str(name))
                             .map(|x| x.2.as_ref().unwrap())
                             .or_else(|| {
-                                site.o
-                                    .ctx
-                                    .func_entries
+                                (site.o.ctx.func_entries)
                                     .get(Ascii::new_str(name))
                                     .map(|x: &Option<EraFuncInfo<'_>>| x.as_ref().unwrap())
                             });
@@ -688,11 +690,10 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
          -> CompileResult<()> {
             let name_span = var_info.span;
             let name_str = interner.resolve(name);
-            if func_info
+            if let Some(prev_var) = func_info
                 .frame_info
                 .vars
                 .insert(Ascii::new_str(name_str), var_info)
-                .is_some()
             {
                 let mut diag = make_diag_fn();
                 diag.span_err(
@@ -700,24 +701,30 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                     name_span,
                     format!("redefinition of variable `{}`", name_str),
                 );
+                diag.span_note(
+                    Default::default(),
+                    prev_var.span,
+                    "previous definition here",
+                );
                 ctx.i.emit_diag_to(diag, &mut ctx.callback);
                 return Err(());
             }
 
             // Warn about variable shadowing
-            if let Some(var) = ctx.i.variables.get_var(name_str) {
-                // let var_span = var.src_span();
+            if let Some(var_info) = ctx.i.variables.get_var_info_by_name(name_str) {
                 let mut diag = make_diag_fn();
                 diag.span_warn(
                     Default::default(),
                     name_span,
                     "this declaration shadows a global variable with the same name",
                 );
-                // diag.span_note(
-                //     Default::default(),
-                //     var_span,
-                //     "previous definition here",
-                // );
+                if !var_info.src_file.is_empty() {
+                    diag.span_note(
+                        var_info.src_file.clone(),
+                        var_info.src_span,
+                        "previous definition here",
+                    );
+                }
                 ctx.i.emit_diag_to(diag, &mut ctx.callback);
             }
             if (ctx.i.csv_indices).contains_key(Ascii::new_str(name_str)) {
@@ -945,41 +952,45 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
         // Now materialize LOCAL(S), ARG(S) variables
         let mut add_builtin_var = |var_name, var_val: ArrayValue| -> CompileResult<()> {
             let var_kind = var_val.kind();
+            let src_file = self.o.ctx.active_source.clone();
             let (var_idx, _) = self.o.ctx.variables.add_var_force(EraVarInfo {
                 name: Ascii::new(rcstr::format!("{var_name}@{name_str}")),
                 val: var_val,
+                src_file,
+                src_span: name_span,
                 is_const: false,
                 is_charadata: false,
                 is_global: false,
+                is_savedata: false,
                 never_trap: true,
             });
             let var_name_key = self.o.ctx.interner().get_or_intern(var_name);
-            // HACK: Use function name span for now
+            // Use function name span as builtin variable span
             let var_span = name_span;
-            if func_info
-                .frame_info
-                .vars
-                .insert(
-                    Ascii::new_str(var_name),
-                    EraFuncFrameVarInfo {
-                        name: var_name_key,
-                        span: var_span,
-                        is_ref: false,
-                        is_const: false,
-                        is_charadata: false,
-                        in_local_frame: false,
-                        var_idx: var_idx.try_into().unwrap(),
-                        var_kind,
-                        dims_cnt: 1,
-                    },
-                )
-                .is_some()
-            {
+            if let Some(prev_var) = func_info.frame_info.vars.insert(
+                Ascii::new_str(var_name),
+                EraFuncFrameVarInfo {
+                    name: var_name_key,
+                    span: var_span,
+                    is_ref: false,
+                    is_const: false,
+                    is_charadata: false,
+                    in_local_frame: false,
+                    var_idx: var_idx.try_into().unwrap(),
+                    var_kind,
+                    dims_cnt: 1,
+                },
+            ) {
                 let mut diag = make_diag_fn();
                 diag.span_err(
                     Default::default(),
                     name_span,
                     format!("redefinition of variable `{var_name}`"),
+                );
+                diag.span_note(
+                    Default::default(),
+                    prev_var.span,
+                    "previous definition here",
                 );
                 self.o.ctx.i.emit_diag_to(diag, &mut self.o.ctx.callback);
                 return Err(());

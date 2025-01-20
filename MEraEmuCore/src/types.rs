@@ -786,6 +786,18 @@ impl EraMacroMap {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EraSourceFileKind {
+    /// A normal source file.
+    Source,
+    /// A header file.
+    Header,
+    /// A system file.
+    System,
+    /// A csv file.
+    Csv,
+}
+
 #[derive(Debug)]
 pub struct EraSourceFile {
     pub filename: ArcStr,
@@ -803,8 +815,8 @@ pub struct EraSourceFile {
     pub macro_map: EraMacroMap,
     /// The list of `#define`'s.
     pub defines: EraDefineScope,
-    /// Whether the file is a header file.
-    pub is_header: bool,
+    /// The kind of source file.
+    pub kind: EraSourceFileKind,
     /// The list of newline positions (before expansion of macros).
     pub newline_pos: Vec<SrcPos>,
 }
@@ -2641,10 +2653,13 @@ pub struct EraVarPool {
 pub struct EraVarInfo {
     pub name: Ascii<ArcStr>,
     pub val: ArrayValue,
+    pub src_file: ArcStr,
+    pub src_span: SrcSpan,
     // TODO: Compress with modular-bitfield
     pub is_const: bool,
     pub is_charadata: bool,
     pub is_global: bool,
+    pub is_savedata: bool,
     pub never_trap: bool,
 }
 
@@ -2653,9 +2668,12 @@ impl EraVarInfo {
         EraVarInfo {
             name: Ascii::new(name),
             val,
+            src_file: ArcStr::default(),
+            src_span: SrcSpan::default(),
             is_const: false,
             is_charadata: false,
             is_global: false,
+            is_savedata: false,
             never_trap: false,
         }
     }
@@ -2702,26 +2720,24 @@ impl EraVarPool {
     }
 
     #[must_use]
-    pub fn add_var_force(&mut self, info: EraVarInfo) -> (usize, bool) {
-        let is_replaced;
+    pub fn add_var_force(&mut self, info: EraVarInfo) -> (usize, Option<EraVarInfo>) {
+        let replaced_var;
         let (var_idx, info) = match self.var_names.entry(info.name.clone()) {
             hashbrown::hash_map::Entry::Occupied(e) => {
                 // Update existing variable
-                is_replaced = true;
-
                 let var_idx = *e.get();
                 self.init_vars.retain(|x| x.0 != var_idx);
                 self.chara_var_idxs.retain(|&x| x != var_idx);
                 self.normal_var_idxs.retain(|&x| x != var_idx);
+                replaced_var = Some(std::mem::replace(&mut self.vars[var_idx], info));
                 (var_idx, &mut self.vars[var_idx])
             }
             hashbrown::hash_map::Entry::Vacant(e) => {
                 // Add new variable
-                is_replaced = false;
-
                 let var_idx = self.vars.len();
                 e.insert(var_idx);
                 self.vars.push(info);
+                replaced_var = None;
                 (var_idx, &mut self.vars[var_idx])
             }
         };
@@ -2738,7 +2754,7 @@ impl EraVarPool {
             self.normal_var_idxs.push(var_idx);
         }
 
-        (var_idx, is_replaced)
+        (var_idx, replaced_var)
     }
 
     #[must_use]

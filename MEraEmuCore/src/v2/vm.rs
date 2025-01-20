@@ -1329,6 +1329,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         })
     }
 
+    fn routine_save_data(&mut self, save_path: &str) -> anyhow::Result<()> {
+        todo!()
+    }
+
     fn routine_check_data(&mut self, save_path: &str) -> anyhow::Result<CheckDataResult> {
         use crate::v2::savefs::*;
         use binrw::BinReaderExt;

@@ -1814,6 +1814,7 @@ mod tests {
             #FUNCTION
             #DIM DYNAMIC iUpper
             #DIM result, 1, 1 = 0
+            #DIM arg
             ;[SKIPSTART]
             ;#DIM cnt = 100
             ;wdwd

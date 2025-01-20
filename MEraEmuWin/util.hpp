@@ -393,6 +393,12 @@ namespace util {
         }
     }
 
+    namespace fs {
+        inline bool file_exists(const wchar_t* path) {
+            return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+        }
+    }
+
     namespace winrt {
         namespace details {
             inline void __stdcall resume_background_callback(void*, void* context) noexcept try {

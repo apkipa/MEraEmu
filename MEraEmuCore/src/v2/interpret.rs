@@ -272,6 +272,16 @@ impl<'ctx, 'i, 'n, T: EraEmitDiagnostic + ?Sized> EraInterpreter<'ctx, 'i, 'n, T
                         let rhs = self.unwrap_int(rhs, rhs_span)?;
                         ScalarValue::Int((lhs >= rhs) as _)
                     }
+                    Token::BitShiftL => {
+                        let lhs = self.unwrap_int(lhs, lhs_span)?;
+                        let rhs = self.unwrap_int(rhs, rhs_span)?;
+                        ScalarValue::Int(lhs.wrapping_shl(rhs as _))
+                    }
+                    Token::BitShiftR => {
+                        let lhs = self.unwrap_int(lhs, lhs_span)?;
+                        let rhs = self.unwrap_int(rhs, rhs_span)?;
+                        ScalarValue::Int(lhs.wrapping_shr(rhs as _))
+                    }
                     _ => {
                         let mut diag = self.make_diag();
                         diag.span_err(Default::default(), op_span, "invalid binary operator");
@@ -715,9 +725,12 @@ impl<'ctx, 'i, 'n, T: EraEmitDiagnostic + ?Sized> EraInterpreter<'ctx, 'i, 'n, T
             var_info: EraVarInfo {
                 name: Ascii::new(self.ctx.node_cache.interner().resolve(name_key).into()),
                 val: var_val,
+                src_file: Default::default(),
+                src_span: name_span,
                 is_const,
                 is_charadata,
                 is_global,
+                is_savedata,
                 never_trap: true,
             },
             is_ref,
