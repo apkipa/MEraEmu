@@ -20,12 +20,24 @@ namespace winrt::MEraEmuWin::implementation {
             return *clone;
         }
 
-        bool EnableParallelLoading() { return enable_parallel_loading; }
-        void EnableParallelLoading(bool value) { enable_parallel_loading = value; }
-        bool EnableJIT() { return enable_jit; }
-        void EnableJIT(bool value) { enable_jit = value; }
+#define GenGetSetter(type, name, member)    \
+        type name() { return member; }      \
+        void name(type value) { member = value; }
 
-        NLOHMANN_DEFINE_TYPE_INTRUSIVE(AppSettingsVM, enable_parallel_loading, enable_jit);
+        // General
+        GenGetSetter(bool, EnableParallelLoading, enable_parallel_loading);
+        GenGetSetter(bool, EnableJIT, enable_jit);
+
+        // Game
+        GenGetSetter(uint32_t, SaveDataCount, save_data_count);
+        GenGetSetter(bool, EnableAutoSave, enable_auto_save);
+
+        NLOHMANN_DEFINE_TYPE_INTRUSIVE(AppSettingsVM,
+            // General
+            enable_parallel_loading, enable_jit,
+            // Game
+            save_data_count, enable_auto_save
+        );
 
         // Non-midl methods
         std::string to_json_string() {
@@ -35,8 +47,13 @@ namespace winrt::MEraEmuWin::implementation {
         }
 
     private:
+        // General
         bool enable_parallel_loading = false;
         bool enable_jit = false;
+
+        // Game
+        uint32_t save_data_count = 20;
+        bool enable_auto_save = true;
     };
 }
 

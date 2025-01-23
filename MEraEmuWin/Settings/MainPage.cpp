@@ -20,6 +20,7 @@ namespace winrt::MEraEmuWin::Settings::implementation {
         auto general_nvi = GeneralNVI();
         general_nvi.Tag(box_value(xaml_typename<MEraEmuWin::Settings::GeneralPage>()));
         nav_view.SelectedItem(general_nvi);
+        GameNVI().Tag(box_value(xaml_typename<MEraEmuWin::Settings::GamePage>()));
     }
     void MainPage::NavView_SelectionChanged(muxc::NavigationView const&, muxc::NavigationViewSelectionChangedEventArgs const& e) {
         auto selected_item = e.SelectedItemContainer();

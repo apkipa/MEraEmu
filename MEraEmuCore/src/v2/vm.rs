@@ -21,7 +21,7 @@ use crate::{
         number::formatting::csharp_format_i64,
         random::SimpleUniformGenerator,
         rcstr::{self, ArcStr, RcStr},
-        Ascii,
+        AnyhowExt, Ascii,
     },
     v2::routines,
 };
@@ -553,7 +553,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                     diag.span_err(
                         chunk.name.clone(),
                         chunk.lookup_src(ip.offset as usize).unwrap_or_default(),
-                        err.to_string(),
+                        format!("{err:?}"),
                     );
                 } else {
                     diag.span_err(
@@ -646,7 +646,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVmExecSite<'ctx, 'i, 's, Ca
             index: ctx
                 .variables
                 .get_var_idx("RESULT")
-                .context("variable `RESULT` not found")?,
+                .context_unlikely("variable `RESULT` not found")?,
         };
         ctx.variables
             .get_var_by_idx_mut(var_result_place.index as usize)
@@ -657,7 +657,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVmExecSite<'ctx, 'i, 's, Ca
             index: ctx
                 .variables
                 .get_var_idx("RESULTS")
-                .context("variable `RESULTS` not found")?,
+                .context_unlikely("variable `RESULTS` not found")?,
         };
         ctx.variables
             .get_var_by_idx_mut(var_results_place.index as usize)
@@ -693,10 +693,13 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVmExecSite<'ctx, 'i, 's, Ca
     /// Rebuilds the execution site to point to the current function being executed.
     fn remake_site(&mut self) -> anyhow::Result<()> {
         let o = unsafe { self.optr.as_mut() };
-        let cur_frame = o.frames.last_mut().context("no function to execute")?;
+        let cur_frame = o
+            .frames
+            .last_mut()
+            .context_unlikely("no function to execute")?;
         let cur_chunk = (self.o.ctx.bc_chunks)
             .get(cur_frame.ip.chunk as usize)
-            .context("chunk not found")?;
+            .context_unlikely("chunk not found")?;
         self.i = &mut o.inner;
         self.o.stack = TailVecRef::new(&mut o.stack, cur_frame.stack_start as _);
         self.o.var_stack = &mut o.var_stack;
@@ -767,7 +770,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         place: VariablePlaceRef,
     ) -> anyhow::Result<&ArrayValue> {
         self.resolve_variable_place(place)
-            .with_context(|| format!("array {:?} not found", place))
+            .with_context_unlikely(|| format!("array {:?} not found", place))
     }
 
     pub fn resolve_variable_place_mut(
@@ -787,7 +790,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         place: VariablePlaceRef,
     ) -> anyhow::Result<&mut ArrayValue> {
         self.resolve_variable_place_mut(place)
-            .with_context(|| format!("array {:?} not found", place))
+            .with_context_unlikely(|| format!("array {:?} not found", place))
     }
 
     /// Retrieves a variable in the current execution scope.
@@ -815,33 +818,33 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
     pub fn get_global_var_int(&self, name: &str) -> anyhow::Result<&ArrIntValue> {
         let var = (self.ctx.variables)
             .get_var(name)
-            .with_context(|| format!("variable `{}` not found", name))?;
+            .with_context_unlikely(|| format!("variable `{}` not found", name))?;
         var.as_arrint()
-            .with_context(|| format!("variable `{}` is not ArrInt", name))
+            .with_context_unlikely(|| format!("variable `{}` is not ArrInt", name))
     }
 
     pub fn get_global_var_str(&self, name: &str) -> anyhow::Result<&ArrStrValue> {
         let var = (self.ctx.variables)
             .get_var(name)
-            .with_context(|| format!("variable `{}` not found", name))?;
+            .with_context_unlikely(|| format!("variable `{}` not found", name))?;
         var.as_arrstr()
-            .with_context(|| format!("variable `{}` is not ArrStr", name))
+            .with_context_unlikely(|| format!("variable `{}` is not ArrStr", name))
     }
 
     pub fn get_global_var_int_mut(&mut self, name: &str) -> anyhow::Result<&mut ArrIntValue> {
         let var = (self.ctx.variables)
             .get_var_mut(name)
-            .with_context(|| format!("variable `{}` not found", name))?;
+            .with_context_unlikely(|| format!("variable `{}` not found", name))?;
         var.as_arrint_mut()
-            .with_context(|| format!("variable `{}` is not ArrInt", name))
+            .with_context_unlikely(|| format!("variable `{}` is not ArrInt", name))
     }
 
     pub fn get_global_var_str_mut(&mut self, name: &str) -> anyhow::Result<&mut ArrStrValue> {
         let var = (self.ctx.variables)
             .get_var_mut(name)
-            .with_context(|| format!("variable `{}` not found", name))?;
+            .with_context_unlikely(|| format!("variable `{}` not found", name))?;
         var.as_arrstr_mut()
-            .with_context(|| format!("variable `{}` is not ArrStr", name))
+            .with_context_unlikely(|| format!("variable `{}` is not ArrStr", name))
     }
 
     pub unsafe fn get_global_var_int_mut_unchecked(
@@ -850,9 +853,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
     ) -> anyhow::Result<&mut ArrIntValue> {
         let var = (self.ctx.variables)
             .get_var(name)
-            .with_context(|| format!("variable `{}` not found", name))?;
+            .with_context_unlikely(|| format!("variable `{}` not found", name))?;
         var.as_arrint_mut_unchecked()
-            .with_context(|| format!("variable `{}` is not ArrInt", name))
+            .with_context_unlikely(|| format!("variable `{}` is not ArrInt", name))
     }
 
     pub unsafe fn get_global_var_str_mut_unchecked(
@@ -861,9 +864,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
     ) -> anyhow::Result<&mut ArrStrValue> {
         let var = (self.ctx.variables)
             .get_var(name)
-            .with_context(|| format!("variable `{}` not found", name))?;
+            .with_context_unlikely(|| format!("variable `{}` not found", name))?;
         var.as_arrstr_mut_unchecked()
-            .with_context(|| format!("variable `{}` is not ArrStr", name))
+            .with_context_unlikely(|| format!("variable `{}` is not ArrStr", name))
     }
 
     pub fn get_variable_name_from_ptr(&self, value: *const ()) -> Option<&str> {
@@ -922,6 +925,8 @@ macro_rules! view_stack_inner_item {
         let $var = match $invals[0].as_unpacked() {
             RefFlatStackValue::Int(x) => x.val,
             v => {
+                crate::util::cold();
+
                 let msg = format!("expected an integer, got {:?}", v);
                 let mut diag = Diagnostic::new();
                 diag.span_err($s.o.cur_filename(), $s.o.cur_bc_span(), msg);
@@ -935,6 +940,8 @@ macro_rules! view_stack_inner_item {
         let $var = match $invals[0].as_unpacked() {
             RefFlatStackValue::Str(x) => &x.val,
             v => {
+                crate::util::cold();
+
                 let msg = format!("expected a string, got {:?}", v);
                 let mut diag = Diagnostic::new();
                 diag.span_err($s.o.cur_filename(), $s.o.cur_bc_span(), msg);
@@ -948,6 +955,8 @@ macro_rules! view_stack_inner_item {
         let $var = match $invals[0].as_unpacked() {
             RefFlatStackValue::ArrRef(x) => *x,
             v => {
+                crate::util::cold();
+
                 let msg = format!("expected an array reference, got {:?}", v);
                 let mut diag = Diagnostic::new();
                 diag.span_err($s.o.cur_filename(), $s.o.cur_bc_span(), msg);
@@ -961,6 +970,8 @@ macro_rules! view_stack_inner_item {
         let $var = match $invals[0].as_unpacked() {
             RefFlatStackValue::Int(x) => x.val != 0,
             v => {
+                crate::util::cold();
+
                 let msg = format!("expected an integer, got {:?}", v);
                 let mut diag = Diagnostic::new();
                 diag.span_err($s.o.cur_filename(), $s.o.cur_bc_span(), msg);
@@ -978,16 +989,7 @@ macro_rules! view_stack {
         let items_count: usize = items_counts.iter().sum();
         let $read_count = items_count;
         let stack_len = $s.o.stack.len();
-        if stack_len < items_count {
-            // let mut diag = Diagnostic::new();
-            // diag.span_err(
-            //     $s.cur_filename(),
-            //     $s.cur_bc_span(),
-            //     "function stack underflow",
-            // );
-            // $s.ctx.emit_diag(diag);
-            // $s.break_reason = EraExecutionBreakReason::InternalError;
-            // return Err(FireEscapeError($s.break_reason).into());
+        if crate::util::unlikely(stack_len < items_count) {
             return Err(anyhow::anyhow!("function stack underflow"));
         }
         let mut _offset = 0;
@@ -1004,15 +1006,17 @@ macro_rules! resolve_array_inner_item {
     ($s:expr, $var:ident) => {
         let $var = $s
             .resolve_variable_place($var)
-            .with_context(|| format!("array {:?} not found", $var))?;
+            .with_context_unlikely(|| format!("array {:?} not found", $var))?;
     };
     ($s:expr, $var:ident:i) => {
         let $var =
             $s.o.resolve_variable_place($var)
-                .with_context(|| format!("array {:?} not found", $var))?;
+                .with_context_unlikely(|| format!("array {:?} not found", $var))?;
         let $var = match $var.as_unpacked() {
             FlatArrayValueRef::ArrInt(x) => x,
             FlatArrayValueRef::ArrStr(_) => {
+                crate::util::cold();
+
                 anyhow::bail!("expected ArrInt, got ArrStr");
             }
         };
@@ -1020,10 +1024,12 @@ macro_rules! resolve_array_inner_item {
     ($s:expr, $var:ident:s) => {
         let $var =
             $s.o.resolve_variable_place($var)
-                .with_context(|| format!("array {:?} not found", $var))?;
+                .with_context_unlikely(|| format!("array {:?} not found", $var))?;
         let $var = match $var.as_unpacked() {
             FlatArrayValueRef::ArrStr(x) => x,
             FlatArrayValueRef::ArrInt(_) => {
+                crate::util::cold();
+
                 anyhow::bail!("expected ArrStr, got ArrInt");
             }
         };
@@ -1031,7 +1037,7 @@ macro_rules! resolve_array_inner_item {
     ($s:expr, $var:ident:a) => {
         let $var = $s
             .resolve_variable_place($var)
-            .with_context(|| format!("array {:?} not found", $var))?;
+            .with_context_unlikely(|| format!("array {:?} not found", $var))?;
     };
 }
 
@@ -1039,11 +1045,11 @@ macro_rules! resolve_array_inner_post_item {
     ($s:expr, $var:ident;$varidx:expr) => {
         let $var = $var
             .flat_get($varidx as _)
-            .context("invalid indices into array")?;
+            .context_unlikely("invalid indices into array")?;
     };
     ($s:expr, $var:ident;$varidx:expr;$dimpos:expr) => {
         let $var = MaskedArr::try_new($var, $varidx as _, $dimpos as _)
-            .context("invalid indices into array")?;
+            .context_unlikely("invalid indices into array")?;
     };
 }
 
@@ -1051,15 +1057,17 @@ macro_rules! resolve_array_mut_unsafe_inner_item {
     ($s:expr, $var:ident) => {
         let $var = $s
             .resolve_variable_place($var)
-            .with_context(|| format!("array {:?} not found", $var))?;
+            .with_context_unlikely(|| format!("array {:?} not found", $var))?;
     };
     ($s:expr, $var:ident:i) => {
         let $var =
             $s.o.resolve_variable_place($var)
-                .with_context(|| format!("array {:?} not found", $var))?;
+                .with_context_unlikely(|| format!("array {:?} not found", $var))?;
         let $var = match unsafe { $var.as_unpacked_mut_unchecked() } {
             FlatArrayValueRefMut::ArrInt(x) => x,
             FlatArrayValueRefMut::ArrStr(_) => {
+                crate::util::cold();
+
                 anyhow::bail!("expected ArrInt, got ArrStr");
             }
         };
@@ -1067,10 +1075,12 @@ macro_rules! resolve_array_mut_unsafe_inner_item {
     ($s:expr, $var:ident:s) => {
         let $var =
             $s.o.resolve_variable_place($var)
-                .with_context(|| format!("array {:?} not found", $var))?;
+                .with_context_unlikely(|| format!("array {:?} not found", $var))?;
         let $var = match unsafe { $var.as_unpacked_mut_unchecked() } {
             FlatArrayValueRefMut::ArrStr(x) => x,
             FlatArrayValueRefMut::ArrInt(_) => {
+                crate::util::cold();
+
                 anyhow::bail!("expected ArrStr, got ArrInt");
             }
         };
@@ -1078,7 +1088,7 @@ macro_rules! resolve_array_mut_unsafe_inner_item {
     ($s:expr, $var:ident:a) => {
         let $var =
             $s.o.resolve_variable_place($var)
-                .with_context(|| format!("array {:?} not found", $var))?;
+                .with_context_unlikely(|| format!("array {:?} not found", $var))?;
     };
 }
 
@@ -1086,11 +1096,11 @@ macro_rules! resolve_array_mut_unsafe_inner_post_item {
     ($s:expr, $var:ident;$varidx:expr) => {
         let $var = $var
             .flat_get_mut($varidx as _)
-            .context("invalid indices into array")?;
+            .context_unlikely("invalid indices into array")?;
     };
     ($s:expr, $var:ident;$varidx:expr;$dimpos:expr) => {
         let mut $var = MaskedArr::try_new($var, $varidx as _, $dimpos as _)
-            .context("invalid indices into array")?;
+            .context_unlikely("invalid indices into array")?;
     };
 }
 
@@ -1115,7 +1125,7 @@ macro_rules! resolve_array_mut_unsafe {
             let _check_equality = [$(($var, stringify!($var))),*];
             for i in 1.._check_equality.len() {
                 for j in 0..i {
-                    if _check_equality[i].0 == _check_equality[j].0 {
+                    if crate::util::unlikely(_check_equality[i].0 == _check_equality[j].0) {
                         anyhow::bail!("variable collision: {:?} versus {:?}", _check_equality[i].1, _check_equality[j].1);
                     }
                 }
@@ -1145,7 +1155,7 @@ macro_rules! resolve_array {
 macro_rules! resolve_array_kind {
     ($s:expr, $var:ident) => {
         $s.o.resolve_variable_place($var)
-            .with_context(|| format!("array {:?} not found", $var))?
+            .with_context_unlikely(|| format!("array {:?} not found", $var))?
             .kind()
     };
 }
@@ -1167,6 +1177,8 @@ impl<C> ControlFlowExt<(), C> for ControlFlow<(), C> {
         match self {
             ControlFlow::Continue(x) => Ok(x),
             ControlFlow::Break(_) => {
+                crate::util::cold();
+
                 Err(FireEscapeError(EraExecutionBreakReason::CallbackBreak).into())
             }
         }
@@ -1175,6 +1187,7 @@ impl<C> ControlFlowExt<(), C> for ControlFlow<(), C> {
 
 #[derive(Debug)]
 pub struct CheckSaveHeaderResult {
+    pub save_type: crate::v2::savefs::EraSaveFileType,
     pub status: i64,
     pub timestamp: u64,
     pub save_info: String,
@@ -1183,7 +1196,7 @@ pub struct CheckSaveHeaderResult {
 #[derive(Debug)]
 pub struct LoadDataResult {
     pub file_exists: bool,
-    pub charas_count: u32,
+    pub charas_count: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -1205,10 +1218,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         if version != 1808 {
             bail!("unsupported version {version}");
         }
-        let save_file_type = save_header.file_type;
-        if !matches!(save_file_type, EraSaveFileType::Normal) {
-            bail!("invalid save file type {save_file_type:?}");
-        }
+        let save_type = save_header.file_type;
+        // if !matches!(save_type, EraSaveFileType::Normal) {
+        //     bail!("invalid save file type {save_file_type:?}");
+        // }
 
         let get_var_i32_0d = |name| {
             (self.ctx.variables.get_var(name)).and_then(|x| x.as_arrint().map(|x| x.vals[0].val))
@@ -1220,6 +1233,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         let game_code = save_header.game_code;
         if !(game_code == 0 || game_code == cur_game_code) {
             return Ok(CheckSaveHeaderResult {
+                save_type,
                 status: 2,
                 timestamp: 0,
                 save_info: String::new(),
@@ -1229,6 +1243,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         let game_ver = save_header.game_version;
         if !(game_ver >= cur_game_min_ver || game_ver == cur_game_ver) {
             return Ok(CheckSaveHeaderResult {
+                save_type,
                 status: 3,
                 timestamp: 0,
                 save_info: String::new(),
@@ -1238,13 +1253,19 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         let timestamp = 0;
         let save_info = save_header.save_info;
         Ok(CheckSaveHeaderResult {
+            save_type,
             status: 0,
             timestamp,
             save_info,
         })
     }
 
-    fn routine_load_data(&mut self, save_path: &str) -> anyhow::Result<LoadDataResult> {
+    fn routine_load_data(
+        &mut self,
+        save_path: &str,
+        reset: bool,
+        expected_file_type: crate::v2::savefs::EraSaveFileType,
+    ) -> anyhow::Result<LoadDataResult> {
         use crate::util::io::CSharpBinaryReader;
         use crate::v2::savefs::*;
         use anyhow::bail;
@@ -1254,71 +1275,93 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         if !self.ctx.callback.on_check_host_file_exists(save_path)? {
             return Ok(LoadDataResult {
                 file_exists: false,
-                charas_count: 0,
+                charas_count: None,
             });
         }
         let file = self.ctx.callback.on_open_host_file(save_path, false)?;
         let mut file = std::io::BufReader::new(file);
 
         let save_header: EraSaveFileHeader = file.read_le()?;
-        _ = self.routine_check_save_header(save_header)?;
+        let CheckSaveHeaderResult {
+            save_type: file_type,
+            ..
+        } = self.routine_check_save_header(save_header)?;
 
-        self.routine_reset_data()?;
-
-        // Load character variables
-        let charas_count = file
-            .read_i64()?
-            .try_into()
-            .context("invalid character count")?;
-        let old_charas_cap = (self.ctx.variables)
-            .charas_var_capacity()
-            .context("no chara variables")?;
-        if charas_count > old_charas_cap {
-            // Grow chara variables
-            use crate::v2::engine::CHARA_CAP_GROWTH_STEP;
-            let grow_count = (charas_count - old_charas_cap + CHARA_CAP_GROWTH_STEP - 1)
-                / CHARA_CAP_GROWTH_STEP
-                * CHARA_CAP_GROWTH_STEP;
-            self.ctx.variables.grow_charas_var_capacity(grow_count);
+        if reset {
+            // Reset data before loading
+            self.routine_reset_data()?;
         }
-        for chara_i in 0..charas_count {
-            loop {
-                let var_type =
-                    EraSaveDataType::from_u8(file.read_u8()?).context("invalid save data type")?;
-                match var_type {
-                    EraSaveDataType::Separator => continue,
-                    EraSaveDataType::EOC | EraSaveDataType::EOF => break,
-                    _ => {
-                        let var_name = file.read_utf16_string()?;
-                        let var = (self.ctx.variables)
-                            .get_var_info_by_name_mut(&var_name)
-                            .with_context(|| format!("variable `{}` does not exist", var_name))?;
-                        if !var.is_charadata {
-                            bail!("variable `{}` is not CHARADATA", var_name);
+
+        // Check save file type
+        if file_type != expected_file_type {
+            anyhow::bail!("invalid save file type {file_type:?}, expected {expected_file_type:?}");
+        }
+
+        let charas_count = if file_type == EraSaveFileType::Normal {
+            // Load character variables
+            let charas_count = file
+                .read_i64()?
+                .try_into()
+                .context_unlikely("invalid character count")?;
+            let old_charas_cap = (self.ctx.variables)
+                .charas_var_capacity()
+                .context_unlikely("no chara variables")?;
+            if charas_count > old_charas_cap {
+                // Grow chara variables
+                use crate::v2::engine::CHARA_CAP_GROWTH_STEP;
+                let grow_count = (charas_count - old_charas_cap + CHARA_CAP_GROWTH_STEP - 1)
+                    / CHARA_CAP_GROWTH_STEP
+                    * CHARA_CAP_GROWTH_STEP;
+                self.ctx.variables.grow_charas_var_capacity(grow_count);
+            }
+            for chara_i in 0..charas_count {
+                loop {
+                    let var_type = EraSaveDataType::from_u8(file.read_u8()?)
+                        .context_unlikely("invalid save data type")?;
+                    match var_type {
+                        EraSaveDataType::Separator => continue,
+                        EraSaveDataType::EOC | EraSaveDataType::EOF => break,
+                        _ => {
+                            let var_name = file.read_utf16_string()?;
+                            let var = (self.ctx.variables)
+                                .get_var_info_by_name_mut(&var_name)
+                                .with_context_unlikely(|| {
+                                    format!("variable `{}` does not exist", var_name)
+                                })?;
+                            if !var.is_charadata {
+                                bail!("variable `{}` is not CHARADATA", var_name);
+                            }
+                            file.read_var(var_type, var, Some(chara_i as _))
+                                .with_context_unlikely(|| {
+                                    format!("read variable `{}` failed", var_name)
+                                })?;
                         }
-                        file.read_var(var_type, var, Some(chara_i as _))
-                            .with_context(|| format!("read variable `{}` failed", var_name))?;
                     }
                 }
             }
-        }
+            Some(charas_count)
+        } else {
+            None
+        };
 
         // Load normal variables
         loop {
-            let var_type =
-                EraSaveDataType::from_u8(file.read_u8()?).context("invalid save data type")?;
+            let var_type = EraSaveDataType::from_u8(file.read_u8()?)
+                .context_unlikely("invalid save data type")?;
             match var_type {
                 EraSaveDataType::EOF => break,
                 _ => {
                     let var_name = file.read_utf16_string()?;
                     let var = (self.ctx.variables)
                         .get_var_info_by_name_mut(&var_name)
-                        .with_context(|| format!("variable `{}` does not exist", var_name))?;
+                        .with_context_unlikely(|| {
+                            format!("variable `{}` does not exist", var_name)
+                        })?;
                     if var.is_charadata {
                         bail!("variable `{}` is CHARADATA", var_name);
                     }
                     file.read_var(var_type, var, None)
-                        .with_context(|| format!("read variable `{}` failed", var_name))?;
+                        .with_context_unlikely(|| format!("read variable `{}` failed", var_name))?;
                 }
             }
         }
@@ -1329,8 +1372,83 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         })
     }
 
-    fn routine_save_data(&mut self, save_path: &str) -> anyhow::Result<()> {
-        todo!()
+    fn routine_save_data(
+        &mut self,
+        save_path: &str,
+        save_info: &str,
+        charas_count: u32,
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryWriter;
+        use crate::v2::savefs::*;
+        use binrw::BinWrite;
+
+        let file = self.ctx.callback.on_open_host_file(save_path, true)?;
+        let mut file = std::io::BufWriter::new(file);
+
+        let game_code = (self.ctx.variables)
+            .get_var_i_0("GAMEBASE_GAMECODE")
+            .unwrap_or(0);
+        let game_ver = (self.ctx.variables)
+            .get_var_i_0("GAMEBASE_VERSION")
+            .unwrap_or(0);
+
+        // Write save file header
+        let header = EraSaveFileHeader {
+            version: 1808,
+            data: Vec::new(),
+            file_type: EraSaveFileType::Normal,
+            game_code,
+            game_version: game_ver,
+            save_info: save_info.to_owned(),
+        };
+        header.write_le(&mut file)?;
+
+        // Write charas variables
+        file.write_i64(charas_count as _)?;
+        for chara_i in 0..charas_count {
+            for var in self.ctx.variables.chara_vars_iter() {
+                if !var.is_savedata || !var.is_charadata || var.is_global {
+                    continue;
+                }
+
+                let is_str = var.val.is_arrstr();
+                let is_nodim = routines::is_chara_nodim(var.name.as_ref());
+                let var_dims_cnt = var.val.dims_cnt() - 1 - (is_nodim as usize);
+                let var_type = EraSaveDataType::new_var(is_str, var_dims_cnt)
+                    .with_context_unlikely(|| format!("cannot save variable `{}`", var.name))?;
+                file.write_u8(var_type as _)?;
+                file.write_utf16_string(var.name.as_ref())?;
+                file.write_var(var_type, var, Some(chara_i as _))?;
+            }
+
+            // Write separator
+            file.write_u8(EraSaveDataType::EOC as _)?;
+        }
+
+        // Write normal variables
+        for var in self.ctx.variables.iter() {
+            if !var.is_savedata || var.is_charadata || var.is_global {
+                continue;
+            }
+
+            let is_str = var.val.is_arrstr();
+            let var_dims_cnt = var.val.dims_cnt();
+            let var_type = EraSaveDataType::new_var(is_str, var_dims_cnt)
+                .with_context_unlikely(|| format!("cannot save variable `{}`", var.name))?;
+            file.write_u8(var_type as _)?;
+            file.write_utf16_string(var.name.as_ref())?;
+            file.write_var(var_type, var, None)?;
+        }
+
+        // Write EOF
+        file.write_u8(EraSaveDataType::EOF as _)?;
+
+        Ok(())
+    }
+
+    fn routine_save_global_data(&mut self, save_path: &str) -> anyhow::Result<()> {
+        // todo!()
+        anyhow::bail!("routine_save_global_data not yet implemented")
     }
 
     fn routine_check_data(&mut self, save_path: &str) -> anyhow::Result<CheckDataResult> {
@@ -1349,6 +1467,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
 
         let save_header: EraSaveFileHeader = file.read_le()?;
         let result = self.routine_check_save_header(save_header)?;
+        if result.save_type != EraSaveFileType::Normal {
+            anyhow::bail!("invalid save file type {:?}", result.save_type);
+        }
 
         Ok(CheckDataResult {
             status: result.status,
@@ -1523,6 +1644,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             .get_index(func_idx)
             .and_then(|(&k, v)| v.as_ref().map(|v| (k, v)))
         else {
+            crate::util::cold();
+
             let msg = format!("function index {} not found", func_idx);
             let mut diag = Diagnostic::new();
             diag.span_err(self.o.cur_filename(), self.o.cur_bc_span(), msg);
@@ -1544,6 +1667,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let args_cnt = args_cnt as usize;
         let params_cnt = func_info.frame_info.args.len();
         if args_cnt != params_cnt {
+            crate::util::cold();
+
             let msg = format!(
                 "function `{}` expects {} arguments, but got {}. Broken codegen?",
                 func_name, params_cnt, args_cnt
@@ -1558,6 +1683,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         // Check call stack depth
         let o = unsafe { self.optr.as_mut() };
         if o.frames.len() >= MAX_CALL_DEPTH {
+            crate::util::cold();
+
             let mut diag = Diagnostic::new();
             diag.span_err(
                 self.o.cur_filename(),
@@ -1635,6 +1762,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                     })
             }
             v => {
+                crate::util::cold();
+
                 let msg = format!("expected a function index, got {:?}", v);
                 let mut diag = Diagnostic::new();
                 diag.span_err(self.o.cur_filename(), self.o.cur_bc_span(), msg);
@@ -1662,6 +1791,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 match (arg_pack[0].as_unpacked(), arg_pack[1].as_unpacked()) {
                     (RefFlatStackValue::ArrRef(_), RefFlatStackValue::Int(idx)) => {
                         if idx.val < 0 {
+                            crate::util::cold();
+
                             return Err(anyhow::anyhow!("array index {} is negative", idx.val));
                         }
                         Ok(ArgPackKind::ArrIdx(&arg_pack[0], idx.val as _))
@@ -1676,11 +1807,15 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                             Ok(ArgPackKind::Scalar(&arg_pack[0]))
                         }
                     }
-                    _ => Err(anyhow::anyhow!(
-                        "invalid argument pack (got `{:?}`, `{:?}`)",
-                        arg_pack[0],
-                        arg_pack[1]
-                    )),
+                    _ => {
+                        crate::util::cold();
+
+                        Err(anyhow::anyhow!(
+                            "invalid argument pack (got `{:?}`, `{:?}`)",
+                            arg_pack[0],
+                            arg_pack[1]
+                        ))
+                    }
                 }
             }
 
@@ -1694,6 +1829,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 match param.var_kind {
                     ValueKind::ArrInt | ValueKind::ArrStr => {
                         let ArgPackKind::ArrIdx(arr, _idx) = arg_pack else {
+                            crate::util::cold();
+
                             let msg = format!(
                                 "expected an array argument for parameter {}, got {:?}",
                                 i, arg_pack
@@ -1706,13 +1843,15 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         };
                         let arr_var = (self.o)
                             .resolve_variable_place(*arr.as_arr_ref().unwrap())
-                            .context("array not found")?;
+                            .context_unlikely("array not found")?;
                         let type_matches = match param.var_kind {
                             ValueKind::ArrInt => arr_var.is_arrint(),
                             ValueKind::ArrStr => arr_var.is_arrstr(),
                             _ => unreachable!(),
                         };
                         if !type_matches {
+                            crate::util::cold();
+
                             let msg = format!(
                                 "expected {:?} for parameter {}, got {:?}",
                                 param.var_kind, i, arr_var
@@ -1728,6 +1867,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                     ValueKind::Int => match arg_pack {
                         ArgPackKind::Scalar(val) => {
                             if val.as_int().is_none() {
+                                crate::util::cold();
+
                                 let msg = format!(
                                     "expected an integer for parameter {}, got {:?}",
                                     i, val
@@ -1747,20 +1888,20 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         ArgPackKind::ArrIdx(arr, idx) => {
                             let arr = (self.o)
                                 .resolve_variable_place(*arr.as_arr_ref().unwrap())
-                                .context("array not found")?;
+                                .context_unlikely("array not found")?;
                             let val = match arr.as_unpacked() {
                                 FlatArrayValueRef::ArrInt(arr) => {
-                                    arr.flat_get(idx).map(|x| x.val).with_context(|| {
-                                        format!("array index {} out of bounds", idx)
-                                    })?
+                                    arr.flat_get(idx).map(|x| x.val).with_context_unlikely(
+                                        || format!("array index {} out of bounds", idx),
+                                    )?
                                 }
                                 FlatArrayValueRef::ArrStr(arr) => {
                                     let val =
-                                        arr.flat_get(idx).map(|x| &x.val).with_context(|| {
-                                            format!("array index {} out of bounds", idx)
-                                        })?;
+                                        arr.flat_get(idx).map(|x| &x.val).with_context_unlikely(
+                                            || format!("array index {} out of bounds", idx),
+                                        )?;
                                     let val = routines::parse_int_literal_with_sign(val.as_bytes())
-                                        .with_context(|| {
+                                        .with_context_unlikely(|| {
                                             format!(
                                                 "string {:?} is not a valid integer",
                                                 val.as_str()
@@ -1784,6 +1925,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                     ValueKind::Str => match arg_pack {
                         ArgPackKind::Scalar(val) => {
                             if val.as_str().is_none() {
+                                crate::util::cold();
+
                                 let msg =
                                     format!("expected a string for parameter {}, got {:?}", i, val);
                                 let mut diag = Diagnostic::new();
@@ -1801,13 +1944,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         ArgPackKind::ArrIdx(arr, idx) => {
                             let arr = (self.o)
                                 .resolve_variable_place(*arr.as_arr_ref().unwrap())
-                                .context("array not found")?;
+                                .context_unlikely("array not found")?;
                             let val = match arr.as_unpacked() {
                                 FlatArrayValueRef::ArrInt(arr) => {
                                     let val = arr
                                         .flat_get(idx)
                                         .map(|x| itoa::Buffer::new().format(x.val).into())
-                                        .with_context(|| {
+                                        .with_context_unlikely(|| {
                                             format!("array index {} out of bounds", idx)
                                         })?;
 
@@ -1823,9 +1966,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                                 }
                                 FlatArrayValueRef::ArrStr(arr) => {
                                     let val =
-                                        arr.flat_get(idx).map(|x| &x.val).with_context(|| {
-                                            format!("array index {} out of bounds", idx)
-                                        })?;
+                                        arr.flat_get(idx).map(|x| &x.val).with_context_unlikely(
+                                            || format!("array index {} out of bounds", idx),
+                                        )?;
                                     val.clone()
                                 }
                             };
@@ -1838,6 +1981,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             // Check call stack depth
             let o = unsafe { self.optr.as_mut() };
             if o.frames.len() >= MAX_CALL_DEPTH {
+                crate::util::cold();
+
                 let mut diag = Diagnostic::new();
                 diag.span_err(
                     self.o.cur_filename(),
@@ -1891,6 +2036,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         } else {
             // Function does not exist
             if is_force {
+                crate::util::cold();
+
                 let msg = format!("function `{:?}` not found", self.o.stack.last().unwrap());
                 let mut diag = Diagnostic::new();
                 diag.span_err(self.o.cur_filename(), self.o.cur_bc_span(), msg);
@@ -2019,7 +2166,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         let interner = self.o.ctx.interner();
-        let val = interner.resolve(TokenKey::try_from_u32(idx).context("invalid token key")?);
+        let val =
+            interner.resolve(TokenKey::try_from_u32(idx).context_unlikely("invalid token key")?);
         self.o.stack.push(StackValue::new_str(val.into()));
         self.add_ip_offset(Bc::LoadConstStr { idx }.bytes_len() as i32);
         Ok(())
@@ -2062,7 +2210,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         let var = (self.o.ctx.variables)
             .get_var_by_idx_mut(idx as _)
-            .with_context(|| format!("variable index {} not found", idx))?;
+            .with_context_unlikely(|| format!("variable index {} not found", idx))?;
         var.ensure_alloc();
         self.o.stack.push(StackValue::new_arr_ref(VariablePlaceRef {
             is_dynamic: false,
@@ -2077,7 +2225,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         let mut var = (self.o.ctx.variables)
             .get_var_by_idx(idx as _)
-            .with_context(|| format!("variable index {} not found", idx))?
+            .with_context_unlikely(|| format!("variable index {} not found", idx))?
             .clone();
         var.ensure_alloc();
         let dyn_var_idx = self.o.var_stack.len();
@@ -2094,7 +2242,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         let var = (self.o.stack.get(idx as usize))
-            .with_context(|| format!("local variable index {} not found", idx))?;
+            .with_context_unlikely(|| format!("local variable index {} not found", idx))?;
         self.o.stack.push(var.clone());
         self.add_ip_offset(Bc::LoadLocalVar { idx }.bytes_len() as i32);
         Ok(())
@@ -2581,8 +2729,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:s, count:i);
-        let r = ArcStr::try_repeat(val, count as usize)
-            .with_context(|| format!("failed to repeat string `{:?}` {} times", val, count))?;
+        let r = ArcStr::try_repeat(val, count as usize).with_context_unlikely(|| {
+            format!("failed to repeat string `{:?}` {} times", val, count)
+        })?;
         let r = StackValue::new_str(r.into());
         self.o.stack.replace_tail(stack_count, [r]);
         self.add_ip_offset(Bc::RepeatStr.bytes_len() as i32);
@@ -2596,15 +2745,15 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         // Fetch indices
         let mut dims = EraVarDims::new();
         for val in vals {
-            let val = val.as_int().context("expected an integer")?;
+            let val = val.as_int().context_unlikely("expected an integer")?;
             dims.push(val.val.try_into()?);
         }
         // Calculate flat index
         let arr = (self.o.resolve_variable_place(arr))
-            .with_context(|| format!("array {:?} not found", arr))?;
-        let flat_idx = arr
-            .calc_idx(&dims)
-            .with_context(|| format!("array index {:?} out of bounds of {:?}", dims, arr.dims()))?;
+            .with_context_unlikely(|| format!("array {:?} not found", arr))?;
+        let flat_idx = arr.calc_idx(&dims).with_context_unlikely(|| {
+            format!("array index {:?} out of bounds of {:?}", dims, arr.dims())
+        })?;
         let r = StackValue::new_int(flat_idx as _);
         self.o.stack.replace_tail(stack_count - 1, [r]);
         self.add_ip_offset(Bc::BuildArrIdxFromMD { count }.bytes_len() as i32);
@@ -2620,7 +2769,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         }
         let idx = idx as usize;
         let arr = (self.o.resolve_variable_place(arr))
-            .with_context(|| format!("array {:?} not found", arr))?;
+            .with_context_unlikely(|| format!("array {:?} not found", arr))?;
         let arr_ptr = arr.as_untagged_ptr();
         let r = match arr.as_unpacked() {
             FlatArrayValueRef::ArrInt(_) => {
@@ -2634,13 +2783,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 if flags.is_trap() {
                     // Trapped; redirect to global variable manipulation
                     let trap_var_info = (self.trap_vars.get(&arr_ptr).copied())
-                        .context("bad trap variable registration")?;
+                        .context_unlikely("bad trap variable registration")?;
                     let trap_var_info = (self.o.ctx.i.variables)
                         .get_var_info(trap_var_info as _)
-                        .context("bad trap variable info")?;
+                        .context_unlikely("bad trap variable info")?;
                     val.val = (self.o.ctx.callback)
                         .on_var_get_int(trap_var_info.name.as_ref(), idx)
-                        .context("trap handler failed")?;
+                        .context_unlikely("trap handler failed")?;
                 }
                 StackValue::new_int(val.val)
             }
@@ -2655,13 +2804,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 if flags.is_trap() {
                     // Trapped; redirect to global variable manipulation
                     let trap_var_info = (self.trap_vars.get(&arr_ptr).copied())
-                        .context("bad trap variable registration")?;
+                        .context_unlikely("bad trap variable registration")?;
                     let trap_var_info = (self.o.ctx.i.variables)
                         .get_var_info(trap_var_info as _)
-                        .context("bad trap variable info")?;
+                        .context_unlikely("bad trap variable info")?;
                     val.val = (self.o.ctx.callback)
                         .on_var_get_str(trap_var_info.name.as_ref(), idx)
-                        .context("trap handler failed")?
+                        .context_unlikely("trap handler failed")?
                         .into();
                 }
                 StackValue::new_str(val.val.clone())
@@ -2683,7 +2832,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         }
         let idx = idx as usize;
         let arr = (self.o.resolve_variable_place(arr))
-            .with_context(|| format!("array {:?} not found", arr))?;
+            .with_context_unlikely(|| format!("array {:?} not found", arr))?;
         let arr_ptr = arr.as_untagged_ptr();
         match arr.as_unpacked() {
             FlatArrayValueRef::ArrInt(_) => {
@@ -2699,13 +2848,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 if flags.is_trap() {
                     // Trapped; redirect to global variable manipulation
                     let trap_var_info = (self.trap_vars.get(&arr_ptr).copied())
-                        .context("bad trap variable registration")?;
+                        .context_unlikely("bad trap variable registration")?;
                     let trap_var_info = (self.o.ctx.i.variables)
                         .get_var_info(trap_var_info as _)
-                        .context("bad trap variable info")?;
+                        .context_unlikely("bad trap variable info")?;
                     (self.o.ctx.callback)
                         .on_var_set_int(trap_var_info.name.as_ref(), idx, in_val)
-                        .context("trap handler failed")?;
+                        .context_unlikely("trap handler failed")?;
                 }
             }
             FlatArrayValueRef::ArrStr(_) => {
@@ -2721,13 +2870,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 if flags.is_trap() {
                     // Trapped; redirect to global variable manipulation
                     let trap_var_info = (self.trap_vars.get(&arr_ptr).copied())
-                        .context("bad trap variable registration")?;
+                        .context_unlikely("bad trap variable registration")?;
                     let trap_var_info = (self.o.ctx.i.variables)
                         .get_var_info(trap_var_info as _)
-                        .context("bad trap variable info")?;
+                        .context_unlikely("bad trap variable info")?;
                     (self.o.ctx.callback)
                         .on_var_set_str(trap_var_info.name.as_ref(), idx, in_val.as_str())
-                        .context("trap handler failed")?;
+                        .context_unlikely("trap handler failed")?;
                 }
             }
         };
@@ -2772,7 +2921,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             .i
             .regex_cache
             .try_get_or_insert(needle.clone(), || regex::Regex::new(needle))
-            .context("failed to compile regex")?;
+            .context_unlikely("failed to compile regex")?;
         let r = re.replace_all(&haystack, replace_with.as_str()).into();
         let r = StackValue::new_str(r);
         self.o.stack.replace_tail(stack_count, [r]);
@@ -2883,7 +3032,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, val:s);
         // let r = routines::parse_int_literal_with_sign(val.as_bytes())
-        //     .with_context(|| format!("string {:?} is not a valid integer", val.as_str()))?;
+        //     .with_context_unlikely(|| format!("string {:?} is not a valid integer", val.as_str()))?;
         let r = if let Some(r) = routines::parse_int_literal_with_sign(val.as_bytes()) {
             r
         } else {
@@ -2907,7 +3056,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, val:i, fmt:s);
-        let r = csharp_format_i64(val, fmt).context("failed to format integer")?;
+        let r = csharp_format_i64(val, fmt).context_unlikely("failed to format integer")?;
         let r = StackValue::new_str(r.into());
         self.o.stack.replace_tail(stack_count, [r]);
         self.add_ip_offset(Bc::FormatIntToStr.bytes_len() as i32);
@@ -2985,12 +3134,14 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let length = length as u32;
         let max_val = max_val.max(0) as u32;
         let val = (val.max(0) as u32).min(max_val);
-        let fill_cnt = val.mul_div_floor(length, max_val).with_context(|| {
-            format!(
-                "failed to calculate muldiv({}, {}, {})",
-                val, length, max_val
-            )
-        })?;
+        let fill_cnt = val
+            .mul_div_floor(length, max_val)
+            .with_context_unlikely(|| {
+                format!(
+                    "failed to calculate muldiv({}, {}, {})",
+                    val, length, max_val
+                )
+            })?;
         let rest_cnt = length - fill_cnt;
         let mut r = String::with_capacity(length as usize + 2);
         r += "[";
@@ -3020,7 +3171,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         view_stack!(self, stack_count, haystack:s, pos:i);
         let r = (pos.try_into().ok())
             .and_then(|pos| haystack.chars().nth(pos))
-            .with_context(|| format!("invalid index {} into string", pos))?;
+            .with_context_unlikely(|| format!("invalid index {} into string", pos))?;
         let r = StackValue::new_int(r as _);
         self.o.stack.replace_tail(stack_count, [r]);
         self.add_ip_offset(Bc::EncodeToUnicode.bytes_len() as i32);
@@ -3032,7 +3183,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, val:i);
         let r = (val.try_into().ok().and_then(char::from_u32))
-            .with_context(|| format!("invalid unicode value {}", val))?;
+            .with_context_unlikely(|| format!("invalid unicode value {}", val))?;
         let r = StackValue::new_str(r.to_string().into());
         self.o.stack.replace_tail(stack_count, [r]);
         self.add_ip_offset(Bc::UnicodeToStr.bytes_len() as i32);
@@ -3062,10 +3213,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         resolve_array_mut_unsafe!(self, tags:s;tags_idx;-1, count:i;count_idx);
         let mut parts_count: usize = 0;
         for part in crate::util::html::split_html_tags(&html) {
-            let part = part.context("found invalid html tag while parsing")?;
+            let part = part.context_unlikely("found invalid html tag while parsing")?;
             let tags = tags
                 .get_mut(parts_count)
-                .context("invalid indices into array")?;
+                .context_unlikely("invalid indices into array")?;
             tags.val = part.into();
             parts_count += 1;
         }
@@ -3224,7 +3375,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 let end_idx = end_idx.min(arr.len());
                 let mut count = 0;
                 for i in start_idx..end_idx {
-                    let arr = arr.get(i).context("invalid indices into array")?;
+                    let arr = arr.get(i).context_unlikely("invalid indices into array")?;
                     if arr.val == value {
                         count += 1;
                     }
@@ -3237,7 +3388,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 let end_idx = end_idx.min(arr.len());
                 let mut count = 0;
                 for i in start_idx..end_idx {
-                    let arr = arr.get(i).context("invalid indices into array")?;
+                    let arr = arr.get(i).context_unlikely("invalid indices into array")?;
                     if arr.val == *value {
                         count += 1;
                     }
@@ -3268,7 +3419,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let end_idx = end_idx.min(arr.len());
         let mut count = AGGREGATOR::INIT;
         for i in start_idx..end_idx {
-            let arr = arr.get(i).context("invalid indices into array")?;
+            let arr = arr.get(i).context_unlikely("invalid indices into array")?;
             count = AGGREGATOR::aggregate(count, arr.val);
         }
         let r = StackValue::new_int(count);
@@ -3291,7 +3442,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let end_idx = end_idx.min(arr.len());
         let mut count = 0;
         for i in start_idx..end_idx {
-            let arr = arr.get(i).context("invalid indices into array")?;
+            let arr = arr.get(i).context_unlikely("invalid indices into array")?;
             if (lower_bound..upper_bound).contains(&arr.val) {
                 count += 1;
             }
@@ -3381,7 +3532,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let prim_arr = arrs[0]
             .as_arr_ref()
             .cloned()
-            .context("expected array to sort by")?;
+            .context_unlikely("expected array to sort by")?;
         let indices = match resolve_array_kind!(self, prim_arr) {
             ArrayValueKind::ArrInt => {
                 resolve_array!(self, prim_arr:i;0;-1);
@@ -3885,13 +4036,15 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             FlatArrayValueRefMut::ArrInt(x) => {
                 let x = x.vals.as_mut_slice();
                 for (i, val) in values.iter().enumerate() {
-                    x[idx_base + idx_start + i] = val.as_int().context("expected integer")?.clone();
+                    x[idx_base + idx_start + i] =
+                        val.as_int().context_unlikely("expected integer")?.clone();
                 }
             }
             FlatArrayValueRefMut::ArrStr(x) => {
                 let x = x.vals.as_mut_slice();
                 for (i, val) in values.iter().enumerate() {
-                    x[idx_base + idx_start + i] = val.as_str().context("expected string")?.clone();
+                    x[idx_base + idx_start + i] =
+                        val.as_str().context_unlikely("expected string")?.clone();
                 }
             }
         }
@@ -3988,7 +4141,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         resolve_array_mut_unsafe!(self, dest:s;dest_idx;-1, dest_count:i;dest_count_idx);
         let mut count = 0;
         for part in input.split(separator.as_str()) {
-            let dest = dest.get_mut(count).context("invalid indices into array")?;
+            let dest = dest
+                .get_mut(count)
+                .context_unlikely("invalid indices into array")?;
             dest.val = part.into();
             count += 1;
         }
@@ -4318,7 +4473,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         // Compile twice to ensure input is safe
                         regex::Regex::new(&value).and_then(|_| regex::Regex::new(&re_str))
                     })
-                    .with_context(|| format!("invalid regex: `{:?}`", re_str))?;
+                    .with_context_unlikely(|| format!("invalid regex: `{:?}`", re_str))?;
 
                 let mut iter = arr
                     .iter()
@@ -4354,7 +4509,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 resolve_any_scalar!(self, value:i);
                 let end_idx = end_idx.min(arr.len());
                 for i in start_idx..end_idx {
-                    arr.get_mut(i).context("invalid indices into array")?.val = value.clone();
+                    arr.get_mut(i)
+                        .context_unlikely("invalid indices into array")?
+                        .val = value.clone();
                 }
             }
             ArrayValueKind::ArrStr => {
@@ -4362,7 +4519,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 resolve_any_scalar!(self, value:s);
                 let end_idx = end_idx.min(arr.len());
                 for i in start_idx..end_idx {
-                    arr.get_mut(i).context("invalid indices into array")?.val = value.clone();
+                    arr.get_mut(i)
+                        .context_unlikely("invalid indices into array")?
+                        .val = value.clone();
                 }
             }
         }
@@ -4376,7 +4535,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, name:s, dim_pos:i);
         let var = (self.o.get_var_by_name(name))
-            .with_context(|| format!("variable `{}` not found", name))?;
+            .with_context_unlikely(|| format!("variable `{}` not found", name))?;
         let dims = var.dims();
         let r = if dim_pos < 0 {
             let dim_pos = dim_pos.wrapping_add_unsigned(dims.len() as _) as usize;
@@ -4384,7 +4543,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         } else {
             dims.get(dim_pos as usize).copied()
         }
-        .with_context(|| format!("dimension index `{dim_pos}` out of bounds"))?;
+        .with_context_unlikely(|| format!("dimension index `{dim_pos}` out of bounds"))?;
         let r = StackValue::new_int(r as _);
         self.o.stack.replace_tail(stack_count, [r]);
         self.add_ip_offset(Bc::GetVarSizeByName.bytes_len() as i32);
@@ -4469,7 +4628,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             .ctx
             .chara_templates
             .get(&chara_no)
-            .with_context(|| format!("chara template {} not found", chara_no))?;
+            .with_context_unlikely(|| format!("chara template {} not found", chara_no))?;
         let r = match csv_kind {
             CsvName | CsvCallName | CsvNickName | CsvMasterName | CsvCStr => {
                 // Return string
@@ -4531,8 +4690,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             .ctx
             .variables
             .get_var(target_arr)
-            .with_context(|| format!("variable `{}` not found", target_arr))?;
-        let target_arr = target_arr.as_arrint().context("expected ArrInt")?;
+            .with_context_unlikely(|| format!("variable `{}` not found", target_arr))?;
+        let target_arr = target_arr.as_arrint().context_unlikely("expected ArrInt")?;
         let mut r = 0;
         while r < max_lv.min(target_arr.vals.len() as i64) {
             let limit = target_arr.vals[(r + 1) as usize].val;
@@ -4563,7 +4722,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             let chara_reg_slot = chara_reg_slot as usize;
             let chara_tmpl = (self.o.ctx.i.chara_templates)
                 .get(&(chara_tmpl_no as u32))
-                .with_context(|| format!("chara template {} not found", chara_tmpl_no))?;
+                .with_context_unlikely(|| format!("chara template {} not found", chara_tmpl_no))?;
             for chara_var in self.o.ctx.i.variables.chara_vars_iter_mut() {
                 chara_var.val.ensure_alloc();
                 let dims = chara_var.val.dims();
@@ -4791,11 +4950,18 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     fn instr_load_data(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
+        use crate::v2::savefs::EraSaveFileType;
+
         view_stack!(self, stack_count, save_id:i);
-        let file = format!(".\\sav\\save{save_id:02}.sav");
-        let r = match self.o.routine_load_data(&file) {
+        let file = self.o.ctx.get_save_path(save_id as _);
+        let r = match self
+            .o
+            .routine_load_data(&file, true, EraSaveFileType::Normal)
+        {
             Ok(r) => {
-                self.charas_count = r.charas_count;
+                if let Some(charas_count) = r.charas_count {
+                    self.charas_count = charas_count;
+                }
                 r.file_exists.into()
             }
             Err(e) => {
@@ -4818,16 +4984,25 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     fn instr_save_data(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
-        // TODO: Bc::SaveData
         view_stack!(self, stack_count, save_id:i, save_info:s);
-        let mut diag = Diagnostic::new();
-        diag.span_err(
-            self.o.cur_filename(),
-            self.o.cur_bc_span(),
-            "SaveData not yet implemented",
-        );
-        self.o.ctx.emit_diag(diag);
-        let r = -1;
+        let save_info = &save_info.clone();
+        let file = self.o.ctx.get_save_path(save_id as _);
+        let r = match self
+            .o
+            .routine_save_data(&file, save_info, self.charas_count)
+        {
+            Ok(()) => 1,
+            Err(e) => {
+                let mut diag = Diagnostic::new();
+                diag.span_err(
+                    self.o.cur_filename(),
+                    self.o.cur_bc_span(),
+                    format!("failed to save data to `{}`: {}", file, e),
+                );
+                self.o.ctx.emit_diag(diag);
+                0
+            }
+        };
         let r = StackValue::new_int(r);
         self.o.stack.replace_tail(stack_count, [r]);
         self.add_ip_offset(Bc::SaveData.bytes_len() as i32);
@@ -4841,7 +5016,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let vresults = self.var_results_place;
 
         view_stack!(self, stack_count, save_id:i);
-        let file = format!(".\\sav\\save{save_id:02}.sav");
+        let file = self.o.ctx.get_save_path(save_id as _);
         let r = match self
             .o
             .routine_check_data(&file)
@@ -4871,8 +5046,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, chara_tmpl_no:i);
         let var_no = self.o.get_global_var_int("NO")?;
-        let var_no =
-            MaskedArr::try_new(var_no, 0, -2).context("expected 1D array of integers for `NO`")?;
+        let var_no = MaskedArr::try_new(var_no, 0, -2)
+            .context_unlikely("expected 1D array of integers for `NO`")?;
         let r = var_no
             .iter()
             .position(|x| x.val == chara_tmpl_no)
@@ -4887,17 +5062,26 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     fn instr_load_global(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
-        // TODO: Bc::LoadGlobal
+        use crate::v2::savefs::EraSaveFileType;
+
+        let file = self.o.ctx.get_global_save_path();
+        let r = match self
+            .o
+            .routine_load_data(&file, false, EraSaveFileType::Global)
         {
-            let mut diag = Diagnostic::new();
-            diag.span_err(
-                self.o.cur_filename(),
-                self.o.cur_bc_span(),
-                "LoadGlobal not yet implemented",
-            );
-            self.o.ctx.emit_diag(diag);
-        }
-        self.o.stack.push(StackValue::new_int(0));
+            Ok(_) => 1,
+            Err(e) => {
+                let mut diag = Diagnostic::new();
+                diag.span_err(
+                    self.o.cur_filename(),
+                    self.o.cur_bc_span(),
+                    format!("failed to load global data from `{}`: {}", file, e),
+                );
+                self.o.ctx.emit_diag(diag);
+                0
+            }
+        };
+        self.o.stack.push(StackValue::new_int(r));
         self.add_ip_offset(Bc::LoadGlobal.bytes_len() as i32);
         Ok(())
     }
@@ -4905,17 +5089,21 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     fn instr_save_global(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
-        // TODO: Bc::SaveGlobal
-        {
-            let mut diag = Diagnostic::new();
-            diag.span_err(
-                self.o.cur_filename(),
-                self.o.cur_bc_span(),
-                "SaveGlobal not yet implemented",
-            );
-            self.o.ctx.emit_diag(diag);
-        }
-        self.o.stack.push(StackValue::new_int(0));
+        let file = self.o.ctx.get_global_save_path();
+        let r = match self.o.routine_save_global_data(&file) {
+            Ok(_) => 1,
+            Err(e) => {
+                let mut diag = Diagnostic::new();
+                diag.span_err(
+                    self.o.cur_filename(),
+                    self.o.cur_bc_span(),
+                    format!("failed to save global data to `{}`: {}", file, e),
+                );
+                self.o.ctx.emit_diag(diag);
+                0
+            }
+        };
+        self.o.stack.push(StackValue::new_int(r));
         self.add_ip_offset(Bc::SaveGlobal.bytes_len() as i32);
         Ok(())
     }
@@ -4938,9 +5126,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let var_default_stain = self.o.get_global_var_int("DEFAULT_STAIN")?;
         let stride: usize = var_stain.dims[1..].iter().map(|&x| x as usize).product();
         let mut var_stain = MaskedArr::try_new(var_stain, (chara_no as usize * stride) as _, -1)
-            .context("invalid indices into array")?;
+            .context_unlikely("invalid indices into array")?;
         let var_default_stain = MaskedArr::try_new(var_default_stain, 0, -1)
-            .context("variable `DEFAULT_STAIN` is empty")?;
+            .context_unlikely("variable `DEFAULT_STAIN` is empty")?;
         let default_stain = var_default_stain
             .iter()
             .map(|x| x.val)
@@ -5339,7 +5527,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let jit_func_slot = self
             .jit_compiled_functions
             .get_mut(func_idx as usize)
-            .with_context(|| format!("function index {} out of bounds", func_idx))?;
+            .with_context_unlikely(|| format!("function index {} out of bounds", func_idx))?;
         match jit_func_slot {
             Some(jit_func) => {
                 if jit_func.is_invalid() {
@@ -5383,11 +5571,11 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             .get_index(func_idx as usize)
             .map(|(_, v)| v.as_ref())
             .flatten()
-            .with_context(|| format!("function index {} out of bounds", func_idx))?;
+            .with_context_unlikely(|| format!("function index {} out of bounds", func_idx))?;
         let func_bc = self.o.ctx.bc_chunks[func_info.chunk_idx as usize].get_bc();
         let mut bc = func_bc
             .get(func_info.bc_offset as usize..(func_info.bc_offset + func_info.bc_size) as usize)
-            .with_context(|| format!("invalid function ip {:?}", func_info))?;
+            .with_context_unlikely(|| format!("invalid function ip {:?}", func_info))?;
 
         // macro_rules! extern_c {
         //     (|$($name:ident: $type:ty),*| -> $ret:ty $body:block) => {{
@@ -6497,7 +6685,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                 let (func_idx, _) =
                     s.o.ctx
                         .func_idx_and_info_from_chunk_pos(frame.ip.chunk as _, frame.ip.offset as _)
-                        .with_context(|| format!("invalid function ip {:?}", frame.ip))?;
+                        .with_context_unlikely(|| format!("invalid function ip {:?}", frame.ip))?;
                 s.jit_side_frame.push(EraJitExecFrame {
                     func_idx: func_idx as _,
                     ip: 0,
@@ -6511,7 +6699,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
             let func_idx = s
                 .jit_side_frame
                 .last()
-                .context("no JIT side frame")?
+                .context_unlikely("no JIT side frame")?
                 .func_idx;
             match s.ensure_jit_function(func_idx) {
                 Ok(()) => unsafe {
@@ -6571,7 +6759,7 @@ fn dedup_chara_numbers(chara_nos: &[StackValue], charas_count: u32) -> anyhow::R
         .iter()
         .map(|x| {
             x.as_int()
-                .context("expected integer")
+                .context_unlikely("expected integer")
                 .and_then(|x| sanitize_chara_no(x.val, charas_count))
         })
         .process_results(|x| x.unique().collect_vec())?;
@@ -6589,7 +6777,7 @@ fn sort_dedup_chara_numbers(
         .iter()
         .map(|x| {
             x.as_int()
-                .context("expected integer")
+                .context_unlikely("expected integer")
                 .and_then(|x| sanitize_chara_no(x.val, charas_count))
         })
         .process_results(|x| x.sorted_unstable().dedup().collect_vec())?;

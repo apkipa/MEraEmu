@@ -6,7 +6,12 @@ namespace MEraEmuWin {
 
         AppSettingsVM DeepClone();
 
+        // General
         Boolean EnableParallelLoading;
         Boolean EnableJIT;
+
+        // Game
+        UInt32 SaveDataCount;
+        Boolean EnableAutoSave;
     };
 }

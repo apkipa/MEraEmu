@@ -638,3 +638,56 @@ pub unsafe fn transmute_to_bytes<T: Sized>(value: &T) -> &[u8] {
     let len = std::mem::size_of::<T>();
     unsafe { std::slice::from_raw_parts(ptr, len) }
 }
+
+#[inline]
+#[cold]
+pub fn cold() {}
+
+#[inline]
+pub fn likely(b: bool) -> bool {
+    if !b {
+        cold()
+    }
+    b
+}
+
+#[inline]
+pub fn unlikely(b: bool) -> bool {
+    if b {
+        cold()
+    }
+    b
+}
+
+pub trait AnyhowExt<T, E> {
+    fn context_unlikely<C>(self, context: C) -> Result<T, anyhow::Error>
+    where
+        C: std::fmt::Display + Send + Sync + 'static;
+    fn with_context_unlikely<C, F>(self, f: F) -> Result<T, anyhow::Error>
+    where
+        C: std::fmt::Display + Send + Sync + 'static,
+        F: FnOnce() -> C;
+}
+
+impl<T, E, R> AnyhowExt<T, E> for R
+where
+    R: anyhow::Context<T, E>,
+{
+    fn context_unlikely<C>(self, context: C) -> Result<T, anyhow::Error>
+    where
+        C: std::fmt::Display + Send + Sync + 'static,
+    {
+        self.with_context_unlikely(|| context)
+    }
+
+    fn with_context_unlikely<C, F>(self, f: F) -> Result<T, anyhow::Error>
+    where
+        C: std::fmt::Display + Send + Sync + 'static,
+        F: FnOnce() -> C,
+    {
+        self.with_context(|| {
+            cold();
+            f()
+        })
+    }
+}

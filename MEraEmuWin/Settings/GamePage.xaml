@@ -1,0 +1,26 @@
+﻿<Page
+    x:Class="MEraEmuWin.Settings.GamePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:MEraEmuWin"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    mc:Ignorable="d">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Orientation="Vertical" Margin="8,2">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MaxWidth="300" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                
+                <muxc:NumberBox Header="要显示的存档数量" SpinButtonPlacementMode="Inline"
+                                Value="{x:Bind ParentPage.Settings.SaveDataCount,Mode=TwoWay}" />
+            </Grid>
+            <ToggleSwitch Header="开启自动保存"
+                          IsOn="{x:Bind ParentPage.Settings.EnableAutoSave,Mode=TwoWay}" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

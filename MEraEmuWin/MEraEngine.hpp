@@ -439,8 +439,7 @@ struct MEraEngineSysCallback {
     virtual int64_t on_get_key_state(int64_t key_code) = 0;
 };
 
-class MEraEngineAsyncErbLoader {
-public:
+struct MEraEngineAsyncErbLoader {
     MEraEngineAsyncErbLoader(std::nullptr_t) noexcept : m_loader(nullptr) {}
     ~MEraEngineAsyncErbLoader() {
         if (m_loader) {

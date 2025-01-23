@@ -86,6 +86,7 @@ dependencies = [
  "unicase",
  "unicode-width",
  "walkdir",
+ "wide",
  "windows-sys 0.59.0",
  "yoke",
  "zerocopy 0.8.14",

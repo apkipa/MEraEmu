@@ -191,16 +191,19 @@ namespace winrt::MEraEmuWin::implementation {
         auto tear_down_fn = [=, settings_wnd = weak_ref(settings_wnd)] {
             EnableWindow(main_hwnd, true);
             ShowWindow(settings_hwnd, SW_HIDE);
+            auto weak_this = get_weak();
             DispatcherQueue::GetForCurrentThread().TryEnqueue(DispatcherQueuePriority::Low, [=] {
                 if (auto wnd = settings_wnd.get()) {
                     wnd.Close();
                 }
+                // Apply settings
+                auto strong_this = weak_this.get();
+                if (!strong_this) { return; }
+                MainEngineControl().ApplySettings(m_app_settings);
+                if (*old_config != m_app_settings.as<implementation::AppSettingsVM>()->to_json_string()) {
+                    SaveConfig();
+                }
             });
-            // Apply settings
-            MainEngineControl().ApplySettings(m_app_settings);
-            if (*old_config != m_app_settings.as<implementation::AppSettingsVM>()->to_json_string()) {
-                SaveConfig();
-            }
         };
         settings_wnd.View().Closing([=](auto&&, auto&&) {
             tear_down_fn();
@@ -247,7 +250,12 @@ namespace winrt::MEraEmuWin::implementation {
             std::ignore = ReadFile(file.get(), buf.data(), size, &read, nullptr);
             if (read == size) {
                 auto j = nlohmann::json::parse(buf);
-                from_json(j, *m_app_settings.as<implementation::AppSettingsVM>());
+                try {
+                    from_json(j, *m_app_settings.as<implementation::AppSettingsVM>());
+                }
+                catch (...) {
+                    // Deliberately ignore errors (such as missing fields)
+                }
             }
         }
     }

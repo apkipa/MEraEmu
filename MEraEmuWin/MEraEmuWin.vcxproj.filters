@@ -20,6 +20,9 @@
     <Page Include="Settings\GeneralPage.xaml">
       <Filter>Settings</Filter>
     </Page>
+    <Page Include="Settings\GamePage.xaml">
+      <Filter>Settings</Filter>
+    </Page>
   </ItemGroup>
   <ItemGroup>
     <Midl Include="App.idl" />

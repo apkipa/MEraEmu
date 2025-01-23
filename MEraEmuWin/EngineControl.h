@@ -285,7 +285,7 @@ namespace winrt::MEraEmuWin::implementation {
             size_t line;
             uint32_t button_idx;
 
-            ActiveButtonData() : line(-1), button_idx() {}
+            ActiveButtonData() : line(size_t(-1)), button_idx() {}
             auto operator<=>(ActiveButtonData const& rhs) const noexcept = default;
             bool is_default() const noexcept { return line == -1; }
         } m_cur_active_button{};

@@ -6878,6 +6878,12 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 apply_args!(name_span, save_id:i);
                 site.chunk.push_bc(BcKind::LoadData, name_span);
             }
+            b"SAVEDATA" => {
+                site.result()?;
+                let [save_id, save_info] = site.unpack_args(args)?;
+                apply_args!(name_span, save_id:i, save_info:s);
+                site.chunk.push_bc(BcKind::SaveData, name_span);
+            }
             b"CHKDATA" => {
                 site.result()?;
                 let [save_id] = site.unpack_args(args)?;

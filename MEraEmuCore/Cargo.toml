@@ -117,6 +117,7 @@ dynasm = "3.0.1"
 dynasmrt = "3.0.1"
 windows-sys = { version = "0.59.0", features = ["Win32_System_Diagnostics_Debug"] }
 zerocopy = { version = "0.8.14", features = ["derive"] }
+wide = "0.7.32"
 # snmalloc-rs = "0.3.5"
 # rpmalloc = "0.2.2"
 

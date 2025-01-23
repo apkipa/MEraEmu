@@ -48,8 +48,39 @@
     SIF LoadSucceeded
         SYSPROC_LOADDATAEND(1)
 @SYSPROC_SAVEGAME
-    ; TODO: SYSPROC_SAVEGAME
-    PRINTFORML Warning: SYSPROC_SAVEGAME not yet implemented
+    #DIM DYNAMIC OldResult
+    #DIM DYNAMIC temp_i1
+    OldResult = RESULT
+
+    PRINTFORML Save to which slot?
+    FOR temp_i1, 0, SAVENOS()
+        SYSPROC_LOADGAME_PrintOneSave(temp_i1)
+    NEXT
+    ; PRINTFORML [99] Auto-save
+    PRINTFORML [100] Cancel
+
+    $INPUT_LOOP
+    INPUT
+    SIF RESULT == 100
+        GOTO TEARDOWN
+    SELECTCASE SYSPROC_SaveDataToSlot(RESULT)
+        CASE -1
+            ; Catastrophic error
+            PRINTFORML ERROR: Cannot save. Exiting.
+            WAIT
+            GOTO TEARDOWN
+        CASE 0
+            ; Save failed
+            PRINTFORML Save failed.
+            GOTO INPUT_LOOP
+        CASE 1
+            ; Save succeeded
+            PRINTFORML Save succeeded.
+        CASEELSE
+            THROW Unknown SAVEDATA result
+    ENDSELECT
+    $TEARDOWN
+    RESULT = OldResult
 @SYSPROC_LOADDATAEND(InvokeResult)
     #FUNCTION
     #DIM DYNAMIC InvokeResult
@@ -119,8 +150,15 @@
     SYSPROC_INVOKE_USER_EVENT_NORETURN("EVENTTURNEND")
 @SYSPROC_BEGIN_SHOP
     SYSPROC_TRYINVOKE_USER_EVENT("EVENTSHOP")
-    ; TODO: SYSPROC_BEGIN_SHOP.AutoSave
-    PRINTFORML Warning: AutoSave not yet implemented
+    ; Initiate auto-save
+    IF GETCONFIG("オートセーブを行なう")
+        PRINTFORML Auto-saving...
+        IF SYSPROC_SaveDataToSlot(99) <= 0
+            PRINTFORML Auto-save failed.
+        ELSE
+            PRINTFORML Auto-save succeeded.
+        ENDIF
+    ENDIF
     SYSPROC_SHOP_BODY()
 @SYSPROC_DOTRAIN(DoTrainCmdNo)
     #DIM DYNAMIC DoTrainCmdNo
@@ -337,3 +375,12 @@
         ; Failed
         PRINTFORML [{save_id, 2}] ----
     ENDIF
+
+@SYSPROC_SaveDataToSlot(save_id)
+    #FUNCTION
+    #DIM DYNAMIC save_id
+    #DIM DYNAMIC cur_time
+    SAVEDATA_TEXT '= @"%GETTIMES()% "
+    ; Call user function to populate SAVEDATA_TEXT
+    TRYCALL SAVEINFO
+    RETURN SAVEDATA(save_id, SAVEDATA_TEXT)

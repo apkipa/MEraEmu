@@ -811,10 +811,6 @@ namespace winrt::MEraEmuWin::implementation {
                 m_str_cache = future.get();
                 return m_str_cache.c_str();
             }
-            if (name == "SAVEDATA_TEXT") {
-                // TODO: SAVEDATA_TEXT
-                return nullptr;
-            }
             throw std::exception("no such variable");
         }
         void on_var_set_int(std::string_view name, size_t idx, int64_t val) override {
@@ -949,7 +945,7 @@ namespace winrt::MEraEmuWin::implementation {
                 // Try to isolate save file by adding `MEraEmu` to the path
                 auto temp = path.substr(0, path.size() - 4);
                 actual_path = to_hstring(temp) + L".MEraEmu.sav";
-                if (!util::fs::file_exists(actual_path.c_str())) {
+                if (!can_write && !util::fs::file_exists(actual_path.c_str())) {
                     actual_path = to_hstring(path);
                 }
             }
@@ -1019,7 +1015,20 @@ namespace winrt::MEraEmuWin::implementation {
             return std::make_unique<Win32File>(std::move(fh));
         }
         bool on_check_host_file_exists(std::string_view path) override {
-            return std::filesystem::exists(path);
+            hstring actual_path;
+            if (path.ends_with(".sav")) {
+                // Try to isolate save file by adding `MEraEmu` to the path
+                auto temp = path.substr(0, path.size() - 4);
+                actual_path = to_hstring(temp) + L".MEraEmu.sav";
+                if (!util::fs::file_exists(actual_path.c_str())) {
+                    actual_path = to_hstring(path);
+                }
+            }
+            else {
+                actual_path = to_hstring(path);
+            }
+
+            return util::fs::file_exists(actual_path.c_str());
         }
         int64_t on_check_font(std::string_view font_name) override
         {
@@ -1031,6 +1040,7 @@ namespace winrt::MEraEmuWin::implementation {
         }
         int64_t on_get_config_int(std::string_view name) override {
             if (name == "一行の高さ") {
+                // Line height
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
                 queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
@@ -1039,6 +1049,7 @@ namespace winrt::MEraEmuWin::implementation {
                 return future.get();
             }
             if (name == "フォントサイズ") {
+                // Font size
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
                 queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
@@ -1047,10 +1058,16 @@ namespace winrt::MEraEmuWin::implementation {
                 return future.get();
             }
             if (name == "ウィンドウ幅") {
+                // Window width
                 return on_var_get_int("SCREENPIXELWIDTH", 0);
             }
             if (name == "表示するセーブデータ数") {
-                return 20;
+                // Save data count
+                return m_sd->app_settings.SaveDataCount();
+            }
+            if (name == "オートセーブを行なう") {
+                // Auto-save
+                return m_sd->app_settings.EnableAutoSave() ? 1 : 0;
             }
             throw std::runtime_error(to_string(std::format(L"no such int config: {}", to_hstring(name))));
         }
@@ -1478,12 +1495,12 @@ namespace winrt::MEraEmuWin::implementation {
 
                 // Register global variables
                 // Engine -- register int
-                auto eri = [&](const char* name) {
-                    builder.register_variable(name, false, 1, true);
+                auto eri = [&](const char* name, bool watch = true) {
+                    builder.register_variable(name, false, 1, watch);
                 };
                 // Engine -- register str
-                auto ers = [&](const char* name) {
-                    builder.register_variable(name, true, 1, true);
+                auto ers = [&](const char* name, bool watch = true) {
+                    builder.register_variable(name, true, 1, watch);
                 };
                 eri("@COLOR");
                 eri("@DEFCOLOR");
@@ -1507,7 +1524,7 @@ namespace winrt::MEraEmuWin::implementation {
                 eri("SCREENWIDTH");
                 eri("SCREENPIXELWIDTH");
                 eri("LINECOUNT");
-                ers("SAVEDATA_TEXT");
+                ers("SAVEDATA_TEXT", false);
                 eri("RANDDATA");
 
                 auto return_to_title = [&] {

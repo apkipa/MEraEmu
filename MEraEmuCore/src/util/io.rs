@@ -18,6 +18,13 @@ pub trait CSharpBinaryReader {
 }
 pub trait CSharpBinaryWriter {
     fn write_i64(&mut self, val: i64) -> std::io::Result<()>;
+    fn write_u64(&mut self, val: u64) -> std::io::Result<()>;
+    fn write_i32(&mut self, val: i32) -> std::io::Result<()>;
+    fn write_u32(&mut self, val: u32) -> std::io::Result<()>;
+    fn write_i16(&mut self, val: i16) -> std::io::Result<()>;
+    fn write_u16(&mut self, val: u16) -> std::io::Result<()>;
+    fn write_i8(&mut self, val: i8) -> std::io::Result<()>;
+    fn write_u8(&mut self, val: u8) -> std::io::Result<()>;
     fn write_7_bit_i32(&mut self, val: i32) -> std::io::Result<()>;
     fn write_utf16_string(&mut self, val: &str) -> std::io::Result<()>;
 }
@@ -105,6 +112,27 @@ impl<T: std::io::Read> CSharpBinaryReader for T {
 impl<T: std::io::Write> CSharpBinaryWriter for T {
     fn write_i64(&mut self, val: i64) -> std::io::Result<()> {
         WriteBytesExt::write_i64::<LE>(self, val)
+    }
+    fn write_u64(&mut self, val: u64) -> std::io::Result<()> {
+        WriteBytesExt::write_u64::<LE>(self, val)
+    }
+    fn write_i32(&mut self, val: i32) -> std::io::Result<()> {
+        WriteBytesExt::write_i32::<LE>(self, val)
+    }
+    fn write_u32(&mut self, val: u32) -> std::io::Result<()> {
+        WriteBytesExt::write_u32::<LE>(self, val)
+    }
+    fn write_i16(&mut self, val: i16) -> std::io::Result<()> {
+        WriteBytesExt::write_i16::<LE>(self, val)
+    }
+    fn write_u16(&mut self, val: u16) -> std::io::Result<()> {
+        WriteBytesExt::write_u16::<LE>(self, val)
+    }
+    fn write_i8(&mut self, val: i8) -> std::io::Result<()> {
+        WriteBytesExt::write_i8(self, val)
+    }
+    fn write_u8(&mut self, val: u8) -> std::io::Result<()> {
+        WriteBytesExt::write_u8(self, val)
     }
     fn write_7_bit_i32(&mut self, val: i32) -> std::io::Result<()> {
         let mut val = val as u32;

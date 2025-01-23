@@ -1011,6 +1011,22 @@ impl<'i> EraCompilerCtxInner<'i> {
             .and_then(|x| x.iter().find(|x| x.0 == kind))
             .map(|x| x.1)
     }
+
+    pub fn get_global_save_path(&self) -> String {
+        format!(".\\sav\\global.sav")
+    }
+
+    pub fn get_save_path(&self, save_id: u32) -> String {
+        format!(".\\sav\\save{save_id:02}.sav")
+    }
+
+    pub fn get_var_save_path(&self, save_id: &str) -> String {
+        format!(".\\dat\\var_{save_id}.dat")
+    }
+
+    pub fn get_chara_save_path(&self, save_id: &str) -> String {
+        format!(".\\dat\\chara_{save_id}.dat")
+    }
 }
 
 pub trait EraEmitDiagnostic {
@@ -2324,6 +2340,7 @@ impl ArrayValueExt for ArrayValue {
         }))
     }
 
+    #[inline(always)]
     fn as_unpacked(&self) -> FlatArrayValueRef {
         use ptr_union::Enum2;
         match unsafe { self.as_deref_unchecked().unpack() } {
@@ -2332,6 +2349,7 @@ impl ArrayValueExt for ArrayValue {
         }
     }
 
+    #[inline(always)]
     fn as_unpacked_mut(&mut self) -> FlatArrayValueRefMut {
         // SAFETY: By mutable self reference, the produced mutable reference is guaranteed to be unique.
         unsafe { self.as_unpacked_mut_unchecked() }
@@ -2340,6 +2358,7 @@ impl ArrayValueExt for ArrayValue {
     /// # Safety
     ///
     /// The caller must ensure that the produced mutable reference is unique.
+    #[inline(always)]
     unsafe fn as_unpacked_mut_unchecked(&self) -> FlatArrayValueRefMut {
         use crate::util::erase_lt_mut;
         use erasable::ErasablePtr;
@@ -2355,6 +2374,7 @@ impl ArrayValueExt for ArrayValue {
         }
     }
 
+    #[inline(always)]
     fn into_unpacked(self) -> FlatArrayValue {
         use ptr_union::Enum2;
         match self.unpack() {
@@ -2915,6 +2935,22 @@ impl EraVarPool {
                 _ => unreachable!(),
             }
         }
+    }
+}
+
+impl EraVarPool {
+    pub fn get_var_i_0(&self, name: &str) -> Option<i64> {
+        self.get_var(name)
+            .and_then(|x| x.as_arrint())
+            .and_then(|x| x.vals.get(0))
+            .map(|x| x.val)
+    }
+
+    pub fn get_var_s_0(&self, name: &str) -> Option<&ArcStr> {
+        self.get_var(name)
+            .and_then(|x| x.as_arrstr())
+            .and_then(|x| x.vals.get(0))
+            .map(|x| &x.val)
     }
 }
 
@@ -4253,260 +4289,6 @@ impl EraBytecodeKind {
         let len = bytes.len() - bytes_reader.len();
         Some((kind, len as u8))
     }
-
-    // pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-    //     use EraBytecodeKind::*;
-    //     use EraExtBytecode1 as Ext1;
-    //     use EraPriBytecode as Pri;
-    //     let byte0 = *bytes.get(0)?;
-    //     let byte1 = || bytes.get(1).copied();
-    //     let byte2 = || bytes.get(1).copied();
-    //     let byte1_3 = || bytes.get(1..3);
-    //     let byte1_5 = || bytes.get(1..5);
-    //     let byte1_9 = || bytes.get(1..9);
-    //     let get = |idx: usize| bytes.get(idx).copied();
-    //     let gets = |s: usize, e: usize| bytes.get(s..e);
-    //     match num_traits::FromPrimitive::from_u8(byte0)? {
-    //         Pri::FailWithMsg => Some(FailWithMsg),
-    //         Pri::DebugBreak => Some(DebugBreak),
-    //         Pri::Quit => Some(Quit),
-    //         Pri::Throw => Some(Throw),
-    //         Pri::Nop => Some(Nop),
-    //         Pri::ReturnVoid => Some(ReturnVoid),
-    //         Pri::ReturnInt => Some(ReturnInt),
-    //         Pri::ReturnStr => Some(ReturnStr),
-    //         Pri::CallFun => Some(CallFun { args_cnt: byte1()? }),
-    //         Pri::TryCallFun => Some(TryCallFun { args_cnt: byte1()? }),
-    //         Pri::TryCallFunForce => Some(TryCallFunForce { args_cnt: byte1()? }),
-    //         Pri::RestartExecAtFun => Some(RestartExecAtFun),
-    //         Pri::JumpWW => Some(JumpWW {
-    //             offset: i32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
-    //         }),
-    //         Pri::JumpIfWW => Some(JumpIfWW {
-    //             offset: i32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
-    //         }),
-    //         Pri::JumpIfNotWW => Some(JumpIfNotWW {
-    //             offset: i32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
-    //         }),
-    //         Pri::LoadConstStr => Some(LoadConstStr {
-    //             idx: u32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
-    //         }),
-    //         Pri::LoadImm8 => Some(LoadImm8 { imm: byte1()? as _ }),
-    //         Pri::LoadImm16 => Some(LoadImm16 {
-    //             imm: i16::from_ne_bytes(byte1_3()?.try_into().unwrap()),
-    //         }),
-    //         Pri::LoadImm32 => Some(LoadImm32 {
-    //             imm: i32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
-    //         }),
-    //         Pri::LoadImm64 => Some(LoadImm64 {
-    //             imm: i64::from_ne_bytes(byte1_9()?.try_into().unwrap()),
-    //         }),
-    //         Pri::LoadVarWW => Some(LoadVarWW {
-    //             idx: u32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
-    //         }),
-    //         Pri::LoadConstVarWW => Some(LoadConstVarWW {
-    //             idx: u32::from_ne_bytes(byte1_5()?.try_into().unwrap()),
-    //         }),
-    //         Pri::LoadLocalVar => Some(LoadLocalVar { idx: byte1()? }),
-    //         Pri::Pop => Some(Pop),
-    //         Pri::PopAllN => Some(PopAllN { count: byte1()? }),
-    //         Pri::PopOneN => Some(PopOneN { idx: byte1()? }),
-    //         Pri::Swap2 => Some(Swap2),
-    //         Pri::Duplicate => Some(Duplicate),
-    //         Pri::DuplicateAllN => Some(DuplicateAllN { count: byte1()? }),
-    //         Pri::DuplicateOneN => Some(DuplicateOneN { idx: byte1()? }),
-    //         Pri::AddInt => Some(AddInt),
-    //         Pri::SubInt => Some(SubInt),
-    //         Pri::MulInt => Some(MulInt),
-    //         Pri::DivInt => Some(DivInt),
-    //         Pri::ModInt => Some(ModInt),
-    //         Pri::NegInt => Some(NegInt),
-    //         Pri::BitAndInt => Some(BitAndInt),
-    //         Pri::BitOrInt => Some(BitOrInt),
-    //         Pri::BitXorInt => Some(BitXorInt),
-    //         Pri::BitNotInt => Some(BitNotInt),
-    //         Pri::ShlInt => Some(ShlInt),
-    //         Pri::ShrInt => Some(ShrInt),
-    //         Pri::CmpIntLT => Some(CmpIntLT),
-    //         Pri::CmpIntLEq => Some(CmpIntLEq),
-    //         Pri::CmpIntGT => Some(CmpIntGT),
-    //         Pri::CmpIntGEq => Some(CmpIntGEq),
-    //         Pri::CmpIntEq => Some(CmpIntEq),
-    //         Pri::CmpIntNEq => Some(CmpIntNEq),
-    //         Pri::CmpStrLT => Some(CmpStrLT),
-    //         Pri::CmpStrLEq => Some(CmpStrLEq),
-    //         Pri::CmpStrGT => Some(CmpStrGT),
-    //         Pri::CmpStrGEq => Some(CmpStrGEq),
-    //         Pri::CmpStrEq => Some(CmpStrEq),
-    //         Pri::CmpStrNEq => Some(CmpStrNEq),
-    //         Pri::LogicalNot => Some(LogicalNot),
-    //         Pri::MaxInt => Some(MaxInt),
-    //         Pri::MinInt => Some(MinInt),
-    //         Pri::ClampInt => Some(ClampInt),
-    //         Pri::InRangeInt => Some(InRangeInt),
-    //         Pri::InRangeStr => Some(InRangeStr),
-    //         Pri::GetBit => Some(GetBit),
-    //         Pri::SetBit => Some(SetBit),
-    //         Pri::ClearBit => Some(ClearBit),
-    //         Pri::InvertBit => Some(InvertBit),
-    //         Pri::BuildString => Some(BuildString { count: byte1()? }),
-    //         Pri::PadString => Some(PadString {
-    //             flags: EraPadStringFlags::from(byte1()?),
-    //         }),
-    //         Pri::RepeatStr => Some(RepeatStr),
-    //         Pri::BuildArrIdxFromMD => Some(BuildArrIdxFromMD { count: byte1()? }),
-    //         Pri::GetArrValFlat => Some(GetArrValFlat),
-    //         Pri::SetArrValFlat => Some(SetArrValFlat),
-    //         Pri::TimesFloat => Some(TimesFloat),
-    //         Pri::FunExists => Some(FunExists),
-    //         Pri::ReplaceStr => Some(ReplaceStr),
-    //         Pri::SubStr => Some(SubStr),
-    //         Pri::SubStrU => Some(SubStrU),
-    //         Pri::StrFind => Some(StrFind),
-    //         Pri::StrFindU => Some(StrFindU),
-    //         Pri::StrLen => Some(StrLen),
-    //         Pri::StrLenU => Some(StrLenU),
-    //         Pri::CountSubStr => Some(CountSubStr),
-    //         Pri::StrCharAtU => Some(StrCharAtU),
-    //         Pri::IntToStr => Some(IntToStr),
-    //         Pri::StrToInt => Some(StrToInt),
-    //         Pri::FormatIntToStr => Some(FormatIntToStr),
-    //         Pri::StrIsValidInt => Some(StrIsValidInt),
-    //         Pri::StrToUpper => Some(StrToUpper),
-    //         Pri::StrToLower => Some(StrToLower),
-    //         Pri::StrToHalf => Some(StrToHalf),
-    //         Pri::StrToFull => Some(StrToFull),
-    //         Pri::BuildBarStr => Some(BuildBarStr),
-    //         Pri::EscapeRegexStr => Some(EscapeRegexStr),
-    //         Pri::EncodeToUnicode => Some(EncodeToUnicode),
-    //         Pri::UnicodeToStr => Some(UnicodeToStr),
-    //         Pri::IntToStrWithBase => Some(IntToStrWithBase),
-    //         Pri::HtmlTagSplit => Some(HtmlTagSplit),
-    //         Pri::HtmlToPlainText => Some(HtmlToPlainText),
-    //         Pri::HtmlEscape => Some(HtmlEscape),
-    //         Pri::PowerInt => Some(PowerInt),
-    //         Pri::SqrtInt => Some(SqrtInt),
-    //         Pri::CbrtInt => Some(CbrtInt),
-    //         Pri::LogInt => Some(LogInt),
-    //         Pri::Log10Int => Some(Log10Int),
-    //         Pri::ExponentInt => Some(ExponentInt),
-    //         Pri::AbsInt => Some(AbsInt),
-    //         Pri::SignInt => Some(SignInt),
-    //         Pri::GroupMatch => Some(GroupMatch { count: byte1()? }),
-    //         Pri::ArrayCountMatches => Some(ArrayCountMatches),
-    //         Pri::CArrayCountMatches => Some(CArrayCountMatches),
-    //         Pri::SumArray => Some(SumArray),
-    //         Pri::SumCArray => Some(SumCArray),
-    //         Pri::MaxArray => Some(MaxArray),
-    //         Pri::MaxCArray => Some(MaxCArray),
-    //         Pri::MinArray => Some(MinArray),
-    //         Pri::MinCArray => Some(MinCArray),
-    //         Pri::InRangeArray => Some(InRangeArray),
-    //         Pri::InRangeCArray => Some(InRangeCArray),
-    //         Pri::ArrayRemove => Some(ArrayRemove),
-    //         Pri::ArraySortAsc => Some(ArraySortAsc),
-    //         Pri::ArraySortDesc => Some(ArraySortDesc),
-    //         Pri::ArrayMSort => Some(ArrayMSort { subs_cnt: byte1()? }),
-    //         Pri::ArrayCopy => Some(ArrayCopy),
-    //         Pri::ArrayShift => Some(ArrayShift),
-    //         Pri::Print => Some(Print),
-    //         Pri::PrintLine => Some(PrintLine),
-    //         Pri::PrintExtended => Some(PrintExtended {
-    //             flags: EraPrintExtendedFlags::from(byte1()?),
-    //         }),
-    //         Pri::ReuseLastLine => Some(ReuseLastLine),
-    //         Pri::ClearLine => Some(ClearLine),
-    //         Pri::Wait => Some(Wait {
-    //             flags: EraWaitFlags::from(byte1()?),
-    //         }),
-    //         Pri::TWait => Some(TWait),
-    //         Pri::Input => Some(Input {
-    //             flags: EraInputExtendedFlags::from(byte1()?),
-    //         }),
-    //         Pri::KbGetKeyState => Some(KbGetKeyState),
-    //         Pri::GetCallerFunName => Some(GetCallerFuncName),
-    //         Pri::GetCharaNum => Some(GetCharaNum),
-    //         Pri::CsvGetNum => Some(CsvGetNum {
-    //             kind: EraCsvVarKind::try_from_i(byte1()?)?,
-    //         }),
-    //         Pri::GetRandomRange => Some(GetRandomRange),
-    //         Pri::GetRandomMax => Some(GetRandomMax),
-    //         // ----- ExtOp1 -----
-    //         Pri::ExtOp1 => match num_traits::FromPrimitive::from_u8(get(1)?)? {
-    //             Ext1::RowAssign => Some(RowAssign { vals_cnt: get(2)? }),
-    //             Ext1::ForLoopStep => Some(ForLoopStep),
-    //             Ext1::ExtendStrToWidth => Some(ExtendStrToWidth),
-    //             Ext1::HtmlPrint => Some(HtmlPrint),
-    //             Ext1::PrintButton => Some(PrintButton {
-    //                 flags: EraPrintExtendedFlags::from(get(2)?),
-    //             }),
-    //             Ext1::PrintImg => Some(PrintImg),
-    //             Ext1::PrintImg4 => Some(PrintImg4),
-    //             Ext1::SplitString => Some(SplitString),
-    //             Ext1::GCreate => Some(GCreate),
-    //             Ext1::GCreateFromFile => Some(GCreateFromFile),
-    //             Ext1::GDispose => Some(GDispose),
-    //             Ext1::GCreated => Some(GCreated),
-    //             Ext1::GDrawSprite => Some(GDrawSprite),
-    //             Ext1::GDrawSpriteWithColorMatrix => Some(GDrawSpriteWithColorMatrix),
-    //             Ext1::GClear => Some(GClear),
-    //             Ext1::SpriteCreate => Some(SpriteCreate),
-    //             Ext1::SpriteDispose => Some(SpriteDispose),
-    //             Ext1::SpriteCreated => Some(SpriteCreated),
-    //             Ext1::SpriteAnimeCreate => Some(SpriteAnimeCreate),
-    //             Ext1::SpriteAnimeAddFrame => Some(SpriteAnimeAddFrame),
-    //             Ext1::SpriteWidth => Some(SpriteWidth),
-    //             Ext1::SpriteHeight => Some(SpriteHeight),
-    //             Ext1::CheckFont => Some(CheckFont),
-    //             Ext1::SaveText => Some(SaveText),
-    //             Ext1::LoadText => Some(LoadText),
-    //             Ext1::FindElement => Some(FindElement),
-    //             Ext1::FindLastElement => Some(FindLastElement),
-    //             Ext1::FindChara => Some(FindChara),
-    //             Ext1::FindLastChara => Some(FindLastChara),
-    //             Ext1::VarSet => Some(VarSet),
-    //             Ext1::CVarSet => Some(CVarSet),
-    //             Ext1::GetVarSizeByName => Some(GetVarSizeByName),
-    //             Ext1::GetVarAllSize => Some(GetVarAllSize),
-    //             Ext1::GetHostTimeRaw => Some(GetHostTimeRaw),
-    //             Ext1::GetHostTime => Some(GetHostTime),
-    //             Ext1::GetHostTimeS => Some(GetHostTimeS),
-    //             Ext1::CsvGetProp2 => Some(CsvGetProp2 {
-    //                 csv_kind: EraCharaCsvPropType::try_from_i(get(2)?)?,
-    //             }),
-    //             Ext1::CharaCsvExists => Some(CharaCsvExists),
-    //             Ext1::GetPalamLv => Some(GetPalamLv),
-    //             Ext1::GetExpLv => Some(GetExpLv),
-    //             Ext1::AddChara => Some(AddChara),
-    //             Ext1::AddVoidChara => Some(AddVoidChara),
-    //             Ext1::PickUpChara => Some(PickUpChara {
-    //                 charas_cnt: get(2)?,
-    //             }),
-    //             Ext1::DeleteChara => Some(DeleteChara {
-    //                 charas_cnt: get(2)?,
-    //             }),
-    //             Ext1::SwapChara => Some(SwapChara),
-    //             Ext1::AddCopyChara => Some(AddCopyChara),
-    //             Ext1::LoadData => Some(LoadData),
-    //             Ext1::SaveData => Some(SaveData),
-    //             Ext1::CheckData => Some(CheckData),
-    //             Ext1::GetCharaRegNum => Some(GetCharaRegNum),
-    //             Ext1::LoadGlobal => Some(LoadGlobal),
-    //             Ext1::SaveGlobal => Some(SaveGlobal),
-    //             Ext1::ResetData => Some(ResetData),
-    //             Ext1::ResetCharaStain => Some(ResetCharaStain),
-    //             Ext1::SaveChara => Some(SaveChara {
-    //                 charas_cnt: get(2)?,
-    //             }),
-    //             Ext1::LoadChara => Some(LoadChara),
-    //             Ext1::GetConfig => Some(GetConfig),
-    //             Ext1::GetConfigS => Some(GetConfigS),
-    //             Ext1::FindCharaDataFile => Some(FindCharaDataFile),
-    //             _ => None,
-    //         },
-    //         _ => todo!(),
-    //     }
-    // }
 
     pub fn to_bytes(&self) -> ArrayVec<[u8; 12]> {
         self.to_bytes_inline()

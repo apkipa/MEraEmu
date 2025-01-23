@@ -188,6 +188,10 @@
       <SubType>Code</SubType>
     </ClInclude>
     <ClInclude Include="ScintillaModule.hpp" />
+    <ClInclude Include="Settings\GamePage.h">
+      <DependentUpon>Settings\GamePage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
     <ClInclude Include="Settings\GeneralPage.h">
       <DependentUpon>Settings\GeneralPage.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -219,6 +223,9 @@
       <SubType>Designer</SubType>
     </Page>
     <Page Include="ScrollViewer_themeresources_v1.xaml">
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="Settings\GamePage.xaml">
       <SubType>Designer</SubType>
     </Page>
     <Page Include="Settings\GeneralPage.xaml">
@@ -288,6 +295,10 @@
     <ClCompile Include="ScintillaModule.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="Settings\GamePage.cpp">
+      <DependentUpon>Settings\GamePage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
     <ClCompile Include="Settings\GeneralPage.cpp">
       <DependentUpon>Settings\GeneralPage.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -350,6 +361,10 @@
     </Midl>
     <Midl Include="RelayCommand.idl">
       <SubType>Designer</SubType>
+    </Midl>
+    <Midl Include="Settings\GamePage.idl">
+      <DependentUpon>Settings\GamePage.xaml</DependentUpon>
+      <SubType>Code</SubType>
     </Midl>
     <Midl Include="Settings\GeneralPage.idl">
       <DependentUpon>Settings\GeneralPage.xaml</DependentUpon>
