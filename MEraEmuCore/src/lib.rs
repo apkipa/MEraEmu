@@ -34,8 +34,8 @@ use itertools::Itertools;
 use safer_ffi::{prelude::*, slice, string};
 use types::*;
 use v2::engine::{
-    EmptyCallback, EraCsvLoadKind, MEraEngine, MEraEngineAsyncErbLoader, MEraEngineBuilder,
-    MEraEngineConfig, MEraEngineHostFile, MEraEngineSysCallback,
+    EmptyCallback, EraCsvLoadKind, EraEngineSnapshotKind, MEraEngine, MEraEngineAsyncErbLoader,
+    MEraEngineBuilder, MEraEngineConfig, MEraEngineHostFile, MEraEngineSysCallback,
 };
 #[cfg(feature = "legacy_v1")]
 pub use vm::{EraColorMatrix, MEraEngineFileSeekMode};
@@ -87,6 +87,11 @@ pub fn generate_headers() -> ::std::io::Result<()> {
 #[ffi_export]
 fn rust_drop_string(s: string::String) {
     drop(s);
+}
+
+#[ffi_export]
+fn rust_drop_vec_u8(v: repr_c::Vec<u8>) {
+    drop(v);
 }
 
 #[ffi_export]
@@ -378,19 +383,29 @@ impl<T> FfiResult<T> {
 trait ResultExt {
     type TOk;
     type TErr;
-    fn into_mee_result(self) -> MeeResult<Self::TOk>;
+    fn into_mee_result<U>(self) -> MeeResult<U>
+    where
+        U: From<Self::TOk>,
+        Self::TOk: Default;
+    // fn into_mee_result_or(self, ok: TOk) -> MeeResult<Self::TOk>;
 }
 
 impl<T, E> ResultExt for Result<T, E>
 where
-    T: Default,
     E: std::error::Error,
 {
     type TOk = T;
     type TErr = E;
-    fn into_mee_result(self) -> MeeResult<Self::TOk> {
+    fn into_mee_result<U>(self) -> MeeResult<U>
+    where
+        U: From<Self::TOk>,
+        Self::TOk: Default,
+    {
         self.map_err(|e| e.to_string()).into()
     }
+    // fn into_mee_result_or(self, ok: TOk) -> MeeResult<Self::TOk> {
+    //     self.map_err(|e| e.to_string()).unwrap_or(ok).into()
+    // }
 }
 
 trait ErrorExt {
@@ -1068,6 +1083,25 @@ fn mee_engine_do_execution(
 #[ffi_export]
 fn mee_engine_do_rpc(engine: &mut MEraEngineFfi, request: char_p::Ref<'_>) -> string::String {
     engine.i.do_rpc(request.to_str()).into()
+}
+
+#[ffi_export]
+fn mee_engine_dump_snapshot(
+    engine: &mut MEraEngineFfi,
+    parts_to_add: u32,
+) -> MeeResult<repr_c::Vec<u8>> {
+    engine
+        .i
+        .dump_snapshot(EraEngineSnapshotKind::from_bits_truncate(parts_to_add))
+        .into_mee_result()
+}
+
+#[ffi_export]
+fn mee_engine_apply_snapshot(
+    engine: &mut MEraEngineFfi,
+    snapshot: c_slice::Ref<'_, u8>,
+) -> MeeResult<()> {
+    engine.i.apply_snapshot(&snapshot).into_mee_result()
 }
 
 #[derive_ReprC]

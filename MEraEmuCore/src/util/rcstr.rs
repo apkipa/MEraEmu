@@ -119,8 +119,49 @@ macro_rules! rcstr_impl {
             where
                 D: serde::Deserializer<'de>,
             {
-                let s = String::deserialize(deserializer)?;
-                Ok($ty::from(s))
+                struct Visitor;
+                impl<'de> serde::de::Visitor<'de> for Visitor {
+                    type Value = $ty;
+
+                    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                        formatter.write_str("a string")
+                    }
+
+                    fn visit_str<E>(self, v: &str) -> Result<$ty, E> {
+                        Ok($ty::from_str(v))
+                    }
+
+                    fn visit_string<E>(self, v: String) -> Result<$ty, E> {
+                        Ok($ty::from_str(&v))
+                    }
+
+                    fn visit_bytes<E>(self, v: &[u8]) -> Result<$ty, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match core::str::from_utf8(v) {
+                            Ok(s) => Ok($ty::from_str(s)),
+                            Err(_) => Err(serde::de::Error::invalid_value(
+                                serde::de::Unexpected::Bytes(v),
+                                &self,
+                            )),
+                        }
+                    }
+
+                    fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<$ty, E>
+                    where
+                        E: serde::de::Error,
+                    {
+                        match core::str::from_utf8(&v) {
+                            Ok(s) => Ok($ty::from_str(s)),
+                            Err(_) => Err(serde::de::Error::invalid_value(
+                                serde::de::Unexpected::Bytes(&v),
+                                &self,
+                            )),
+                        }
+                    }
+                }
+                deserializer.deserialize_str(Visitor)
             }
         }
     };

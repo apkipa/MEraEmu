@@ -6,6 +6,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    xmlns:tuxc="using:Tenkai.UI.Xaml.Controls"
     xmlns:muxcp="using:Microsoft.UI.Xaml.Controls.Primitives"
     xmlns:editor="using:WinUIEditor"
     mc:Ignorable="d">
@@ -300,6 +301,8 @@
                 <VisualState x:Name="SourcesTabLeftPaneClosed">
                     <VisualState.Setters>
                         <Setter Target="SourcesTabLeftPane.Visibility" Value="Collapsed" />
+                        <Setter Target="SourcesTabLeftPaneSizer.Visibility" Value="Collapsed" />
+                        <Setter Target="SourcesTabLeftPaneColDef.Width" Value="0" />
                         <Setter Target="SourcesTabLeftPaneOpenCloseButtonContent.Glyph" Value="&#xF716;" />
                     </VisualState.Setters>
                 </VisualState>
@@ -309,6 +312,8 @@
                 <VisualState x:Name="SourcesTabRightPaneClosed">
                     <VisualState.Setters>
                         <Setter Target="SourcesTabRightPane.Visibility" Value="Collapsed" />
+                        <Setter Target="SourcesTabRightPaneSizer.Visibility" Value="Collapsed" />
+                        <Setter Target="SourcesTabRightPaneColDef.Width" Value="0" />
                         <Setter Target="SourcesTabRightPaneOpenCloseButtonContent.Glyph" Value="&#xF717;" />
                     </VisualState.Setters>
                 </VisualState>
@@ -344,12 +349,12 @@
             <muxc:TabViewItem Header="Sources" IsClosable="False">
                 <Grid>
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition x:Name="SourcesTabLeftPaneColDef" Width="300" />
                         <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition x:Name="SourcesTabRightPaneColDef" Width="300" />
                     </Grid.ColumnDefinitions>
 
-                    <Grid x:Name="SourcesTabLeftPane" Grid.Column="0" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" BorderThickness="0,0,1,0" Width="300">
+                    <Grid x:Name="SourcesTabLeftPane" Grid.Column="0" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" BorderThickness="0,0,1,0">
                         <muxc:TreeView x:Name="SourceFilesTreeView" Grid.Column="0" CanReorderItems="False" CanDrag="False"
                                        ItemInvoked="SourceFilesTreeView_ItemInvoked" />
                     </Grid>
@@ -393,7 +398,7 @@
                             </muxc:TabView.TabStripFooter>
                         </muxc:TabView>
                     </Grid>
-                    <Grid x:Name="SourcesTabRightPane" Grid.Column="2" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" BorderThickness="1,0,0,0" Width="300">
+                    <Grid x:Name="SourcesTabRightPane" Grid.Column="2" BorderBrush="{ThemeResource TextBoxDisabledBorderThemeBrush}" BorderThickness="1,0,0,0">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
@@ -582,6 +587,20 @@
                             </StackPanel>
                         </ScrollViewer>
                     </Grid>
+                    
+                    <!-- Sizer -->
+                    <tuxc:GridSplitter x:Name="SourcesTabLeftPaneSizer" Grid.Column="1"
+                                       ResizeDirection="Columns" Width="8" Padding="0" HorizontalAlignment="Left">
+                        <tuxc:GridSplitter.RenderTransform>
+                            <TranslateTransform X="-5" />
+                        </tuxc:GridSplitter.RenderTransform>
+                    </tuxc:GridSplitter>
+                    <tuxc:GridSplitter x:Name="SourcesTabRightPaneSizer" Grid.Column="2"
+                                       ResizeDirection="Columns" Width="8" Padding="0" HorizontalAlignment="Left">
+                        <tuxc:GridSplitter.RenderTransform>
+                            <TranslateTransform X="-4" />
+                        </tuxc:GridSplitter.RenderTransform>
+                    </tuxc:GridSplitter>
                 </Grid>
             </muxc:TabViewItem>
         </muxc:TabView>
@@ -590,6 +609,13 @@
             TODO: Console, Time Travel, etc.
             -->
         </muxc:TabView>
+        
+        <!-- Sizer -->
+        <tuxc:GridSplitter Grid.Row="1" ResizeDirection="Rows" Height="8" Padding="0" VerticalAlignment="Top">
+            <tuxc:GridSplitter.RenderTransform>
+                <TranslateTransform Y="-4" />
+            </tuxc:GridSplitter.RenderTransform>
+        </tuxc:GridSplitter>
 
         <Rectangle x:Name="PageFlyoutContainerBackground" Grid.RowSpan="2" IsTapEnabled="True" PointerPressed="PageFlyoutContainerBackground_PointerPressed" />
         <Grid x:Name="PageFlyoutContainer" Grid.RowSpan="2" TabFocusNavigation="Cycle" VerticalAlignment="Top"

@@ -58,6 +58,7 @@
 #include <winrt/Tenkai.UI.ViewManagement.h>
 #include <winrt/Tenkai.UI.Xaml.h>
 #include <winrt/Tenkai.UI.Xaml.Data.h>
+#include <winrt/Tenkai.UI.Xaml.Controls.h>
 
 //#include <winrt/Microsoft.Xaml.Interactivity.h>
 //#include <winrt/Microsoft.Xaml.Interactions.Core.h>

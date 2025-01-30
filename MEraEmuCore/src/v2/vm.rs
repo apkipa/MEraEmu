@@ -10,7 +10,7 @@ use std::{
 use anyhow::Context;
 use cstree::interning::{InternKey, Resolver, TokenKey};
 use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use itertools::Itertools;
 use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,7 @@ use crate::{
 use EraBytecodeKind as Bc;
 
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
+type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 
 #[derive(Debug)]
 pub struct TailVecRef<'a, T> {
@@ -169,7 +170,7 @@ impl<T> TailVecRef<'_, T> {
 
     #[inline(always)]
     pub fn must_pop_many(&mut self, count: usize) {
-        if self.len() < count {
+        if crate::util::unlikely(self.len() < count) {
             panic!(
                 "stack underflow, vec len = {}, count = {}",
                 self.len(),
@@ -181,7 +182,7 @@ impl<T> TailVecRef<'_, T> {
 
     #[inline(always)]
     pub fn replace_tail(&mut self, count: usize, replace_with: impl IntoIterator<Item = T>) {
-        if self.len() < count {
+        if crate::util::unlikely(self.len() < count) {
             panic!(
                 "stack underflow, vec len = {}, count = {}",
                 self.len(),
@@ -189,7 +190,25 @@ impl<T> TailVecRef<'_, T> {
             );
         }
         let start = self.vec.len() - count;
-        self.vec.splice(start.., replace_with);
+        // self.vec.splice(start.., replace_with);
+        // Spec splice (adapted from std)
+        self.vec.drain(start..);
+        let mut iterator = replace_with.into_iter();
+        while let Some(element) = iterator.next() {
+            let len = self.vec.len();
+            // Mark vec grow as cold
+            if crate::util::unlikely(len == self.vec.capacity()) {
+                let (lower, _) = iterator.size_hint();
+                self.vec.reserve(lower.saturating_add(1));
+            }
+            unsafe {
+                core::ptr::write(self.vec.as_mut_ptr().add(len), element);
+                // Since next() executes user code which can panic we have to bump the length
+                // after each step.
+                // NB can't overflow since we would have had to alloc the address space
+                self.vec.set_len(len + 1);
+            }
+        }
     }
 
     /// # Safety
@@ -204,6 +223,34 @@ impl<T> TailVecRef<'_, T> {
         unsafe {
             let new_len = self.vec.len() - count;
             self.vec.set_len(new_len);
+            if N <= count {
+                // Spec extend; hopefully the compiler will optimize the checks away.
+                let dst = self.vec.as_mut_ptr().add(new_len);
+                let src = ManuallyDrop::new(replace_with);
+                std::ptr::copy_nonoverlapping(src.as_ptr(), dst, N);
+                self.vec.set_len(new_len + N);
+            } else {
+                self.vec.extend(replace_with);
+            }
+        }
+    }
+
+    /// # Safety
+    ///
+    /// No bounds checking is performed.
+    #[inline(always)]
+    pub unsafe fn replace_tail_unchecked_spec<const N: usize>(
+        &mut self,
+        count: usize,
+        replace_with: [T; N],
+    ) {
+        unsafe {
+            let new_len = self.vec.len() - count;
+            self.vec.set_len(new_len);
+            for i in 0..count {
+                let ptr = self.vec.as_mut_ptr().add(new_len + i);
+                std::ptr::drop_in_place(ptr);
+            }
             if N <= count {
                 // Spec extend; hopefully the compiler will optimize the checks away.
                 let dst = self.vec.as_mut_ptr().add(new_len);
@@ -392,7 +439,7 @@ pub struct EraFuncExecFrame {
     pub is_transient: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EraVirtualMachineState {
     /// The stack of values. The first value is a dummy value.
     stack: Vec<StackValue>,
@@ -451,14 +498,20 @@ impl EraVirtualMachineState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EraVirtualMachineStateInner {
+    #[serde(skip)]
     rand_gen: SimpleUniformGenerator,
+    #[serde(skip, default = "make_default_regex_cache")]
     regex_cache: lru::LruCache<ArcStr, regex::Regex>,
-    // var place -> var index
+    // var index (global only, no DYNAMIC vars)
     // NOTE: When serializing, we need to convert the address into `VariablePlaceRef`.
-    trap_vars: FxHashMap<erasable::ErasedPtr, u32>,
+    trap_vars: FxHashSet<u32>,
     charas_count: u32,
+}
+
+fn make_default_regex_cache() -> lru::LruCache<ArcStr, regex::Regex> {
+    lru::LruCache::new(NonZeroUsize::new(15).unwrap())
 }
 
 // TODO: Custom serde support for EraVirtualMachineState which involves
@@ -484,7 +537,7 @@ impl EraVirtualMachineState {
             inner: EraVirtualMachineStateInner {
                 rand_gen: SimpleUniformGenerator::new(),
                 regex_cache: lru::LruCache::new(NonZeroUsize::new(15).unwrap()),
-                trap_vars: FxHashMap::default(),
+                trap_vars: Default::default(),
                 charas_count: 0,
             },
         }
@@ -527,10 +580,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
                 x.flags.set_is_trap(true);
             }
         };
-        self.state
-            .inner
-            .trap_vars
-            .insert(var.as_untagged_ptr(), var_idx as u32);
+        self.state.inner.trap_vars.insert(var_idx as u32);
         Some(var_idx)
     }
 
@@ -2327,7 +2377,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.wrapping_add(b));
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::AddInt.bytes_len() as i32);
         Ok(())
     }
@@ -2337,7 +2389,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.wrapping_sub(b));
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::SubInt.bytes_len() as i32);
         Ok(())
     }
@@ -2347,7 +2401,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.wrapping_mul(b));
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::MulInt.bytes_len() as i32);
         Ok(())
     }
@@ -2360,7 +2416,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             return Err(anyhow::anyhow!("division by zero"));
         }
         let r = StackValue::new_int(a.wrapping_div(b));
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::DivInt.bytes_len() as i32);
         Ok(())
     }
@@ -2373,7 +2431,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             return Err(anyhow::anyhow!("division by zero"));
         }
         let r = StackValue::new_int(a.wrapping_rem(b));
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::ModInt.bytes_len() as i32);
         Ok(())
     }
@@ -2383,7 +2443,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, val:i);
         let r = StackValue::new_int(val.wrapping_neg());
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::NegInt.bytes_len() as i32);
         Ok(())
     }
@@ -2393,7 +2455,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a & b);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::BitAndInt.bytes_len() as i32);
         Ok(())
     }
@@ -2403,7 +2467,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a | b);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::BitOrInt.bytes_len() as i32);
         Ok(())
     }
@@ -2413,7 +2479,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a ^ b);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::BitXorInt.bytes_len() as i32);
         Ok(())
     }
@@ -2423,7 +2491,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, val:i);
         let r = StackValue::new_int(!val);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::BitNotInt.bytes_len() as i32);
         Ok(())
     }
@@ -2433,7 +2503,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.wrapping_shl(b as u32));
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::ShlInt.bytes_len() as i32);
         Ok(())
     }
@@ -2443,7 +2515,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.wrapping_shr(b as u32));
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::ShrInt.bytes_len() as i32);
         Ok(())
     }
@@ -2453,7 +2527,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a < b) as i64);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::CmpIntLT.bytes_len() as i32);
         Ok(())
     }
@@ -2463,7 +2539,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a <= b) as i64);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::CmpIntLEq.bytes_len() as i32);
         Ok(())
     }
@@ -2473,7 +2551,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a > b) as i64);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::CmpIntGT.bytes_len() as i32);
         Ok(())
     }
@@ -2483,7 +2563,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a >= b) as i64);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::CmpIntGEq.bytes_len() as i32);
         Ok(())
     }
@@ -2493,7 +2575,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a == b) as i64);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::CmpIntEq.bytes_len() as i32);
         Ok(())
     }
@@ -2503,7 +2587,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int((a != b) as i64);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::CmpIntNEq.bytes_len() as i32);
         Ok(())
     }
@@ -2573,7 +2659,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, val:i);
         let r = StackValue::new_int((val == 0) as i64);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::LogicalNot.bytes_len() as i32);
         Ok(())
     }
@@ -2583,7 +2671,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.max(b));
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::MaxInt.bytes_len() as i32);
         Ok(())
     }
@@ -2593,7 +2683,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, a:i, b:i);
         let r = StackValue::new_int(a.min(b));
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::MinInt.bytes_len() as i32);
         Ok(())
     }
@@ -2603,7 +2695,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, val:i, min:i, max:i);
         let r = StackValue::new_int(val.max(min).min(max));
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::ClampInt.bytes_len() as i32);
         Ok(())
     }
@@ -2613,7 +2707,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, val:i, min:i, max:i);
         let r = StackValue::new_int((min <= val && val <= max) as i64);
-        self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::InRangeInt.bytes_len() as i32);
         Ok(())
     }
@@ -2637,7 +2733,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         }
         let bit = b as usize;
         let r = StackValue::new_int((a >> bit) & 1);
-        self.o.stack.replace_tail(stack_count, [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::GetBit.bytes_len() as i32);
         Ok(())
     }
@@ -2651,7 +2749,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         }
         let bit = b as usize;
         let r = StackValue::new_int(a | (1 << bit));
-        self.o.stack.replace_tail(stack_count, [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::SetBit.bytes_len() as i32);
         Ok(())
     }
@@ -2665,7 +2765,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         }
         let bit = b as usize;
         let r = StackValue::new_int(a & !(1 << bit));
-        self.o.stack.replace_tail(stack_count, [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::ClearBit.bytes_len() as i32);
         Ok(())
     }
@@ -2679,7 +2781,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         }
         let bit = b as usize;
         let r = StackValue::new_int(a ^ (1 << bit));
-        self.o.stack.replace_tail(stack_count, [r]);
+        unsafe {
+            (self.o.stack).replace_tail_no_drop_unchecked_spec(stack_count, [r]);
+        }
         self.add_ip_offset(Bc::InvertBit.bytes_len() as i32);
         Ok(())
     }
@@ -2768,6 +2872,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             anyhow::bail!("array index {} out of bounds", idx);
         }
         let idx = idx as usize;
+        let arr_place = arr;
         let arr = (self.o.resolve_variable_place(arr))
             .with_context_unlikely(|| format!("array {:?} not found", arr))?;
         let arr_ptr = arr.as_untagged_ptr();
@@ -2782,10 +2887,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 };
                 if flags.is_trap() {
                     // Trapped; redirect to global variable manipulation
-                    let trap_var_info = (self.trap_vars.get(&arr_ptr).copied())
-                        .context_unlikely("bad trap variable registration")?;
                     let trap_var_info = (self.o.ctx.i.variables)
-                        .get_var_info(trap_var_info as _)
+                        .get_var_info(arr_place.index)
                         .context_unlikely("bad trap variable info")?;
                     val.val = (self.o.ctx.callback)
                         .on_var_get_int(trap_var_info.name.as_ref(), idx)
@@ -2803,10 +2906,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 };
                 if flags.is_trap() {
                     // Trapped; redirect to global variable manipulation
-                    let trap_var_info = (self.trap_vars.get(&arr_ptr).copied())
-                        .context_unlikely("bad trap variable registration")?;
                     let trap_var_info = (self.o.ctx.i.variables)
-                        .get_var_info(trap_var_info as _)
+                        .get_var_info(arr_place.index)
                         .context_unlikely("bad trap variable info")?;
                     val.val = (self.o.ctx.callback)
                         .on_var_get_str(trap_var_info.name.as_ref(), idx)
@@ -2831,6 +2932,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             anyhow::bail!("array index {} out of bounds", idx);
         }
         let idx = idx as usize;
+        let arr_place = arr;
         let arr = (self.o.resolve_variable_place(arr))
             .with_context_unlikely(|| format!("array {:?} not found", arr))?;
         let arr_ptr = arr.as_untagged_ptr();
@@ -2847,10 +2949,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 val.val = in_val;
                 if flags.is_trap() {
                     // Trapped; redirect to global variable manipulation
-                    let trap_var_info = (self.trap_vars.get(&arr_ptr).copied())
-                        .context_unlikely("bad trap variable registration")?;
                     let trap_var_info = (self.o.ctx.i.variables)
-                        .get_var_info(trap_var_info as _)
+                        .get_var_info(arr_place.index)
                         .context_unlikely("bad trap variable info")?;
                     (self.o.ctx.callback)
                         .on_var_set_int(trap_var_info.name.as_ref(), idx, in_val)
@@ -2869,10 +2969,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 val.val = in_val.clone();
                 if flags.is_trap() {
                     // Trapped; redirect to global variable manipulation
-                    let trap_var_info = (self.trap_vars.get(&arr_ptr).copied())
-                        .context_unlikely("bad trap variable registration")?;
                     let trap_var_info = (self.o.ctx.i.variables)
-                        .get_var_info(trap_var_info as _)
+                        .get_var_info(arr_place.index)
                         .context_unlikely("bad trap variable info")?;
                     (self.o.ctx.callback)
                         .on_var_set_str(trap_var_info.name.as_ref(), idx, in_val.as_str())

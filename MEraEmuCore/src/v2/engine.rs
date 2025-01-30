@@ -1532,7 +1532,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 var_desc.dims.insert(0, INITIAL_CHARA_CAP);
             }
             // NOTE: May need ensure_alloc() later
-            let val: ptr_union::Union2<Box<ArrIntValue>, Box<ArrStrValue>> = if var_desc.is_string {
+            let val = if var_desc.is_string {
                 ArrayValue::new_str_arr(
                     var_desc.dims,
                     var_desc.initial_sval.unwrap_or_else(|| Vec::new()),
@@ -2904,6 +2904,33 @@ pub struct EraEvaluateExprResult {
     pub children_total_count: Option<u64>,
 }
 
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct EraEngineSnapshotKind: u32 {
+        const GLOBAL_VAR = 0b0000_0001;
+        const EXEC_STATE = 0b0000_0010;
+        const SOURCE_CODE = 0b0000_0100;
+
+        const _ = !0;
+    }
+}
+impl Serialize for EraEngineSnapshotKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.bits())
+    }
+}
+impl<'de> Deserialize<'de> for EraEngineSnapshotKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(u32::deserialize(deserializer).map(Self::from_bits_truncate)?)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EraEngineSnapshotChunkHeader {
+    pub kind: EraEngineSnapshotKind,
+    pub size: u32,
+}
+
 #[easy_jsonrpc::rpc]
 pub trait MEraEngineRpc {
     fn reset_exec_to_ip(&mut self, ip: EraExecIp) -> Result<(), MEraEngineError>;
@@ -2961,6 +2988,15 @@ impl<Callback> MEraEngine<Callback> {
     }
 }
 
+macro_rules! mtry {
+    ($x:expr) => {
+        match $x {
+            Ok(x) => x,
+            Err(e) => return Err(MEraEngineError::from(format!("{:?}", e))),
+        }
+    };
+}
+
 impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
     pub fn get_config(&self) -> &MEraEngineConfig {
         &self.config
@@ -2995,6 +3031,103 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
             easy_jsonrpc::MaybeReply::DontReply => String::new(),
             easy_jsonrpc::MaybeReply::Reply(reply) => reply.to_string(),
         }
+    }
+
+    pub fn dump_snapshot(
+        &self,
+        parts_to_add: EraEngineSnapshotKind,
+    ) -> Result<Vec<u8>, MEraEngineError> {
+        Ok(mtry!(self.dump_snapshot_inner(parts_to_add)))
+    }
+
+    pub fn apply_snapshot(&mut self, snapshot: &[u8]) -> Result<(), MEraEngineError> {
+        Ok(mtry!(self.apply_snapshot_inner(snapshot)))
+    }
+
+    fn dump_snapshot_inner(&self, parts_to_add: EraEngineSnapshotKind) -> anyhow::Result<Vec<u8>> {
+        use byteorder::{WriteBytesExt, LE};
+
+        let mut snapshot = Vec::new();
+        if parts_to_add.contains(EraEngineSnapshotKind::SOURCE_CODE) {
+            snapshot.write_u32::<LE>(EraEngineSnapshotKind::SOURCE_CODE.bits())?;
+            let pos = snapshot.len();
+            snapshot.write_u32::<LE>(0)?;
+            self.dump_source_code_snapshot_to_sink(&mut snapshot)?;
+            let size = snapshot.len() - pos - 4;
+            (&mut snapshot[pos..pos + 4]).write_u32::<LE>(size as u32)?;
+        }
+        if parts_to_add.contains(EraEngineSnapshotKind::GLOBAL_VAR) {
+            snapshot.write_u32::<LE>(EraEngineSnapshotKind::GLOBAL_VAR.bits())?;
+            let pos = snapshot.len();
+            snapshot.write_u32::<LE>(0)?;
+            self.dump_global_var_snapshot_to_sink(&mut snapshot)?;
+            let size = snapshot.len() - pos - 4;
+            (&mut snapshot[pos..pos + 4]).write_u32::<LE>(size as u32)?;
+        }
+        if parts_to_add.contains(EraEngineSnapshotKind::EXEC_STATE) {
+            snapshot.write_u32::<LE>(EraEngineSnapshotKind::EXEC_STATE.bits())?;
+            let pos = snapshot.len();
+            snapshot.write_u32::<LE>(0)?;
+            self.dump_exec_state_snapshot_to_sink(&mut snapshot)?;
+            let size = snapshot.len() - pos - 4;
+            (&mut snapshot[pos..pos + 4]).write_u32::<LE>(size as u32)?;
+        }
+        Ok(snapshot)
+    }
+
+    pub fn apply_snapshot_inner(&mut self, snapshot: &[u8]) -> anyhow::Result<()> {
+        use byteorder::{ReadBytesExt, LE};
+
+        let mut snapshot = snapshot;
+        while !snapshot.is_empty() {
+            let kind = EraEngineSnapshotKind::from_bits_truncate(snapshot.read_u32::<LE>()?);
+            let size = snapshot.read_u32::<LE>()? as usize;
+            let mut chunk = &snapshot[..size];
+            snapshot = &snapshot[size..];
+            match kind {
+                EraEngineSnapshotKind::GLOBAL_VAR => {
+                    self.ctx.deserialize_global_var_from(&mut chunk)?;
+                }
+                EraEngineSnapshotKind::SOURCE_CODE => {
+                    self.ctx.deserialize_source_code_from(&mut chunk, true)?;
+                }
+                EraEngineSnapshotKind::EXEC_STATE => {
+                    self.vm_state = bincode::deserialize(chunk)?;
+                }
+                _ => return Err(anyhow::anyhow!("unknown snapshot kind")),
+            }
+        }
+        Ok(())
+    }
+
+    fn dump_global_var_snapshot_to_sink(
+        &self,
+        sink: &mut impl std::io::Write,
+    ) -> anyhow::Result<()> {
+        let mut compressor = zstd::stream::Encoder::new(sink, 0)?;
+        self.ctx.serialize_global_var_into(&mut compressor)?;
+        compressor.finish()?;
+        Ok(())
+    }
+
+    fn dump_source_code_snapshot_to_sink(
+        &self,
+        sink: &mut impl std::io::Write,
+    ) -> anyhow::Result<()> {
+        let mut compressor = zstd::stream::Encoder::new(sink, 0)?;
+        self.ctx.serialize_source_code_into(&mut compressor)?;
+        compressor.finish()?;
+        Ok(())
+    }
+
+    fn dump_exec_state_snapshot_to_sink(
+        &self,
+        sink: &mut impl std::io::Write,
+    ) -> anyhow::Result<()> {
+        let mut compressor = zstd::stream::Encoder::new(sink, 0)?;
+        bincode::serialize_into(&mut compressor, &self.vm_state)?;
+        compressor.finish()?;
+        Ok(())
     }
 
     fn resolve_variable_place(&self, place: VariablePlaceRef) -> Option<&ArrayValue> {

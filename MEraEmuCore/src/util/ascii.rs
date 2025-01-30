@@ -4,6 +4,8 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+use serde::{Deserialize, Serialize};
+
 /// Case Insensitive wrapper of Ascii strings.
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(transparent)]
@@ -19,6 +21,17 @@ impl<S: AsRef<str>> Ascii<S> {
 impl Ascii<str> {
     pub fn new_str(value: &str) -> &Ascii<str> {
         value.into()
+    }
+}
+
+impl<T: Serialize> Serialize for Ascii<T> {
+    fn serialize<D: serde::Serializer>(&self, serializer: D) -> Result<D::Ok, D::Error> {
+        self.0.serialize(serializer)
+    }
+}
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Ascii<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(deserializer).map(Ascii)
     }
 }
 

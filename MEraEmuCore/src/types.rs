@@ -9,6 +9,8 @@ use std::{
     ops::{ControlFlow, Deref, DerefMut},
 };
 
+use anyhow::Context;
+use bincode::Options;
 use cstree::{
     interning::{Resolver, TokenInterner, TokenKey},
     syntax::{SyntaxElement, SyntaxElementRef, SyntaxNode, SyntaxToken},
@@ -19,7 +21,7 @@ use hashbrown::HashMap;
 use indexmap::IndexMap;
 use rclite::{Arc, Rc};
 use rustc_hash::FxBuildHasher;
-use safer_ffi::{derive_ReprC, prelude::VirtualPtr};
+use safer_ffi::derive_ReprC;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tinyvec::ArrayVec;
 
@@ -786,7 +788,7 @@ impl EraMacroMap {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EraSourceFileKind {
     /// A normal source file.
     Source,
@@ -798,7 +800,13 @@ pub enum EraSourceFileKind {
     Csv,
 }
 
-#[derive(Debug)]
+impl Default for EraSourceFileKind {
+    fn default() -> Self {
+        EraSourceFileKind::Source
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct EraSourceFile {
     pub filename: ArcStr,
     /// The original source text.
@@ -1026,6 +1034,79 @@ impl<'i> EraCompilerCtxInner<'i> {
 
     pub fn get_chara_save_path(&self, save_id: &str) -> String {
         format!(".\\dat\\chara_{save_id}.dat")
+    }
+
+    pub fn serialize_source_code_into(&self, w: &mut impl std::io::Write) -> bincode::Result<()> {
+        struct Data<'a, 'i> {
+            s: &'a EraCompilerCtxInner<'i>,
+        }
+        impl Serialize for Data<'_, '_> {
+            fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.collect_seq(self.s.source_map.iter().map(|(filename, file)| {
+                    let text = file.text.as_deref();
+                    (filename, file.kind, text)
+                }))
+            }
+        }
+        let data = Data { s: self };
+        bincode::serialize_into(w, &data)
+    }
+
+    pub fn deserialize_source_code_from(
+        &mut self,
+        r: &mut impl std::io::Read,
+        verify_mode: bool,
+    ) -> anyhow::Result<()> {
+        let data: Vec<(ArcStr, EraSourceFileKind, Option<arcstr::ArcStr>)> =
+            bincode::deserialize_from(r)?;
+        for (filename, kind, text) in data {
+            if verify_mode {
+                // Check whether source files match
+                let Some(src_file) = self.source_map.get(&filename) else {
+                    anyhow::bail!("source file not found: {:?}", filename);
+                };
+                if src_file.kind != kind {
+                    anyhow::bail!(
+                        "source file kind mismatch: {:?} != {:?}",
+                        src_file.kind,
+                        kind
+                    );
+                }
+                if let Some(text) = text {
+                    if let Some(src_text) = src_file.text.as_deref() {
+                        if text != src_text {
+                            anyhow::bail!(
+                                "source file text mismatch: {:?} != {:?}",
+                                text,
+                                src_text
+                            );
+                        }
+                    }
+                }
+            } else {
+                // Overwrite source file
+                let source_map =
+                    Arc::get_mut(&mut self.source_map).context("source map is immutable")?;
+                let src_file = source_map.entry(filename).or_default();
+                src_file.kind = kind;
+                src_file.text = text;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn serialize_global_var_into(&self, w: &mut impl std::io::Write) -> bincode::Result<()> {
+        bincode::serialize_into(w, &self.variables)
+    }
+
+    pub fn deserialize_global_var_from(
+        &mut self,
+        r: &mut impl std::io::Read,
+    ) -> anyhow::Result<()> {
+        // Avoid memory hogging
+        self.variables = Default::default();
+        self.variables = bincode::deserialize_from(r)?;
+        Ok(())
     }
 }
 
@@ -2233,7 +2314,31 @@ impl ArrayValueKind {
     }
 }
 
-pub type ArrayValue = ptr_union::Union2<Box<ArrIntValue>, Box<ArrStrValue>>;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct ArrayValue(ptr_union::Union2<Box<ArrIntValue>, Box<ArrStrValue>>);
+impl Deref for ArrayValue {
+    type Target = ptr_union::Union2<Box<ArrIntValue>, Box<ArrStrValue>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for ArrayValue {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Serialize for ArrayValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_unpacked().serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for ArrayValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        FlatArrayValue::deserialize(deserializer).map(Into::into)
+    }
+}
 
 pub trait ArrayValueExt: Sized {
     fn new_int_arr(dims: EraVarDims, vals: Vec<IntValue>) -> Self;
@@ -2325,19 +2430,19 @@ pub trait ArrayValueExt: Sized {
 
 impl ArrayValueExt for ArrayValue {
     fn new_int_arr(dims: EraVarDims, vals: Vec<IntValue>) -> Self {
-        ARRAY_VALUE_BUILDER.a(Box::new(ArrIntValue {
+        ArrayValue(ARRAY_VALUE_BUILDER.a(Box::new(ArrIntValue {
             dims,
             vals,
             flags: EraValueFlags::new(),
-        }))
+        })))
     }
 
     fn new_str_arr(dims: EraVarDims, vals: Vec<StrValue>) -> Self {
-        ARRAY_VALUE_BUILDER.b(Box::new(ArrStrValue {
+        ArrayValue(ARRAY_VALUE_BUILDER.b(Box::new(ArrStrValue {
             dims,
             vals,
             flags: EraValueFlags::new(),
-        }))
+        })))
     }
 
     #[inline(always)]
@@ -2377,7 +2482,7 @@ impl ArrayValueExt for ArrayValue {
     #[inline(always)]
     fn into_unpacked(self) -> FlatArrayValue {
         use ptr_union::Enum2;
-        match self.unpack() {
+        match self.0.unpack() {
             Enum2::A(x) => FlatArrayValue::ArrInt(x),
             Enum2::B(x) => FlatArrayValue::ArrStr(x),
         }
@@ -2402,17 +2507,17 @@ const ARRAY_VALUE_BUILDER: ptr_union::Builder2<Box<ArrIntValue>, Box<ArrStrValue
 
 impl From<FlatArrayValue> for ArrayValue {
     fn from(value: FlatArrayValue) -> Self {
-        match value {
+        ArrayValue(match value {
             FlatArrayValue::ArrInt(x) => ARRAY_VALUE_BUILDER.a(x),
             FlatArrayValue::ArrStr(x) => ARRAY_VALUE_BUILDER.b(x),
-        }
+        })
     }
 }
 
 impl From<ArrayValue> for FlatArrayValue {
     fn from(value: ArrayValue) -> Self {
         use ptr_union::Enum2;
-        match value.unpack() {
+        match value.0.unpack() {
             Enum2::A(x) => FlatArrayValue::ArrInt(x),
             Enum2::B(x) => FlatArrayValue::ArrStr(x),
         }
@@ -2669,7 +2774,99 @@ pub struct EraVarPool {
     init_vars: Vec<(usize, ArrayValue)>,
 }
 
-#[derive(Debug, Clone)]
+impl Serialize for EraVarPool {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("EraVarPool", 3)?;
+        state.serialize_field("var_names", &self.var_names)?;
+        state.serialize_field("vars", &self.vars)?;
+        state.serialize_field("init_vars", &self.init_vars)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for EraVarPool {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            VarNames,
+            Vars,
+            InitVars,
+        }
+
+        struct EraVarPoolVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for EraVarPoolVisitor {
+            type Value = EraVarPool;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("struct EraVarPool")
+            }
+
+            fn visit_map<V: serde::de::MapAccess<'de>>(
+                self,
+                mut map: V,
+            ) -> Result<Self::Value, V::Error> {
+                use serde::de;
+
+                let mut var_names = None;
+                let mut vars = None;
+                let mut init_vars = None;
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::VarNames => {
+                            if var_names.is_some() {
+                                return Err(de::Error::duplicate_field("var_names"));
+                            }
+                            var_names = Some(map.next_value()?);
+                        }
+                        Field::Vars => {
+                            if vars.is_some() {
+                                return Err(de::Error::duplicate_field("vars"));
+                            }
+                            vars = Some(map.next_value()?);
+                        }
+                        Field::InitVars => {
+                            if init_vars.is_some() {
+                                return Err(de::Error::duplicate_field("init_vars"));
+                            }
+                            init_vars = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let var_names = var_names.ok_or_else(|| de::Error::missing_field("var_names"))?;
+                let vars = vars.ok_or_else(|| de::Error::missing_field("vars"))?;
+                let init_vars = init_vars.ok_or_else(|| de::Error::missing_field("init_vars"))?;
+                let mut r = EraVarPool {
+                    var_names,
+                    chara_var_idxs: Vec::new(),
+                    normal_var_idxs: Vec::new(),
+                    vars,
+                    init_vars,
+                };
+                r.chara_var_idxs = r
+                    .vars
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, x)| if x.is_charadata { Some(i) } else { None })
+                    .collect();
+                r.normal_var_idxs = r
+                    .vars
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, x)| if !x.is_charadata { Some(i) } else { None })
+                    .collect();
+                Ok(r)
+            }
+        }
+
+        const FIELDS: &[&str] = &["var_names", "vars", "init_vars"];
+        deserializer.deserialize_struct("EraVarPool", FIELDS, EraVarPoolVisitor)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EraVarInfo {
     pub name: Ascii<ArcStr>,
     pub val: ArrayValue,
