@@ -64,6 +64,7 @@ impl<'a, T> std::ops::DerefMut for TailVecRef<'a, T> {
     }
 }
 
+// NOTE: Implementation is optimized for VM scenarios.
 impl<T> TailVecRef<'_, T> {
     #[inline(always)]
     pub fn as_slice(&self) -> &[T] {
@@ -77,7 +78,20 @@ impl<T> TailVecRef<'_, T> {
 
     #[inline(always)]
     pub fn push(&mut self, value: T) {
-        self.vec.push(value);
+        // self.vec.push(value);
+
+        let len = self.vec.len();
+        if crate::util::unlikely(len == self.vec.capacity()) {
+            // Fallback
+            self.vec.push(value);
+        } else {
+            // Fast path
+            unsafe {
+                let end = self.vec.as_mut_ptr().add(len);
+                std::ptr::write(end, value);
+                self.vec.set_len(len + 1);
+            }
+        }
     }
 
     #[inline(always)]
@@ -87,8 +101,9 @@ impl<T> TailVecRef<'_, T> {
 
     #[inline(always)]
     pub fn pop(&mut self) -> Option<T> {
-        if self.vec.len() > self.start {
-            self.vec.pop()
+        if crate::util::likely(self.vec.len() > self.start) {
+            // Fast path
+            unsafe { Some(self.vec.pop().unwrap_unchecked()) }
         } else {
             None
         }
@@ -511,7 +526,7 @@ pub struct EraVirtualMachineStateInner {
 }
 
 fn make_default_regex_cache() -> lru::LruCache<ArcStr, regex::Regex> {
-    lru::LruCache::new(NonZeroUsize::new(15).unwrap())
+    lru::LruCache::new(NonZeroUsize::new(1023).unwrap())
 }
 
 // TODO: Custom serde support for EraVirtualMachineState which involves
@@ -536,7 +551,7 @@ impl EraVirtualMachineState {
             var_stack: Vec::new(),
             inner: EraVirtualMachineStateInner {
                 rand_gen: SimpleUniformGenerator::new(),
-                regex_cache: lru::LruCache::new(NonZeroUsize::new(15).unwrap()),
+                regex_cache: make_default_regex_cache(),
                 trap_vars: Default::default(),
                 charas_count: 0,
             },
@@ -4571,7 +4586,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         // Compile twice to ensure input is safe
                         regex::Regex::new(&value).and_then(|_| regex::Regex::new(&re_str))
                     })
-                    .with_context_unlikely(|| format!("invalid regex: `{:?}`", re_str))?;
+                    .with_context_unlikely(|| format!("invalid regex: `{:?}`", value))?;
 
                 let mut iter = arr
                     .iter()
