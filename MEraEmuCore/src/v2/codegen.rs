@@ -2341,11 +2341,14 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                     return Err(());
                 }
                 // Execute function
-                self.chunk.push_load_imm(func_idx as _, stmt_span);
                 let bc = if reset_exec {
+                    self.chunk.push_load_imm(func_idx as _, stmt_span);
                     BcKind::RestartExecAtFun
                 } else {
-                    BcKind::CallFun { args_cnt: 0 }
+                    BcKind::CallFun {
+                        args_cnt: 0,
+                        func_idx: func_idx as _,
+                    }
                 };
                 self.chunk.push_bc(bc, stmt_span);
             }
@@ -2584,10 +2587,10 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                     args,
                     ScalarValueKind::Int,
                 )?;
-                self.chunk.push_load_imm(func_idx as _, stmt_span);
                 self.chunk.push_bc(
                     BcKind::CallFun {
                         args_cnt: args.len() as _,
+                        func_idx: func_idx as _,
                     },
                     stmt_span,
                 );
@@ -2639,9 +2642,13 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                     &[],
                     ScalarValueKind::Void,
                 )?;
-                self.chunk.push_load_imm(func_idx as _, stmt_span);
-                self.chunk
-                    .push_bc(BcKind::CallFun { args_cnt: 0 }, stmt_span);
+                self.chunk.push_bc(
+                    BcKind::CallFun {
+                        args_cnt: 0,
+                        func_idx: func_idx as _,
+                    },
+                    stmt_span,
+                );
             }
             EraNode::StmtSaveGame => {
                 let func_idx = self.match_user_func_sig(
@@ -2650,9 +2657,13 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                     &[],
                     ScalarValueKind::Void,
                 )?;
-                self.chunk.push_load_imm(func_idx as _, stmt_span);
-                self.chunk
-                    .push_bc(BcKind::CallFun { args_cnt: 0 }, stmt_span);
+                self.chunk.push_bc(
+                    BcKind::CallFun {
+                        args_cnt: 0,
+                        func_idx: func_idx as _,
+                    },
+                    stmt_span,
+                );
             }
             EraNode::StmtDebugClear => {
                 // TODO: DebugClearStmt
@@ -5704,12 +5715,11 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
             return Err(());
         }
 
-        // Push function number
-        self.chunk.push_load_imm(target_idx as _, name_span);
         // Call function
         self.chunk.push_bc(
             BcKind::CallFun {
                 args_cnt: target_func.frame_info.args.len() as _,
+                func_idx: target_idx as _,
             },
             args_span,
         );
@@ -6274,9 +6284,13 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                     &[ValueKind::Int],
                     ScalarValueKind::Str,
                 )?;
-                site.chunk.push_load_imm(func_idx as _, name_span);
-                site.chunk
-                    .push_bc(BcKind::CallFun { args_cnt: 1 }, name_span);
+                site.chunk.push_bc(
+                    BcKind::CallFun {
+                        args_cnt: 1,
+                        func_idx: func_idx as _,
+                    },
+                    name_span,
+                );
             }
             b"MAX" => {
                 site.result()?;

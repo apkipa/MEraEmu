@@ -223,9 +223,6 @@ macro_rules! bmatch_caseless {
     }};
 }
 
-pub(crate) use bmatch_caseless;
-pub(crate) use uppercase_bliteral;
-
 // Source: https://stackoverflow.com/a/50781657
 pub trait SubsliceOffset {
     /**
@@ -691,3 +688,23 @@ where
         })
     }
 }
+
+macro_rules! impl_serde_for_modular_bitfield {
+    ($name:ident, $type:ty) => {
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                <$type>::from(*self).serialize(serializer)
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                <$type>::deserialize(deserializer).map(Self::from)
+            }
+        }
+    };
+}
+
+pub(crate) use bmatch_caseless;
+pub(crate) use impl_serde_for_modular_bitfield;
+pub(crate) use uppercase_bliteral;

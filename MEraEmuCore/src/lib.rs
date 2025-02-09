@@ -1086,22 +1086,22 @@ fn mee_engine_do_rpc(engine: &mut MEraEngineFfi, request: char_p::Ref<'_>) -> st
 }
 
 #[ffi_export]
-fn mee_engine_dump_snapshot(
+fn mee_engine_take_snapshot(
     engine: &mut MEraEngineFfi,
     parts_to_add: u32,
 ) -> MeeResult<repr_c::Vec<u8>> {
     engine
         .i
-        .dump_snapshot(EraEngineSnapshotKind::from_bits_truncate(parts_to_add))
+        .take_snapshot(EraEngineSnapshotKind::from_bits_truncate(parts_to_add))
         .into_mee_result()
 }
 
 #[ffi_export]
-fn mee_engine_apply_snapshot(
+fn mee_engine_restore_snapshot(
     engine: &mut MEraEngineFfi,
     snapshot: c_slice::Ref<'_, u8>,
 ) -> MeeResult<()> {
-    engine.i.apply_snapshot(&snapshot).into_mee_result()
+    engine.i.restore_snapshot(&snapshot).into_mee_result()
 }
 
 #[derive_ReprC]

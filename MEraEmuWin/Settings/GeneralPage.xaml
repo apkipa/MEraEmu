@@ -13,6 +13,8 @@
                           IsOn="{x:Bind ParentPage.Settings.EnableParallelLoading,Mode=TwoWay}" />
             <ToggleSwitch Header="启用 JIT 缓存 (实验性)"
                           IsOn="{x:Bind ParentPage.Settings.EnableJIT,Mode=TwoWay}" />
+            <ToggleSwitch Header="引擎执行出错时显示控制器"
+                          IsOn="{x:Bind ParentPage.Settings.EnableEngineControlOnError,Mode=TwoWay}" />
         </StackPanel>
     </ScrollViewer>
 </Page>

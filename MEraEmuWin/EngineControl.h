@@ -80,9 +80,18 @@ namespace winrt::MEraEmuWin::implementation {
             hstring path;
             uint32_t line, column;
         };
+        // For engine control on error
+        struct EngineErrorControlButton {
+            enum class ButtonType {
+                Retry,
+                Continue,
+            } type;
+        };
+
+        using ButtonData = std::variant<InputButton, SourceButton, EngineErrorControlButton>;
 
         uint32_t starti, len;
-        std::variant<InputButton, SourceButton> data;
+        ButtonData data;
     };
 
     struct EngineUnhandledExceptionEventArgs : EngineUnhandledExceptionEventArgsT<EngineUnhandledExceptionEventArgs> {
@@ -212,6 +221,8 @@ namespace winrt::MEraEmuWin::implementation {
         void RoutinePrintSourceButton(hstring const& content, hstring const& path,
             uint32_t line, uint32_t column, PrintExtendedFlags flags);
         void RoutinePrintButton(hstring const& content, hstring const& value, PrintExtendedFlags flags);
+        void RoutinePrintEngineErrorControlButton(hstring const& content, EngineUIPrintLineDataButton::EngineErrorControlButton::ButtonType type);
+        void RoutinePrintButtonGeneric(hstring const& content, PrintExtendedFlags flags, EngineUIPrintLineDataButton::ButtonData data);
 
         void SetCurrentLineAlignment(int64_t value);
         int64_t GetCurrentLineAlignment();

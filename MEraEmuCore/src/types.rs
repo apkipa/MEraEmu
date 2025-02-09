@@ -26,6 +26,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tinyvec::ArrayVec;
 
 use crate::util::{
+    impl_serde_for_modular_bitfield,
     interning::ThreadedTokenInterner,
     rcstr::{ArcStr, RcStr},
     Ascii,
@@ -1829,6 +1830,7 @@ pub struct EraPrintExtendedFlags {
     pub left_pad: bool,
     pub right_pad: bool,
 }
+impl_serde_for_modular_bitfield!(EraPrintExtendedFlags, u8);
 
 #[modular_bitfield::bitfield]
 #[repr(u8)]
@@ -1839,6 +1841,7 @@ pub struct EraWaitFlags {
     #[skip]
     __: modular_bitfield::specifiers::B6,
 }
+impl_serde_for_modular_bitfield!(EraWaitFlags, u8);
 
 #[modular_bitfield::bitfield]
 #[repr(u8)]
@@ -1849,6 +1852,7 @@ pub struct EraPadStringFlags {
     #[skip]
     __: modular_bitfield::specifiers::B6,
 }
+impl_serde_for_modular_bitfield!(EraPadStringFlags, u8);
 
 #[modular_bitfield::bitfield]
 #[repr(u8)]
@@ -1861,6 +1865,7 @@ pub struct EraInputExtendedFlags {
     #[skip]
     __: modular_bitfield::specifiers::B4,
 }
+impl_serde_for_modular_bitfield!(EraInputExtendedFlags, u8);
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(C)]
@@ -2091,18 +2096,7 @@ pub struct EraValueFlags {
     #[skip]
     __: modular_bitfield::specifiers::B5,
 }
-
-impl Serialize for EraValueFlags {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        u8::from(*self).serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for EraValueFlags {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        u8::deserialize(deserializer).map(Self::from)
-    }
-}
+impl_serde_for_modular_bitfield!(EraValueFlags, u8);
 
 impl IntValue {
     #[inline]
@@ -3185,7 +3179,17 @@ pub struct EraCharaInitTemplate {
 }
 
 #[repr(u8)]
-#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    num_derive::FromPrimitive,
+    num_derive::ToPrimitive,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+)]
 pub enum EraCharaCsvPropType {
     CsvName,
     CsvCallName,
@@ -3253,7 +3257,17 @@ impl TryFrom<u8> for EraCharaCsvPropType {
 }
 
 #[repr(u8)]
-#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    num_derive::FromPrimitive,
+    num_derive::ToPrimitive,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+)]
 pub enum EraCsvVarKind {
     CsvAbl,
     CsvExp,
@@ -3945,8 +3959,8 @@ pub enum EraExtBytecode1 {
     FindCharaDataFile,
 }
 
-/// Strongly typed version of Era bytecode. All integer values are encoded in platform-endian.
-#[derive(Debug, Clone, Copy)]
+/// Strongly typed version of Era bytecode. All integer values are encoded in native-endian.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum EraBytecodeKind {
     FailWithMsg,
     DebugBreak,
@@ -3956,7 +3970,7 @@ pub enum EraBytecodeKind {
     ReturnVoid,
     ReturnInt,
     ReturnStr,
-    CallFun { args_cnt: u8 },
+    CallFun { args_cnt: u8, func_idx: u32 },
     TryCallFun { args_cnt: u8 },
     TryCallFunForce { args_cnt: u8 },
     RestartExecAtFun,
@@ -4205,6 +4219,7 @@ impl EraBytecodeKind {
             Pri::ReturnStr => Ok(ReturnStr),
             Pri::CallFun => Ok(CallFun {
                 args_cnt: reader.ru8()?,
+                func_idx: reader.ru32()?,
             }),
             Pri::TryCallFun => Ok(TryCallFun {
                 args_cnt: reader.ru8()?,
@@ -4506,9 +4521,10 @@ impl EraBytecodeKind {
             ReturnVoid => bytes.push(Pri::ReturnVoid as u8),
             ReturnInt => bytes.push(Pri::ReturnInt as u8),
             ReturnStr => bytes.push(Pri::ReturnStr as u8),
-            CallFun { args_cnt } => {
+            CallFun { args_cnt, func_idx } => {
                 bytes.push(Pri::CallFun as u8);
                 bytes.push(args_cnt);
+                bytes.extend_from_slice(&func_idx.to_ne_bytes());
             }
             TryCallFun { args_cnt } => {
                 bytes.push(Pri::TryCallFun as u8);
@@ -4967,6 +4983,153 @@ impl EraBytecodeKind {
     #[inline(always)]
     pub fn bytes_len(&self) -> usize {
         self.to_bytes_inline().len()
+    }
+
+    /// Returns the number of stack slots this bytecode will push / pop.
+    /// Positive value means pushing, negative value means popping.
+    /// None means this bytecode performs non-trivial stack manipulation.
+    pub fn stack_influence(&self) -> Option<i32> {
+        use EraBytecodeKind::*;
+
+        Some(match *self {
+            // ! Interrupts execution
+            FailWithMsg | DebugBreak | Quit | Throw => return None,
+            Nop => 0,
+            // ! Unwinds the stack
+            ReturnVoid | ReturnInt | ReturnStr => return None,
+            // ! Calls a function, which *may* return a value
+            CallFun { .. } => return None,
+            TryCallFun { args_cnt } => -(args_cnt as i32 * 2 + 1 - 1),
+            TryCallFunForce { args_cnt } => -(args_cnt as i32 * 2 + 1),
+            // ! Unwinds the stack
+            RestartExecAtFun => return None,
+            JumpWW { .. } => 0,
+            JumpIfWW { .. } | JumpIfNotWW { .. } => -1,
+            LoadConstStr { .. }
+            | LoadImm8 { .. }
+            | LoadImm16 { .. }
+            | LoadImm32 { .. }
+            | LoadImm64 { .. }
+            | LoadVarWW { .. }
+            | LoadConstVarWW { .. }
+            | LoadLocalVar { .. } => 1,
+            Pop => -1,
+            PopAllN { count } => -(count as i32),
+            PopOneN { .. } => -1,
+            Swap2 => 0,
+            Duplicate => 1,
+            DuplicateAllN { count } => count as i32,
+            DuplicateOneN { .. } => 1,
+            AddInt | SubInt | MulInt | DivInt | ModInt => -1,
+            NegInt => 0,
+            BitAndInt | BitOrInt | BitXorInt | BitNotInt | ShlInt | ShrInt | CmpIntLT
+            | CmpIntLEq | CmpIntGT | CmpIntGEq | CmpIntEq | CmpIntNEq | CmpStrLT | CmpStrLEq
+            | CmpStrGT | CmpStrGEq | CmpStrEq | CmpStrNEq => -1,
+            LogicalNot => 0,
+            MaxInt | MinInt => -1,
+            ClampInt | InRangeInt | InRangeStr => -2,
+            GetBit | SetBit | ClearBit | InvertBit => -1,
+            BuildString { count } => -(count as i32 - 1),
+            PadString { .. } => -1,
+            RepeatStr => -1,
+            BuildArrIdxFromMD { count } => -(count as i32 - 1),
+            GetArrValFlat => -1,
+            SetArrValFlat => -2,
+            TimesFloat => -1,
+            FunExists => 0,
+            ReplaceStr => -2,
+            SubStr | SubStrU => -2,
+            StrFind | StrFindU => -2,
+            StrLen | StrLenU => 0,
+            CountSubStr => -1,
+            StrCharAtU => -1,
+            IntToStr | StrToInt => 0,
+            FormatIntToStr => -1,
+            StrIsValidInt => 0,
+            StrToUpper | StrToLower | StrToHalf | StrToFull => 0,
+            BuildBarStr => -2,
+            EscapeRegexStr => 0,
+            EncodeToUnicode => -1,
+            UnicodeToStr => 0,
+            IntToStrWithBase => -1,
+            HtmlTagSplit => -5,
+            HtmlToPlainText | HtmlEscape => 0,
+            PowerInt => -1,
+            SqrtInt | CbrtInt | LogInt | Log10Int | ExponentInt | AbsInt | SignInt => 0,
+            GroupMatch { count } => -(count as i32 + 1 - 1),
+            ArrayCountMatches | CArrayCountMatches => -4,
+            SumArray | SumCArray | MaxArray | MaxCArray | MinArray | MinCArray => -3,
+            InRangeArray | InRangeCArray => -5,
+            ArrayRemove => -4,
+            ArraySortAsc | ArraySortDesc => -4,
+            ArrayMSort { subs_cnt } => -(subs_cnt as i32 + 1),
+            ArrayCopy => -2,
+            ArrayShift => -6,
+            // -----
+            Print | PrintLine | PrintExtended { .. } | ReuseLastLine => -1,
+            ClearLine => -1,
+            Wait { .. } => 0,
+            TWait => -2,
+            Input { flags } => -match (flags.is_one(), flags.is_timed()) {
+                (false, false) => 2 + flags.has_default_value() as i32,
+                (false, true) => 5,
+                (true, false) => flags.has_default_value() as i32,
+                (true, true) => 5,
+            },
+            KbGetKeyState => 0,
+            GetCallerFuncName => 1,
+            GetCharaNum => 1,
+            CsvGetNum { .. } => 0,
+            GetRandomRange => -1,
+            GetRandomMax => 0,
+            // ----- ExtOp1 -----
+            RowAssign { vals_cnt } => -(vals_cnt as i32 + 2),
+            ForLoopStep => 1,
+            ExtendStrToWidth => -1,
+            HtmlPrint => -1,
+            PrintButton { .. } => -2,
+            PrintImg | PrintImg4 => return None,
+            SplitString => -6,
+            GCreate => -2,
+            GCreateFromFile => -1,
+            GDispose | GCreated => 0,
+            GDrawSprite => -5,
+            GDrawSpriteWithColorMatrix => -6,
+            GClear => -1,
+            SpriteCreate => -5,
+            SpriteDispose | SpriteCreated => 0,
+            SpriteAnimeCreate => -2,
+            SpriteAnimeAddFrame => -8,
+            SpriteWidth | SpriteHeight => 0,
+            CheckFont => 0,
+            SaveText => -3,
+            LoadText => -2,
+            FindElement | FindLastElement => -5,
+            FindChara | FindLastChara => -4,
+            VarSet | CVarSet => -5,
+            GetVarSizeByName => -1,
+            GetVarAllSize => -1,
+            GetHostTimeRaw | GetHostTime | GetHostTimeS => 1,
+            CsvGetProp2 { .. } => -1,
+            CharaCsvExists => 0,
+            GetPalamLv | GetExpLv => -1,
+            AddChara => -1,
+            AddVoidChara => 0,
+            PickUpChara { charas_cnt } | DeleteChara { charas_cnt } => -(charas_cnt as i32),
+            SwapChara => -2,
+            AddCopyChara => return None,
+            LoadData => 0,
+            SaveData => -1,
+            CheckData => 0,
+            GetCharaRegNum => 0,
+            LoadGlobal | SaveGlobal => 1,
+            ResetData => 0,
+            ResetCharaStain => -1,
+            SaveChara { charas_cnt } => -(charas_cnt as i32 + 2),
+            LoadChara => -1,
+            GetConfig | GetConfigS => 0,
+            FindCharaDataFile => -1,
+        })
     }
 }
 

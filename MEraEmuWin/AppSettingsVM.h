@@ -27,6 +27,7 @@ namespace winrt::MEraEmuWin::implementation {
         // General
         GenGetSetter(bool, EnableParallelLoading, enable_parallel_loading);
         GenGetSetter(bool, EnableJIT, enable_jit);
+        GenGetSetter(bool, EnableEngineControlOnError, enable_engine_control_on_error);
 
         // Game
         GenGetSetter(uint32_t, SaveDataCount, save_data_count);
@@ -34,7 +35,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         NLOHMANN_DEFINE_TYPE_INTRUSIVE(AppSettingsVM,
             // General
-            enable_parallel_loading, enable_jit,
+            enable_parallel_loading, enable_jit, enable_engine_control_on_error,
             // Game
             save_data_count, enable_auto_save
         );
@@ -50,6 +51,7 @@ namespace winrt::MEraEmuWin::implementation {
         // General
         bool enable_parallel_loading = false;
         bool enable_jit = false;
+        bool enable_engine_control_on_error = false;
 
         // Game
         uint32_t save_data_count = 20;

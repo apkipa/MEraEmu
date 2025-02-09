@@ -2,7 +2,7 @@ use std::{
     any,
     borrow::Cow,
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     num::{NonZero, NonZeroUsize},
     ops::{ControlFlow, DerefMut},
     sync::atomic::AtomicBool,
@@ -2911,6 +2911,7 @@ bitflags::bitflags! {
         const EXEC_STATE = 0b0000_0010;
         const SOURCE_CODE = 0b0000_0100;
 
+        const ALL = 0x07;
         const _ = !0;
     }
 }
@@ -2929,6 +2930,12 @@ impl<'de> Deserialize<'de> for EraEngineSnapshotKind {
 pub struct EraEngineSnapshotChunkHeader {
     pub kind: EraEngineSnapshotKind,
     pub size: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EraEngineDecodeBytecodeResult {
+    pub bc: EraBytecodeKind,
+    pub len: u8,
 }
 
 #[easy_jsonrpc::rpc]
@@ -2980,6 +2987,14 @@ pub trait MEraEngineRpc {
         name: &str,
     ) -> Result<Vec<EraDumpFunctionBytecodeEntry>, MEraEngineError>;
     fn dump_stack(&self) -> Vec<StackValue>;
+    fn decode_bytecode(
+        &self,
+        bc: Vec<u8>,
+    ) -> Result<EraEngineDecodeBytecodeResult, MEraEngineError>;
+    /// Moves to the next IP that is safe to execute. Safe means that the stack
+    /// transitions into a clean and safe state for execution starting from the
+    /// new IP.
+    fn goto_next_safe_ip(&mut self) -> Result<(), MEraEngineError>;
 }
 
 impl<Callback> MEraEngine<Callback> {
@@ -3033,18 +3048,18 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         }
     }
 
-    pub fn dump_snapshot(
+    pub fn take_snapshot(
         &self,
         parts_to_add: EraEngineSnapshotKind,
     ) -> Result<Vec<u8>, MEraEngineError> {
-        Ok(mtry!(self.dump_snapshot_inner(parts_to_add)))
+        Ok(mtry!(self.take_snapshot_inner(parts_to_add)))
     }
 
-    pub fn apply_snapshot(&mut self, snapshot: &[u8]) -> Result<(), MEraEngineError> {
-        Ok(mtry!(self.apply_snapshot_inner(snapshot)))
+    pub fn restore_snapshot(&mut self, snapshot: &[u8]) -> Result<(), MEraEngineError> {
+        Ok(mtry!(self.restore_snapshot_inner(snapshot)))
     }
 
-    fn dump_snapshot_inner(&self, parts_to_add: EraEngineSnapshotKind) -> anyhow::Result<Vec<u8>> {
+    fn take_snapshot_inner(&self, parts_to_add: EraEngineSnapshotKind) -> anyhow::Result<Vec<u8>> {
         use byteorder::{WriteBytesExt, LE};
 
         let mut snapshot = Vec::new();
@@ -3075,7 +3090,7 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         Ok(snapshot)
     }
 
-    pub fn apply_snapshot_inner(&mut self, snapshot: &[u8]) -> anyhow::Result<()> {
+    pub fn restore_snapshot_inner(&mut self, snapshot: &[u8]) -> anyhow::Result<()> {
         use byteorder::{ReadBytesExt, LE};
 
         let mut snapshot = snapshot;
@@ -3433,7 +3448,7 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
         let mut lines = Vec::new();
         loop {
             use crate::util::SubsliceOffset;
-            let offset = chunk.get_bc().subslice_offset(bc).unwrap();
+            let bc_offset = chunk.get_bc().subslice_offset(bc).unwrap();
             let Ok(cur_inst) = EraBytecodeKind::from_reader(&mut bc) else {
                 break;
             };
@@ -3446,9 +3461,17 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
                 } else {
                     opcode_str += " ; <invalid>";
                 }
+            } else if let EraBytecodeKind::JumpWW { offset }
+            | EraBytecodeKind::JumpIfWW { offset }
+            | EraBytecodeKind::JumpIfNotWW { offset } = cur_inst
+            {
+                opcode_str += &format!(
+                    " ; -> {}",
+                    bc_offset.wrapping_add_signed(offset as _) as u32
+                );
             }
             lines.push(EraDumpFunctionBytecodeEntry {
-                offset: offset as _,
+                offset: bc_offset as _,
                 opcode_str,
             });
         }
@@ -3463,5 +3486,220 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
 
     fn dump_stack(&self) -> Vec<StackValue> {
         self.vm_state.get_stack().to_owned()
+    }
+
+    fn decode_bytecode(
+        &self,
+        bc: Vec<u8>,
+    ) -> Result<EraEngineDecodeBytecodeResult, MEraEngineError> {
+        let mut bc = bc.as_slice();
+        let orig_bc = bc;
+        match EraBytecodeKind::from_reader(&mut bc) {
+            Ok(cur_inst) => Ok(EraEngineDecodeBytecodeResult {
+                bc: cur_inst,
+                len: orig_bc.subslice_offset(bc).unwrap() as _,
+            }),
+            Err(e) => Err(MEraEngineError::new(format!("{:?}", e))),
+        }
+    }
+
+    fn goto_next_safe_ip(&mut self) -> Result<(), MEraEngineError> {
+        self.goto_next_safe_ip_inner()
+            .map_err(|e| MEraEngineError::new(format!("{:?}", e)))
+    }
+}
+
+impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
+    fn goto_next_safe_ip_inner(&mut self) -> anyhow::Result<()> {
+        use hashbrown::hash_map::Entry;
+
+        let cur_ip = self.vm_state.get_cur_ip().context("no current IP")?;
+        let func_info = self
+            .ctx
+            .func_info_from_chunk_pos(cur_ip.chunk as _, cur_ip.offset as _)
+            .context("function info not found")?;
+        let bc = (self.ctx.bc_chunks)
+            .get(cur_ip.chunk as usize)
+            .context("chunk not found")?;
+        let bc = {
+            let start = func_info.bc_offset as usize;
+            let end = start + func_info.bc_size as usize;
+            &bc.get_bc()[start..end]
+        };
+        let func_local_vars_count = (func_info.frame_info.vars.iter())
+            .filter(|(_, x)| x.in_local_frame)
+            .count() as u32;
+
+        // Build stack balance map
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct InstInfo {
+            /// The stack length before executing the instruction.
+            pub stack_balance: u32,
+            /// The stack length to restore to if going to rollback from this instruction.
+            pub base_stack_balance: u32,
+        }
+        let mut bc_infos = HashMap::new();
+        bc_infos.insert(
+            0,
+            InstInfo {
+                stack_balance: 0,
+                base_stack_balance: 0,
+            },
+        );
+        let mut queue = VecDeque::new();
+        queue.push_back(0);
+
+        #[cfg(debug_assertions)]
+        #[cfg(windows)]
+        let mut counters = HashMap::new();
+
+        while let Some(ip) = queue.pop_front() {
+            let bc = &bc[ip..];
+            if bc.is_empty() {
+                // Reached the end of the function.
+                continue;
+            }
+            let (cur_inst, cur_inst_len) =
+                EraBytecodeKind::with_len_from_bytes(bc).context("bytecode decode error")?;
+            let cur_inst_info = bc_infos[&ip];
+            let stack_delta = if let Some(stack_delta) = cur_inst.stack_influence() {
+                stack_delta
+            } else if let EraBytecodeKind::CallFun { args_cnt, func_idx } = cur_inst {
+                // NB: Not handled by `stack_influence`, because it depends on the function
+                // signature (return value).
+
+                let func_idx = func_idx as usize;
+                let Some(func_info) = (self.ctx.func_entries)
+                    .get_index(func_idx)
+                    .and_then(|x| x.1.as_ref())
+                else {
+                    continue;
+                };
+                -(args_cnt as i32 - func_info.ret_kind.is_value() as i32)
+            } else if matches!(
+                cur_inst,
+                EraBytecodeKind::FailWithMsg | EraBytecodeKind::Quit | EraBytecodeKind::Throw
+            ) {
+                // HACK: Assume we can go past these instructions.
+                -((cur_inst_info.stack_balance - cur_inst_info.base_stack_balance) as i32)
+            } else {
+                // Control flow cannot go past this instruction. Stop here.
+                continue;
+            };
+            let Some(stack_balance) = cur_inst_info.stack_balance.checked_add_signed(stack_delta)
+            else {
+                // Wrong path; maybe need analysis from other paths to determine the correct stack balance.
+                continue;
+                // anyhow::bail!(
+                //     "cannot add stack balance {} with {}: underflow\nwhile processing IP {} {:?} {:?}",
+                //     cur_inst_info.stack_balance,
+                //     stack_delta,
+                //     ip,
+                //     cur_inst,
+                //     cur_inst_info
+                // );
+            };
+            let next_inst_info = InstInfo {
+                stack_balance,
+                base_stack_balance: if matches!(cur_inst, EraBytecodeKind::ForLoopStep) {
+                    // Currently, only for loops introduce a new stack balance.
+                    cur_inst_info.stack_balance
+                } else {
+                    (cur_inst_info.base_stack_balance)
+                        .max(func_local_vars_count)
+                        .min(stack_balance)
+                },
+            };
+            // Fill next instruction info
+            let mut apply_at = |new_ip| -> anyhow::Result<()> {
+                #[cfg(debug_assertions)]
+                #[cfg(windows)]
+                unsafe {
+                    counters.entry(ip).and_modify(|x| *x += 1).or_insert(1);
+                    let msg = format!(
+                        "IP {} -> {} {:?} {} times\n    (stack {:?} -> {:?})\n\0",
+                        ip, new_ip, cur_inst, counters[&ip], cur_inst_info, next_inst_info
+                    );
+                    windows_sys::Win32::System::Diagnostics::Debug::OutputDebugStringA(
+                        msg.as_ptr(),
+                    );
+                }
+
+                // match bc_infos.entry(new_ip) {
+                //     Entry::Occupied(e) => {
+                //         // Already visited this instruction. Check whether the stack balance is the same.
+                //         if e.get() != &next_inst_info {
+                //             // Stack balance conflict!
+                //             anyhow::bail!(
+                //                 "stack balance conflict at IP {}; {:?} != {:?}; originated from {}({:?})",
+                //                 new_ip,
+                //                 next_inst_info,
+                //                 e.get(),
+                //                 ip,
+                //                 cur_inst_info
+                //             );
+                //         }
+                //     }
+                //     Entry::Vacant(e) => {
+                //         // New instruction. Add to the queue.
+                //         e.insert(next_inst_info);
+                //         queue.push_back(new_ip);
+                //     }
+                // }
+                match bc_infos.entry(new_ip) {
+                    Entry::Occupied(e)
+                        if next_inst_info.stack_balance > e.get().stack_balance
+                            || next_inst_info.base_stack_balance > e.get().base_stack_balance =>
+                    {
+                        // Stack balance updated. Add to the queue.
+                        e.replace_entry(next_inst_info);
+                        queue.push_back(new_ip);
+                    }
+                    Entry::Vacant(e) => {
+                        // New instruction. Add to the queue.
+                        e.insert(next_inst_info);
+                        queue.push_back(new_ip);
+                    }
+                    _ => (),
+                }
+                Ok(())
+            };
+            match cur_inst {
+                EraBytecodeKind::JumpWW { offset } => {
+                    apply_at(ip.wrapping_add_signed(offset as _))?
+                }
+                EraBytecodeKind::JumpIfWW { offset } | EraBytecodeKind::JumpIfNotWW { offset } => {
+                    apply_at(ip.wrapping_add_signed(offset as _))?;
+                    apply_at(ip + cur_inst_len as usize)?;
+                }
+                _ => apply_at(ip + cur_inst_len as usize)?,
+            }
+        }
+
+        // Now transition to the next safe IP by searching down from the current IP.
+        let mut offset = (cur_ip.offset - func_info.bc_offset) as usize;
+        let this_bc_info = bc_infos
+            .get(&offset)
+            .with_context(|| format!("IP not found: {}", offset))?;
+        while let Some(cur_inst) = EraBytecodeKind::from_bytes(&bc[offset..]) {
+            let bc_info = bc_infos
+                .get(&offset)
+                .with_context(|| format!("IP not found: {}", offset))?;
+            if bc_info.stack_balance == this_bc_info.base_stack_balance {
+                // Found a safe IP.
+                let new_ip = EraExecIp {
+                    chunk: cur_ip.chunk,
+                    offset: func_info.bc_offset + offset as u32,
+                };
+                let delta = this_bc_info.stack_balance - this_bc_info.base_stack_balance;
+                let new_len = self.vm_state.stack_len() - delta as usize;
+                self.vm_state.set_cur_ip(new_ip).unwrap();
+                self.vm_state.truncate_stack(new_len);
+                return Ok(());
+            }
+            offset += cur_inst.bytes_len();
+        }
+
+        anyhow::bail!("no safe IP found");
     }
 }

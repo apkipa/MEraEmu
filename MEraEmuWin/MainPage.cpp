@@ -185,8 +185,8 @@ namespace winrt::MEraEmuWin::implementation {
         SetWindowLongPtrW(settings_hwnd, GWL_EXSTYLE, GetWindowLongPtrW(settings_hwnd, GWL_EXSTYLE) | WS_EX_DLGMODALFRAME);
         SetWindowLongPtrW(settings_hwnd, GWL_STYLE, WS_POPUPWINDOW | WS_DLGFRAME | WS_THICKFRAME);
         SetWindowLongPtrW(settings_hwnd, GWLP_HWNDPARENT, (LONG_PTR)main_hwnd);
-        EnableWindow(main_hwnd, false);
         settings_wnd.Activate();
+        EnableWindow(main_hwnd, false);
         auto old_config = std::make_shared<std::string>(m_app_settings.as<implementation::AppSettingsVM>()->to_json_string());
         auto tear_down_fn = [=, settings_wnd = weak_ref(settings_wnd)] {
             EnableWindow(main_hwnd, true);

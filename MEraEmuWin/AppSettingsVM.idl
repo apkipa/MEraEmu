@@ -9,6 +9,7 @@ namespace MEraEmuWin {
         // General
         Boolean EnableParallelLoading;
         Boolean EnableJIT;
+        Boolean EnableEngineControlOnError;
 
         // Game
         UInt32 SaveDataCount;

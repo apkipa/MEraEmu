@@ -484,6 +484,21 @@ impl EraVirtualMachineState {
         self.inner.rand_gen = SimpleUniformGenerator::new();
     }
 
+    /// Gets the current instruction pointer.
+    pub fn get_cur_ip(&self) -> Option<EraExecIp> {
+        self.frames.last().map(|f| f.ip)
+    }
+
+    /// Sets the current instruction pointer.
+    pub fn set_cur_ip(&mut self, ip: EraExecIp) -> Result<(), ()> {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.ip = ip;
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
     pub fn get_exec_frames(&self) -> &[EraFuncExecFrame] {
         &self.frames[..]
     }
@@ -510,6 +525,10 @@ impl EraVirtualMachineState {
 
     pub fn get_var_stack_value_mut(&mut self, idx: usize) -> Option<&mut ArrayValue> {
         self.var_stack.get_mut(idx)
+    }
+
+    pub fn truncate_stack(&mut self, new_len: usize) {
+        self.stack.truncate(new_len);
     }
 }
 
@@ -1693,17 +1712,21 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         Ok(())
     }
 
-    fn instr_call_fun(&mut self, args_cnt: u8) -> anyhow::Result<()> {
-        self.instr_call_fun_with_return_value(args_cnt)?;
+    fn instr_call_fun(&mut self, args_cnt: u8, func_idx: u32) -> anyhow::Result<()> {
+        self.instr_call_fun_with_return_value(args_cnt, func_idx)?;
         Ok(())
     }
 
-    fn instr_call_fun_with_return_value(&mut self, args_cnt: u8) -> anyhow::Result<usize> {
+    fn instr_call_fun_with_return_value(
+        &mut self,
+        args_cnt: u8,
+        func_idx: u32,
+    ) -> anyhow::Result<usize> {
         self.ensure_pre_step_instruction()?;
 
         // DANGER: Touches the site execution state. Watch out for UB.
-        // NOTE: Function index must be Int, not Str (i.e. no dynamic function calls).
-        view_stack!(self, _, _args:any:args_cnt, func_idx:i);
+        let inst_len = Bc::CallFun { args_cnt, func_idx }.bytes_len() as u32;
+        view_stack!(self, _, _args:any:args_cnt);
         let func_idx = func_idx as usize;
         let Some((func_name, func_info)) = (self.o.ctx.func_entries)
             .get_index(func_idx)
@@ -1722,7 +1745,6 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             chunk: func_info.chunk_idx,
             offset: func_info.bc_offset,
         };
-        let inst_len = Bc::CallFun { args_cnt }.bytes_len() as u32;
         let ret_ip = EraExecIp {
             chunk: self.o.cur_frame.ip.chunk,
             offset: self.o.cur_frame.ip.offset + inst_len,
@@ -1763,7 +1785,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         // Now prepare arguments for the function
         // WARN: The following procedure must not fail until remake, or stack will be corrupted.
-        assert!(o.stack.pop().is_some(), "stack underflow");
+        // // Pop function index
+        // assert!(o.stack.pop().is_some(), "stack underflow");
 
         // Create a new execution frame for the function
         let is_transient = func_info.is_transient;
@@ -2103,7 +2126,14 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             if is_force {
                 crate::util::cold();
 
-                let msg = format!("function `{:?}` not found", self.o.stack.last().unwrap());
+                let msg = format!(
+                    "function `{}` not found",
+                    match func_idx.as_unpacked() {
+                        RefFlatStackValue::Int(x) => x.val.to_string(),
+                        RefFlatStackValue::Str(x) => x.val.to_string(),
+                        v => format!("{:?}", v),
+                    }
+                );
                 let mut diag = Diagnostic::new();
                 diag.span_err(self.o.cur_filename(), self.o.cur_bc_span(), msg);
                 self.o.ctx.emit_diag(diag);
@@ -2734,6 +2764,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, val:s, min:s, max:s);
         let r = StackValue::new_int((min <= val && val <= max) as i64);
+        // TODO: Not using replace_tail_no_drop_unchecked_spec because ArcStr needs drop;
+        //       Maybe use replace_tail_unchecked_spec?
         self.o.stack.splice(self.o.stack.len() - stack_count.., [r]);
         self.add_ip_offset(Bc::InRangeStr.bytes_len() as i32);
         Ok(())
@@ -2743,7 +2775,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
-        if b < 0 || b >= 64 {
+        if crate::util::unlikely(b < 0 || b >= 64) {
             anyhow::bail!("bit index {} out of bounds", b);
         }
         let bit = b as usize;
@@ -2759,7 +2791,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
-        if b < 0 || b >= 64 {
+        if crate::util::unlikely(b < 0 || b >= 64) {
             anyhow::bail!("bit index {} out of bounds", b);
         }
         let bit = b as usize;
@@ -2775,7 +2807,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
-        if b < 0 || b >= 64 {
+        if crate::util::unlikely(b < 0 || b >= 64) {
             anyhow::bail!("bit index {} out of bounds", b);
         }
         let bit = b as usize;
@@ -2791,7 +2823,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, a:i, b:i);
-        if b < 0 || b >= 64 {
+        if crate::util::unlikely(b < 0 || b >= 64) {
             anyhow::bail!("bit index {} out of bounds", b);
         }
         let bit = b as usize;
@@ -4716,8 +4748,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         use chrono::*;
-        // NOTE: Native time zone info is used
 
+        // NOTE: Native time zone info is used
         let r = self.o.ctx.callback.on_get_host_time();
         let t = DateTime::from_timestamp_millis(r as _).unwrap();
         let t: DateTime<Local> = t.into();
@@ -5391,7 +5423,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::ReturnVoid => s.instr_return_void()?,
             Bc::ReturnInt => s.instr_return_int()?,
             Bc::ReturnStr => s.instr_return_str()?,
-            Bc::CallFun { args_cnt } => s.instr_call_fun(args_cnt)?,
+            Bc::CallFun { args_cnt, func_idx } => s.instr_call_fun(args_cnt, func_idx)?,
             Bc::TryCallFun { args_cnt } => s.instr_try_call_fun(args_cnt, false)?,
             Bc::TryCallFunForce { args_cnt } => s.instr_try_call_fun(args_cnt, true)?,
             Bc::RestartExecAtFun => s.instr_restart_exec_at_fun()?,
@@ -5577,17 +5609,17 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::GetConfigS => s.instr_get_config_s()?,
             Bc::FindCharaDataFile => s.instr_find_chara_data_file()?,
             // _ => s.instr_raise_illegal_instruction()?,
-            _ => {
-                let mut diag = Diagnostic::new();
-                diag.span_err(
-                    s.o.cur_filename(),
-                    s.o.cur_bc_span(),
-                    format!("unimplemented bytecode `{:?}`", inst),
-                );
-                s.o.ctx.emit_diag(diag);
-                s.break_reason = EraExecutionBreakReason::IllegalInstruction;
-                return Err(FireEscapeError(s.break_reason).into());
-            }
+            // _ => {
+            //     let mut diag = Diagnostic::new();
+            //     diag.span_err(
+            //         s.o.cur_filename(),
+            //         s.o.cur_bc_span(),
+            //         format!("unimplemented bytecode `{:?}`", inst),
+            //     );
+            //     s.o.ctx.emit_diag(diag);
+            //     s.break_reason = EraExecutionBreakReason::IllegalInstruction;
+            //     return Err(FireEscapeError(s.break_reason).into());
+            // }
         }
 
         Ok(())
@@ -6029,19 +6061,21 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         ; ret
                     );
                 }
-                Bc::CallFun { args_cnt } => {
+                Bc::CallFun { args_cnt, func_idx } => {
                     let subroutine: i64 = {
                         extern "win64-unwind" fn jit_instr_call_fun<
                             Callback: EraCompilerCallback,
                         >(
                             site: &mut EraVmExecSite<Callback>,
                             args_cnt: u8,
+                            func_idx: u32,
                             next_rip: usize,
                         ) -> usize {
-                            let func_idx = match site.instr_call_fun_with_return_value(args_cnt) {
-                                Ok(x) => x,
-                                Err(e) => std::panic::panic_any(e),
-                            };
+                            let func_idx =
+                                match site.instr_call_fun_with_return_value(args_cnt, func_idx) {
+                                    Ok(x) => x,
+                                    Err(e) => std::panic::panic_any(e),
+                                };
                             site.jit_side_frame.last_mut().unwrap().ip = next_rip;
                             let asm_ip = site.jit_compiled_functions[func_idx as usize]
                                 .as_ref()
@@ -6058,7 +6092,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         ; .arch x64
                         ; mov rcx, [rsp+0x20] // self
                         ; mov dl, BYTE args_cnt as _ // args_cnt
-                        ; lea r8, [>next_instr] // next_rip
+                        ; mov r8, DWORD func_idx as _ // func_idx
+                        ; lea r9, [>next_instr] // next_rip
                         ; mov rax, QWORD subroutine as _
                         ; call rax
                         ; test rax, rax

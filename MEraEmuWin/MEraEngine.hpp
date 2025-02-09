@@ -113,6 +113,13 @@ struct MEraEngineException : std::runtime_error {
 #define ERA_PEF_RIGHT_PAD ((PrintExtendedFlags)0x80)
 typedef uint8_t PrintExtendedFlags;
 
+#define ERA_ENGINE_SNAPSHOT_KIND_GLOBAL_VAR 0x1
+#define ERA_ENGINE_SNAPSHOT_KIND_EXEC_STATE 0x2
+#define ERA_ENGINE_SNAPSHOT_KIND_SOURCE_CODE 0x4
+#define ERA_ENGINE_SNAPSHOT_KIND_ALL 0x07
+typedef uint32_t EraEngineSnapshotKind;
+
+
 struct EraDiagnosticEntry {
     DiagnosticLevel level;
     std::string_view filename;
@@ -368,6 +375,18 @@ private:
     DiagnosticProviderFfi m_provider;
 };
 
+struct EraEngineSnapshot {
+    EraEngineSnapshot(Vec_uint8_t v) : i(v) {}
+    EraEngineSnapshot(EraEngineSnapshot const&) = delete;
+    ~EraEngineSnapshot() { rust_drop_vec_u8(i); }
+
+    std::span<uint8_t> as_bytes() {
+        return { i.ptr, i.len };
+    }
+
+    Vec_uint8_t i;
+};
+
 struct MEraEngineHostFile {
     MEraEngineHostFile() {}
     virtual ~MEraEngineHostFile() {}
@@ -507,10 +526,16 @@ struct MEraEngine {
         uint64_t offset, uint64_t count, uint64_t eval_limit) const;
     std::vector<std::string> get_functions_list() const;
     std::vector<EraDumpFunctionBytecodeEntry> dump_function_bytecode(std::string_view name) const;
-    // TODO: Properly return the result
+    // TODO: Properly type the returned result
     nlohmann::json dump_stack() const;
+    // TODO: Properly type the returned result
+    nlohmann::json decode_bytecode(std::span<const uint8_t> bc) const;
+    void goto_next_safe_ip() const;
 
     nlohmann::json do_rpc(std::string_view method, nlohmann::json params) const;
+
+    EraEngineSnapshot take_snapshot(EraEngineSnapshotKind parts_to_add) const;
+    void restore_snapshot(std::span<const uint8_t> snapshot) const;
 
 private:
     friend struct MEraEngineBuilder;

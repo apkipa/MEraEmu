@@ -134,6 +134,7 @@ Ret to_rust_type(T val) {
     }
 }
 
+thread_local std::string t_rust_exception_boundary_ex_msg;
 template<typename T, typename Functor>
 T rust_exception_boundary(Functor&& functor) noexcept {
     try {
@@ -146,19 +147,37 @@ T rust_exception_boundary(Functor&& functor) noexcept {
         }
     }
     catch (std::exception const& e) {
-        thread_local std::string ex_what{ e.what() };
+        auto& ex_msg = t_rust_exception_boundary_ex_msg;
+        ex_msg = e.what();
 
         // Fix vtable on exception
         if constexpr (requires(T t) { t.ok.vtable; }) {
             return {
                 .is_ok = { false },
                 .ok = {.vtable = {.release_vptr = [](Erased_t*) {}}},
-                .err = { ex_what.c_str() },
+                .err = { ex_msg.c_str() },
             };
         }
 
-        return { .is_ok = { false }, .err = { ex_what.c_str() } };
+        return { .is_ok = { false }, .err = { ex_msg.c_str() } };
     }
+#ifdef CPPWINRT_VERSION
+    catch (winrt::hresult_error const& e) {
+        auto& ex_msg = t_rust_exception_boundary_ex_msg;
+        ex_msg = winrt::to_string(winrt::format(L"0x{:08x}\n{}", (uint32_t)e.code(), e.message()));
+
+        // Fix vtable on exception
+        if constexpr (requires(T t) { t.ok.vtable; }) {
+            return {
+                .is_ok = { false },
+                .ok = {.vtable = {.release_vptr = [](Erased_t*) {}}},
+                .err = { ex_msg.c_str() },
+            };
+        }
+
+        return { .is_ok = { false }, .err = { ex_msg.c_str() } };
+    }
+#endif
     catch (...) {
         auto msg = "Uncaught exception at FFI boundary, aborting for safety.";
         (void)msg;
@@ -574,9 +593,21 @@ std::vector<EraDumpFunctionBytecodeEntry> MEraEngine::dump_function_bytecode(std
 nlohmann::json MEraEngine::dump_stack() const {
     return do_rpc("dump_stack", {});
 }
+nlohmann::json MEraEngine::decode_bytecode(std::span<const uint8_t> bc) const {
+    return do_rpc("decode_bytecode", { { "bc", bc } });
+}
+void MEraEngine::goto_next_safe_ip() const {
+    do_rpc("goto_next_safe_ip", {});
+}
 nlohmann::json MEraEngine::do_rpc(std::string_view method, nlohmann::json params) const {
     auto json = make_jsonrpc(method, std::move(params));
     rust_String response{ mee_engine_do_rpc(m_engine, json.dump().c_str()) };
     json.clear();
     return unwrap_jsonrpc(response);
+}
+EraEngineSnapshot MEraEngine::take_snapshot(EraEngineSnapshotKind parts_to_add) const {
+    return EraEngineSnapshot{ unwrap_rust(mee_engine_take_snapshot(m_engine, parts_to_add)) };
+}
+void MEraEngine::restore_snapshot(std::span<const uint8_t> snapshot) const {
+    unwrap_rust(mee_engine_restore_snapshot(m_engine, TO_RUST_SLICE(snapshot)));
 }

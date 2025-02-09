@@ -953,15 +953,26 @@ namespace winrt::MEraEmuWin::implementation {
                 actual_path = to_hstring(path);
             }
 
-            file_handle fh(CreateFileW(
-                actual_path.c_str(),
-                GENERIC_READ | (can_write ? GENERIC_WRITE : 0),
-                FILE_SHARE_READ,
-                nullptr,
-                can_write ? OPEN_ALWAYS : OPEN_EXISTING,
-                0,
-                nullptr
-            ));
+            auto create_file_fn = [&] {
+                file_handle fh(CreateFileW(
+                    actual_path.c_str(),
+                    GENERIC_READ | (can_write ? GENERIC_WRITE : 0),
+                    FILE_SHARE_READ,
+                    nullptr,
+                    can_write ? OPEN_ALWAYS : OPEN_EXISTING,
+                    0,
+                    nullptr
+                ));
+                return fh;
+            };
+            auto fh = create_file_fn();
+            if (!fh && can_write) {
+                // File creation failed, try to create the parent directory
+                auto parent_dir = std::filesystem::path(actual_path.c_str()).parent_path();
+                std::filesystem::create_directories(parent_dir);
+                // Then try again
+                fh = create_file_fn();
+            }
             check_bool((bool)fh);
 
             struct Win32File : MEraEngineHostFile {
@@ -1319,7 +1330,7 @@ namespace winrt::MEraEmuWin::implementation {
             auto const& cur_line = m_ui_lines[m_cur_active_button.line];
             if (m_cur_active_button.button_idx < size(cur_line.buttons)) {
                 auto const& cur_button = cur_line.buttons[m_cur_active_button.button_idx];
-                // Tapping a button
+                // Clicking a button
                 handled_button = true;
                 auto input_button_fn = [this](EngineUIPrintLineDataButton::InputButton const& v) -> fire_and_forget {
                     auto input_tb = UserInputTextBox();
@@ -1360,7 +1371,24 @@ namespace winrt::MEraEmuWin::implementation {
                     });
                     co_await cd.ShowAsync();
                 };
-                std::visit(overloaded{ input_button_fn, source_button_fn }, cur_button.data);
+                auto engine_error_control_button_fn = [this](EngineUIPrintLineDataButton::EngineErrorControlButton const& v) -> fire_and_forget {
+                    using ButtonType = EngineUIPrintLineDataButton::EngineErrorControlButton::ButtonType;
+                    // Remove the button
+                    // NB: Must copy v.type before RoutineClearLine not to invalidate the reference
+                    auto type = v.type;
+                    RoutinePrint({}, ERA_PEF_IS_LINE);
+                    RoutineClearLine(1);
+                    if (type == ButtonType::Retry) {
+                        QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+                    }
+                    else if (type == ButtonType::Continue) {
+                        QueueEngineFuncTask([](MEraEngine const& engine) {
+                            engine.goto_next_safe_ip();
+                        }, true);
+                    }
+                    co_return;
+                };
+                std::visit(overloaded{ input_button_fn, source_button_fn, engine_error_control_button_fn }, cur_button.data);
             }
         }
         if (!handled_button) {
@@ -1758,15 +1786,16 @@ namespace winrt::MEraEmuWin::implementation {
                             sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
                         });
                     };
+                    bool should_notify_stop = false;
                     while (force_exec || !is_halted()) {
+                        should_notify_stop = true;
+
                         //std::atomic_bool alwaystrue{ true };
                         stop_reason = engine.do_execution(
                             //force_exec ? alwaystrue : engine_task_rx.is_vacant_var(),
                             engine_task_rx.is_vacant_var(),
                             instructions_to_exec);
-                        queue_ui_work([sd, stop_reason] {
-                            sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
-                        });
+
                         break;
                     }
                     force_exec = false;
@@ -1781,6 +1810,7 @@ namespace winrt::MEraEmuWin::implementation {
                     }
 
                     callback->m_tick_compensation = 0;
+
                     if (sd->has_execution_error) {
                         // Dump stack trace when execution error occurs
                         sd->has_execution_error = false;
@@ -1823,6 +1853,13 @@ namespace winrt::MEraEmuWin::implementation {
                             sd->ui_ctrl->SetRedrawState(2);
                         });
                     }
+
+                    if (should_notify_stop) {
+                        queue_ui_work([sd, stop_reason] {
+                            sd->ui_ctrl->OnEngineExecutionInterrupted(stop_reason);
+                        });
+                    }
+
                     // Handle one task event
                     do {
                         auto task_opt = engine_task_rx.recv();
@@ -1939,6 +1976,23 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::OnEngineExecutionInterrupted(EraExecutionBreakReason reason) {
         m_last_execution_break_reason = reason;
         m_ev_EngineExecutionInterrupted(reason);
+
+        // If engine control is enabled, print control buttons after the error
+        if (m_app_settings.EnableEngineControlOnError()) {
+            if (reason != ERA_EXECUTION_BREAK_REASON_CALLBACK_BREAK &&
+                reason != ERA_EXECUTION_BREAK_REASON_STOP_FLAG &&
+                reason != ERA_EXECUTION_BREAK_REASON_DEBUG_BREAK_INSTRUCTION &&
+                reason != ERA_EXECUTION_BREAK_REASON_CODE_QUIT &&
+                reason != ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS)
+            {
+                using ButtonType = EngineUIPrintLineDataButton::EngineErrorControlButton::ButtonType;
+                RoutinePrint(L"由于发生错误, 引擎已经停止运行。接下来要做什么? ", 0);
+                RoutinePrintEngineErrorControlButton(L"[重试]", ButtonType::Retry);
+                RoutinePrintEngineErrorControlButton(L"[继续(不推荐)]", ButtonType::Continue);
+                RoutinePrint({}, ERA_PEF_IS_LINE);
+                m_reused_last_line = true;
+            }
+        }
     }
     void EngineControl::UpdateDevToolsWindow() {
         if (!IsDevToolsOpen()) { return; }
@@ -2290,7 +2344,10 @@ namespace winrt::MEraEmuWin::implementation {
         auto const& cur_line = m_ui_lines[line];
         auto height_1 = static_cast<long>((cur_line.acc_height - cur_line.line_height) * m_yscale);
         auto height_2 = static_cast<long>(cur_line.acc_height * m_yscale);
-        check_hresult(m_vsis_noref->Invalidate({ 0, height_1, width, height_2 }));
+        if FAILED(m_vsis_noref->Invalidate({ 0, height_1, width, height_2 })) {
+            // Sometimes the invalidation fails (OOB), so we need to redraw the whole thing
+            FlushEngineImageOutputLayout(true);
+        }
     }
     void EngineControl::UpdateAndInvalidateActiveButton(Point const& pt) {
         auto line = GetLineIndexFromHeight(pt.Y);
@@ -2736,36 +2793,15 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::RoutinePrintSourceButton(hstring const& content, hstring const& path,
         uint32_t line, uint32_t column, PrintExtendedFlags flags
     ) {
-        if (content.empty()) { return; }
-        uint32_t ui_line_start = size(m_ui_lines);
-        uint32_t ui_line_offset{};
-        for (auto const& part : m_cur_composing_line.parts) {
-            ui_line_offset += part.str.size();
-        }
-        RoutinePrint(content, flags | ERA_PEF_FORCE_PLAIN);
-        // Apply to composed lines
-        for (size_t i = ui_line_start; i < size(m_ui_lines); i++) {
-            auto& line_data = m_ui_lines[i];
-            line_data.buttons.push_back(
-                EngineUIPrintLineDataButton{
-                    .starti = ui_line_offset,
-                    .len = line_data.txt.size() - ui_line_offset,
-                    .data = EngineUIPrintLineDataButton::SourceButton{ path, line, column },
-                }
-                );
-            ui_line_offset = 0;
-        }
-        // Apply to current composing line
-        if (!m_cur_composing_line.parts.empty()) {
-            auto& part = m_cur_composing_line.parts.back();
-            part.explicit_buttons = EngineUIPrintLineDataButton{
-                .starti = ui_line_offset,
-                .len = part.str.size(),
-                .data = EngineUIPrintLineDataButton::SourceButton{ path, line, column },
-            };
-        }
+        RoutinePrintButtonGeneric(content, flags, EngineUIPrintLineDataButton::SourceButton{ path, line, column });
     }
     void EngineControl::RoutinePrintButton(hstring const& content, hstring const& value, PrintExtendedFlags flags) {
+        RoutinePrintButtonGeneric(content, flags, EngineUIPrintLineDataButton::InputButton{ value });
+    }
+    void EngineControl::RoutinePrintEngineErrorControlButton(hstring const& content, EngineUIPrintLineDataButton::EngineErrorControlButton::ButtonType type) {
+        RoutinePrintButtonGeneric(content, 0, EngineUIPrintLineDataButton::EngineErrorControlButton{ type });
+    }
+    void EngineControl::RoutinePrintButtonGeneric(hstring const& content, PrintExtendedFlags flags, EngineUIPrintLineDataButton::ButtonData data) {
         if (content.empty()) { return; }
         uint32_t ui_line_start = size(m_ui_lines);
         uint32_t ui_line_offset{};
@@ -2780,9 +2816,8 @@ namespace winrt::MEraEmuWin::implementation {
                 EngineUIPrintLineDataButton{
                     .starti = ui_line_offset,
                     .len = line_data.txt.size() - ui_line_offset,
-                    .data = EngineUIPrintLineDataButton::InputButton{ value },
-                }
-                );
+                    .data = data,
+                });
             ui_line_offset = 0;
         }
         // Apply to current composing line
@@ -2791,11 +2826,10 @@ namespace winrt::MEraEmuWin::implementation {
             part.explicit_buttons = EngineUIPrintLineDataButton{
                 .starti = ui_line_offset,
                 .len = part.str.size(),
-                .data = EngineUIPrintLineDataButton::InputButton{ value },
+                .data = data,
             };
         }
     }
-
     void EngineControl::SetCurrentLineAlignment(int64_t value) {
         m_cur_line_alignment = (uint32_t)value;
     }
@@ -2832,10 +2866,10 @@ namespace winrt::MEraEmuWin::implementation {
     }
     void EngineControl::SetSkipDisplay(int64_t value) {
         if (value == 0) {
-            m_auto_redraw = false;
+            m_skip_display = false;
         }
         else {
-            m_auto_redraw = true;
+            m_skip_display = true;
         }
     }
     int64_t EngineControl::GetSkipDisplay() {
