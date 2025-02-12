@@ -1,8 +1,6 @@
 ﻿#include "pch.h"
 #include "Settings/GamePage.h"
-#if __has_include("Settings/GamePage.g.cpp")
 #include "Settings/GamePage.g.cpp"
-#endif
 
 using namespace winrt;
 using namespace Windows::UI::Xaml;

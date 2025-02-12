@@ -12,6 +12,7 @@
                 <muxc:XamlControlsResources ControlsResourcesVersion="Version2" />
                 <ResourceDictionary Source="ScrollBar_themeresources_v1.xaml" />
                 <ResourceDictionary Source="ScrollViewer_themeresources_v1.xaml" />
+                <ResourceDictionary Source="TextBox_themeresources.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
             <FontFamily x:Key="MaterialSymbolFontFamily">ms-resource:///Files/Assets/Fonts/MaterialSymbolsOutlined-Light.ttf#Material Symbols Outlined</FontFamily>

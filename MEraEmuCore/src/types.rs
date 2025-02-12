@@ -3145,6 +3145,7 @@ impl EraVarPool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EraCmdArgFmt {
     /// Interprets the argument as a string expression, then parses its content as string form.
     ExpressionSForm,
@@ -3898,6 +3899,10 @@ pub enum EraExtBytecode1 {
     ///
     /// Steps the current FOR loop, and returns whether the loop should continue.
     ForLoopStep,
+    /// `(var: Arr, flat_idx: Int, end: Int, step: Int) -> (Self, do_next: Int)`
+    ///
+    /// Checks current FOR loop WITHOUT stepping, and returns whether the loop should continue.
+    ForLoopNoStep,
     ExtendStrToWidth,
     HtmlPrint,
     PrintButton,
@@ -4102,6 +4107,7 @@ pub enum EraBytecodeKind {
     // ----- ExtOp1 -----
     RowAssign { vals_cnt: u8 },
     ForLoopStep,
+    ForLoopNoStep,
     ExtendStrToWidth,
     HtmlPrint,
     PrintButton { flags: EraPrintExtendedFlags },
@@ -4404,6 +4410,7 @@ impl EraBytecodeKind {
                         vals_cnt: reader.ru8()?,
                     }),
                     Ext1::ForLoopStep => Ok(ForLoopStep),
+                    Ext1::ForLoopNoStep => Ok(ForLoopNoStep),
                     Ext1::ExtendStrToWidth => Ok(ExtendStrToWidth),
                     Ext1::HtmlPrint => Ok(HtmlPrint),
                     Ext1::PrintButton => Ok(PrintButton {
@@ -4741,6 +4748,10 @@ impl EraBytecodeKind {
             ForLoopStep => {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::ForLoopStep as u8);
+            }
+            ForLoopNoStep => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::ForLoopNoStep as u8);
             }
             ExtendStrToWidth => {
                 bytes.push(Pri::ExtOp1 as u8);
@@ -5085,6 +5096,7 @@ impl EraBytecodeKind {
             // ----- ExtOp1 -----
             RowAssign { vals_cnt } => -(vals_cnt as i32 + 2),
             ForLoopStep => 1,
+            ForLoopNoStep => 1,
             ExtendStrToWidth => -1,
             HtmlPrint => -1,
             PrintButton { .. } => -2,

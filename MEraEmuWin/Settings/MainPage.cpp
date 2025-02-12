@@ -1,8 +1,6 @@
 ﻿#include "pch.h"
 #include "Settings/MainPage.h"
-#if __has_include("Settings/MainPage.g.cpp")
 #include "Settings/MainPage.g.cpp"
-#endif
 
 using namespace winrt;
 using namespace Windows::Foundation;
@@ -21,6 +19,7 @@ namespace winrt::MEraEmuWin::Settings::implementation {
         general_nvi.Tag(box_value(xaml_typename<MEraEmuWin::Settings::GeneralPage>()));
         nav_view.SelectedItem(general_nvi);
         GameNVI().Tag(box_value(xaml_typename<MEraEmuWin::Settings::GamePage>()));
+        DisplayNVI().Tag(box_value(xaml_typename<MEraEmuWin::Settings::DisplayPage>()));
     }
     void MainPage::NavView_SelectionChanged(muxc::NavigationView const&, muxc::NavigationViewSelectionChangedEventArgs const& e) {
         auto selected_item = e.SelectedItemContainer();

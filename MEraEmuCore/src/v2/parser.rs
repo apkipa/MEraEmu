@@ -241,7 +241,8 @@ pub enum EraNode {
     // StmtDebugPrint(Pad2<EraPrintExtendedFlags>, EraExtraDataRefWithLen),
     // StmtPrint(Pad2<EraPrintExtendedFlags>, EraExtraDataRefWithLen),
     StmtDebugPrint(EraPrintExtendedFlags, EraNodeRef),
-    StmtPrint(EraPrintExtendedFlags, EraNodeRef),
+    // (need_eval, flags, arguments)
+    StmtPrint(Pad2<bool>, EraPrintExtendedFlags, EraNodeRef),
     // (dest, [Vec<data | data_list>])
     // NOTE: data_list is of type `ListExpr`
     StmtPrintData(Pad2<EraPrintExtendedFlags>, EraNodeRef, EraExtraDataRef),
@@ -2608,7 +2609,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         let node_ref = if let Some((arg_fmt, flags)) = routines::recognize_print_cmd(cmd) {
             _ = self.o.bump();
             let args_list = self.command_arg(arg_fmt);
-            let node = EraNode::StmtPrint(flags, args_list);
+            let need_eval = matches!(arg_fmt, CmdArg::ExpressionSForm);
+            let node = EraNode::StmtPrint(Pad2(need_eval), flags, args_list);
             let span = self.span_to_now(span);
             self.o.node_arena.add_node(node, span, span)
         } else if let Some((arg_fmt, flags)) = routines::recognize_debugprint_cmd(cmd) {

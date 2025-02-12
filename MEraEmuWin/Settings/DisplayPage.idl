@@ -1,0 +1,12 @@
+import "Settings/MainPage.idl";
+
+namespace MEraEmuWin.Settings {
+    [default_interface]
+    runtimeclass DisplayPage : Windows.UI.Xaml.Controls.Page {
+        DisplayPage();
+
+        MEraEmuWin.Settings.MainPage ParentPage{ get; };
+
+        Windows.UI.Xaml.Controls.ToggleSwitch CTRL_AutoDetectGameUIScale{ get; };
+    };
+}

@@ -1,0 +1,25 @@
+namespace MEraEmuWin {
+    enum ContentAlignment1D {
+        Start,
+        Center,
+        End,
+        Stretch,
+    };
+
+    runtimeclass StackPanel : Windows.UI.Xaml.Controls.Panel { 
+        StackPanel();
+
+        static Windows.UI.Xaml.DependencyProperty OrientationProperty{ get; };
+        Windows.UI.Xaml.Controls.Orientation Orientation;
+        static Windows.UI.Xaml.DependencyProperty PaddingProperty{ get; };
+        Windows.UI.Xaml.Thickness Padding;
+        static Windows.UI.Xaml.DependencyProperty SpacingProperty{ get; };
+        Double Spacing;
+        static Windows.UI.Xaml.DependencyProperty ContentAlignmentProperty{ get; };
+        /// Gets or sets the alignment of the content along the axis of the StackPanel.
+        /// Since element's HorizontalAlignment/VerticalAlignment takes precedence over this property,
+        /// it is only effective when the element is stretched and has a MaxWidth/MaxHeight set.
+        /// The default is `Stretch`.
+        ContentAlignment1D ContentAlignment;
+    };
+}

@@ -8,13 +8,13 @@
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Orientation="Vertical" Margin="8,2">
+        <local:StackPanel Orientation="Vertical" Margin="8,2" ContentAlignment="Start">
             <ToggleSwitch Header="启用并行加载 (实验性)"
                           IsOn="{x:Bind ParentPage.Settings.EnableParallelLoading,Mode=TwoWay}" />
             <ToggleSwitch Header="启用 JIT 缓存 (实验性)"
                           IsOn="{x:Bind ParentPage.Settings.EnableJIT,Mode=TwoWay}" />
             <ToggleSwitch Header="引擎执行出错时显示控制器"
                           IsOn="{x:Bind ParentPage.Settings.EnableEngineControlOnError,Mode=TwoWay}" />
-        </StackPanel>
+        </local:StackPanel>
     </ScrollViewer>
 </Page>

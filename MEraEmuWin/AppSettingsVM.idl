@@ -14,5 +14,19 @@ namespace MEraEmuWin {
         // Game
         UInt32 SaveDataCount;
         Boolean EnableAutoSave;
+
+        // Display
+        Boolean AutoDetectGameUIScale;
+        Double GameUIScale;
+        String GameDefaultFontName;
+        Double GameFontSize;
+        Double GameLineHeight;
+        Windows.UI.Color GameBackgroundColor;
+        Windows.UI.Color GameForegroundColor;
+        Windows.UI.Color GameHighlightColor;
+        UInt32 GamePrintCCountPerLine;
+        UInt32 GamePrintCCharCount;
+        Boolean EnableFontSmoothing;
+        Boolean EnablePixelSnapping;
     };
 }

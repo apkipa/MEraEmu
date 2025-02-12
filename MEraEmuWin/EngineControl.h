@@ -8,44 +8,7 @@
 
 #include "MEraEngine.hpp"
 
-#include "util.hpp"
-
-#include <variant>
-#include <future>
-
-// TODO: Move to tools header
-#define DP_NAMESPACE winrt::MEraEmuWin
-//#define DP_CLASS EngineControl
-#define DP_DECLARE(name)    \
-    static Windows::UI::Xaml::DependencyProperty m_ ## name ## Property
-#define DP_DECLARE_METHOD(name)                                         \
-    static Windows::UI::Xaml::DependencyProperty name ## Property() {   \
-        return m_ ## name ## Property;                                  \
-    }
-#define DP_DEFINE_METHOD(name, type)                                    \
-    void DP_CLASS::name(type value) {                                   \
-        using winrt::Windows::Foundation::IInspectable;                 \
-        using RawT = std::remove_cvref_t<type>;                         \
-        if constexpr (std::is_base_of_v<IInspectable, RawT>) {          \
-            SetValue(m_ ## name ## Property, box_value(value));         \
-        }                                                               \
-        else {                                                          \
-            if (name() == value) { return; }                            \
-            SetValue(m_ ## name ## Property, box_value(value));         \
-        }                                                               \
-    }                                                                   \
-    std::remove_cvref_t<type> DP_CLASS::name() {                        \
-        using RawT = std::remove_cvref_t<type>;                         \
-        return unbox_value<RawT>(GetValue(m_ ## name ## Property));     \
-    }
-#define DP_DEFINE(name, ...)                                                    \
-    DependencyProperty DP_CLASS::m_ ## name ## Property =                       \
-        DependencyProperty::Register(                                           \
-            L"" #name,                                                          \
-            winrt::xaml_typename<decltype(std::declval<DP_CLASS>().name())>(),  \
-            winrt::xaml_typename<DP_NAMESPACE::DP_CLASS>(),                     \
-            Windows::UI::Xaml::PropertyMetadata{ __VA_ARGS__ }                  \
-        )
+#include "DPHelper.h"
 
 namespace winrt::MEraEmuWin::DevTools::implementation {
     struct MainPage;
@@ -123,16 +86,13 @@ namespace winrt::MEraEmuWin::implementation {
         }
         void UnhandledException(event_token et) noexcept { m_ev_UnhandledException.remove(et); }
 
-        void EngineForeColor(Windows::UI::Color value);
-        Windows::UI::Color EngineForeColor();
-        void EngineBackColor(Windows::UI::Color value);
-        Windows::UI::Color EngineBackColor();
-        void EngineTitle(hstring const& value);
-        hstring EngineTitle();
+        DP_DECLARE_PROP_METHOD(EngineForeColor);
+        DP_DECLARE_PROP_METHOD(EngineBackColor);
+        DP_DECLARE_PROP_METHOD(EngineTitle);
 
-        DP_DECLARE_METHOD(EngineForeColor);
-        DP_DECLARE_METHOD(EngineBackColor);
-        DP_DECLARE_METHOD(EngineTitle);
+        DP_DEFINE_GETSETTER(EngineForeColor, Windows::UI::Color);
+        DP_DEFINE_GETSETTER(EngineBackColor, Windows::UI::Color);
+        DP_DEFINE_GETSETTER(EngineTitle, hstring const&);
 
         // XAML helpers
         Windows::UI::Xaml::Media::SolidColorBrush ColorToBrush(Windows::UI::Color value) {
@@ -198,10 +158,12 @@ namespace winrt::MEraEmuWin::implementation {
         void UpdateEngineUI();
         void EmitUnhandledExceptionEvent(std::exception_ptr ex);
         void RedrawDirtyEngineImageOutput();
-        void FlushEngineImageOutputLayout(bool invalidate_all);
+        // NOTE: If invalidate_all is false, it is assumed that previous lines along with
+        //       UI metrics are unchanged. Only the newly added lines are redrawn.
+        void UpdateEngineImageOutputLayout(bool invalidate_all);
         void InitD2DDevice(bool force_software);
-        void UpdateUIWidth(uint64_t new_width);
-        uint64_t GetCalculatedUIHeight();
+        void RelayoutUILines(bool recreate_all);
+        uint64_t GetAccUIHeightInLines();
         // NOTE: Returns count of lines if height exceeds all lines
         size_t GetLineIndexFromHeight(uint64_t height);
         void InvalidateLineAtIndex(size_t line);
@@ -209,6 +171,9 @@ namespace winrt::MEraEmuWin::implementation {
         bool TryFulfillInputRequest(bool clear_input);
         ID2D1SolidColorBrush* GetOrCreateSolidColorBrush(uint32_t color);
         IDWriteTextFormat* GetOrCreateTextFormat(hstring const& font_family);
+        IDWriteTextFormat* GetDefaultTextFormat() {
+            return GetOrCreateTextFormat(m_app_settings->GameDefaultFontName());
+        }
 
         void OnInputCountDownTick(IInspectable const&, IInspectable const&);
         void FlushCurPrintLine();
@@ -238,15 +203,15 @@ namespace winrt::MEraEmuWin::implementation {
         void PushNoSkipDisplay();
         void PopNoSkipDisplay();
 
-        DP_DECLARE(EngineForeColor);
-        DP_DECLARE(EngineBackColor);
-        DP_DECLARE(EngineTitle);
+        DP_DECLARE_PROP(EngineForeColor);
+        DP_DECLARE_PROP(EngineBackColor);
+        DP_DECLARE_PROP(EngineTitle);
 
         std::shared_ptr<EngineSharedData> m_sd;
         util::sync::spsc::Receiver<std::move_only_function<void()>> m_ui_task_rx{ nullptr };
         util::sync::spsc::Sender<std::unique_ptr<EngineThreadTask>> m_engine_task_tx{ nullptr };
 
-        MEraEmuWin::AppSettingsVM m_app_settings;
+        com_ptr<implementation::AppSettingsVM> m_app_settings = nullptr;
         EraExecutionBreakReason m_last_execution_break_reason = ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
         event<delegate<EraExecutionBreakReason>> m_ev_EngineExecutionInterrupted;
         Tenkai::UI::Xaml::Window m_devtools_wnd{ nullptr };
@@ -256,9 +221,6 @@ namespace winrt::MEraEmuWin::implementation {
         com_ptr<ID2D1DeviceContext> m_d2d_ctx;
         std::unordered_map<uint32_t, com_ptr<ID2D1SolidColorBrush>> m_brush_map;
         std::unordered_map<hstring, com_ptr<IDWriteTextFormat>> m_font_map;
-        hstring m_default_font_name;
-        uint64_t m_ui_width{};
-        float m_xscale{ 1 }, m_yscale{ 1 };
         uint32_t m_focus_color{ D2D1::ColorF::Yellow };
         std::vector<EngineUIPrintLineData> m_ui_lines;
         bool m_reused_last_line{ false };
@@ -267,8 +229,8 @@ namespace winrt::MEraEmuWin::implementation {
         hstring m_cur_font_name{};
         bool m_auto_redraw{};
         bool m_skip_display{};
-        uint64_t m_no_skip_display_cnt{};
-        uint64_t m_last_redraw_dirty_height{};
+        uint32_t m_no_skip_display_cnt{};
+        uint32_t m_last_redraw_dirty_height{};
         struct ComposingLineData {
             struct ComposingLineDataPart {
                 hstring str;
@@ -284,12 +246,18 @@ namespace winrt::MEraEmuWin::implementation {
         winrt::clock::time_point m_input_start_t;
         hstring m_input_last_prompt;
         Windows::UI::Xaml::DispatcherTimer m_input_countdown_timer;
-        struct EngineConfig {
-            float line_height = 16;
-            float font_size = 14;
-            int64_t printc_char_count = 25;
-            int64_t printc_per_line = 5;
-        } m_cfg;
+        struct {
+            // Used to determine canvas size in pixels (DIP -> pixel conversion)
+            float xscale{}, yscale{};
+            // The actual UI scale factor. We deliberately ignore the world transform
+            // (m_xscale, m_yscale) applied to the engine control.
+            float ui_scale{};
+            uint32_t canvas_width_px{}, canvas_height_px{};
+            // Below are calculated values based on the above
+            uint32_t line_char_capacity{};
+            float line_height_px_f{};
+            float font_size_px_f{};
+        } m_ui_param_cache;
         int64_t m_cur_printc_count{};
         bool m_user_skipping{};
         struct ActiveButtonData {

@@ -871,35 +871,22 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             };
 
         let parse_u32 = |this: &mut Self, val: &str| -> Result<u32, ()> {
-            val.parse().map_err(|_| {
-                let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
-                let offset = content.subslice_offset(val).unwrap();
-                diag.span_err(
-                    Default::default(),
-                    SrcSpan::new(SrcPos(offset as _), val.len() as _),
-                    "failed to parse u32",
-                );
-                this.ctx.emit_diag(diag);
-            })
+            crate::v2::routines::parse_int_literal(val.as_bytes())
+                .and_then(|x| x.try_into().ok())
+                .ok_or_else(|| {
+                    let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
+                    let offset = content.subslice_offset(val).unwrap();
+                    diag.span_err(
+                        Default::default(),
+                        SrcSpan::new(SrcPos(offset as _), val.len() as _),
+                        "failed to parse u32",
+                    );
+                    this.ctx.emit_diag(diag);
+                })
         };
-        let parse_i64_tail = |this: &mut Self, mut val: &str| -> Result<i64, ()> {
-            // HACK: Ignore bad characters after integers
-            if let Some(pos) = val.find(|x| !matches!(x, '0'..='9' | ' ' | '\t' | '-')) {
-                let (left, right) = val.split_at(pos);
-                let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
-                let offset = content.subslice_offset(right).unwrap();
-                diag.span_err(
-                    Default::default(),
-                    SrcSpan::new(SrcPos(offset as _), right.len() as _),
-                    format!(
-                        "invalid character `{}` after integer; did you mean `;`?",
-                        right.chars().next().unwrap()
-                    ),
-                );
-                this.ctx.emit_diag(diag);
-                val = left.trim();
-            }
-            val.parse().map_err(|_| {
+        let parse_i64_tail = |this: &mut Self, val: &str| -> Result<i64, ()> {
+            let mut val = val;
+            let Some(r) = crate::v2::routines::read_int_literal_str(&mut val) else {
                 let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
                 let offset = content.subslice_offset(val).unwrap();
                 diag.span_err(
@@ -908,7 +895,23 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                     "failed to parse i64",
                 );
                 this.ctx.emit_diag(diag);
-            })
+                return Err(());
+            };
+            val = val.trim_ascii_start();
+            if !val.is_empty() {
+                let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
+                let offset = content.subslice_offset(val).unwrap();
+                diag.span_err(
+                    Default::default(),
+                    SrcSpan::new(SrcPos(offset as _), val.len() as _),
+                    format!(
+                        "invalid character `{}` after integer; did you mean `;`?",
+                        val.chars().next().unwrap()
+                    ),
+                );
+                this.ctx.emit_diag(diag);
+            }
+            Ok(r)
         };
         let resolve_csv_idx =
             |this: &mut Self, csv_kind: EraCsvVarKind, val: &str| -> Result<u32, ()> {
@@ -1001,11 +1004,12 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 }
             }
             EraCsvLoadKind::VariableSize => {
-                let Some(initial_vars) = self.initial_vars.as_mut() else {
+                if self.initial_vars.is_none() {
                     return Err(MEraEngineError::new("CSV loaded too late".into()));
-                };
+                }
 
-                let rows = Self::parse_csv_loose(content);
+                let rows = self.parse_csv_loose(filename.clone(), content);
+                let initial_vars = self.initial_vars.as_mut().unwrap();
                 for row in rows {
                     if let [name, size] = row[..] {
                         let name_span = {
@@ -1122,7 +1126,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 };
 
                 // Fill character template
-                let rows = Self::parse_csv_loose(content);
+                let rows = self.parse_csv_loose(filename.clone(), content);
                 let mut chara_template = EraCharaInitTemplate::default();
                 chara_template.csv_no = csv_no;
 
@@ -1280,9 +1284,12 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 }
             }
             EraCsvLoadKind::Item => {
-                let Some(initial_vars) = self.initial_vars.as_mut() else {
+                if self.initial_vars.is_none() {
                     return Err(MEraEngineError::new("CSV loaded too late".into()));
-                };
+                }
+
+                let rows = self.parse_csv_loose(filename.clone(), content);
+                let initial_vars = self.initial_vars.as_mut().unwrap();
 
                 let target = "ITEMNAME";
                 let target2 = "ITEMPRICE";
@@ -1293,7 +1300,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 let mut initial_priceval = vec![IntValue::default(); price_vd.dims[0] as _];
 
                 let diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
-                for mut cols in Self::parse_csv_loose(content) {
+                for mut cols in rows {
                     cols.truncate(3);
 
                     let index = cols[0];
@@ -2719,68 +2726,59 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         filename: ArcStr,
         content: &'a str,
     ) -> Vec<[&'a str; COL_COUNT]> {
-        use crate::util::SubsliceOffset;
-
+        let loose_rows = self.parse_csv_loose(filename.clone(), content);
         let mut rows = Vec::new();
-
-        'outer: for cont_line in content.lines() {
-            // Remove comments
-            let cont_line = if let Some(pos) = cont_line.find(';') {
-                &cont_line[..pos]
-            } else {
-                cont_line
-            };
-
-            if cont_line.trim_ascii().is_empty() {
+        for loose_row in &loose_rows {
+            if loose_row.len() < COL_COUNT {
+                let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
+                diag.span_err(
+                    Default::default(),
+                    SrcSpan::new(SrcPos(0), content.len() as _),
+                    format!("expected {} columns, found {}", COL_COUNT, loose_row.len()),
+                );
+                self.ctx.emit_diag(diag);
                 continue;
             }
-
-            let mut cur_row = [""; COL_COUNT];
-            cur_row[0] = cont_line;
-            // NOTE: Excessive columns are allowed and combined into the last column.
-            for i in 1..COL_COUNT {
-                let Some((cur_col, rest)) = cur_row[i - 1].split_once(',') else {
-                    let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
-                    let offset = cont_line.subslice_offset(cur_row[i - 1]).unwrap();
-                    diag.span_err(
-                        Default::default(),
-                        SrcSpan::new(SrcPos(offset as _), cur_row[i - 1].len() as _),
-                        format!("expected {} columns, found {}", COL_COUNT, i),
-                    );
-                    self.ctx.emit_diag(diag);
-                    continue 'outer;
-                };
-                (cur_row[i - 1], cur_row[i]) = (cur_col.trim_ascii(), rest.trim_ascii());
-            }
-
-            // HACK: Remove trailing comma (& rows)
-            if let Some(left) = cur_row[COL_COUNT - 1].split_once(',') {
-                cur_row[COL_COUNT - 1] = left.0.trim_ascii();
-            }
-
-            rows.push(cur_row);
+            rows.push(loose_row[..COL_COUNT].try_into().unwrap());
         }
-
         rows
     }
 
-    fn parse_csv_loose(content: &str) -> Vec<Vec<&str>> {
+    fn parse_csv_loose<'a>(&mut self, filename: ArcStr, content: &'a str) -> Vec<Vec<&'a str>> {
         let mut rows = Vec::new();
+        let mut inhibit_newline_count = 0u32;
 
         for cont_line in content.lines() {
             // Remove comments
-            let cont_line = if let Some(pos) = cont_line.find(';') {
+            let mut cont_line = if let Some(pos) = cont_line.find(';') {
                 &cont_line[..pos]
             } else {
                 cont_line
             };
+            cont_line = cont_line.trim_ascii();
+            if cont_line.starts_with('{') {
+                cont_line = &cont_line[1..];
+                inhibit_newline_count += 1;
+            } else if cont_line.starts_with('}') {
+                if inhibit_newline_count == 0 {
+                    let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
+                    diag.span_err(
+                        Default::default(),
+                        SrcSpan::new(SrcPos(0), cont_line.len() as _),
+                        "unmatched `}`",
+                    );
+                    self.ctx.emit_diag(diag);
 
-            if cont_line.trim_ascii().is_empty() {
+                    continue;
+                }
+                cont_line = &cont_line[1..];
+                inhibit_newline_count -= 1;
+            }
+            if cont_line.is_empty() {
                 continue;
             }
 
             let cur_row = cont_line.split(',').map(|x| x.trim_ascii()).collect();
-
             rows.push(cur_row);
         }
 
@@ -3601,7 +3599,7 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
             };
             let next_inst_info = InstInfo {
                 stack_balance,
-                base_stack_balance: if matches!(cur_inst, EraBytecodeKind::ForLoopStep) {
+                base_stack_balance: if matches!(cur_inst, EraBytecodeKind::ForLoopNoStep) {
                     // Currently, only for loops introduce a new stack balance.
                     cur_inst_info.stack_balance
                 } else {

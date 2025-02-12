@@ -66,6 +66,8 @@
 
 //#include <include/WinUIIncludes.hpp>
 
+#include <Tenkai.hpp>
+
 #include <windows.ui.xaml.media.dxinterop.h>
 
 #include <ppl.h>
@@ -83,8 +85,11 @@
 #include <array>
 #include <mutex>
 #include <condition_variable>
+#include <variant>
+#include <future>
 #include <atomic>
 #include <chrono>
 #include <set>
 
-typedef SSIZE_T ssize_t;
+#include "util.hpp"
+#include "Shared.hpp"

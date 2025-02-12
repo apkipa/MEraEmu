@@ -1,0 +1,8 @@
+namespace MEraEmuWin {
+    [default_interface]
+    runtimeclass FixTextBoxFlyout {
+        static void SetIsActive(Windows.UI.Xaml.FrameworkElement element, Boolean value);
+        static Boolean GetIsActive(Windows.UI.Xaml.FrameworkElement element);
+        static Windows.UI.Xaml.DependencyProperty IsActiveProperty{ get; };
+    };
+}

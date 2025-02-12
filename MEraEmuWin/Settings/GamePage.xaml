@@ -9,18 +9,11 @@
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Orientation="Vertical" Margin="8,2">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" MaxWidth="300" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                
-                <muxc:NumberBox Header="要显示的存档数量" SpinButtonPlacementMode="Inline"
-                                Value="{x:Bind ParentPage.Settings.SaveDataCount,Mode=TwoWay}" />
-            </Grid>
+        <local:StackPanel Orientation="Vertical" Margin="8,2" ContentAlignment="Start">
+            <muxc:NumberBox Header="要显示的存档数量" SpinButtonPlacementMode="Inline" Minimum="0" MaxWidth="300"
+                            Value="{x:Bind ParentPage.Settings.SaveDataCount,Mode=TwoWay}" />
             <ToggleSwitch Header="开启自动保存"
                           IsOn="{x:Bind ParentPage.Settings.EnableAutoSave,Mode=TwoWay}" />
-        </StackPanel>
+        </local:StackPanel>
     </ScrollViewer>
 </Page>

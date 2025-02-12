@@ -12,9 +12,9 @@
 
 #include "EngineUnhandledExceptionEventArgs.g.cpp"
 #include "DevTools/MainPage.h"
-#include "MEraEngine.hpp"
-#include "Tenkai.hpp"
-#include "util.hpp"
+
+#define DP_NAMESPACE ::winrt::MEraEmuWin
+#define DP_CLASS EngineControl
 
 using namespace winrt;
 using namespace Windows::UI;
@@ -27,6 +27,18 @@ using namespace Windows::UI::Core;
 using namespace Windows::Foundation;
 using namespace Windows::System;
 using namespace Windows::System::Threading;
+
+// GETCONFIG
+#define ERA_CONFIG_NAME_LINE_HEIGHT "一行の高さ"
+#define ERA_CONFIG_NAME_FONT_SIZE "フォントサイズ"
+#define ERA_CONFIG_NAME_PRINTC_COUNT_PER_LINE "PRINTCを並べる数"
+#define ERA_CONFIG_NAME_PRINTC_CHAR_LENGTH "PRINTCの文字数"
+#define ERA_CONFIG_NAME_WINDOW_WIDTH "ウィンドウ幅"
+#define ERA_CONFIG_NAME_SAVE_DATA_COUNT "表示するセーブデータ数"
+#define ERA_CONFIG_NAME_AUTO_SAVE "オートセーブを行なう"
+
+// GETCONFIGS
+#define ERA_CONFIG_NAME_GRAPHICS_INTERFACE "描画インターフェース"
 
 template<class... Ts>
 struct overloaded : Ts... { using Ts::operator()...; };
@@ -405,7 +417,7 @@ namespace winrt::MEraEmuWin::implementation {
         std::exception_ptr thread_exception{ nullptr };
         bool has_execution_error{ false };
         MEraEngine engine{ nullptr };
-        MEraEmuWin::AppSettingsVM app_settings{};
+        com_ptr<implementation::AppSettingsVM> app_settings{};
     };
 
     struct MEraEmuWinEngineSysCallback : ::MEraEngineSysCallback {
@@ -731,20 +743,22 @@ namespace winrt::MEraEmuWin::implementation {
                 return 0;
             }
             if (name == "@PRINTCPERLINE") {
-                std::promise<int64_t> promise;
+                /*std::promise<int64_t> promise;
                 auto future = promise.get_future();
                 queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_cfg.printc_per_line);
                 });
-                return future.get();
+                return future.get();*/
+                return m_sd->app_settings->GamePrintCCountPerLine();
             }
             if (name == "@PRINTCLENGTH") {
-                std::promise<int64_t> promise;
+                /*std::promise<int64_t> promise;
                 auto future = promise.get_future();
                 queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_cfg.printc_char_count);
                 });
-                return future.get();
+                return future.get();*/
+                return m_sd->app_settings->GamePrintCCharCount();
             }
             if (name == "@LINEISEMPTY") {
                 std::promise<bool> promise;
@@ -755,11 +769,10 @@ namespace winrt::MEraEmuWin::implementation {
                 return future.get();
             }
             if (name == "SCREENWIDTH") {
-                // TODO: SCREENWIDTH
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
                 queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->m_ui_width / 20);
+                    promise.set_value(sd->ui_ctrl->m_ui_param_cache.line_char_capacity);
                 });
                 return future.get();
             }
@@ -768,7 +781,7 @@ namespace winrt::MEraEmuWin::implementation {
                 std::promise<int64_t> promise;
                 auto future = promise.get_future();
                 queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->m_ui_width);
+                    promise.set_value(sd->ui_ctrl->m_ui_param_cache.canvas_width_px);
                 });
                 return future.get();
             }
@@ -805,7 +818,7 @@ namespace winrt::MEraEmuWin::implementation {
                 std::promise<std::string> promise;
                 auto future = promise.get_future();
                 queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    auto screen_width = sd->ui_ctrl->m_ui_width / 20;
+                    auto screen_width = sd->ui_ctrl->m_ui_param_cache.line_char_capacity;
                     promise.set_value(std::string(screen_width, '-'));
                 });
                 m_str_cache = future.get();
@@ -1050,41 +1063,43 @@ namespace winrt::MEraEmuWin::implementation {
             return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(t).count();
         }
         int64_t on_get_config_int(std::string_view name) override {
-            if (name == "一行の高さ") {
+            if (name == ERA_CONFIG_NAME_LINE_HEIGHT) {
                 // Line height
-                std::promise<int64_t> promise;
+                /*std::promise<int64_t> promise;
                 auto future = promise.get_future();
                 queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_cfg.line_height);
                 });
-                return future.get();
+                return future.get();*/
+                return m_sd->app_settings->GameLineHeight();
             }
-            if (name == "フォントサイズ") {
+            if (name == ERA_CONFIG_NAME_FONT_SIZE) {
                 // Font size
-                std::promise<int64_t> promise;
+                /*std::promise<int64_t> promise;
                 auto future = promise.get_future();
                 queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
                     promise.set_value(sd->ui_ctrl->m_cfg.font_size);
                 });
-                return future.get();
+                return future.get();*/
+                return m_sd->app_settings->GameFontSize();
             }
-            if (name == "ウィンドウ幅") {
+            if (name == ERA_CONFIG_NAME_WINDOW_WIDTH) {
                 // Window width
                 return on_var_get_int("SCREENPIXELWIDTH", 0);
             }
-            if (name == "表示するセーブデータ数") {
+            if (name == ERA_CONFIG_NAME_SAVE_DATA_COUNT) {
                 // Save data count
-                return m_sd->app_settings.SaveDataCount();
+                return m_sd->app_settings->SaveDataCount();
             }
-            if (name == "オートセーブを行なう") {
+            if (name == ERA_CONFIG_NAME_AUTO_SAVE) {
                 // Auto-save
-                return m_sd->app_settings.EnableAutoSave() ? 1 : 0;
+                return m_sd->app_settings->EnableAutoSave() ? 1 : 0;
             }
             throw std::runtime_error(to_string(std::format(L"no such int config: {}", to_hstring(name))));
         }
         const char* on_get_config_str(std::string_view name) override {
             // TODO: on_get_config_str
-            if (name == "描画インターフェース") {
+            if (name == ERA_CONFIG_NAME_GRAPHICS_INTERFACE) {
                 return "Direct2D";
             }
             throw std::runtime_error(to_string(std::format(L"no such str config: {}", to_hstring(name))));
@@ -1144,40 +1159,50 @@ namespace winrt::MEraEmuWin::implementation {
         uint32_t color;
         uint32_t style;
     };
+    struct EngineUIPrintLineDataInlineObject {
+        uint32_t starti, len;
+
+        struct InlineObject : implements<InlineObject, IDWriteInlineObject> {
+            // TODO...
+        };
+        com_ptr<InlineObject> obj;
+    };
     struct EngineUIPrintLineData {
         hstring txt;
-        com_ptr<IDWriteTextFormat> txt_fmt;
         com_ptr<IDWriteTextLayout4> txt_layout;
-        std::vector<com_ptr<::IUnknown>> inline_objs;   // Usually images
-        uint64_t line_height{};
-        uint64_t acc_height{};  // Including current line
+        uint32_t height{}; // Unit: line
+        uint32_t acc_height{}; // Including the current line
+        uint32_t render_height{}; // Usually >= height
+        uint32_t lookback_render_height{};
         std::vector<EngineUIPrintLineDataEffect> effects;
         std::vector<EngineUIPrintLineDataButton> buttons;
+        std::vector<EngineUIPrintLineDataInlineObject> inline_objs; // Usually images
+        HorizontalAlignment alignment{ HorizontalAlignment::Left };
 
-        EngineUIPrintLineData(hstring const& txt, com_ptr<IDWriteTextFormat> const& txt_fmt) :
-            txt(txt), txt_fmt(txt_fmt) {
-        }
+        EngineUIPrintLineData(hstring const& txt) : txt(txt) {}
 
-        void update_width(EngineControl* ctrl, uint64_t width) {
+        void update_width(EngineControl* ctrl, uint32_t width) {
             if (!txt_layout) { return ensure_layout(ctrl, width); }
             check_hresult(txt_layout->SetMaxWidth(static_cast<float>(width)));
 
             flush_metrics();
         }
-        void ensure_layout(EngineControl* ctrl, uint64_t width) {
+        void ensure_layout(EngineControl* ctrl, uint32_t width) {
             if (txt_layout) { return; }
             com_ptr<IDWriteTextLayout> tmp_layout;
             check_hresult(g_dwrite_factory->CreateTextLayout(
                 txt.c_str(), static_cast<UINT32>(txt.size()),
-                txt_fmt.get(),
+                ctrl->GetDefaultTextFormat(),
                 static_cast<float>(width),
                 1e6,
                 tmp_layout.put()
             ));
             tmp_layout.as(txt_layout);
-            // TODO: Follow user font settings in the future
+            auto line_height = ctrl->m_ui_param_cache.line_height_px_f;
             check_hresult(txt_layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,
-                ctrl->m_cfg.line_height, ctrl->m_cfg.line_height * 0.8));
+                (float)line_height,
+                (float)(line_height * 0.8)
+            ));
 
             flush_metrics();
         }
@@ -1195,13 +1220,13 @@ namespace winrt::MEraEmuWin::implementation {
             //acc_height -= line_height;
             DWRITE_TEXT_METRICS1 metrics;
             check_hresult(txt_layout->GetMetrics(&metrics));
-            line_height = static_cast<uint64_t>(metrics.height);
+            height = metrics.lineCount;
+            render_height = metrics.height;
             //acc_height += line_height;
         }
     };
 
     EngineControl::EngineControl() {
-        m_default_font_name = L"MS Gothic";
         ensure_global_factory();
     }
     EngineControl::~EngineControl() {
@@ -1214,23 +1239,21 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::InitializeComponent() {
         EngineControlT::InitializeComponent();
 
+        // Initialize default settings
+        ApplySettings(nullptr);
+
         // Register for scale notification...
         auto bkg_swapchain_panel = BackgroundSwapchainPanel();
-        bkg_swapchain_panel.CompositionScaleChanged([this](SwapChainPanel const& sender, auto&&) {
-            m_xscale = sender.CompositionScaleX();
-            m_yscale = sender.CompositionScaleY();
-            if (m_vsis_noref) {
-                FlushEngineImageOutputLayout(true);
-            }
+        bkg_swapchain_panel.CompositionScaleChanged([this](SwapChainPanel const&, auto&&) {
+            UpdateEngineImageOutputLayout(true);
         });
-        m_xscale = bkg_swapchain_panel.CompositionScaleX();
-        m_yscale = bkg_swapchain_panel.CompositionScaleY();
         // And width notification.
         SizeChanged([this](auto&&, auto&&) {
-            UpdateUIWidth((uint64_t)ActualWidth());
+            UpdateEngineImageOutputLayout(true);
             // Always bring view to bottom
             RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
         });
+        UpdateEngineImageOutputLayout(true);
         EngineOutputImage().SizeChanged([this](auto&&, auto&&) {
             RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
         });
@@ -1266,11 +1289,18 @@ namespace winrt::MEraEmuWin::implementation {
         check_hresult(m_vsis_noref->Resize(0, 0));
     }
     void EngineControl::ApplySettings(MEraEmuWin::AppSettingsVM settings) {
-        m_app_settings = settings.DeepClone();
+        if (!settings) {
+            m_app_settings = make_self<implementation::AppSettingsVM>();
+        }
+        else {
+            m_app_settings = settings.DeepClone().as<implementation::AppSettingsVM>();
+        }
         // Synchronize settings to engine
         QueueEngineTask(std::make_unique<EngineThreadTask>(EngineThreadTaskKind::SyncSettingsWithFunc, [this] {
             m_sd->app_settings = m_app_settings;
         }));
+
+        UpdateEngineImageOutputLayout(true);
     }
     bool EngineControl::IsStarted() {
         return m_sd && m_sd->thread_is_alive.load(std::memory_order_relaxed);
@@ -1509,8 +1539,8 @@ namespace winrt::MEraEmuWin::implementation {
                 }();
 
                 auto update_config_fn = [&](MEraEngineConfig& cfg) {
-                    cfg.threads_cnt = appcfg.EnableParallelLoading() ? 0 : 1;
-                    cfg.vm_cache_strategy = appcfg.EnableJIT() ?
+                    cfg.threads_cnt = appcfg->EnableParallelLoading() ? 0 : 1;
+                    cfg.vm_cache_strategy = appcfg->EnableJIT() ?
                         M_ERA_ENGINE_VM_CACHE_STRATEGY_FAST_JIT :
                         M_ERA_ENGINE_VM_CACHE_STRATEGY_DISABLED;
                 };
@@ -1634,7 +1664,7 @@ namespace winrt::MEraEmuWin::implementation {
                     auto [erb_tx, erb_rx] = util::sync::spsc::sync_channel<std::tuple<std::filesystem::path, std::unique_ptr<uint8_t[]>, size_t>>(64);
                     std::jthread erb_thread;
                     MEraEngineAsyncErbLoader async_erb_loader = nullptr;
-                    if (appcfg.EnableParallelLoading()) {
+                    if (appcfg->EnableParallelLoading()) {
                         // Use async loader from MEraEngineBuilder
                         async_erb_loader = builder.start_async_erb_loader();
                         erb_thread = std::jthread([&, async_erb_loader = std::move(async_erb_loader)] {
@@ -1714,7 +1744,7 @@ namespace winrt::MEraEmuWin::implementation {
                         builder.load_erh(to_string(erh.c_str()).c_str(), { data.get(), size });
                     }
                     builder.finish_load_erh();
-                    if (appcfg.EnableParallelLoading()) {
+                    if (appcfg->EnableParallelLoading()) {
                         builder.wait_for_async_loader();
                     }
                     else {
@@ -1978,7 +2008,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_ev_EngineExecutionInterrupted(reason);
 
         // If engine control is enabled, print control buttons after the error
-        if (m_app_settings.EnableEngineControlOnError()) {
+        if (m_app_settings->EnableEngineControlOnError()) {
             if (reason != ERA_EXECUTION_BREAK_REASON_CALLBACK_BREAK &&
                 reason != ERA_EXECUTION_BREAK_REASON_STOP_FLAG &&
                 reason != ERA_EXECUTION_BREAK_REASON_DEBUG_BREAK_INSTRUCTION &&
@@ -2005,14 +2035,12 @@ namespace winrt::MEraEmuWin::implementation {
         m_vsis_noref = nullptr;
         m_vsis_d2d_noref = nullptr;
         m_d2d_ctx = nullptr;
-        // TODO: Proper UI scale
-        //m_xscale = m_yscale = XamlRoot().RasterizationScale();
         m_ui_lines.clear();
         m_cur_composing_line = {};
         m_reused_last_line = false;
         m_cur_line_alignment = {};
         m_cur_font_style = {};
-        m_cur_font_name = m_default_font_name;
+        m_cur_font_name = m_app_settings->GameDefaultFontName();
         m_auto_redraw = true;
         m_skip_display = false;
         m_no_skip_display_cnt = 0;
@@ -2023,7 +2051,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_font_map.clear();
         ClearValue(m_EngineForeColorProperty);
         ClearValue(m_EngineBackColorProperty);
-        UpdateUIWidth(std::exchange(m_ui_width, {}));
+        UpdateEngineImageOutputLayout(true);
         VirtualSurfaceImageSource img_src(0, 0);
         EngineOutputImage().Source(img_src);
         m_vsis_noref = img_src.as<IVirtualSurfaceImageSourceNative>().get();
@@ -2082,8 +2110,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_ev_UnhandledException(*this, make<EngineUnhandledExceptionEventArgs>(code, ex_msg));
     }
     void EngineControl::RedrawDirtyEngineImageOutput() {
-        int height = GetCalculatedUIHeight();
-        //check_hresult(m_vsis_noref->Resize(m_ui_width, height));
+        int height = GetAccUIHeightInLines();
         DWORD update_rt_cnt{};
         check_hresult(m_vsis_noref->GetUpdateRectCount(&update_rt_cnt));
         std::vector<RECT> update_rts(update_rt_cnt);
@@ -2099,41 +2126,31 @@ namespace winrt::MEraEmuWin::implementation {
                 // Deliberately ignores errors
                 m_vsis_d2d_noref->EndDraw();
             });
-            // TODO: Offset, clipping, ...
+            // NOTE: Scale is applied to font size, so do nothing here
             ctx->SetTransform(
-                D2D1::Matrix3x2F::Scale(m_xscale, m_yscale) *
+                //D2D1::Matrix3x2F::Scale(m_xscale, m_yscale) *
                 D2D1::Matrix3x2F::Translation(offset.x - update_rt.left, offset.y - update_rt.top)
             );
-            /*ctx->PushAxisAlignedClip(
-                D2D1::RectF(
-                    update_rt.left, update_rt.top, update_rt.right, update_rt.bottom),
-                D2D1_ANTIALIAS_MODE_ALIASED
-            );*/
-            ctx->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
+            if (m_app_settings->EnableFontSmoothing()) {
+                ctx->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            }
+            else {
+                ctx->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
+            }
             ctx->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-            int dip_rt_top = update_rt.top / m_yscale;
-            int dip_rt_bottom = update_rt.bottom / m_yscale;
+            int dip_rt_top = update_rt.top;
+            int dip_rt_bottom = update_rt.bottom;
             // Clear stale bitmap area
             ctx->Clear(D2D1::ColorF(D2D1::ColorF::White, 0));
-            {
-                /*ctx->DrawLine(D2D1::Point2F(0, dip_rt_top), D2D1::Point2F(1e4, dip_rt_top),
-                    GetOrCreateSolidColorBrush(D2D1::ColorF::Green | 0xff000000));
-                ctx->DrawLine(D2D1::Point2F(0, dip_rt_bottom), D2D1::Point2F(1e4, dip_rt_bottom),
-                    GetOrCreateSolidColorBrush(D2D1::ColorF::Yellow | 0xff000000));*/
-                    /*ctx->DrawLine(D2D1::Point2F(0, offset.y), D2D1::Point2F(1e4, offset.y),
-                        GetOrCreateSolidColorBrush(D2D1::ColorF::Green | 0xff000000));
-                    ctx->DrawLine(D2D1::Point2F(0, offset.y + (update_rt.bottom - update_rt.top)), D2D1::Point2F(1e4, offset.y + (update_rt.bottom - update_rt.top)),
-                        GetOrCreateSolidColorBrush(D2D1::ColorF::Yellow | 0xff000000));*/
-            }
             // Obtain lines requiring redraws
             auto ib = begin(m_ui_lines), ie = end(m_ui_lines);
             int line_start = std::ranges::upper_bound(ib, ie, dip_rt_top,
                 [](auto const& a, auto const& b) { return a < b; },
-                [](auto const& e) { return e.acc_height; }
+                [&](auto const& e) { return e.acc_height * m_ui_param_cache.line_height_px_f; }
             ) - ib;
             int line_end = std::ranges::upper_bound(ib, ie, dip_rt_bottom,
                 [](auto const& a, auto const& b) { return a < b; },
-                [](auto const& e) { return e.acc_height; }
+                [&](auto const& e) { return e.acc_height * m_ui_param_cache.line_height_px_f; }
             ) - ib;
             if (line_end < size(m_ui_lines)) { line_end++; }
 
@@ -2144,7 +2161,7 @@ namespace winrt::MEraEmuWin::implementation {
             for (int line = line_start; line < line_end; line++) {
                 auto& line_data = m_ui_lines[line];
                 int offx = 0;
-                int offy = line_data.acc_height - line_data.line_height;
+                int offy = (line_data.acc_height - line_data.height) * m_ui_param_cache.line_height_px_f;
 
                 // If we have an active button at this line, apply and flush effects
                 if (m_cur_active_button.line == line && m_cur_active_button.button_idx < size(line_data.buttons)) {
@@ -2170,63 +2187,80 @@ namespace winrt::MEraEmuWin::implementation {
                         brush);
                 }
             }
-            /* Stash:
-            // Large transform causes blurry text, so we must manually handle it
-            ctx->SetTransform(
-                D2D1::Matrix3x2F::Scale(m_xscale, m_yscale) *
-                D2D1::Matrix3x2F::Translation(offset.x, offset.y)
-            );
-            ctx->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_ALIASED);
-            int dip_rt_top = update_rt.top / m_yscale;
-            int dip_rt_bottom = update_rt.bottom / m_yscale;
-            // Clear stale bitmap area
-            ctx->Clear(D2D1::ColorF(D2D1::ColorF::White, 0));
-            // Obtain lines requiring redraws
-            auto ib = begin(m_ui_lines), ie = end(m_ui_lines);
-            int line_start = std::ranges::upper_bound(ib, ie, dip_rt_top,
-                [](auto const& a, auto const& b) { return a < b; },
-                [](auto const& e) { return e.acc_height; }
-            ) - ib;
-            int line_end = std::ranges::upper_bound(ib, ie, dip_rt_bottom,
-                [](auto const& a, auto const& b) { return a < b; },
-                [](auto const& e) { return e.acc_height; }
-            ) - ib;
-            if (line_end < size(m_ui_lines)) { line_end++; }
-
-            // Fallback brush (not actually used in practice, as all texts have
-            // color effects applied)
-            auto brush = GetOrCreateSolidColorBrush(D2D1::ColorF::Silver | 0xff000000);
-
-            for (int line = line_start; line < line_end; line++) {
-                auto& line_data = m_ui_lines[line];
-                int offx = 0;
-                int offy = line_data.acc_height - line_data.line_height;
-                float foffx = offx - update_rt.left / m_xscale;
-                float foffy = offy - update_rt.top / m_yscale + 0.3f;
-                ctx->DrawTextLayout(D2D1::Point2F(foffx, foffy), line_data.txt_layout.get(),
-                    brush);
-            }
-            */
         }
 
         if (m_sd->ui_redraw_block_engine.exchange(false, std::memory_order_relaxed)) {
             m_sd->ui_redraw_block_engine.notify_one();
         }
     }
-    void EngineControl::FlushEngineImageOutputLayout(bool invalidate_all) {
-        auto height = GetCalculatedUIHeight();
-        int real_width = m_ui_width * m_xscale;
-        int real_height = height * m_yscale;
-        int old_real_height = m_last_redraw_dirty_height * m_yscale;
-        check_hresult(m_vsis_noref->Resize(real_width, height * m_yscale));
+    void EngineControl::UpdateEngineImageOutputLayout(bool invalidate_all) {
+        auto& ui_params = m_ui_param_cache;
+        bool need_invalidate_line_metrics = false;
+        bool fully_invalidate_line_metrics = false;
         if (invalidate_all) {
-            check_hresult(m_vsis_noref->Invalidate({ 0, 0, real_width, real_height }));
+            // Recalculate UI parameters
+            auto sp = BackgroundSwapchainPanel();
+            ui_params.xscale = sp.CompositionScaleX();
+            ui_params.yscale = sp.CompositionScaleY();
+            float new_ui_scale;
+            if (m_app_settings->AutoDetectGameUIScale()) {
+                new_ui_scale = std::max(ui_params.xscale, ui_params.yscale);
+            }
+            else {
+                new_ui_scale = m_app_settings->GameUIScale();
+            }
+            if (ui_params.ui_scale != new_ui_scale) {
+                ui_params.ui_scale = new_ui_scale;
+                need_invalidate_line_metrics = true;
+            }
+            // Align canvas width to 4 pixels to prevent blurring
+            auto new_canvas_width = std::floor(ActualWidth() / 4) * 4;
+            EngineOutputImage().Width(new_canvas_width);
+            auto new_canvas_width_px = int(new_canvas_width * ui_params.xscale);
+            if (ui_params.canvas_width_px != new_canvas_width_px) {
+                ui_params.canvas_width_px = new_canvas_width_px;
+                need_invalidate_line_metrics = true;
+            }
+
+            ui_params.line_char_capacity = uint32_t(ui_params.canvas_width_px / m_app_settings->GameFontSize());
+            auto new_line_height_px_f = m_app_settings->GameLineHeight() * ui_params.ui_scale;
+            if (m_app_settings->EnablePixelSnapping()) {
+                new_line_height_px_f = std::round(new_line_height_px_f);
+            }
+            if (ui_params.line_height_px_f != new_line_height_px_f) {
+                ui_params.line_height_px_f = new_line_height_px_f;
+                need_invalidate_line_metrics = true;
+                fully_invalidate_line_metrics = true;
+            }
+            auto new_font_size_px_f = m_app_settings->GameFontSize() * ui_params.ui_scale;
+            if (m_app_settings->EnablePixelSnapping()) {
+                new_font_size_px_f = std::round(new_font_size_px_f);
+            }
+            if (ui_params.font_size_px_f != new_font_size_px_f) {
+                ui_params.font_size_px_f = new_font_size_px_f;
+                need_invalidate_line_metrics = true;
+                fully_invalidate_line_metrics = true;
+                // Clear font cache to force re-creation of fonts of new size
+                m_font_map.clear();
+            }
+
+            // Redraw all lines
+            m_last_redraw_dirty_height = 0;
         }
-        else {
-            check_hresult(m_vsis_noref->Invalidate({ 0, old_real_height, real_width, real_height }));
+
+        if (need_invalidate_line_metrics) {
+            RelayoutUILines(fully_invalidate_line_metrics);
         }
+
+        if (!m_vsis_noref) { return; }
+
+        auto height = int(GetAccUIHeightInLines() * ui_params.line_height_px_f);
+        ui_params.canvas_height_px = height;
+        check_hresult(m_vsis_noref->Resize(ui_params.canvas_width_px, height));
+        check_hresult(m_vsis_noref->Invalidate(
+            { 0, (long)m_last_redraw_dirty_height, (long)ui_params.canvas_width_px, height }));
         m_last_redraw_dirty_height = height;
-        // TODO: Is this an XAML bug?
+        // TODO: Must call InvalidateMeasure() for updates to be visible. Is this an XAML bug?
         EngineOutputImage().InvalidateMeasure();
     }
     void EngineControl::InitD2DDevice(bool force_software) {
@@ -2264,17 +2298,20 @@ namespace winrt::MEraEmuWin::implementation {
         // Associate output image with created Direct2D device
         check_hresult(m_vsis_d2d_noref->SetDevice(d2d_dev.get()));
     }
-    void EngineControl::UpdateUIWidth(uint64_t new_width) {
-        if (new_width == m_ui_width) { return; }
-        new_width /= 4;
-        new_width *= 4;
-        m_ui_width = new_width;
-        EngineOutputImage().Width((double)new_width);
+    void EngineControl::RelayoutUILines(bool recreate_all) {
+        const float new_width = m_ui_param_cache.canvas_width_px;
+        if (recreate_all) {
+            for (auto& line : m_ui_lines) {
+                line.txt_layout = nullptr;
+            }
+        }
+
         uint64_t last_height{};
-        if (size(m_ui_lines) > 5000) {
+        constexpr size_t PARALLEL_THRESHOLD = 4000;
+        if (size(m_ui_lines) > PARALLEL_THRESHOLD) {
             // Multi-threaded process
             auto total_cnt = size(m_ui_lines);
-            auto split_cnt = (total_cnt + total_cnt - 1) / 5000;
+            auto split_cnt = (total_cnt + total_cnt - 1) / PARALLEL_THRESHOLD;
             if (split_cnt > 4) {
                 split_cnt = 4;
             }
@@ -2282,23 +2319,20 @@ namespace winrt::MEraEmuWin::implementation {
             for (size_t i = 1; i < split_cnt; i++) {
                 auto start_pos = total_cnt * i / split_cnt;
                 auto end_pos = total_cnt * (i + 1) / split_cnt;
-                std::promise<void> worker_promise;
-                workers.push_back(worker_promise.get_future());
-                ThreadPool::RunAsync([=, promise = std::move(worker_promise)](auto&&) mutable {
-                    try {
-                        for (size_t i = start_pos; i < end_pos; i++) {
-                            auto& line = m_ui_lines[i];
-                            line.update_width(this, new_width);
-                        }
-                        promise.set_value();
+                workers.push_back(std::async(std::launch::async, [=] {
+                    for (size_t i = start_pos; i < end_pos; i++) {
+                        auto& line = m_ui_lines[i];
+                        line.update_width(this, new_width);
                     }
-                    catch (...) { promise.set_exception(std::current_exception()); }
-                });
+                }));
             }
             for (size_t i = 0; i < total_cnt * 1 / split_cnt; i++) {
                 auto& line = m_ui_lines[i];
                 line.update_width(this, new_width);
-                line.acc_height = last_height + line.line_height;
+                if (recreate_all) {
+                    line.flush_effects(this);
+                }
+                line.acc_height = last_height + line.height;
                 last_height = line.acc_height;
             }
             for (auto& worker : workers) {
@@ -2306,7 +2340,10 @@ namespace winrt::MEraEmuWin::implementation {
             }
             for (size_t i = total_cnt * 1 / split_cnt; i < total_cnt; i++) {
                 auto& line = m_ui_lines[i];
-                line.acc_height = last_height + line.line_height;
+                if (recreate_all) {
+                    line.flush_effects(this);
+                }
+                line.acc_height = last_height + line.height;
                 last_height = line.acc_height;
             }
         }
@@ -2314,20 +2351,15 @@ namespace winrt::MEraEmuWin::implementation {
             // Process directly on the UI thread
             for (auto& line : m_ui_lines) {
                 line.update_width(this, new_width);
-                line.acc_height = last_height + line.line_height;
+                if (recreate_all) {
+                    line.flush_effects(this);
+                }
+                line.acc_height = last_height + line.height;
                 last_height = line.acc_height;
             }
         }
-
-        if (m_vsis_noref) {
-            int height = GetCalculatedUIHeight();
-            auto new_w = static_cast<int>(m_ui_width * m_xscale);
-            auto new_h = static_cast<int>(height * m_yscale);
-            check_hresult(m_vsis_noref->Resize(new_w, new_h));
-            m_vsis_noref->Invalidate({ 0, 0, new_w, new_h });
-        }
     }
-    uint64_t EngineControl::GetCalculatedUIHeight() {
+    uint64_t EngineControl::GetAccUIHeightInLines() {
         if (m_ui_lines.empty()) { return 0; }
         return m_ui_lines.back().acc_height;
     }
@@ -2335,25 +2367,33 @@ namespace winrt::MEraEmuWin::implementation {
         auto ib = begin(m_ui_lines), ie = end(m_ui_lines);
         return std::ranges::upper_bound(ib, ie, height,
             [](auto const& a, auto const& b) { return a < b; },
-            [](auto const& e) { return e.acc_height; }
+            [&](auto const& e) { return e.acc_height * m_ui_param_cache.line_height_px_f; }
         ) - ib;
     }
     void EngineControl::InvalidateLineAtIndex(size_t line) {
         if (line >= size(m_ui_lines)) { return; }
-        auto width = static_cast<long>(m_ui_width * m_xscale);
+        auto width = static_cast<long>(m_ui_param_cache.canvas_width_px);
         auto const& cur_line = m_ui_lines[line];
-        auto height_1 = static_cast<long>((cur_line.acc_height - cur_line.line_height) * m_yscale);
-        auto height_2 = static_cast<long>(cur_line.acc_height * m_yscale);
-        if FAILED(m_vsis_noref->Invalidate({ 0, height_1, width, height_2 })) {
+        auto height_1 = static_cast<long>((cur_line.acc_height - cur_line.height) * m_ui_param_cache.line_height_px_f);
+        auto height_2 = static_cast<long>(cur_line.acc_height * m_ui_param_cache.line_height_px_f);
+        // HACK: Invalidate a larger area to prevent text clipping
+        auto compensation = (long)std::ceil((m_ui_param_cache.font_size_px_f - m_ui_param_cache.line_height_px_f));
+        if (compensation < 0) {
+            compensation = 0;
+        }
+        compensation += 1;
+        if FAILED(m_vsis_noref->Invalidate({ 0, height_1 - compensation, width, height_2 + compensation })) {
             // Sometimes the invalidation fails (OOB), so we need to redraw the whole thing
-            FlushEngineImageOutputLayout(true);
+            UpdateEngineImageOutputLayout(true);
         }
     }
     void EngineControl::UpdateAndInvalidateActiveButton(Point const& pt) {
-        auto line = GetLineIndexFromHeight(pt.Y);
+        auto pt_x = pt.X * m_ui_param_cache.xscale;
+        auto pt_y = pt.Y * m_ui_param_cache.yscale;
+        auto line = GetLineIndexFromHeight(pt_y);
         // Check for buttons
         ActiveButtonData new_active_button;
-        if ((pt.X >= 0 && pt.Y >= 0) && line < size(m_ui_lines)) {
+        if ((pt_x >= 0 && pt_y >= 0) && line < size(m_ui_lines)) {
             auto const& cur_line = m_ui_lines[line];
             if (!cur_line.buttons.empty()) {
                 // Perform hit test on text
@@ -2361,7 +2401,7 @@ namespace winrt::MEraEmuWin::implementation {
                 BOOL is_inside;
                 DWRITE_HIT_TEST_METRICS hit_test_metrics;
                 check_hresult(cur_line.txt_layout->HitTestPoint(
-                    pt.X, pt.Y - (cur_line.acc_height - cur_line.line_height),
+                    pt_x, pt_y - (cur_line.acc_height - cur_line.height) * m_ui_param_cache.line_height_px_f,
                     &is_trailing_hit, &is_inside, &hit_test_metrics
                 ));
                 if (is_inside) {
@@ -2421,7 +2461,7 @@ namespace winrt::MEraEmuWin::implementation {
                 DWRITE_FONT_WEIGHT_REGULAR,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                (float)m_cfg.font_size,
+                std::max(m_ui_param_cache.font_size_px_f, 1e-6f),
                 L"",
                 entry.put()
             ));
@@ -2475,7 +2515,7 @@ namespace winrt::MEraEmuWin::implementation {
                 if (m_input_last_prompt != prompt) {
                     m_input_last_prompt = prompt;
                     RoutineReuseLastLine(prompt);
-                    FlushEngineImageOutputLayout(false);
+                    UpdateEngineImageOutputLayout(false);
                 }
             }
         }
@@ -2500,7 +2540,7 @@ namespace winrt::MEraEmuWin::implementation {
                 m_reused_last_line = false;
             }
 
-            auto height = GetCalculatedUIHeight();
+            auto height = GetAccUIHeightInLines();
 
             com_ptr<IDWriteTextFormat> txt_fmt;
             try {
@@ -2508,11 +2548,10 @@ namespace winrt::MEraEmuWin::implementation {
             }
             catch (...) {
                 // Font does not exist, fallback
-                m_cur_font_name = m_default_font_name;
-                txt_fmt.copy_from(GetOrCreateTextFormat(m_default_font_name));
+                txt_fmt.copy_from(GetOrCreateTextFormat({}));
             }
 
-            m_ui_lines.emplace_back(hstring{}, txt_fmt);
+            m_ui_lines.emplace_back(hstring{});
             auto& cur_line = m_ui_lines.back();
             uint32_t implicit_button_scan_start{};
             auto materialize_implicit_buttons_fn = [&] {
@@ -2634,8 +2673,8 @@ namespace winrt::MEraEmuWin::implementation {
             // Reset composing line
             m_cur_composing_line = {};
 
-            cur_line.ensure_layout(this, m_ui_width);
-            height += cur_line.line_height;
+            cur_line.ensure_layout(this, m_ui_param_cache.canvas_width_px);
+            height += cur_line.height;
             cur_line.acc_height = height;
             cur_line.flush_effects(this);
 
@@ -2644,7 +2683,6 @@ namespace winrt::MEraEmuWin::implementation {
             updated = true;
         };
 
-        //auto color = to_u32(EngineForeColor());
         uint32_t color;
         if (flags & ERA_PEF_IGNORE_COLOR) {
             color = to_u32(unbox_value<Color>(
@@ -2669,8 +2707,9 @@ namespace winrt::MEraEmuWin::implementation {
 
             bool align_right = flags & ERA_PEF_RIGHT_PAD;
             auto str_width = rust_get_wstring_width((const uint16_t*)content.c_str());
-            if (str_width < m_cfg.printc_char_count) {
-                int space_cnt = m_cfg.printc_char_count - str_width;
+            const auto printc_char_count = m_app_settings->GamePrintCCharCount();
+            if (str_width < printc_char_count) {
+                int space_cnt = printc_char_count - str_width;
                 if (align_right) {
                     content = format(L"{:{}}{}", L"", space_cnt, content);
                 }
@@ -2700,7 +2739,7 @@ namespace winrt::MEraEmuWin::implementation {
                 .str = hstring(content_sv), .color = color,
                 .forbid_button = forbid_button, .is_isolated = is_isolated });
         }
-        if (flags & ERA_PEF_IS_LINE || m_cur_printc_count >= m_cfg.printc_per_line) {
+        if (flags & ERA_PEF_IS_LINE || m_cur_printc_count >= m_app_settings->GamePrintCCountPerLine()) {
             push_cur_composing_line_fn();
         }
         else if ((flags & ERA_PEF_IS_SINGLE) && !m_cur_composing_line.parts.empty()) {
@@ -2709,7 +2748,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         // Resize to trigger updates
         if (updated && m_auto_redraw) {
-            FlushEngineImageOutputLayout(false);
+            UpdateEngineImageOutputLayout(false);
         }
     }
     void EngineControl::RoutineHtmlPrint(hstring const& content) {
@@ -2726,7 +2765,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         // Flush intermediate print contents first
         FlushCurPrintLine();
-        FlushEngineImageOutputLayout(false);
+        UpdateEngineImageOutputLayout(false);
 
         m_input_start_t = winrt::clock::now();
         m_input_last_prompt = {};
@@ -2784,10 +2823,11 @@ namespace winrt::MEraEmuWin::implementation {
             m_ui_lines.erase(ie - count, ie);
         }
         if (m_auto_redraw) {
-            FlushEngineImageOutputLayout(false);
+            UpdateEngineImageOutputLayout(false);
         }
         else {
-            m_last_redraw_dirty_height = std::min(m_last_redraw_dirty_height, GetCalculatedUIHeight());
+            auto new_height = GetAccUIHeightInLines() * m_ui_param_cache.line_height_px_f;
+            m_last_redraw_dirty_height = std::min(m_last_redraw_dirty_height, (uint32_t)new_height);
         }
     }
     void EngineControl::RoutinePrintSourceButton(hstring const& content, hstring const& path,
@@ -2844,7 +2884,7 @@ namespace winrt::MEraEmuWin::implementation {
     }
     void EngineControl::SetCurrentFontName(hstring const& value) {
         // TODO: Verify font name?
-        m_cur_font_name = value.empty() ? m_default_font_name : value;
+        m_cur_font_name = value.empty() ? m_app_settings->GameDefaultFontName() : value;
     }
     hstring EngineControl::GetCurrentFontName() {
         return m_cur_font_name;
@@ -2858,7 +2898,7 @@ namespace winrt::MEraEmuWin::implementation {
         }
         else {
             m_auto_redraw = true;
-            FlushEngineImageOutputLayout(false);
+            UpdateEngineImageOutputLayout(false);
         }
     }
     int64_t EngineControl::GetRedrawState() {
@@ -2893,15 +2933,10 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
 
-#define DP_CLASS EngineControl
-    DP_DEFINE(EngineForeColor, box_value(Windows::UI::Colors::Silver()));
-    DP_DEFINE(EngineBackColor, box_value(Windows::UI::Colors::Black()));
-    DP_DEFINE(EngineTitle, box_value(L"MEraEmu"), [](DependencyObject const& sender, DependencyPropertyChangedEventArgs const& e) {
+    DP_DEFINE_PROP(EngineForeColor, box_value(Windows::UI::Colors::Silver()));
+    DP_DEFINE_PROP(EngineBackColor, box_value(Windows::UI::Colors::Black()));
+    DP_DEFINE_PROP(EngineTitle, box_value(L"MEraEmu"), [](DependencyObject const& sender, DependencyPropertyChangedEventArgs const& e) {
         auto that = sender.as<EngineControl>();
         that->UpdateDevToolsWindow();
     });
-    DP_DEFINE_METHOD(EngineForeColor, Color);
-    DP_DEFINE_METHOD(EngineBackColor, Color);
-    DP_DEFINE_METHOD(EngineTitle, hstring const&);
-#undef DP_CLASS
 }

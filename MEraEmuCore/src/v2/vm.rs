@@ -4217,6 +4217,23 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         Ok(())
     }
 
+    fn instr_for_loop_no_step(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        // NOTE: ForLoopNoStep does not eat any stack values. It only pushes a boolean value
+        //       to the stack to indicate whether the loop should continue.
+        view_stack!(self, _, arr:a, arr_idx:i, end:i, step:i);
+        resolve_array!(self, arr:i;arr_idx);
+        let r = if step < 0 {
+            arr.val > end
+        } else {
+            arr.val < end
+        };
+        self.o.stack.push(StackValue::new_int(r as _));
+        self.add_ip_offset(Bc::ForLoopNoStep.bytes_len() as i32);
+        Ok(())
+    }
+
     fn instr_extend_str_to_width(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
@@ -5552,6 +5569,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::GetRandomMax => s.instr_get_random_max()?,
             Bc::RowAssign { vals_cnt } => s.instr_row_assign(vals_cnt)?,
             Bc::ForLoopStep => s.instr_for_loop_step()?,
+            Bc::ForLoopNoStep => s.instr_for_loop_no_step()?,
             Bc::ExtendStrToWidth => s.instr_extend_str_to_width()?,
             Bc::HtmlPrint => s.instr_html_print()?,
             Bc::PrintButton { flags } => s.instr_print_button(flags)?,
@@ -6535,6 +6553,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                     call_subroutine_1_any!(instr_row_assign, u8, vals_cnt)
                 }
                 Bc::ForLoopStep => call_subroutine_0!(instr_for_loop_step),
+                Bc::ForLoopNoStep => call_subroutine_0!(instr_for_loop_no_step),
                 Bc::ExtendStrToWidth => call_subroutine_0!(instr_extend_str_to_width),
                 Bc::HtmlPrint => call_subroutine_0!(instr_html_print),
                 Bc::PrintButton { flags } => {

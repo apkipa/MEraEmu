@@ -1657,23 +1657,52 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 );
                 self.ctx.emit_diag_to(diag, self.diag_emit);
             }
-            EraNode::StmtPrint(flags, args) => {
+            EraNode::StmtPrint(Pad2(need_eval), flags, args) => {
                 let args = self.unwrap_list_expr(args)?;
-                let mut parts_cnt = 0;
-                for arg in args.iter().map(|x| EraNodeRef(*x)) {
-                    let arg_span = self.arena.get_node_span(arg);
-                    let arg = self.expression(arg)?;
-                    match arg {
-                        ScalarValueKind::Int => {
-                            self.chunk.push_bc(BcKind::IntToStr, arg_span);
-                        }
-                        ScalarValueKind::Str => (),
-                        ScalarValueKind::Empty => continue,
-                        _ => unreachable!("invalid print argument"),
+                if need_eval {
+                    // HACK: Before we support eval, handle them as constants now
+                    {
+                        let mut diag = self.make_diag();
+                        diag.span_err(
+                            Default::default(),
+                            stmt_span,
+                            "PRINTFORMS is not yet supported and will be ignored for now",
+                        );
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
                     }
-                    parts_cnt += 1;
+
+                    let mut parts_cnt = 0;
+                    for arg in args.iter().map(|x| EraNodeRef(*x)) {
+                        let arg_span = self.arena.get_node_span(arg);
+                        let arg = self.expression(arg)?;
+                        match arg {
+                            ScalarValueKind::Int => {
+                                self.chunk.push_bc(BcKind::IntToStr, arg_span);
+                            }
+                            ScalarValueKind::Str => (),
+                            ScalarValueKind::Empty => continue,
+                            _ => unreachable!("invalid print argument"),
+                        }
+                        parts_cnt += 1;
+                    }
+                    self.chunk.push_build_string(parts_cnt, stmt_span);
+                } else {
+                    let mut parts_cnt = 0;
+                    for arg in args.iter().map(|x| EraNodeRef(*x)) {
+                        let arg_span = self.arena.get_node_span(arg);
+                        let arg = self.expression(arg)?;
+                        match arg {
+                            ScalarValueKind::Int => {
+                                self.chunk.push_bc(BcKind::IntToStr, arg_span);
+                            }
+                            ScalarValueKind::Str => (),
+                            ScalarValueKind::Empty => continue,
+                            _ => unreachable!("invalid print argument"),
+                        }
+                        parts_cnt += 1;
+                    }
+                    self.chunk.push_build_string(parts_cnt, stmt_span);
                 }
-                self.chunk.push_build_string(parts_cnt, stmt_span);
                 self.stmt_print_emit_bc(flags, stmt_span);
             }
             EraNode::StmtPrintData(flags, dest, data) => {
@@ -3333,41 +3362,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
         let cur_scope = self.allocate_scope_id(cur_scope, 4);
 
         // REPEAT loop prologue
-        let emit_ternary_fn =
-            |this: &mut Self,
-             span,
-             then_fn: &mut dyn Fn(&mut Self, SrcSpan),
-             else_fn: &mut dyn Fn(&mut Self, SrcSpan)| {
-                // Assuming stack has condition pushed
-                let bt_else = this.chunk.push_jump_if_not(span);
-                then_fn(this, span);
-                let bt_end = this.chunk.push_jump(span);
-                bt_else.complete_here(this.chunk);
-                else_fn(this, span);
-                bt_end.complete_here(this.chunk);
-            };
-        let emit_cond_fn = |this: &mut Self, span| {
-            this.chunk.push_duplicate_all(2, span);
-            this.chunk.push_load_imm(0, span);
-            this.chunk.push_bc(BcKind::CmpIntLT, span);
-            emit_ternary_fn(
-                this,
-                span,
-                &mut |this, span| {
-                    this.chunk.push_duplicate_one(5, span);
-                    this.chunk.push_duplicate_one(5, span);
-                    this.chunk.push_bc(BcKind::GetArrValFlat, span);
-                    this.chunk.push_bc(BcKind::CmpIntLT, span);
-                },
-                &mut |this, span| {
-                    this.chunk.push_duplicate_one(5, span);
-                    this.chunk.push_duplicate_one(5, span);
-                    this.chunk.push_bc(BcKind::GetArrValFlat, span);
-                    this.chunk.push_bc(BcKind::CmpIntGT, span);
-                },
-            );
-        };
-        emit_cond_fn(self, stmt_span);
+        self.chunk.push_bc(BcKind::ForLoopNoStep, stmt_span);
         let jp_cond_pre_check = self.chunk.push_jump(stmt_span);
         // Continue part
         let cp_continue = self.chunk.checkpoint();
@@ -3440,41 +3435,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
         let cur_scope = self.allocate_scope_id(cur_scope, 4);
 
         // FOR loop prologue
-        let emit_ternary_fn =
-            |this: &mut Self,
-             span,
-             then_fn: &mut dyn Fn(&mut Self, SrcSpan),
-             else_fn: &mut dyn Fn(&mut Self, SrcSpan)| {
-                // Assuming stack has condition pushed
-                let bt_else = this.chunk.push_jump_if_not(span);
-                then_fn(this, span);
-                let bt_end = this.chunk.push_jump(span);
-                bt_else.complete_here(this.chunk);
-                else_fn(this, span);
-                bt_end.complete_here(this.chunk);
-            };
-        let emit_cond_fn = |this: &mut Self, span| {
-            this.chunk.push_duplicate_all(2, span);
-            this.chunk.push_load_imm(0, span);
-            this.chunk.push_bc(BcKind::CmpIntLT, span);
-            emit_ternary_fn(
-                this,
-                span,
-                &mut |this, span| {
-                    this.chunk.push_duplicate_one(5, span);
-                    this.chunk.push_duplicate_one(5, span);
-                    this.chunk.push_bc(BcKind::GetArrValFlat, span);
-                    this.chunk.push_bc(BcKind::CmpIntLT, span);
-                },
-                &mut |this, span| {
-                    this.chunk.push_duplicate_one(5, span);
-                    this.chunk.push_duplicate_one(5, span);
-                    this.chunk.push_bc(BcKind::GetArrValFlat, span);
-                    this.chunk.push_bc(BcKind::CmpIntGT, span);
-                },
-            );
-        };
-        emit_cond_fn(self, stmt_span);
+        self.chunk.push_bc(BcKind::ForLoopNoStep, stmt_span);
         let jp_cond_pre_check = self.chunk.push_jump(stmt_span);
         // Continue part
         let cp_continue = self.chunk.checkpoint();

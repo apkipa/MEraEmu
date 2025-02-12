@@ -120,42 +120,80 @@ pub fn recognize_printdata_cmd(cmd: &[u8]) -> Option<EraPrintExtendedFlags> {
     cmd.is_empty().then_some(flags)
 }
 
-pub fn parse_int_literal(s: &[u8]) -> Option<i64> {
-    if s.is_empty() {
-        return None;
+pub fn read_digits_literal<T: num_traits::PrimInt>(radix: u32, s: &mut &[u8]) -> Option<T> {
+    if radix < 2 || radix > 36 {
+        panic!("invalid radix: {}", radix);
     }
-    let mut s = s;
-    let radix = if s.strip_prefix_inplace(b"0x") || s.strip_prefix_inplace(b"0X") {
-        16
-    } else if s.strip_prefix_inplace(b"0b") || s.strip_prefix_inplace(b"0B") {
-        2
-    } else if let Some(x) = s.strip_prefix(b"0") {
-        if !x.is_empty() {
-            s = x;
-        }
-        // 8
-        10
-    } else {
-        10
-    };
-    // TODO: Support scientific notation
-    let mut num = 0i64;
+    let radix_as_t = T::from(radix)?;
+
+    let orig_s = s;
+    let mut s = *orig_s;
+
+    let mut num = T::zero();
     // TODO: Optimize with max_safe_digits
     while let [c, rest @ ..] = s {
         let Some(digit) = (*c as char).to_digit(radix) else {
             break;
         };
-        num = num.checked_mul(radix as i64)?.checked_add(digit as i64)?;
+        let digit = T::from(digit)?;
+        num = num.checked_mul(&radix_as_t)?.checked_add(&digit)?;
         s = rest;
     }
+
+    *orig_s = s;
+
+    Some(num)
+}
+
+pub fn read_nonempty_digits_literal<T: num_traits::PrimInt>(
+    radix: u32,
+    s: &mut &[u8],
+) -> Option<T> {
+    let copy_s = *s;
+    let num = read_digits_literal(radix, s)?;
+    (!std::ptr::addr_eq(*s, copy_s)).then_some(num)
+}
+
+/// Reads an integer literal from the input slice. If the input is a valid UTF-8 string,
+/// it is guaranteed that the input remains valid UTF-8 after the function call.
+pub fn read_int_literal(s: &mut &[u8]) -> Option<i64> {
+    let orig_s = s;
+    let mut s = *orig_s;
+
+    let radix = if s.strip_prefix_inplace(b"0x") || s.strip_prefix_inplace(b"0X") {
+        16
+    } else if s.strip_prefix_inplace(b"0b") || s.strip_prefix_inplace(b"0B") {
+        2
+    } else {
+        10
+    };
+    // TODO: Support scientific notation
+    let mut num: i64 = read_nonempty_digits_literal(radix, &mut s)?;
     // binary exp
     if s.strip_prefix_inplace(b"p") || s.strip_prefix_inplace(b"P") {
-        num = atoi_simd::parse_pos::<u32>(s)
-            .ok()
-            .and_then(|x| num.checked_shl(x))?;
-        s = &[];
+        let exp = read_nonempty_digits_literal(10, &mut s)?;
+        num = num.checked_shl(exp)?;
     }
-    s.is_empty().then_some(num)
+
+    *orig_s = s;
+
+    Some(num)
+}
+
+pub fn read_int_literal_str(s: &mut &str) -> Option<i64> {
+    unsafe {
+        let mut slice = s.as_bytes();
+        let r = read_int_literal(&mut slice)?;
+        // SAFETY: The input is valid UTF-8
+        *s = std::str::from_utf8_unchecked(slice);
+        Some(r)
+    }
+}
+
+pub fn parse_int_literal(s: &[u8]) -> Option<i64> {
+    let mut s = s;
+    let r = read_int_literal(&mut s)?;
+    s.is_empty().then_some(r)
 }
 
 pub fn parse_int_literal_with_sign(s: &[u8]) -> Option<i64> {
@@ -179,6 +217,8 @@ fn test_parse_int_literal_with_sign() -> anyhow::Result<()> {
     assert_eq!(parse_int_literal_with_sign(b"0x1"), Some(1));
     assert_eq!(parse_int_literal_with_sign(b"0x10"), Some(16));
     assert_eq!(parse_int_literal_with_sign(b"6"), Some(6));
+    assert_eq!(parse_int_literal_with_sign(b""), None);
+    assert_eq!(parse_int_literal_with_sign(b"p"), None);
     Ok(())
 }
 

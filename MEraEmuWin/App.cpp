@@ -68,6 +68,27 @@ App::App() {
 /// </summary>
 /// <param name="e">Details about the launch request and process.</param>
 void App::OnLaunched(LaunchActivatedEventArgs const& e) {
+    if constexpr (true) {
+        // TODO: Remove this when Tenkai.UWP is updated to v0.1.7
+        // Manually register resources
+        struct InvertedBoolConverter : implements<InvertedBoolConverter, Windows::UI::Xaml::Data::IValueConverter> {
+            InvertedBoolConverter() {}
+            IInspectable Convert(IInspectable const& value, Windows::UI::Xaml::Interop::TypeName const&, IInspectable const&, hstring const&) {
+                if (!value) {
+                    return nullptr;
+                }
+                return box_value(!unbox_value<bool>(value));
+            }
+            IInspectable ConvertBack(IInspectable const& value, Windows::UI::Xaml::Interop::TypeName const&, IInspectable const&, hstring const&) {
+                if (!value) {
+                    return nullptr;
+                }
+                return box_value(!unbox_value<bool>(value));
+            }
+        };
+        Resources().Insert(box_value(L"InvertedBoolConverter"), make<InvertedBoolConverter>());
+    }
+
     Tenkai::UI::Xaml::Window main_wnd;
     main_wnd.ExtendsContentIntoTitleBar(true);
     main_wnd.Activate();

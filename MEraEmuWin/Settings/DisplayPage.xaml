@@ -1,0 +1,37 @@
+﻿<Page
+    x:Class="MEraEmuWin.Settings.DisplayPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:MEraEmuWin"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
+    mc:Ignorable="d">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <!-- TODO: Preview side bar -->
+        
+        <local:StackPanel Orientation="Vertical" Margin="8,2" ContentAlignment="Start">
+            <ToggleSwitch x:Name="CTRL_AutoDetectGameUIScale" Header="使用系统缩放设置游戏界面缩放"
+                          IsOn="{x:Bind ParentPage.Settings.AutoDetectGameUIScale,Mode=TwoWay}" />
+            <Slider Header="游戏界面缩放比例" Minimum="0.1" Maximum="5" StepFrequency="0.05" MaxWidth="300"
+                    IsEnabled="{x:Bind CTRL_AutoDetectGameUIScale.IsOn,Mode=OneWay,Converter={StaticResource InvertedBoolConverter}}"
+                    Value="{x:Bind ParentPage.Settings.GameUIScale,Mode=TwoWay}" />
+            <TextBox Header="游戏默认字体" MaxWidth="300"
+                     Text="{x:Bind ParentPage.Settings.GameDefaultFontName,Mode=TwoWay}" />
+            <muxc:NumberBox Header="游戏字体大小" SpinButtonPlacementMode="Inline" Minimum="0" MaxWidth="300"
+                            Value="{x:Bind ParentPage.Settings.GameFontSize,Mode=TwoWay}" />
+            <muxc:NumberBox Header="游戏行高" SpinButtonPlacementMode="Inline" Minimum="0" MaxWidth="300"
+                            Value="{x:Bind ParentPage.Settings.GameLineHeight,Mode=TwoWay}" />
+            <!-- TODO: Color picker -->
+            <muxc:NumberBox Header="PRINTC 每行个数" SpinButtonPlacementMode="Inline" Minimum="0" MaxWidth="300"
+                            Value="{x:Bind ParentPage.Settings.GamePrintCCountPerLine,Mode=TwoWay}" />
+            <muxc:NumberBox Header="PRINTC 字符长度" SpinButtonPlacementMode="Inline" Minimum="0" MaxWidth="300"
+                            Value="{x:Bind ParentPage.Settings.GamePrintCCharCount,Mode=TwoWay}" />
+            <ToggleSwitch Header="启用字体平滑渲染"
+                          IsOn="{x:Bind ParentPage.Settings.EnableFontSmoothing,Mode=TwoWay}" />
+            <ToggleSwitch Header="避免模糊"
+                          IsOn="{x:Bind ParentPage.Settings.EnablePixelSnapping,Mode=TwoWay}" />
+        </local:StackPanel>
+    </ScrollViewer>
+</Page>

@@ -172,8 +172,13 @@
       <DependentUpon>DevTools\SourcesTabWatchTabItem.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClInclude>
+    <ClInclude Include="DPHelper.h" />
     <ClInclude Include="EngineControl.h">
       <DependentUpon>EngineControl.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
+    <ClInclude Include="FixTextBoxFlyout.h">
+      <DependentUpon>FixTextBoxFlyout.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClInclude>
     <ClInclude Include="pch.h" />
@@ -188,6 +193,10 @@
       <SubType>Code</SubType>
     </ClInclude>
     <ClInclude Include="ScintillaModule.hpp" />
+    <ClInclude Include="Settings\DisplayPage.h">
+      <DependentUpon>Settings\DisplayPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
     <ClInclude Include="Settings\GamePage.h">
       <DependentUpon>Settings\GamePage.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -201,6 +210,10 @@
       <SubType>Code</SubType>
     </ClInclude>
     <ClInclude Include="Shared.hpp" />
+    <ClInclude Include="StackPanel.h">
+      <DependentUpon>StackPanel.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
     <ClInclude Include="util.hpp" />
   </ItemGroup>
   <ItemGroup>
@@ -225,6 +238,9 @@
     <Page Include="ScrollViewer_themeresources_v1.xaml">
       <SubType>Designer</SubType>
     </Page>
+    <Page Include="Settings\DisplayPage.xaml">
+      <SubType>Designer</SubType>
+    </Page>
     <Page Include="Settings\GamePage.xaml">
       <SubType>Designer</SubType>
     </Page>
@@ -232,6 +248,9 @@
       <SubType>Designer</SubType>
     </Page>
     <Page Include="Settings\MainPage.xaml">
+      <SubType>Designer</SubType>
+    </Page>
+    <Page Include="TextBox_themeresources.xaml">
       <SubType>Designer</SubType>
     </Page>
   </ItemGroup>
@@ -287,6 +306,10 @@
       <DependentUpon>EngineControl.xaml</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
+    <ClCompile Include="FixTextBoxFlyout.cpp">
+      <DependentUpon>FixTextBoxFlyout.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
     <ClCompile Include="main.cpp" />
     <ClCompile Include="RelayCommand.cpp">
       <DependentUpon>RelayCommand.idl</DependentUpon>
@@ -294,6 +317,10 @@
     </ClCompile>
     <ClCompile Include="ScintillaModule.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="Settings\DisplayPage.cpp">
+      <DependentUpon>Settings\DisplayPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
     </ClCompile>
     <ClCompile Include="Settings\GamePage.cpp">
       <DependentUpon>Settings\GamePage.xaml</DependentUpon>
@@ -305,6 +332,10 @@
     </ClCompile>
     <ClCompile Include="Settings\MainPage.cpp">
       <DependentUpon>Settings\MainPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
+    <ClCompile Include="StackPanel.cpp">
+      <DependentUpon>StackPanel.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
     <ClInclude Include="MEraEngine.hpp">
@@ -356,11 +387,18 @@
       <DependentUpon>EngineControl.xaml</DependentUpon>
       <SubType>Code</SubType>
     </Midl>
+    <Midl Include="FixTextBoxFlyout.idl">
+      <SubType>Designer</SubType>
+    </Midl>
     <Midl Include="MainPage.idl">
       <DependentUpon>MainPage.xaml</DependentUpon>
     </Midl>
     <Midl Include="RelayCommand.idl">
       <SubType>Designer</SubType>
+    </Midl>
+    <Midl Include="Settings\DisplayPage.idl">
+      <DependentUpon>Settings\DisplayPage.xaml</DependentUpon>
+      <SubType>Code</SubType>
     </Midl>
     <Midl Include="Settings\GamePage.idl">
       <DependentUpon>Settings\GamePage.xaml</DependentUpon>
@@ -373,6 +411,9 @@
     <Midl Include="Settings\MainPage.idl">
       <DependentUpon>Settings\MainPage.xaml</DependentUpon>
       <SubType>Code</SubType>
+    </Midl>
+    <Midl Include="StackPanel.idl">
+      <SubType>Designer</SubType>
     </Midl>
   </ItemGroup>
   <ItemGroup>

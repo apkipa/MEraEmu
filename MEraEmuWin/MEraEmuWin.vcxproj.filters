@@ -23,6 +23,10 @@
     <Page Include="Settings\GamePage.xaml">
       <Filter>Settings</Filter>
     </Page>
+    <Page Include="Settings\DisplayPage.xaml">
+      <Filter>Settings</Filter>
+    </Page>
+    <Page Include="TextBox_themeresources.xaml" />
   </ItemGroup>
   <ItemGroup>
     <Midl Include="App.idl" />
@@ -44,6 +48,8 @@
       <Filter>DevTools</Filter>
     </Midl>
     <Midl Include="AppSettingsVM.idl" />
+    <Midl Include="StackPanel.idl" />
+    <Midl Include="FixTextBoxFlyout.idl" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="pch.cpp" />
@@ -63,6 +69,7 @@
     <ClInclude Include="util.hpp" />
     <ClInclude Include="ScintillaModule.hpp" />
     <ClInclude Include="Shared.hpp" />
+    <ClInclude Include="DPHelper.h" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="Assets\Wide310x150Logo.scale-200.png">

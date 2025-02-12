@@ -1,5 +1,7 @@
 #pragma once
 
+// A utility header that is meant to be portable across different projects.
+
 #include <atomic>
 #include <memory>
 #include <utility>
