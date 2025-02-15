@@ -1800,7 +1800,15 @@ namespace winrt::MEraEmuWin::implementation {
             DWRITE_TEXT_METRICS1 metrics;
             check_hresult(txt_layout->GetMetrics(&metrics));
             height = metrics.lineCount;
-            render_height = std::ceil(metrics.height / ctrl->m_ui_param_cache.line_height_px_f);
+            float pixel_height = metrics.height;
+            float inline_objects_height{};
+            for (auto const& obj : inline_objs) {
+                auto [width, height] = obj.obj->get_object_size();
+                inline_objects_height = std::max(inline_objects_height, height);
+            }
+            // There may be multiple lines, so sum up the heights instead of maximize
+            pixel_height += inline_objects_height;
+            render_height = std::ceil(pixel_height / ctrl->m_ui_param_cache.line_height_px_f);
             //acc_height += line_height;
         }
     };
@@ -2936,7 +2944,7 @@ namespace winrt::MEraEmuWin::implementation {
                 last_height = line.acc_height;
 
                 while (last_lookback_render_pos < i &&
-                    last_lookback_render_pos + m_ui_lines[last_lookback_render_pos].render_height > i)
+                    last_lookback_render_pos + m_ui_lines[last_lookback_render_pos].render_height <= i)
                 {
                     last_lookback_render_pos++;
                 }
@@ -3310,7 +3318,7 @@ namespace winrt::MEraEmuWin::implementation {
             auto& prev_line = m_ui_lines[i - 1];
             cur_line.lookback_render_pos = prev_line.lookback_render_pos;
             while (cur_line.lookback_render_pos < i &&
-                cur_line.lookback_render_pos + m_ui_lines[cur_line.lookback_render_pos].render_height > i)
+                cur_line.lookback_render_pos + m_ui_lines[cur_line.lookback_render_pos].render_height <= i)
             {
                 cur_line.lookback_render_pos++;
             }
