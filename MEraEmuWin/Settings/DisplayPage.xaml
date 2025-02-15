@@ -32,6 +32,8 @@
                           IsOn="{x:Bind ParentPage.Settings.EnableFontSmoothing,Mode=TwoWay}" />
             <ToggleSwitch Header="避免模糊"
                           IsOn="{x:Bind ParentPage.Settings.EnablePixelSnapping,Mode=TwoWay}" />
+            <ToggleSwitch Header="启用 HTML 渲染支持"
+                          IsOn="{x:Bind ParentPage.Settings.EnableHtmlRendering,Mode=TwoWay}" />
         </local:StackPanel>
     </ScrollViewer>
 </Page>

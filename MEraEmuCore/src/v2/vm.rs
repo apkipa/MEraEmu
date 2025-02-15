@@ -4272,8 +4272,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     fn instr_html_print(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
-        view_stack!(self, stack_count, html:s);
-        self.o.ctx.callback.on_html_print(html);
+        view_stack!(self, stack_count, html:s, no_single:i);
+        self.o.ctx.callback.on_html_print(html, no_single);
         self.o.stack.replace_tail(stack_count, []);
         self.add_ip_offset(Bc::HtmlPrint.bytes_len() as i32);
         Ok(())
@@ -4294,6 +4294,28 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         // TODO: PrintImg, PrintImg4 ?
         anyhow::bail!("PrintImg is not yet implemented");
+    }
+
+    fn instr_print_rect(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, x:i, y:i, width:i, height:i);
+        let html = format!("<shape type='rect' param='{x},{y},{width},{height}'>");
+        self.o.ctx.callback.on_html_print(&html, 1);
+        self.o.stack.replace_tail(stack_count, []);
+        self.add_ip_offset(Bc::PrintRect.bytes_len() as i32);
+        Ok(())
+    }
+
+    fn instr_print_space(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, size:i);
+        let html = format!("<shape type='space' param='{size}'>");
+        self.o.ctx.callback.on_html_print(&html, 1);
+        self.o.stack.replace_tail(stack_count, []);
+        self.add_ip_offset(Bc::PrintRect.bytes_len() as i32);
+        Ok(())
     }
 
     fn instr_split_string(&mut self) -> anyhow::Result<()> {
@@ -5574,6 +5596,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::HtmlPrint => s.instr_html_print()?,
             Bc::PrintButton { flags } => s.instr_print_button(flags)?,
             Bc::PrintImg | Bc::PrintImg4 => s.instr_print_img()?,
+            Bc::PrintRect => s.instr_print_rect()?,
+            Bc::PrintSpace => s.instr_print_space()?,
             Bc::SplitString => s.instr_split_string()?,
             Bc::GCreate => s.instr_gcreate()?,
             Bc::GCreateFromFile => s.instr_gcreate_from_file()?,
@@ -6560,6 +6584,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                     call_subroutine_1_any!(instr_print_button, u8, u8::from(flags))
                 }
                 Bc::PrintImg | Bc::PrintImg4 => call_subroutine_0!(instr_print_img),
+                Bc::PrintRect => call_subroutine_0!(instr_print_rect),
+                Bc::PrintSpace => call_subroutine_0!(instr_print_space),
                 Bc::SplitString => call_subroutine_0!(instr_split_string),
                 Bc::GCreate => call_subroutine_0!(instr_gcreate),
                 Bc::GCreateFromFile => call_subroutine_0!(instr_gcreate_from_file),

@@ -1165,7 +1165,7 @@ pub trait EraCompilerCallback {
     fn on_print(&mut self, content: &str, flags: EraPrintExtendedFlags);
     // TODO: Debug is a global flag inside VM?
     fn on_debugprint(&mut self, content: &str, flags: EraPrintExtendedFlags);
-    fn on_html_print(&mut self, content: &str);
+    fn on_html_print(&mut self, content: &str, no_single: i64);
     fn on_wait(&mut self, any_key: bool, is_force: bool);
     fn on_twait(&mut self, duration: i64, is_force: bool);
     fn on_input_int(
@@ -3910,6 +3910,8 @@ pub enum EraExtBytecode1 {
     // PrintImg2,
     // PrintImg3,
     PrintImg4,
+    PrintRect,
+    PrintSpace,
     SplitString,
     GCreate,
     GCreateFromFile,
@@ -4113,6 +4115,8 @@ pub enum EraBytecodeKind {
     PrintButton { flags: EraPrintExtendedFlags },
     PrintImg,
     PrintImg4,
+    PrintRect,
+    PrintSpace,
     SplitString,
     GCreate,
     GCreateFromFile,
@@ -4418,6 +4422,8 @@ impl EraBytecodeKind {
                     }),
                     Ext1::PrintImg => Ok(PrintImg),
                     Ext1::PrintImg4 => Ok(PrintImg4),
+                    Ext1::PrintRect => Ok(PrintRect),
+                    Ext1::PrintSpace => Ok(PrintSpace),
                     Ext1::SplitString => Ok(SplitString),
                     Ext1::GCreate => Ok(GCreate),
                     Ext1::GCreateFromFile => Ok(GCreateFromFile),
@@ -4774,6 +4780,14 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::PrintImg4 as u8);
             }
+            PrintRect => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::PrintRect as u8);
+            }
+            PrintSpace => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::PrintSpace as u8);
+            }
             SplitString => {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::SplitString as u8);
@@ -5098,9 +5112,11 @@ impl EraBytecodeKind {
             ForLoopStep => 1,
             ForLoopNoStep => 1,
             ExtendStrToWidth => -1,
-            HtmlPrint => -1,
+            HtmlPrint => -2,
             PrintButton { .. } => -2,
             PrintImg | PrintImg4 => return None,
+            PrintRect => -4,
+            PrintSpace => -1,
             SplitString => -6,
             GCreate => -2,
             GCreateFromFile => -1,

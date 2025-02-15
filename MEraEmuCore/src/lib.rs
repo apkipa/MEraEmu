@@ -58,6 +58,11 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 #[cfg(feature = "headers")]
 pub fn generate_headers() -> ::std::io::Result<()> {
     use ::std::io::Read;
+
+    fn file_time(path: impl AsRef<::std::path::Path>) -> ::std::time::SystemTime {
+        ::std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
     let builder = ::safer_ffi::headers::builder();
     if let Some(filename) = ::std::env::args_os().nth(1) {
         // Check if the file is unchanged
@@ -72,8 +77,11 @@ pub fn generate_headers() -> ::std::io::Result<()> {
         let mut new_file = Vec::new();
         builder.to_writer(&mut new_file).generate()?;
         if previous_file.as_deref() == Some(&new_file[..]) {
-            // File is unchanged, don't touch it to prevent unnecessary rebuilds
-            return Ok(());
+            // File is unchanged, don't touch it to prevent unnecessary rebuilds...
+            if file_time(&filename) >= file_time("../MEraEmuCore/src/lib.rs") {
+                return Ok(());
+            }
+            // Unless the headers are older than the source file.
         }
         ::std::fs::write(&filename, new_file)
     } else {
@@ -434,7 +442,7 @@ trait MEraEngineSysCallbackFfi {
     fn on_print(&mut self, content: string::str_ref<'_>, flags: u8);
     //fn on_debugprint(&mut self, content: string::str_ref<'_>, flags: u8);
     /// Callback for HTML_PRINT statements.
-    fn on_html_print(&mut self, content: string::str_ref<'_>);
+    fn on_html_print(&mut self, content: string::str_ref<'_>, no_single: i64);
     fn on_wait(&mut self, any_key: bool, is_force: bool);
     fn on_twait(&mut self, duration: i64, is_force: bool);
     fn on_input_int(
@@ -624,8 +632,8 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackFfi> {
         MEraEngineSysCallbackFfi::on_print(self, content.into(), flags.into());
     }
     //fn on_debugprint(&mut self, content: &str, flags: EraPrintExtendedFlags);
-    fn on_html_print(&mut self, content: &str) {
-        MEraEngineSysCallbackFfi::on_html_print(self, content.into());
+    fn on_html_print(&mut self, content: &str, no_single: i64) {
+        MEraEngineSysCallbackFfi::on_html_print(self, content.into(), no_single);
     }
     fn on_wait(&mut self, any_key: bool, is_force: bool) {
         MEraEngineSysCallbackFfi::on_wait(self, any_key, is_force);
@@ -1606,7 +1614,7 @@ mod tests {
             self.output += content;
         }
 
-        fn on_html_print(&mut self, content: &str) {}
+        fn on_html_print(&mut self, content: &str, no_single: i64) {}
 
         fn on_wait(&mut self, any_key: bool, is_force: bool) {}
 

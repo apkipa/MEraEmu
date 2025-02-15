@@ -288,7 +288,9 @@
                     <VisualState.Setters>
                         <Setter Target="CodeExecPauseResumeButtonContent.Glyph" Value="&#xE037;" />
                         <Setter Target="CodeExecStepIntoButton.IsEnabled" Value="True" />
+                        <!-- Not yet implemented: Step Over
                         <Setter Target="CodeExecStepOverButton.IsEnabled" Value="True" />
+                        -->
                         <Setter Target="CodeExecStepOutButton.IsEnabled" Value="True" />
                         <Setter Target="CodeExecStepSingleButton.IsEnabled" Value="True" />
                         <Setter Target="SourcesTabScopeTabRunningIndicator.Visibility" Value="Collapsed" />

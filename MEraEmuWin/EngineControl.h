@@ -33,6 +33,71 @@ namespace winrt::MEraEmuWin::implementation {
         SyncSettingsWithFunc,
     };
 
+    template <typename T>
+    struct SequentialObjectAllocator {
+        SequentialObjectAllocator() {}
+        SequentialObjectAllocator(SequentialObjectAllocator const&) = delete;
+        SequentialObjectAllocator(SequentialObjectAllocator&&) = delete;
+        SequentialObjectAllocator& operator=(SequentialObjectAllocator const&) = delete;
+        SequentialObjectAllocator& operator=(SequentialObjectAllocator&&) = delete;
+
+        // NOTE: Returns 1-based index
+
+        size_t allocate(T obj) {
+            // First, try to find a free slot
+            for (size_t i = 0; i < m_valid.size(); ++i) {
+                if (!m_valid[i]) {
+                    m_data[i] = std::move(obj);
+                    m_valid[i] = true;
+                    return i + 1;
+                }
+            }
+
+            // Otherwise, append to the end
+            size_t idx = m_data.size();
+            m_data.push_back(std::move(obj));
+            m_valid.push_back(true);
+            return idx + 1;
+        }
+
+        void deallocate(size_t idx) {
+            idx--;
+            if (m_valid.at(idx)) {
+                T t = std::move(m_data[idx]);
+                (void)t;
+            }
+            else {
+                throw std::invalid_argument("Invalid deallocation index");
+            }
+            m_valid[idx] = false;
+        }
+
+        bool is_valid(size_t idx) const {
+            idx--;
+            return idx < m_valid.size() && m_valid[idx];
+        }
+
+        T& at(size_t idx) {
+            if (!is_valid(idx)) {
+                throw std::invalid_argument("Invalid index");
+            }
+            return m_data[idx - 1];
+        }
+
+        T& operator[](size_t idx) {
+            return m_data[idx - 1];
+        }
+
+        void clear() {
+            m_data.clear();
+            m_valid.clear();
+        }
+
+    private:
+        std::vector<T> m_data;
+        std::vector<bool> m_valid;
+    };
+
     struct EngineUIPrintLineDataButton {
         // For input command
         struct InputButton {
@@ -55,6 +120,27 @@ namespace winrt::MEraEmuWin::implementation {
 
         uint32_t starti, len;
         ButtonData data;
+    };
+
+    struct EngineUIPrintLineDataInlineObject {
+        struct ShapeRect {
+            int32_t x, y, width, height;
+        };
+        struct ShapeSpace {
+            int32_t size;
+        };
+        struct Image {
+            hstring sprite;
+            int32_t width, height;
+            int32_t ypos;
+        };
+
+        using InlineObjectData = std::variant<ShapeRect, ShapeSpace, Image>;
+
+        struct InlineObject;
+
+        uint32_t starti, len;
+        com_ptr<InlineObject> obj;
     };
 
     struct EngineUnhandledExceptionEventArgs : EngineUnhandledExceptionEventArgsT<EngineUnhandledExceptionEventArgs> {
@@ -117,6 +203,11 @@ namespace winrt::MEraEmuWin::implementation {
         friend EngineSharedData;
         friend MEraEmuWinEngineSysCallback;
         friend EngineUIPrintLineData;
+        friend EngineUIPrintLineDataInlineObject;
+
+        struct PrintButtonRegionContext {
+            uint32_t ui_line_start{ UINT32_MAX }, ui_line_offset{ UINT32_MAX };
+        };
 
         void UISideDisconnect();
         void QueueEngineTask(std::unique_ptr<EngineThreadTask> task);
@@ -176,10 +267,10 @@ namespace winrt::MEraEmuWin::implementation {
         }
 
         void OnInputCountDownTick(IInspectable const&, IInspectable const&);
-        void FlushCurPrintLine();
+        bool FlushCurrentPrintLine(bool force_push = false);
         // NOTE: Wait flag is ignored deliberately
         void RoutinePrint(hstring content, PrintExtendedFlags flags);
-        void RoutineHtmlPrint(hstring const& content);
+        void RoutineHtmlPrint(hstring const& content, int64_t no_single);
         void RoutineInput(std::unique_ptr<InputRequest> request);
         void RoutineReuseLastLine(hstring const& content);
         void RoutineClearLine(uint64_t count);
@@ -188,6 +279,9 @@ namespace winrt::MEraEmuWin::implementation {
         void RoutinePrintButton(hstring const& content, hstring const& value, PrintExtendedFlags flags);
         void RoutinePrintEngineErrorControlButton(hstring const& content, EngineUIPrintLineDataButton::EngineErrorControlButton::ButtonType type);
         void RoutinePrintButtonGeneric(hstring const& content, PrintExtendedFlags flags, EngineUIPrintLineDataButton::ButtonData data);
+        PrintButtonRegionContext BeginPrintButtonRegion();
+        template <typename F>
+        void EndPrintButtonRegion(PrintButtonRegionContext ctx, F&& f);
 
         void SetCurrentLineAlignment(int64_t value);
         int64_t GetCurrentLineAlignment();
@@ -221,7 +315,6 @@ namespace winrt::MEraEmuWin::implementation {
         com_ptr<ID2D1DeviceContext> m_d2d_ctx;
         std::unordered_map<uint32_t, com_ptr<ID2D1SolidColorBrush>> m_brush_map;
         std::unordered_map<hstring, com_ptr<IDWriteTextFormat>> m_font_map;
-        uint32_t m_focus_color{ D2D1::ColorF::Yellow };
         std::vector<EngineUIPrintLineData> m_ui_lines;
         bool m_reused_last_line{ false };
         uint32_t m_cur_line_alignment{};
@@ -232,15 +325,19 @@ namespace winrt::MEraEmuWin::implementation {
         uint32_t m_no_skip_display_cnt{};
         uint32_t m_last_redraw_dirty_height{};
         struct ComposingLineData {
-            struct ComposingLineDataPart {
-                hstring str;
-                uint32_t color;
-                // TODO: Styles support (strikethrough, ...)
-                bool forbid_button;     // true for PRINTPLAIN
-                bool is_isolated;       // true for PRINTC
-                std::optional<EngineUIPrintLineDataButton> explicit_buttons;
+            struct DataPart {
+                hstring str{};
+                // NOTE: We use values from settings as sentinels (follow default settings)
+                uint32_t color{};
+                uint32_t style{};
+                hstring font_name{};
+                com_ptr<EngineUIPrintLineDataInlineObject::InlineObject> inline_obj; // Sentinel: nullptr
+
+                bool forbid_button{};   // true for PRINTPLAIN
+                bool is_isolated{};     // true for PRINTC
             };
-            std::vector<ComposingLineDataPart> parts;
+            std::vector<DataPart> parts;
+            std::vector<EngineUIPrintLineDataButton> explicit_buttons;
         } m_cur_composing_line;
         std::unique_ptr<InputRequest> m_outstanding_input_req;
         winrt::clock::time_point m_input_start_t;
@@ -269,6 +366,24 @@ namespace winrt::MEraEmuWin::implementation {
             bool is_default() const noexcept { return line == -1; }
         } m_cur_active_button{};
         Windows::Foundation::Point m_cur_pt{};
+
+        struct GraphicsObject {
+            hstring file_path;
+            uint32_t width{}, height{};
+            com_ptr<ID2D1Bitmap> bitmap;
+
+            void ensure_loaded(EngineControl* ctrl);
+            std::pair<uint32_t, uint32_t> get_dimensions() const noexcept {
+                auto size = bitmap->GetPixelSize();
+                return { size.width, size.height };
+            }
+        };
+        std::unordered_map<int64_t, GraphicsObject> m_graphics_objects;
+        struct SpriteObject {
+            int64_t gid;
+            int32_t x, y, width, height;
+        };
+        std::unordered_map<hstring, SpriteObject> m_sprite_objects;
     };
 }
 

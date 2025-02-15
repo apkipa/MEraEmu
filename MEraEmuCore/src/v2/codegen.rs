@@ -2093,8 +2093,9 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 self.chunk.push_pop_all(3, stmt_span);
             }
             EraNode::StmtHtmlPrint(args) => {
-                let ([text], []) = self.unpack_list_expr(args)?;
+                let ([text], [no_single]) = self.unpack_list_expr(args)?;
                 self.str_expr(text)?;
+                self.int_expr_or(no_single, 0)?;
                 self.chunk.push_bc(BcKind::HtmlPrint, stmt_span);
             }
             EraNode::StmtPrintButton(..) => {
@@ -2108,6 +2109,49 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
             EraNode::StmtPrintButtonLC(..) => {
                 let flags = EraPrintExtendedFlags::new().with_left_pad(true);
                 self.stmt_printbutton(stmt, flags)?;
+            }
+            EraNode::StmtPrintRect(args) => {
+                let args_span = self.arena.get_node_span(args);
+                let exprs = self.unwrap_list_expr(args)?;
+                match exprs.len() {
+                    1 => {
+                        // width
+                        let width = EraNodeRef(exprs[0]);
+                        self.chunk.push_load_imm(0, stmt_span);
+                        self.chunk.push_load_imm(0, stmt_span);
+                        self.int_expr(width)?;
+                        self.chunk.push_load_imm(100, stmt_span);
+                    }
+                    4 => {
+                        // x, y, width, height
+                        let (x, y, width, height) = (
+                            EraNodeRef(exprs[0]),
+                            EraNodeRef(exprs[1]),
+                            EraNodeRef(exprs[2]),
+                            EraNodeRef(exprs[3]),
+                        );
+                        self.int_expr(x)?;
+                        self.int_expr(y)?;
+                        self.int_expr(width)?;
+                        self.int_expr(height)?;
+                    }
+                    _ => {
+                        let mut diag = self.make_diag();
+                        diag.span_err(
+                            Default::default(),
+                            args_span,
+                            format!("PRINT_RECT does not take {} arguments", exprs.len()),
+                        );
+                        self.ctx.emit_diag_to(diag, self.diag_emit);
+                        return Err(());
+                    }
+                }
+                self.chunk.push_bc(BcKind::PrintRect, stmt_span);
+            }
+            EraNode::StmtPrintSpace(args) => {
+                let ([size], []) = self.unpack_list_expr(args)?;
+                self.int_expr(size)?;
+                self.chunk.push_bc(BcKind::PrintSpace, stmt_span);
             }
             EraNode::StmtArrayRemove(args) => {
                 let ([target, start_index, count], []) = self.unpack_list_expr(args)?;
@@ -6872,6 +6916,20 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 let key = site.ctx.interner().get_or_intern("表示するセーブデータ数");
                 site.chunk.push_load_const_str(key, name_span);
                 site.chunk.push_bc(BcKind::GetConfig, name_span);
+            }
+            b"BITMAP_CACHE_ENABLE" => {
+                // Returns void
+                // NOTE: We do not need to support bitmap cache; we already have an extremely
+                //       efficient renderer that does not require caching / handles caching
+                //       smartly.
+                let [_enable] = site.unpack_args(args)?;
+                let mut diag = site.make_diag();
+                diag.span_err(
+                    Default::default(),
+                    name_span,
+                    "function `BITMAP_CACHE_ENABLE` is not supported and will be ignored",
+                );
+                site.ctx.emit_diag_to(diag, site.diag_emit);
             }
             _ if name.eq_ignore_ascii_case("SYSINTRINSIC_LoadGameInit") => {
                 // Do nothing

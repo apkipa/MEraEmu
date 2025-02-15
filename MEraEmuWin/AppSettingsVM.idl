@@ -28,5 +28,6 @@ namespace MEraEmuWin {
         UInt32 GamePrintCCharCount;
         Boolean EnableFontSmoothing;
         Boolean EnablePixelSnapping;
+        Boolean EnableHtmlRendering;
     };
 }

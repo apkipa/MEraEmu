@@ -119,6 +119,11 @@ typedef uint8_t PrintExtendedFlags;
 #define ERA_ENGINE_SNAPSHOT_KIND_ALL 0x07
 typedef uint32_t EraEngineSnapshotKind;
 
+#define ERA_FONT_STYLE_NORMAL 0
+#define ERA_FONT_STYLE_BOLD 0x1
+#define ERA_FONT_STYLE_ITALIC 0x2
+#define ERA_FONT_STYLE_STRIKEOUT 0x4
+#define ERA_FONT_STYLE_UNDERLINE 0x8
 
 struct EraDiagnosticEntry {
     DiagnosticLevel level;
@@ -405,7 +410,7 @@ struct MEraEngineSysCallback {
     virtual void on_error(EraDiagnosticProvider const& provider) = 0;
     virtual uint64_t on_get_rand() = 0;
     virtual void on_print(std::string_view content, PrintExtendedFlags flags) = 0;
-    virtual void on_html_print(std::string_view content) = 0;
+    virtual void on_html_print(std::string_view content, int64_t no_single) = 0;
     virtual void on_wait(bool any_key, bool is_force) = 0;
     virtual void on_twait(int64_t duration, bool is_force) = 0;
     virtual ControlFlow<std::monostate, std::optional<int64_t>> on_input_int(std::optional<int64_t> default_value, bool can_click, bool allow_skip) = 0;

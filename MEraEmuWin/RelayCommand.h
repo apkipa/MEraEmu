@@ -15,6 +15,7 @@ namespace winrt::MEraEmuWin::implementation {
         }
 
         bool CanExecute(Windows::Foundation::IInspectable const& parameter) {
+            (void)parameter;
             return m_handler != nullptr;
         }
 

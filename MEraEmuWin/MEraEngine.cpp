@@ -251,8 +251,8 @@ MEraEngineBuilder::MEraEngineBuilder(std::unique_ptr<MEraEngineSysCallback> call
         .on_print = [](Erased_t* self, slice_ref_uint8_t content, uint8_t flags) noexcept {
             ((MEraEngineSysCallback*)self)->on_print(STR_VIEW(content), (PrintExtendedFlags)flags);
         },
-        .on_html_print = [](Erased_t* self, slice_ref_uint8_t content) noexcept {
-            ((MEraEngineSysCallback*)self)->on_html_print(STR_VIEW(content));
+        .on_html_print = [](Erased_t* self, slice_ref_uint8_t content, int64_t no_single) noexcept {
+            ((MEraEngineSysCallback*)self)->on_html_print(STR_VIEW(content), no_single);
         },
         .on_wait = [](Erased_t* self, bool any_key, bool is_force) noexcept {
             ((MEraEngineSysCallback*)self)->on_wait(any_key, is_force);

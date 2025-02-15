@@ -151,7 +151,7 @@ pub trait MEraEngineSysCallback {
     fn on_print(&mut self, content: &str, flags: EraPrintExtendedFlags) {}
     //fn on_debugprint(&mut self, content: &str, flags: EraPrintExtendedFlags);
     /// Callback for HTML_PRINT statements.
-    fn on_html_print(&mut self, content: &str) {}
+    fn on_html_print(&mut self, content: &str, no_single: i64) {}
     fn on_wait(&mut self, any_key: bool, is_force: bool) {}
     fn on_twait(&mut self, duration: i64, is_force: bool) {}
     fn on_input_int(
@@ -356,8 +356,8 @@ impl<T: MEraEngineSysCallback> EraCompilerCallback for T {
         self.on_print(content, flags)
     }
 
-    fn on_html_print(&mut self, content: &str) {
-        self.on_html_print(content)
+    fn on_html_print(&mut self, content: &str, no_single: i64) {
+        self.on_html_print(content, no_single)
     }
 
     fn on_wait(&mut self, any_key: bool, is_force: bool) {

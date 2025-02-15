@@ -300,6 +300,8 @@ pub enum EraNode {
     StmtPrintButton(EraNodeRef),
     StmtPrintButtonC(EraNodeRef),
     StmtPrintButtonLC(EraNodeRef),
+    StmtPrintRect(EraNodeRef),
+    StmtPrintSpace(EraNodeRef),
     StmtArrayRemove(EraNodeRef),
     StmtArraySort(EraNodeRef),
     StmtArrayMSort(EraNodeRef),
@@ -2388,6 +2390,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         let cp = self.o.b.checkpoint();
         let span = self.o.l.current_src_span();
         buf.clear();
+        self.o.l.skip_whitespace(Mode::Normal);
         loop {
             let result = self.o.peek_token(Mode::TernaryStrForm);
             let token = result.token;
@@ -2400,6 +2403,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 continue;
             }
             if !buf.is_empty() {
+                if !matches!(token.kind, Token::LBrace | Token::Percentage) {
+                    buf.truncate(buf.trim_ascii_end().len());
+                }
                 let token_key = self.o.b.interner().get_or_intern(&buf);
                 let span = self.span_to_now(literal_span);
                 let node = self
@@ -2450,6 +2456,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         let cp = self.o.b.checkpoint();
         let span = self.o.l.current_src_span();
         buf.clear();
+        self.o.l.skip_whitespace(Mode::Normal);
         loop {
             let result = self.o.peek_token(Mode::RawStrForm);
             let token = result.token;
@@ -2462,6 +2469,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 continue;
             }
             if !buf.is_empty() {
+                if !matches!(token.kind, Token::LBrace | Token::Percentage) {
+                    buf.truncate(buf.trim_ascii_end().len());
+                }
                 let token_key = self.o.b.interner().get_or_intern(&buf);
                 let span = self.span_to_now(literal_span);
                 let node = self
@@ -2678,10 +2688,12 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 b"CVARSET" => make!(EraNode::StmtCVarSet(self.cmd_arg_limit(1, 5))),
                 b"VARSIZE" => make!(EraNode::StmtVarSize(self.cmd_arg_limit(1, 1))),
                 b"SWAP" => make!(EraNode::StmtSwap(self.cmd_arg_limit(2, 2))),
-                b"HTML_PRINT" => make!(EraNode::StmtHtmlPrint(self.cmd_arg_limit(1, 1))),
+                b"HTML_PRINT" => make!(EraNode::StmtHtmlPrint(self.cmd_arg_limit(1, 2))),
                 b"PRINTBUTTON" => make!(EraNode::StmtPrintButton(self.cmd_arg_limit(2, 2))),
                 b"PRINTBUTTONC" => make!(EraNode::StmtPrintButtonC(self.cmd_arg_limit(2, 2))),
                 b"PRINTBUTTONLC" => make!(EraNode::StmtPrintButtonLC(self.cmd_arg_limit(2, 2))),
+                b"PRINT_RECT" => make!(EraNode::StmtPrintRect(self.cmd_arg_limit(1, 4))),
+                b"PRINT_SPACE" => make!(EraNode::StmtPrintSpace(self.cmd_arg_limit(1, 4))),
                 b"ARRAYREMOVE" => make!(EraNode::StmtArrayRemove(self.cmd_arg_limit(3, 3))),
                 b"ARRAYSORT" => make!(EraNode::StmtArraySort(self.cmd_arg_limit(1, 4))),
                 b"ARRAYMSORT" => make!(EraNode::StmtArrayMSort(
@@ -2884,7 +2896,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 | b"GETKEY"
                 | b"GETKEYTRIGGERED"
                 | b"FIND_CHARADATA"
-                | b"CHKDATA" => {
+                | b"CHKDATA"
+                | b"BITMAP_CACHE_ENABLE" => {
                     // NOTE: Cannot use `make!` because we cannot bump the token here.
                     let node = EraNode::StmtResultCmdCall(
                         self.identifier().unwrap(),

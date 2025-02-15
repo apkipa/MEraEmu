@@ -46,6 +46,7 @@ namespace winrt::MEraEmuWin::implementation {
         GenGetSetter(uint32_t, GamePrintCCharCount, game_printc_char_count);
         GenGetSetter(bool, EnableFontSmoothing, enable_font_smoothing);
         GenGetSetter(bool, EnablePixelSnapping, enable_pixel_snapping);
+        GenGetSetter(bool, EnableHtmlRendering, enable_html_rendering);
 
         NLOHMANN_DEFINE_TYPE_INTRUSIVE(AppSettingsVM,
             // General
@@ -56,7 +57,8 @@ namespace winrt::MEraEmuWin::implementation {
             auto_detect_game_ui_scale, game_ui_scale, game_default_font_name,
             game_font_size, game_line_height, game_background_color,
             game_foreground_color, game_highlight_color, game_printc_count_per_line,
-            game_printc_char_count, enable_font_smoothing, enable_pixel_snapping
+            game_printc_char_count, enable_font_smoothing, enable_pixel_snapping,
+            enable_html_rendering
         );
 
         // Non-midl methods
@@ -89,6 +91,7 @@ namespace winrt::MEraEmuWin::implementation {
         uint32_t game_printc_char_count = 25;
         bool enable_font_smoothing = false;
         bool enable_pixel_snapping = true;
+        bool enable_html_rendering = true;
     };
 }
 
