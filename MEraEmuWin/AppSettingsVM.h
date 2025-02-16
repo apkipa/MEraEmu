@@ -20,46 +20,55 @@ namespace winrt::MEraEmuWin::implementation {
             return *clone;
         }
 
+#define X_FIELDS \
+    /* General */ \
+    X(bool, ReadResourcesDir, read_resources_dir) \
+    X(bool, ReadFontsDir, read_fonts_dir) \
+    X(bool, EnableParallelLoading, enable_parallel_loading) \
+    X(bool, EnableJIT, enable_jit) \
+    X(bool, EnableEngineControlOnError, enable_engine_control_on_error) \
+    /* Game */ \
+    X(uint32_t, SaveDataCount, save_data_count) \
+    X(bool, EnableAutoSave, enable_auto_save) \
+    /* Display */ \
+    X(bool, AutoDetectGameUIScale, auto_detect_game_ui_scale) \
+    X(double, GameUIScale, game_ui_scale) \
+    X(hstring, GameDefaultFontName, game_default_font_name) \
+    X(double, GameFontSize, game_font_size) \
+    X(double, GameLineHeight, game_line_height) \
+    X(Windows::UI::Color, GameBackgroundColor, game_background_color) \
+    X(Windows::UI::Color, GameForegroundColor, game_foreground_color) \
+    X(Windows::UI::Color, GameHighlightColor, game_highlight_color) \
+    X(uint32_t, GamePrintCCountPerLine, game_printc_count_per_line) \
+    X(uint32_t, GamePrintCCharCount, game_printc_char_count) \
+    X(bool, EnableFontSmoothing, enable_font_smoothing) \
+    X(bool, EnablePixelSnapping, enable_pixel_snapping) \
+    X(bool, EnableHtmlRendering, enable_html_rendering)
+
 #define GenGetSetter(type, name, member)    \
         type name() { return member; }      \
         void name(type value) { member = value; }
 
-        // General
-        GenGetSetter(bool, EnableParallelLoading, enable_parallel_loading);
-        GenGetSetter(bool, EnableJIT, enable_jit);
-        GenGetSetter(bool, EnableEngineControlOnError, enable_engine_control_on_error);
+#define X GenGetSetter
+        X_FIELDS;
+#undef X
 
-        // Game
-        GenGetSetter(uint32_t, SaveDataCount, save_data_count);
-        GenGetSetter(bool, EnableAutoSave, enable_auto_save);
+        friend void to_json(nlohmann::json& j, const AppSettingsVM& p) {
+#define X(type, name, member) j[#member] = p.member;
+            X_FIELDS;
+#undef X
+        }
 
-        // Display
-        GenGetSetter(bool, AutoDetectGameUIScale, auto_detect_game_ui_scale);
-        GenGetSetter(double, GameUIScale, game_ui_scale);
-        GenGetSetter(hstring, GameDefaultFontName, game_default_font_name);
-        GenGetSetter(double, GameFontSize, game_font_size);
-        GenGetSetter(double, GameLineHeight, game_line_height);
-        GenGetSetter(Windows::UI::Color, GameBackgroundColor, game_background_color);
-        GenGetSetter(Windows::UI::Color, GameForegroundColor, game_foreground_color);
-        GenGetSetter(Windows::UI::Color, GameHighlightColor, game_highlight_color);
-        GenGetSetter(uint32_t, GamePrintCCountPerLine, game_printc_count_per_line);
-        GenGetSetter(uint32_t, GamePrintCCharCount, game_printc_char_count);
-        GenGetSetter(bool, EnableFontSmoothing, enable_font_smoothing);
-        GenGetSetter(bool, EnablePixelSnapping, enable_pixel_snapping);
-        GenGetSetter(bool, EnableHtmlRendering, enable_html_rendering);
-
-        NLOHMANN_DEFINE_TYPE_INTRUSIVE(AppSettingsVM,
-            // General
-            enable_parallel_loading, enable_jit, enable_engine_control_on_error,
-            // Game
-            save_data_count, enable_auto_save,
-            // Display
-            auto_detect_game_ui_scale, game_ui_scale, game_default_font_name,
-            game_font_size, game_line_height, game_background_color,
-            game_foreground_color, game_highlight_color, game_printc_count_per_line,
-            game_printc_char_count, enable_font_smoothing, enable_pixel_snapping,
-            enable_html_rendering
-        );
+        friend void from_json(const nlohmann::json& j, AppSettingsVM& p) {
+#define X(type, name, member) \
+    do { \
+        if (auto it = j.find(#member); it != j.end()) { \
+            it->get_to(p.member); \
+        } \
+    } while (0);
+            X_FIELDS;
+#undef X
+        }
 
         // Non-midl methods
         std::string to_json_string() {
@@ -70,6 +79,8 @@ namespace winrt::MEraEmuWin::implementation {
 
     private:
         // General
+        bool read_resources_dir = true;
+        bool read_fonts_dir = true;
         bool enable_parallel_loading = false;
         bool enable_jit = false;
         bool enable_engine_control_on_error = false;

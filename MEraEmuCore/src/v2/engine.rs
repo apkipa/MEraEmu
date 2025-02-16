@@ -687,6 +687,7 @@ pub struct MEraEngineBuilder<SysCallback, BuilderCallback> {
     erb_count: usize,
     rayon_threadpool: Option<rayon::ThreadPool>,
     erb_loader_rx: Option<std::sync::mpsc::Receiver<MEraEngineAsyncErbLoaderMsg>>,
+    gid_file_cache: HashMap<String, i64, FxBuildHasher>,
 }
 
 impl<T: MEraEngineSysCallback> MEraEngineBuilder<T, EmptyCallback> {
@@ -705,6 +706,7 @@ impl<T: MEraEngineSysCallback> MEraEngineBuilder<T, EmptyCallback> {
             erb_count: 0,
             rayon_threadpool: None,
             erb_loader_rx: None,
+            gid_file_cache: Default::default(),
         };
 
         // Initialize default global variables
@@ -759,6 +761,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             erb_count: self.erb_count,
             rayon_threadpool: self.rayon_threadpool,
             erb_loader_rx: self.erb_loader_rx,
+            gid_file_cache: self.gid_file_cache,
         }
     }
     pub fn with_config(mut self, new_config: MEraEngineConfig) -> Self {
@@ -1407,10 +1410,113 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             EraCsvLoadKind::ImageResources => {
                 let dir_prefix = filename
                     .rsplit_once(&['\\', '/'])
-                    .map(|x| x.0)
+                    .map(|x| &filename[..x.0.len() + 1])
                     .unwrap_or("");
-                // TODO: Use self.callback to pre-allocate graphics & sprites
-                todo!()
+
+                let mut anime_sprite_name = String::new();
+                for row in self.parse_csv_loose(filename.clone(), content) {
+                    // sprite,file_path,x,y,width,height
+                    //
+                    // or:
+                    //
+                    // sprite,ANIME,width,height
+                    // sprite,file_path,x,y,width,height,xPos,yPos,delay
+                    // ...
+
+                    use crate::v2::routines::parse_int_literal;
+
+                    let get_col_bytes = |idx: usize| row.get(idx).map_or(&[][..], |x| x.as_bytes());
+                    let load_graphics = |this: &mut Self, file_path: &str| -> Result<i64, ()> {
+                        let next_gid = (this.gid_file_cache.len() + 1) as i64;
+                        match this.gid_file_cache.raw_entry_mut().from_key(file_path) {
+                            hashbrown::hash_map::RawEntryMut::Occupied(e) => {
+                                let gid = *e.get();
+                                if gid > 0 {
+                                    Ok(gid)
+                                } else {
+                                    Err(())
+                                }
+                            }
+                            hashbrown::hash_map::RawEntryMut::Vacant(e) => {
+                                if this.ctx.callback.on_gcreatefromfile(next_gid, file_path) != 0 {
+                                    e.insert(file_path.into(), next_gid);
+                                    Ok(next_gid)
+                                } else {
+                                    Err(())
+                                }
+                            }
+                        }
+                    };
+
+                    if row.len() < 2 {
+                        let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
+                        let offset = content.subslice_offset(&row[0]).unwrap();
+                        diag.span_err(
+                            Default::default(),
+                            SrcSpan::new(SrcPos(offset as _), row[0].len() as _),
+                            "too few columns in CSV row",
+                        );
+                        self.ctx.emit_diag(diag);
+                        continue;
+                    }
+                    let sprite = row[0];
+                    let file_path = row[1];
+                    if sprite.is_empty() {
+                        let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
+                        let offset = content.subslice_offset(&row[0]).unwrap();
+                        diag.span_err(
+                            Default::default(),
+                            SrcSpan::new(SrcPos(offset as _), row[0].len() as _),
+                            "empty sprite name",
+                        );
+                        self.ctx.emit_diag(diag);
+                        continue;
+                    }
+                    if sprite == anime_sprite_name {
+                        // Continue from previous anime sprite
+                        let x = parse_int_literal(get_col_bytes(2)).unwrap_or(0);
+                        let y = parse_int_literal(get_col_bytes(3)).unwrap_or(0);
+                        let width = parse_int_literal(get_col_bytes(4)).unwrap_or(0);
+                        let height = parse_int_literal(get_col_bytes(5)).unwrap_or(0);
+                        let x_pos = parse_int_literal(get_col_bytes(6)).unwrap_or(0);
+                        let y_pos = parse_int_literal(get_col_bytes(7)).unwrap_or(0);
+                        let delay = parse_int_literal(get_col_bytes(8)).unwrap_or(0);
+                        if let Ok(gid) = load_graphics(self, &format!("{dir_prefix}{file_path}")) {
+                            self.ctx.callback.on_spriteanimeaddframe(
+                                &anime_sprite_name,
+                                gid,
+                                x,
+                                y,
+                                width,
+                                height,
+                                x_pos,
+                                y_pos,
+                                delay,
+                            );
+                        }
+                        continue;
+                    }
+                    // Otherwise, start a new sprite
+                    if file_path.eq_ignore_ascii_case("ANIME") {
+                        // Start a new anime sprite
+                        anime_sprite_name = sprite.into();
+                        let width = parse_int_literal(get_col_bytes(2)).unwrap_or(0);
+                        let height = parse_int_literal(get_col_bytes(3)).unwrap_or(0);
+                        (self.ctx.callback).on_spriteanimecreate(&anime_sprite_name, width, height);
+                        continue;
+                    } else {
+                        // Start a new normal sprite
+                        anime_sprite_name.clear();
+
+                        let x = parse_int_literal(get_col_bytes(2)).unwrap_or(0);
+                        let y = parse_int_literal(get_col_bytes(3)).unwrap_or(0);
+                        let width = parse_int_literal(get_col_bytes(4)).unwrap_or(0);
+                        let height = parse_int_literal(get_col_bytes(5)).unwrap_or(0);
+                        if let Ok(gid) = load_graphics(self, &format!("{dir_prefix}{file_path}")) {
+                            (self.ctx.callback).on_spritecreate(&sprite, gid, x, y, width, height);
+                        }
+                    }
+                }
             }
             EraCsvLoadKind::GameBase => {
                 for [index, value] in self.parse_csv::<2>(filename.clone(), content) {

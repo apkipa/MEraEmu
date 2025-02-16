@@ -23,6 +23,8 @@ namespace winrt::Tenkai {
     using UI::Xaml::Window;
 }
 
+#define GAME_BASE_DIR L".\\"
+
 LRESULT CALLBACK SubclassWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     auto main_page = (MEraEmuWin::implementation::MainPage*)dwRefData;
     try {
@@ -142,6 +144,19 @@ namespace winrt::MEraEmuWin::implementation {
 
             // Apply settings
             engine_ctrl.ApplySettings(m_app_settings);
+
+            // Load fonts
+            if (m_app_settings.ReadFontsDir()) {
+                auto fonts_dir = GAME_BASE_DIR L"fonts";
+                if (util::fs::file_exists(fonts_dir)) {
+                    for (auto const& file : std::filesystem::recursive_directory_iterator(fonts_dir)) {
+                        if (!file.is_regular_file()) { continue; }
+
+                        // Deliberately ignore errors
+                        AddFontResourceExW(file.path().c_str(), FR_PRIVATE, nullptr);
+                    }
+                }
+            }
         }
 
         // Automatically start the game engine
@@ -225,7 +240,7 @@ namespace winrt::MEraEmuWin::implementation {
         )));
     }
     void MainPage::BootstrapEngine() {
-        hstring game_base_dir{ L".\\" };
+        hstring game_base_dir{ GAME_BASE_DIR };
         try {
             auto engine_ctrl = MainEngineControl().try_as<EngineControl>();
             if (!engine_ctrl) { return; }

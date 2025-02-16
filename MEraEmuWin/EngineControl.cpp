@@ -719,6 +719,23 @@ namespace winrt::MEraEmuWin::implementation {
 }
 
 namespace winrt::MEraEmuWin::implementation {
+    com_ptr<IDWriteFactory2> g_dwrite_factory;
+    com_ptr<IWICImagingFactory> g_wic_factory;
+    void ensure_global_factory() {
+        if (g_dwrite_factory) { return; }
+        {
+            decltype(g_dwrite_factory) factory;
+            check_hresult(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
+                guid_of<decltype(*factory)>(),
+                reinterpret_cast<::IUnknown**>(factory.put())
+            ));
+            g_dwrite_factory = std::move(factory);
+        }
+        {
+            g_wic_factory = create_instance<IWICImagingFactory>(CLSID_WICImagingFactory);
+        }
+    }
+
     // NOTE: If InputRequest is dropped before fulfilled, it will be treated as interrupted.
     //       To convey the skip operation, call `try_fulfill_void` instead.
     struct InputRequest {
@@ -1093,53 +1110,38 @@ namespace winrt::MEraEmuWin::implementation {
         }
         int64_t on_var_get_int(std::string_view name, size_t idx) override {
             if (name == "@COLOR") {
-                std::promise<uint32_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(to_u32(sd->ui_ctrl->EngineForeColor()) & ~0xff000000);
+                return exec_ui_work([sd = m_sd] {
+                    return to_u32(sd->ui_ctrl->EngineForeColor()) & ~0xff000000;
                 });
-                return future.get();
             }
             if (name == "@DEFCOLOR") {
-                return D2D1::ColorF::Silver;
+                return to_u32(m_sd->app_settings->GameForegroundColor());
             }
             if (name == "@BGCOLOR") {
-                std::promise<uint32_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(to_u32(sd->ui_ctrl->EngineBackColor()) & ~0xff000000);
+                return exec_ui_work([sd = m_sd] {
+                    return to_u32(sd->ui_ctrl->EngineBackColor()) & ~0xff000000;
                 });
-                return future.get();
             }
             if (name == "@DEFBGCOLOR") {
-                return D2D1::ColorF::Black;
+                return to_u32(m_sd->app_settings->GameBackgroundColor());
             }
             if (name == "@FOCUSCOLOR") {
-                return D2D1::ColorF::Yellow;
+                return to_u32(m_sd->app_settings->GameHighlightColor());
             }
             if (name == "@STYLE") {
-                std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->GetCurrentFontStyle());
+                return exec_ui_work([sd = m_sd] {
+                    return sd->ui_ctrl->GetCurrentFontStyle();
                 });
-                return future.get();
             }
             if (name == "@REDRAW") {
-                std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->GetRedrawState());
+                return exec_ui_work([sd = m_sd] {
+                    return sd->ui_ctrl->GetRedrawState();
                 });
-                return future.get();
             }
             if (name == "@ALIGN") {
-                std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->GetCurrentLineAlignment());
+                return exec_ui_work([sd = m_sd] {
+                    return sd->ui_ctrl->GetCurrentLineAlignment();
                 });
-                return future.get();
             }
             if (name == "@TOOLTIP_DELAY") {
                 // TODO: @TOOLTIP_DELAY
@@ -1150,12 +1152,9 @@ namespace winrt::MEraEmuWin::implementation {
                 return 0;
             }
             if (name == "@SKIPDISP") {
-                std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->GetSkipDisplay());
+                return exec_ui_work([sd = m_sd] {
+                    return sd->ui_ctrl->GetSkipDisplay();
                 });
-                return future.get();
             }
             if (name == "@MESSKIP") {
                 // TODO: @MESSKIP
@@ -1166,55 +1165,31 @@ namespace winrt::MEraEmuWin::implementation {
                 return 0;
             }
             if (name == "@PRINTCPERLINE") {
-                /*std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->m_cfg.printc_per_line);
-                });
-                return future.get();*/
                 return m_sd->app_settings->GamePrintCCountPerLine();
             }
             if (name == "@PRINTCLENGTH") {
-                /*std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->m_cfg.printc_char_count);
-                });
-                return future.get();*/
                 return m_sd->app_settings->GamePrintCCharCount();
             }
             if (name == "@LINEISEMPTY") {
-                std::promise<bool> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->m_cur_composing_line.parts.empty());
+                return exec_ui_work([sd = m_sd] {
+                    return sd->ui_ctrl->m_cur_composing_line.parts.empty();
                 });
-                return future.get();
             }
             if (name == "SCREENWIDTH") {
-                std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->m_ui_param_cache.line_char_capacity);
+                return exec_ui_work([sd = m_sd] {
+                    return sd->ui_ctrl->m_ui_param_cache.line_char_capacity;
                 });
-                return future.get();
             }
             if (name == "SCREENPIXELWIDTH") {
                 // NOTE: Returns width in logical pixels
-                std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->m_ui_param_cache.canvas_width_px / sd->ui_ctrl->m_ui_param_cache.ui_scale);
+                return exec_ui_work([sd = m_sd] {
+                    return sd->ui_ctrl->m_ui_param_cache.canvas_width_px / sd->ui_ctrl->m_ui_param_cache.ui_scale;
                 });
-                return future.get();
             }
             if (name == "LINECOUNT") {
-                std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value((int64_t)sd->ui_ctrl->m_ui_lines.size());
+                return exec_ui_work([sd = m_sd] {
+                    return (int64_t)sd->ui_ctrl->m_ui_lines.size();
                 });
-                return future.get();
             }
             throw std::exception("no such variable");
         }
@@ -1323,56 +1298,63 @@ namespace winrt::MEraEmuWin::implementation {
                 sd->ui_ctrl->RoutinePrintButton(content, value, flags);
             });
         }
-        int64_t on_gcreate(int64_t gid, int64_t width, int64_t height) override
-        {
+        int64_t on_gcreate(int64_t gid, int64_t width, int64_t height) override {
+            return exec_ui_work([&] {
+                return m_sd->ui_ctrl->RoutineGCreate(gid, width, height);
+            });
+        }
+        int64_t on_gcreatefromfile(int64_t gid, std::string_view path) override {
+            return exec_ui_work([&] {
+                return m_sd->ui_ctrl->RoutineGCreateFromFile(gid, to_hstring(path));
+            });
+        }
+        int64_t on_gdispose(int64_t gid) override {
+            return exec_ui_work([&] {
+                return m_sd->ui_ctrl->RoutineGDispose(gid);
+            });
+        }
+        int64_t on_gcreated(int64_t gid) override {
+            return exec_ui_work([&] {
+                return m_sd->ui_ctrl->RoutineGCreated(gid);
+            });
+        }
+        int64_t on_gdrawsprite(int64_t gid, std::string_view sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const& color_matrix) override {
+            // TODO: on_gdrawsprite
             return 0;
         }
-        int64_t on_gcreatefromfile(int64_t gid, std::string_view path) override
-        {
+        int64_t on_gclear(int64_t gid, int64_t color) override {
+            // TODO: on_gclear
             return 0;
         }
-        int64_t on_gdispose(int64_t gid) override
-        {
+        int64_t on_spritecreate(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) override {
+            return exec_ui_work([&] {
+                return m_sd->ui_ctrl->RoutineSpriteCreate(to_hstring(name), gid, x, y, width, height);
+            });
+        }
+        int64_t on_spritedispose(std::string_view name) override {
+            return exec_ui_work([&] {
+                return m_sd->ui_ctrl->RoutineSpriteDispose(to_hstring(name));
+            });
+        }
+        int64_t on_spritecreated(std::string_view name) override {
+            return exec_ui_work([&] {
+                return m_sd->ui_ctrl->RoutineSpriteCreated(to_hstring(name));
+            });
+        }
+        int64_t on_spriteanimecreate(std::string_view name, int64_t width, int64_t height) override {
+            // TODO: on_spriteanimecreate
             return 0;
         }
-        int64_t on_gcreated(int64_t gid) override
-        {
+        int64_t on_spriteanimeaddframe(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height, int64_t offset_x, int64_t offset_y, int64_t delay) override {
+            // TODO: on_spriteanimeaddframe
             return 0;
         }
-        int64_t on_gdrawsprite(int64_t gid, std::string_view sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const& color_matrix) override
-        {
+        int64_t on_spritewidth(std::string_view name) override {
+            // TODO: on_spritewidth
             return 0;
         }
-        int64_t on_gclear(int64_t gid, int64_t color) override
-        {
-            return 0;
-        }
-        int64_t on_spritecreate(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) override
-        {
-            return 0;
-        }
-        int64_t on_spritedispose(std::string_view name) override
-        {
-            return 0;
-        }
-        int64_t on_spritecreated(std::string_view name) override
-        {
-            return 0;
-        }
-        int64_t on_spriteanimecreate(std::string_view name, int64_t width, int64_t height) override
-        {
-            return 0;
-        }
-        int64_t on_spriteanimeaddframe(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height, int64_t offset_x, int64_t offset_y, int64_t delay) override
-        {
-            return 0;
-        }
-        int64_t on_spritewidth(std::string_view name) override
-        {
-            return 0;
-        }
-        int64_t on_spriteheight(std::string_view name) override
-        {
+        int64_t on_spriteheight(std::string_view name) override {
+            // TODO: on_spriteheight
             return 0;
         }
         std::unique_ptr<MEraEngineHostFile> on_open_host_file(std::string_view path, bool can_write) override {
@@ -1477,9 +1459,13 @@ namespace winrt::MEraEmuWin::implementation {
 
             return util::fs::file_exists(actual_path.c_str());
         }
-        int64_t on_check_font(std::string_view font_name) override
-        {
-            return 0;
+        int64_t on_check_font(std::string_view font_name) override {
+            com_ptr<IDWriteFontCollection> font_collection;
+            check_hresult(g_dwrite_factory->GetSystemFontCollection(font_collection.put(), true));
+            uint32_t index;
+            BOOL exists;
+            check_hresult(font_collection->FindFamilyName(to_hstring(font_name).c_str(), &index, &exists));
+            return exists ? 1 : 0;
         }
         uint64_t on_get_host_time() override {
             auto t = std::chrono::system_clock::now().time_since_epoch();
@@ -1488,22 +1474,10 @@ namespace winrt::MEraEmuWin::implementation {
         int64_t on_get_config_int(std::string_view name) override {
             if (name == ERA_CONFIG_NAME_LINE_HEIGHT) {
                 // Line height
-                /*std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->m_cfg.line_height);
-                });
-                return future.get();*/
                 return m_sd->app_settings->GameLineHeight();
             }
             if (name == ERA_CONFIG_NAME_FONT_SIZE) {
                 // Font size
-                /*std::promise<int64_t> promise;
-                auto future = promise.get_future();
-                queue_ui_work([sd = m_sd, promise = std::move(promise)]() mutable {
-                    promise.set_value(sd->ui_ctrl->m_cfg.font_size);
-                });
-                return future.get();*/
                 return m_sd->app_settings->GameFontSize();
             }
             if (name == ERA_CONFIG_NAME_WINDOW_WIDTH) {
@@ -1527,8 +1501,8 @@ namespace winrt::MEraEmuWin::implementation {
             }
             throw std::runtime_error(to_string(std::format(L"no such str config: {}", to_hstring(name))));
         }
-        int64_t on_get_key_state(int64_t key_code) override
-        {
+        int64_t on_get_key_state(int64_t key_code) override {
+            // TODO: on_get_key_state
             return 0;
         }
 
@@ -1550,6 +1524,16 @@ namespace winrt::MEraEmuWin::implementation {
                 });
             }
         }
+        template <typename F>
+        auto exec_ui_work(F&& f) {
+            using ReturnType = std::invoke_result_t<F>;
+            std::promise<ReturnType> promise;
+            auto future = promise.get_future();
+            queue_ui_work([f = std::forward<F>(f), promise = std::move(promise)]() mutable {
+                promise.set_value(f());
+            });
+            return future.get();
+        }
 
         EngineSharedData* const m_sd;
         util::sync::spsc::Sender<std::move_only_function<void()>> const* const m_ui_task_tx;
@@ -1559,23 +1543,6 @@ namespace winrt::MEraEmuWin::implementation {
     public:
         int64_t m_tick_compensation{};
     };
-
-    com_ptr<IDWriteFactory2> g_dwrite_factory;
-    com_ptr<IWICImagingFactory> g_wic_factory;
-    void ensure_global_factory() {
-        if (g_dwrite_factory) { return; }
-        {
-            decltype(g_dwrite_factory) factory;
-            check_hresult(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
-                guid_of<decltype(*factory)>(),
-                reinterpret_cast<::IUnknown**>(factory.put())
-            ));
-            g_dwrite_factory = std::move(factory);
-        }
-        {
-            g_wic_factory = create_instance<IWICImagingFactory>(CLSID_WICImagingFactory);
-        }
-    }
 
     struct EngineUIPrintLineDataStyle {
         struct Color {
@@ -1631,17 +1598,37 @@ namespace winrt::MEraEmuWin::implementation {
                 // Do nothing
                 return S_OK;
             };
-            auto shape_image = [&](EngineUIPrintLineDataInlineObject::Image const& v) -> HRESULT {
-                // TODO...
-                /*auto [width, height] = get_object_size();
-                auto img = ctrl->GetImage(v.name);
-                if (!img) { return E_FAIL; }
+            auto image = [&](EngineUIPrintLineDataInlineObject::Image const& v) -> HRESULT {
+                auto it = ctrl->m_sprite_objects.find(v.sprite);
+                if (it == ctrl->m_sprite_objects.end()) {
+                    // Sprite not found
+                    return S_OK;
+                }
+                auto& sprite = it->second;
                 D2D1_RECT_F rect;
-                rect.left = originX + v.x * ctrl->m_ui_param_cache.font_size_px_f / 100;
-                rect.top = originY + v.y * ctrl->m_ui_param_cache.font_size_px_f / 100;
-                rect.right = rect.left + width;
-                rect.bottom = rect.top + height;
-                ctrl->m_d2d_ctx->DrawImage(img.get(), rect);*/
+                if (ctrl->m_app_settings->EnablePixelSnapping()) {
+                    originX = std::round(originX);
+                    originY = std::round(originY);
+                }
+                rect.left = originX;
+                rect.top = originY + v.ypos * ctrl->m_ui_param_cache.font_size_px_f / 100;
+                rect.right = rect.left + v.width * ctrl->m_ui_param_cache.font_size_px_f / 100;
+                rect.bottom = rect.top + v.height * ctrl->m_ui_param_cache.font_size_px_f / 100;
+                auto d2d_ctx = get_d2d_ctx();
+                auto img_it = ctrl->m_graphics_objects.find(sprite.gid);
+                if (img_it == ctrl->m_graphics_objects.end() || !img_it->second.try_ensure_loaded(ctrl)) {
+                    // Graphics object not found or bad, draw crossed box
+                    d2d_ctx->DrawRectangle(rect, get_brush(), 1.0f);
+                    d2d_ctx->DrawLine({ rect.left, rect.top }, { rect.right, rect.bottom }, get_brush(), 1.0f);
+                    d2d_ctx->DrawLine({ rect.right, rect.top }, { rect.left, rect.bottom }, get_brush(), 1.0f);
+                    return S_OK;
+                }
+                else {
+                    // Draw sprite
+                    auto& img = img_it->second;
+                    auto src_rect = D2D1::RectF(float(sprite.x), float(sprite.y), float(sprite.x + sprite.width), float(sprite.y + sprite.height));
+                    d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, src_rect);
+                }
                 return S_OK;
             };
 
@@ -1650,7 +1637,7 @@ namespace winrt::MEraEmuWin::implementation {
                 hr = std::visit(overloaded(
                     shape_rect,
                     shape_space,
-                    shape_image
+                    image
                 ), data);
             });
             if (FAILED(hr2)) { return hr2; }
@@ -1686,16 +1673,16 @@ namespace winrt::MEraEmuWin::implementation {
                     ctrl->m_ui_param_cache.font_size_px_f
                 );
             };
-            auto shape_image = [this](EngineUIPrintLineDataInlineObject::Image const& v) {
+            auto image = [this](EngineUIPrintLineDataInlineObject::Image const& v) {
                 return std::make_pair(
                     v.width * ctrl->m_ui_param_cache.font_size_px_f / 100,
-                    v.height * ctrl->m_ui_param_cache.font_size_px_f / 100
+                    (v.ypos + v.height) * ctrl->m_ui_param_cache.font_size_px_f / 100
                 );
             };
             return std::visit(overloaded(
                 shape_rect,
                 shape_space,
-                shape_image
+                image
             ), data);
         }
 
@@ -1809,6 +1796,9 @@ namespace winrt::MEraEmuWin::implementation {
             // There may be multiple lines, so sum up the heights instead of maximize
             pixel_height += inline_objects_height;
             render_height = std::ceil(pixel_height / ctrl->m_ui_param_cache.line_height_px_f);
+            if (inline_objects_height > 0) {
+                render_height--;
+            }
             //acc_height += line_height;
         }
     };
@@ -1876,18 +1866,30 @@ namespace winrt::MEraEmuWin::implementation {
         check_hresult(m_vsis_noref->Resize(0, 0));
     }
     void EngineControl::ApplySettings(MEraEmuWin::AppSettingsVM settings) {
+        com_ptr<implementation::AppSettingsVM> new_settings;
         if (!settings) {
-            m_app_settings = make_self<implementation::AppSettingsVM>();
+            new_settings = make_self<implementation::AppSettingsVM>();
         }
         else {
-            m_app_settings = settings.DeepClone().as<implementation::AppSettingsVM>();
+            new_settings = settings.DeepClone().as<implementation::AppSettingsVM>();
         }
+        auto old_settings = std::exchange(m_app_settings, new_settings);
         // Synchronize settings to engine
         QueueEngineTask(std::make_unique<EngineThreadTask>(EngineThreadTaskKind::SyncSettingsWithFunc, [this] {
             m_sd->app_settings = m_app_settings;
         }));
 
-        UpdateEngineImageOutputLayout(true);
+        bool font_changed{};
+        if (old_settings) {
+            if (old_settings->GameDefaultFontName() != new_settings->GameDefaultFontName()) {
+                font_changed = true;
+                if (m_cur_font_name.empty() || m_cur_font_name == old_settings->GameDefaultFontName()) {
+                    m_cur_font_name = new_settings->GameDefaultFontName();
+                }
+            }
+        }
+
+        UpdateEngineImageOutputLayout(true, font_changed);
     }
     bool EngineControl::IsStarted() {
         return m_sd && m_sd->thread_is_alive.load(std::memory_order_relaxed);
@@ -2314,6 +2316,19 @@ namespace winrt::MEraEmuWin::implementation {
                     }
                     for (auto& csv : chara_csvs) {
                         load_csv(csv, ERA_CSV_LOAD_KIND_CHARA_);
+                    }
+                    if (appcfg->ReadResourcesDir()) {
+                        auto resources_dir = sd->game_base_dir + L"resources";
+                        if (util::fs::file_exists(resources_dir.c_str())) {
+                            using std::filesystem::recursive_directory_iterator;
+                            for (auto const& entry : recursive_directory_iterator(resources_dir.c_str())) {
+                                if (!entry.is_regular_file()) { continue; }
+                                auto const& path = entry.path();
+                                if (iends_with(path.c_str(), L".csv")) {
+                                    load_csv(path, ERA_CSV_LOAD_KIND_IMAGE_RESOURCES);
+                                }
+                            }
+                        }
                     }
                     builder.finish_load_csv();
 
@@ -2792,10 +2807,10 @@ namespace winrt::MEraEmuWin::implementation {
             m_sd->ui_redraw_block_engine.notify_one();
         }
     }
-    void EngineControl::UpdateEngineImageOutputLayout(bool invalidate_all) {
+    void EngineControl::UpdateEngineImageOutputLayout(bool invalidate_all, bool recreate_ui_lines) {
         auto& ui_params = m_ui_param_cache;
-        bool need_invalidate_line_metrics = false;
-        bool fully_invalidate_line_metrics = false;
+        bool need_invalidate_line_metrics = recreate_ui_lines;
+        bool fully_invalidate_line_metrics = recreate_ui_lines;
         if (invalidate_all) {
             // Recalculate UI parameters
             auto sp = BackgroundSwapchainPanel();
@@ -2926,7 +2941,7 @@ namespace winrt::MEraEmuWin::implementation {
                     }
                 }));
             }
-            for (size_t i = 0; i < total_cnt * 1 / split_cnt; i++) {
+            for (size_t i = 0; i < total_cnt; i++) {
                 auto& line = m_ui_lines[i];
                 if (i < total_cnt * 1 / split_cnt) {
                     line.update_width(this, new_width);
@@ -3519,7 +3534,7 @@ namespace winrt::MEraEmuWin::implementation {
                                             this, EngineUIPrintLineDataInlineObject::ShapeSpace{ .size = width }
                                         );
                                         m_cur_composing_line.parts.push_back({
-                                            .str = hstring(L" "), .inline_obj = std::move(obj), .forbid_button = true,
+                                            .str = hstring(L"�"), .inline_obj = std::move(obj), .forbid_button = true,
                                             });
                                         gather_to_part_fn(m_cur_composing_line.parts.back());
                                     }
@@ -3558,13 +3573,53 @@ namespace winrt::MEraEmuWin::implementation {
                         });
                     }
                     else if (tag.name == L"img") {
-                        // TODO: Implement image tag
-                        // Not yet supported; print html content as plain text
-                        auto start_pos = tag.start_tag_pos_range.first;
-                        auto end_pos = tag.end_tag_pos_range.second;
-                        hstring html(std::wstring_view(hstring(content)).substr(start_pos, end_pos - start_pos));
-                        m_cur_composing_line.parts.push_back({ .str = html, .forbid_button = true });
-                        gather_to_part_fn(m_cur_composing_line.parts.back());
+                        hstring sprite_name;
+                        if (auto it = tag.attrs.find(L"src"); it != tag.attrs.end()) {
+                            sprite_name = it->second;
+                        }
+                        else {
+                            throw std::runtime_error("Image tag missing src attribute");
+                        }
+                        auto sprite_it = m_sprite_objects.find(sprite_name);
+                        if (sprite_it != m_sprite_objects.end()) {
+                            auto& sprite = sprite_it->second;
+                            int32_t width, height, ypos;
+                            if (auto it = tag.attrs.find(L"ypos"); it != tag.attrs.end()) {
+                                ypos = parse<int32_t>(it->second).value();
+                            }
+                            else {
+                                ypos = 0;
+                            }
+                            if (auto it = tag.attrs.find(L"height"); it != tag.attrs.end()) {
+                                height = parse<int32_t>(it->second).value();
+                            }
+                            else {
+                                height = 100;
+                            }
+                            if (auto it = tag.attrs.find(L"width"); it != tag.attrs.end()) {
+                                width = parse<int32_t>(it->second).value();
+                            }
+                            else {
+                                width = sprite.width * height / sprite.height;
+                            }
+                            auto obj = make_self<EngineUIPrintLineDataInlineObject::InlineObject>(
+                                this, EngineUIPrintLineDataInlineObject::Image{
+                                    .sprite = sprite_name, .width = width, .height = height, .ypos = ypos
+                                }
+                            );
+                            m_cur_composing_line.parts.push_back({
+                                .str = hstring(L"�"), .inline_obj = std::move(obj), .forbid_button = true,
+                                });
+                            gather_to_part_fn(m_cur_composing_line.parts.back());
+                        }
+                        else {
+                            // Sprite does not exist or is invalid; print html content as plain text
+                            auto start_pos = tag.start_tag_pos_range.first;
+                            auto end_pos = tag.end_tag_pos_range.second;
+                            hstring html(std::wstring_view(hstring(content)).substr(start_pos, end_pos - start_pos));
+                            m_cur_composing_line.parts.push_back({ .str = html, .forbid_button = true });
+                            gather_to_part_fn(m_cur_composing_line.parts.back());
+                        }
                     }
                 }
                 else if (event_kind == Parser::VisitEventKind::OnText) {
@@ -3717,6 +3772,59 @@ namespace winrt::MEraEmuWin::implementation {
                 });
         }
     }
+    int64_t EngineControl::RoutineGCreate(int64_t gid, int64_t width, int64_t height) {
+        if (gid <= 0) {
+            // Invalid gid
+            return 0;
+        }
+        if (m_graphics_objects.contains(gid)) {
+            // Already exists
+            return 0;
+        }
+
+        m_graphics_objects.insert({ gid, GraphicsObject((uint32_t)width, (uint32_t)height) });
+
+        return 1;
+    }
+    int64_t EngineControl::RoutineGCreateFromFile(int64_t gid, hstring const& path) {
+        if (gid <= 0) {
+            // Invalid gid
+            return 0;
+        }
+        if (m_graphics_objects.contains(gid)) {
+            // Already exists
+            return 0;
+        }
+
+        m_graphics_objects.insert({ gid, GraphicsObject(path) });
+
+        return 1;
+    }
+    int64_t EngineControl::RoutineGDispose(int64_t gid) {
+        return m_graphics_objects.erase(gid);
+    }
+    int64_t EngineControl::RoutineGCreated(int64_t gid) {
+        return m_graphics_objects.contains(gid);
+    }
+    int64_t EngineControl::RoutineSpriteCreate(hstring const& name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) {
+        if (m_sprite_objects.contains(name)) {
+            // Already exists
+            return 0;
+        }
+        if (!m_graphics_objects.contains(gid)) {
+            // Invalid gid
+            return 0;
+        }
+        m_sprite_objects.insert({ name, SpriteObject(gid, (int32_t)x, (int32_t)y, (int32_t)width, (int32_t)height) });
+        return 1;
+    }
+    int64_t EngineControl::RoutineSpriteDispose(hstring const& name) {
+        return m_sprite_objects.erase(name);
+    }
+    int64_t EngineControl::RoutineSpriteCreated(hstring const& name) {
+        return m_sprite_objects.contains(name);
+    }
+
     void EngineControl::SetCurrentLineAlignment(int64_t value) {
         m_cur_line_alignment = (uint32_t)value;
     }
@@ -3777,6 +3885,50 @@ namespace winrt::MEraEmuWin::implementation {
         }
         if (--m_no_skip_display_cnt == 0) {
             // Do nothing
+        }
+    }
+
+    void EngineControl::GraphicsObject::ensure_loaded(EngineControl* ctrl) {
+        if (bitmap) { return; }
+
+        if (file_path.empty()) {
+            // Create an empty bitmap
+            check_hresult(ctrl->m_d2d_ctx->CreateBitmap(
+                D2D1::SizeU(width, height),
+                D2D1::BitmapProperties(
+                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
+                ),
+                bitmap.put()
+            ));
+        }
+        else {
+            // Load from file
+            com_ptr<IWICBitmapDecoder> decoder;
+            check_hresult(g_wic_factory->CreateDecoderFromFilename(
+                file_path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, decoder.put()
+            ));
+            com_ptr<IWICBitmapFrameDecode> frame;
+            check_hresult(decoder->GetFrame(0, frame.put()));
+            com_ptr<IWICFormatConverter> converter;
+            check_hresult(g_wic_factory->CreateFormatConverter(converter.put()));
+            check_hresult(converter->Initialize(
+                frame.get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.f,
+                WICBitmapPaletteTypeMedianCut
+            ));
+            check_hresult(ctrl->m_d2d_ctx->CreateBitmapFromWicBitmap(
+                converter.get(), bitmap.put()
+            ));
+        }
+    }
+    bool EngineControl::GraphicsObject::try_ensure_loaded(EngineControl* ctrl) {
+        if (is_bad) { return false; }
+        try {
+            ensure_loaded(ctrl);
+            return true;
+        }
+        catch (...) {
+            is_bad = true;
+            return false;
         }
     }
 

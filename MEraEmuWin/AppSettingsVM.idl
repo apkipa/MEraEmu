@@ -7,6 +7,8 @@ namespace MEraEmuWin {
         AppSettingsVM DeepClone();
 
         // General
+        Boolean ReadResourcesDir;
+        Boolean ReadFontsDir;
         Boolean EnableParallelLoading;
         Boolean EnableJIT;
         Boolean EnableEngineControlOnError;

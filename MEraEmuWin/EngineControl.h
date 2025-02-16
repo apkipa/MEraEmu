@@ -251,7 +251,7 @@ namespace winrt::MEraEmuWin::implementation {
         void RedrawDirtyEngineImageOutput();
         // NOTE: If invalidate_all is false, it is assumed that previous lines along with
         //       UI metrics are unchanged. Only the newly added lines are redrawn.
-        void UpdateEngineImageOutputLayout(bool invalidate_all);
+        void UpdateEngineImageOutputLayout(bool invalidate_all, bool recreate_ui_lines = false);
         void InitD2DDevice(bool force_software);
         void RelayoutUILines(bool recreate_all);
         uint64_t GetAccUIHeightInLines();
@@ -282,6 +282,14 @@ namespace winrt::MEraEmuWin::implementation {
         PrintButtonRegionContext BeginPrintButtonRegion();
         template <typename F>
         void EndPrintButtonRegion(PrintButtonRegionContext ctx, F&& f);
+        int64_t RoutineGCreate(int64_t gid, int64_t width, int64_t height);
+        int64_t RoutineGCreateFromFile(int64_t gid, hstring const& path);
+        int64_t RoutineGDispose(int64_t gid);
+        int64_t RoutineGCreated(int64_t gid);
+        // TODO...
+        int64_t RoutineSpriteCreate(hstring const& name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height);
+        int64_t RoutineSpriteDispose(hstring const& name);
+        int64_t RoutineSpriteCreated(hstring const& name);
 
         void SetCurrentLineAlignment(int64_t value);
         int64_t GetCurrentLineAlignment();
@@ -371,19 +379,28 @@ namespace winrt::MEraEmuWin::implementation {
             hstring file_path;
             uint32_t width{}, height{};
             com_ptr<ID2D1Bitmap> bitmap;
+            bool is_bad{};  // true if the file is not found or invalid
+
+            GraphicsObject(hstring const& file_path) : file_path(file_path) {}
+            GraphicsObject(uint32_t width, uint32_t height) : width(width), height(height) {}
 
             void ensure_loaded(EngineControl* ctrl);
+            bool try_ensure_loaded(EngineControl* ctrl);
             std::pair<uint32_t, uint32_t> get_dimensions() const noexcept {
                 auto size = bitmap->GetPixelSize();
                 return { size.width, size.height };
             }
         };
-        std::unordered_map<int64_t, GraphicsObject> m_graphics_objects;
+        std::map<int64_t, GraphicsObject> m_graphics_objects;
         struct SpriteObject {
             int64_t gid;
             int32_t x, y, width, height;
+
+            SpriteObject(int64_t gid, int32_t x, int32_t y, int32_t width, int32_t height) :
+                gid(gid), x(x), y(y), width(width), height(height) {
+            }
         };
-        std::unordered_map<hstring, SpriteObject> m_sprite_objects;
+        std::map<hstring, SpriteObject, std::less<>> m_sprite_objects;
     };
 }
 
