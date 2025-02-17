@@ -1579,7 +1579,8 @@ namespace winrt::MEraEmuWin::implementation {
             auto shape_rect = [&](EngineUIPrintLineDataInlineObject::ShapeRect const& v) -> HRESULT {
                 D2D1_RECT_F rect;
                 rect.left = originX + v.x * ctrl->m_ui_param_cache.font_size_px_f / 100;
-                rect.top = originY + v.y * ctrl->m_ui_param_cache.font_size_px_f / 100;
+                //rect.top = originY + v.y * ctrl->m_ui_param_cache.font_size_px_f / 100;
+                rect.top = originY;
                 rect.right = rect.left + v.width * ctrl->m_ui_param_cache.font_size_px_f / 100;
                 rect.bottom = rect.top + v.height * ctrl->m_ui_param_cache.font_size_px_f / 100;
                 auto d2d_ctx = get_d2d_ctx();
@@ -1611,7 +1612,8 @@ namespace winrt::MEraEmuWin::implementation {
                     originY = std::round(originY);
                 }
                 rect.left = originX;
-                rect.top = originY + v.ypos * ctrl->m_ui_param_cache.font_size_px_f / 100;
+                //rect.top = originY + v.ypos * ctrl->m_ui_param_cache.font_size_px_f / 100;
+                rect.top = originY;
                 rect.right = rect.left + v.width * ctrl->m_ui_param_cache.font_size_px_f / 100;
                 rect.bottom = rect.top + v.height * ctrl->m_ui_param_cache.font_size_px_f / 100;
                 auto d2d_ctx = get_d2d_ctx();
@@ -1645,13 +1647,55 @@ namespace winrt::MEraEmuWin::implementation {
         }
         STDMETHOD(GetMetrics)(DWRITE_INLINE_OBJECT_METRICS* metrics) override {
             DWRITE_INLINE_OBJECT_METRICS inlineMetrics{};
-            std::tie(inlineMetrics.width, inlineMetrics.height) = get_object_size();
-            inlineMetrics.baseline = ctrl->m_ui_param_cache.font_size_px_f * 0.8f + 1;
+            inlineMetrics.width = get_object_width();
+            //inlineMetrics.height = ctrl->ConvFontUnitToPixels(100);
+            auto vrange = get_object_vertical_range();
+            inlineMetrics.height = vrange.second - vrange.first;
+            inlineMetrics.baseline = ctrl->m_ui_param_cache.font_size_px_f * 0.8f;
+
+            float baselineOffset = 0.0f;
+            auto shape_rect = [&](EngineUIPrintLineDataInlineObject::ShapeRect const& v) {
+                /*overhangs->top = ctrl->ConvFontUnitToPixels(-v.y);
+                overhangs->bottom = ctrl->ConvFontUnitToPixels(v.y + v.height - 100);*/
+                baselineOffset = vrange.first;
+            };
+            auto shape_space = [&](EngineUIPrintLineDataInlineObject::ShapeSpace const& v) {
+                // HACK: Full font height for hit testing
+                inlineMetrics.height = ctrl->ConvFontUnitToPixels(100);
+            };
+            auto image = [&](EngineUIPrintLineDataInlineObject::Image const& v) {
+                /*overhangs->top = ctrl->ConvFontUnitToPixels(-v.ypos);
+                overhangs->bottom = ctrl->ConvFontUnitToPixels(v.ypos + v.height - 100);*/
+                baselineOffset = vrange.first;
+            };
+            std::visit(overloaded(
+                shape_rect,
+                shape_space,
+                image
+            ), data);
+
+            inlineMetrics.baseline -= baselineOffset;
             *metrics = inlineMetrics;
             return S_OK;
         }
         STDMETHOD(GetOverhangMetrics)(DWRITE_OVERHANG_METRICS* overhangs) override {
             *overhangs = {};
+            auto shape_rect = [&](EngineUIPrintLineDataInlineObject::ShapeRect const& v) {
+                /*overhangs->top = ctrl->ConvFontUnitToPixels(-v.y);
+                overhangs->bottom = ctrl->ConvFontUnitToPixels(v.y + v.height - 100);*/
+            };
+            auto shape_space = [&](EngineUIPrintLineDataInlineObject::ShapeSpace const& v) {
+                return;
+            };
+            auto image = [&](EngineUIPrintLineDataInlineObject::Image const& v) {
+                /*overhangs->top = ctrl->ConvFontUnitToPixels(-v.ypos);
+                overhangs->bottom = ctrl->ConvFontUnitToPixels(v.ypos + v.height - 100);*/
+            };
+            std::visit(overloaded(
+                shape_rect,
+                shape_space,
+                image
+            ), data);
             return S_OK;
         }
         STDMETHOD(GetBreakConditions)(DWRITE_BREAK_CONDITION* breakConditionBefore, DWRITE_BREAK_CONDITION* breakConditionAfter) override {
@@ -1660,23 +1704,36 @@ namespace winrt::MEraEmuWin::implementation {
             return S_OK;
         }
 
-        std::pair<float, float> get_object_size() {
+        float get_object_width() {
+            auto shape_rect = [this](EngineUIPrintLineDataInlineObject::ShapeRect const& v) {
+                return std::max(ctrl->ConvFontUnitToPixels(v.x + v.width), 0.0f);
+            };
+            auto shape_space = [this](EngineUIPrintLineDataInlineObject::ShapeSpace const& v) {
+                return std::max(ctrl->ConvFontUnitToPixels(v.size), 0.0f);
+            };
+            auto image = [this](EngineUIPrintLineDataInlineObject::Image const& v) {
+                return std::max(ctrl->ConvFontUnitToPixels(v.width), 0.0f);
+            };
+            return std::visit(overloaded(
+                shape_rect,
+                shape_space,
+                image
+            ), data);
+        }
+        std::pair<float, float> get_object_vertical_range() {
             auto shape_rect = [this](EngineUIPrintLineDataInlineObject::ShapeRect const& v) {
                 return std::make_pair(
-                    (v.x + v.width) * ctrl->m_ui_param_cache.font_size_px_f / 100,
-                    (v.y + v.height) * ctrl->m_ui_param_cache.font_size_px_f / 100
+                    ctrl->ConvFontUnitToPixels(v.y),
+                    ctrl->ConvFontUnitToPixels(v.y + v.height)
                 );
             };
             auto shape_space = [this](EngineUIPrintLineDataInlineObject::ShapeSpace const& v) {
-                return std::make_pair(
-                    v.size * ctrl->m_ui_param_cache.font_size_px_f / 100,
-                    ctrl->m_ui_param_cache.font_size_px_f
-                );
+                return std::pair{ 0.0f, 0.0f };
             };
             auto image = [this](EngineUIPrintLineDataInlineObject::Image const& v) {
                 return std::make_pair(
-                    v.width * ctrl->m_ui_param_cache.font_size_px_f / 100,
-                    (v.ypos + v.height) * ctrl->m_ui_param_cache.font_size_px_f / 100
+                    ctrl->ConvFontUnitToPixels(v.ypos),
+                    ctrl->ConvFontUnitToPixels(v.ypos + v.height)
                 );
             };
             return std::visit(overloaded(
@@ -1696,8 +1753,20 @@ namespace winrt::MEraEmuWin::implementation {
         com_ptr<IDWriteTextLayout4> txt_layout;
         uint32_t height{}; // Unit: line
         uint32_t acc_height{}; // Including the current line
-        uint32_t render_height{}; // Unit: line; usually >= height
+        /* NOTE:
+         * A line may render outside the line height, thus we need to keep track of the
+         * amount of lines to render before and after the current line. `render_forward_height`
+         * and `render_backward_height` are the amount of lines to render before and after
+         * the current line, and they correspond to `lookback_render_pos` and
+         * `lookforward_render_pos`, the accumulated line indices for actual rendering.
+         * In other words, `render*` values describe the drawing area produced by the
+         * current line, while `look*` values describe the lines that draws inside the
+         * current line's area.
+         */
+        uint32_t render_forward_height{}; // Unit: line; usually >= height
+        uint32_t render_backward_height{}; // Unit: line; usually >= height
         uint32_t lookback_render_pos{}; // Unit: line
+        uint32_t lookforward_render_pos{}; // Unit: line
         std::vector<EngineUIPrintLineDataStyle> styles;
         std::vector<EngineUIPrintLineDataButton> buttons;
         std::vector<EngineUIPrintLineDataInlineObject> inline_objs; // Usually images
@@ -1718,7 +1787,7 @@ namespace winrt::MEraEmuWin::implementation {
                 txt.c_str(), static_cast<UINT32>(txt.size()),
                 ctrl->GetDefaultTextFormat(),
                 static_cast<float>(width),
-                1e6,
+                0,
                 tmp_layout.put()
             ));
             tmp_layout.as(txt_layout);
@@ -1787,18 +1856,10 @@ namespace winrt::MEraEmuWin::implementation {
             DWRITE_TEXT_METRICS1 metrics;
             check_hresult(txt_layout->GetMetrics(&metrics));
             height = metrics.lineCount;
-            float pixel_height = metrics.height;
-            float inline_objects_height{};
-            for (auto const& obj : inline_objs) {
-                auto [width, height] = obj.obj->get_object_size();
-                inline_objects_height = std::max(inline_objects_height, height);
-            }
-            // There may be multiple lines, so sum up the heights instead of maximize
-            pixel_height += inline_objects_height;
-            render_height = std::ceil(pixel_height / ctrl->m_ui_param_cache.line_height_px_f);
-            if (inline_objects_height > 0) {
-                render_height--;
-            }
+            DWRITE_OVERHANG_METRICS overhangs;
+            check_hresult(txt_layout->GetOverhangMetrics(&overhangs));
+            render_backward_height = (uint32_t)std::ceil(std::max(overhangs.top, 0.0f) / ctrl->m_ui_param_cache.line_height_px_f);
+            render_forward_height = (uint32_t)std::ceil(overhangs.bottom / ctrl->m_ui_param_cache.line_height_px_f);
             //acc_height += line_height;
         }
     };
@@ -2761,8 +2822,13 @@ namespace winrt::MEraEmuWin::implementation {
                 [](auto const& a, auto const& b) { return a < b; },
                 [&](auto const& e) { return e.acc_height * m_ui_param_cache.line_height_px_f; }
             ) - ib;
-            if (line_end < size(m_ui_lines)) { line_end++; }
 
+            // Look forward rendering
+            if (line_end < size(m_ui_lines)) {
+                auto& line_data = m_ui_lines[line_end];
+                line_end = line_data.lookforward_render_pos;
+                line_end++;
+            }
             // Look back rendering
             if (line_start < line_end) {
                 auto& line_data = m_ui_lines[line_start];
@@ -2920,8 +2986,6 @@ namespace winrt::MEraEmuWin::implementation {
             }
         }
 
-        uint64_t last_height{};
-        uint32_t last_lookback_render_pos{ 0 };
         constexpr size_t PARALLEL_THRESHOLD = 4000;
         if (size(m_ui_lines) > PARALLEL_THRESHOLD) {
             // Multi-threaded process
@@ -2955,15 +3019,8 @@ namespace winrt::MEraEmuWin::implementation {
                 if (recreate_all) {
                     line.flush_effects(this);
                 }
-                line.acc_height = last_height + line.height;
-                last_height = line.acc_height;
 
-                while (last_lookback_render_pos < i &&
-                    last_lookback_render_pos + m_ui_lines[last_lookback_render_pos].render_height <= i)
-                {
-                    last_lookback_render_pos++;
-                }
-                line.lookback_render_pos = last_lookback_render_pos;
+                UpdateLineAccMetrics(i);
             }
         }
         else {
@@ -2974,21 +3031,15 @@ namespace winrt::MEraEmuWin::implementation {
                 if (recreate_all) {
                     line.flush_effects(this);
                 }
-                line.acc_height = last_height + line.height;
-                last_height = line.acc_height;
 
-                while (last_lookback_render_pos < i &&
-                    last_lookback_render_pos + m_ui_lines[last_lookback_render_pos].render_height > i)
-                {
-                    last_lookback_render_pos++;
-                }
-                line.lookback_render_pos = last_lookback_render_pos;
+                UpdateLineAccMetrics(i);
             }
         }
     }
-    uint64_t EngineControl::GetAccUIHeightInLines() {
+    uint64_t EngineControl::GetAccUIHeightInLines(size_t line_idx) {
         if (m_ui_lines.empty()) { return 0; }
-        return m_ui_lines.back().acc_height;
+        if (line_idx >= size(m_ui_lines)) { line_idx = size(m_ui_lines) - 1; }
+        return m_ui_lines[line_idx].acc_height;
     }
     size_t EngineControl::GetLineIndexFromHeight(uint64_t height) {
         auto ib = begin(m_ui_lines), ie = end(m_ui_lines);
@@ -2997,20 +3048,48 @@ namespace winrt::MEraEmuWin::implementation {
             [&](auto const& e) { return e.acc_height * m_ui_param_cache.line_height_px_f; }
         ) - ib;
     }
+    void EngineControl::UpdateLineAccMetrics(size_t i) {
+        if (i >= size(m_ui_lines)) { return; }
+        auto& line = m_ui_lines[i];
+        if (i == 0) {
+            line.acc_height = line.height;
+            line.lookback_render_pos = line.lookforward_render_pos = 0;
+        }
+        else {
+            auto const& prev_line = m_ui_lines[i - 1];
+            line.acc_height = prev_line.acc_height + line.height;
+            // Look back area
+            line.lookback_render_pos = prev_line.lookback_render_pos;
+            while (line.lookback_render_pos < i &&
+                line.lookback_render_pos + m_ui_lines[line.lookback_render_pos].render_forward_height <= i)
+            {
+                line.lookback_render_pos++;
+            }
+            // Look forward area
+            {
+                size_t pos = line.render_backward_height >= i ? 0 : i - line.render_backward_height;
+                for (; pos < i; pos++) {
+                    m_ui_lines[pos].lookforward_render_pos = i;
+                }
+                line.lookforward_render_pos = i;
+            }
+        }
+    }
     void EngineControl::InvalidateLineAtIndex(size_t line) {
         if (line >= size(m_ui_lines)) { return; }
-        auto width = static_cast<long>(m_ui_param_cache.canvas_width_px);
+        auto width = long(m_ui_param_cache.canvas_width_px);
         auto const& cur_line = m_ui_lines[line];
-        auto height_1 = static_cast<long>((cur_line.acc_height - cur_line.height) * m_ui_param_cache.line_height_px_f);
-        auto height_2 = static_cast<long>(cur_line.acc_height * m_ui_param_cache.line_height_px_f);
-        // HACK: Invalidate a larger area to prevent text clipping
-        auto compensation = (long)std::ceil((m_ui_param_cache.font_size_px_f - m_ui_param_cache.line_height_px_f));
-        if (compensation < 0) {
-            compensation = 0;
-        }
-        compensation += 1;
-        if FAILED(m_vsis_noref->Invalidate({ 0, height_1 - compensation, width, height_2 + compensation })) {
-            // Sometimes the invalidation fails (OOB), so we need to redraw the whole thing
+        auto line_start_idx = line >= cur_line.render_backward_height ? line - cur_line.render_backward_height : 0;
+        auto line_end_idx = line + cur_line.render_forward_height;
+        if (line_end_idx > 0) { line_end_idx--; } // Inclusive
+        if (line_end_idx >= size(m_ui_lines)) { line_end_idx = size(m_ui_lines) - 1; }
+        auto const& line_start = m_ui_lines[line_start_idx];
+        auto const& line_end = m_ui_lines[line_end_idx];
+        auto height_1 = (long)std::floor((line_start.acc_height - line_start.height) * m_ui_param_cache.line_height_px_f);
+        auto height_2 = (long)std::floor(line_end.acc_height * m_ui_param_cache.line_height_px_f);
+        height_2 = std::min(height_2, long(m_ui_param_cache.canvas_height_px));
+        if FAILED(m_vsis_noref->Invalidate({ 0, height_1, width, height_2 })) {
+            // Sometimes the invalidation fails (because of OOB), so we need to redraw the whole thing
             UpdateEngineImageOutputLayout(true);
         }
     }
@@ -3018,11 +3097,20 @@ namespace winrt::MEraEmuWin::implementation {
         auto pt_x = pt.X * m_ui_param_cache.xscale;
         auto pt_y = pt.Y * m_ui_param_cache.yscale;
         auto line = GetLineIndexFromHeight(pt_y);
+
         // Check for buttons
         ActiveButtonData new_active_button;
         if ((pt_x >= 0 && pt_y >= 0) && line < size(m_ui_lines)) {
             auto const& cur_line = m_ui_lines[line];
-            if (!cur_line.buttons.empty()) {
+            auto start_line_idx = cur_line.lookback_render_pos;
+            auto end_line_idx = cur_line.lookforward_render_pos;
+            if (end_line_idx >= size(m_ui_lines)) { end_line_idx = size(m_ui_lines) - 1; }
+            end_line_idx++;
+
+            for (auto i = start_line_idx; i < end_line_idx; i++) {
+                auto const& cur_line = m_ui_lines[i];
+                if (cur_line.buttons.empty()) { continue; }
+
                 // Perform hit test on text
                 BOOL is_trailing_hit;
                 BOOL is_inside;
@@ -3031,20 +3119,21 @@ namespace winrt::MEraEmuWin::implementation {
                     pt_x, pt_y - (cur_line.acc_height - cur_line.height) * m_ui_param_cache.line_height_px_f,
                     &is_trailing_hit, &is_inside, &hit_test_metrics
                 ));
-                if (is_inside) {
-                    auto cur_pos = hit_test_metrics.textPosition;
-                    for (size_t i = 0; i < size(cur_line.buttons); i++) {
-                        auto const& cur_btn = cur_line.buttons[i];
-                        if (cur_btn.starti <= cur_pos && cur_pos < cur_btn.starti + cur_btn.len) {
-                            // Found the target button
-                            new_active_button.line = line;
-                            new_active_button.button_idx = i;
-                            break;
-                        }
+                if (!is_inside) { continue; }
+                auto cur_pos = hit_test_metrics.textPosition;
+                for (size_t j = 0; j < size(cur_line.buttons); j++) {
+                    auto const& cur_btn = cur_line.buttons[j];
+                    if (cur_btn.starti <= cur_pos && cur_pos < cur_btn.starti + cur_btn.len) {
+                        // Found the target button
+                        new_active_button.line = i;
+                        new_active_button.button_idx = j;
+                        break;
                     }
                 }
+
             }
         }
+
         // If we are on a button, request redraw for that (/ those) lines
         if (new_active_button != m_cur_active_button) {
             InvalidateLineAtIndex(m_cur_active_button.line);
@@ -3156,8 +3245,6 @@ namespace winrt::MEraEmuWin::implementation {
             m_reused_last_line = false;
         }
 
-        auto height = GetAccUIHeightInLines();
-
         com_ptr<IDWriteTextFormat> txt_fmt;
         try {
             txt_fmt.copy_from(GetOrCreateTextFormat(m_cur_font_name));
@@ -3166,6 +3253,8 @@ namespace winrt::MEraEmuWin::implementation {
             // Font does not exist, fallback
             txt_fmt.copy_from(GetOrCreateTextFormat({}));
         }
+
+        auto line_i = size(m_ui_lines);
 
         m_ui_lines.emplace_back(hstring{});
         auto& cur_line = m_ui_lines.back();
@@ -3325,19 +3414,15 @@ namespace winrt::MEraEmuWin::implementation {
         m_cur_composing_line = {};
 
         cur_line.ensure_layout(this, m_ui_param_cache.canvas_width_px);
-        height += cur_line.height;
-        cur_line.acc_height = height;
         cur_line.flush_effects(this);
-        if (size(m_ui_lines) > 1) {
-            auto i = size(m_ui_lines) - 1;
-            auto& prev_line = m_ui_lines[i - 1];
-            cur_line.lookback_render_pos = prev_line.lookback_render_pos;
-            while (cur_line.lookback_render_pos < i &&
-                cur_line.lookback_render_pos + m_ui_lines[cur_line.lookback_render_pos].render_height <= i)
-            {
-                cur_line.lookback_render_pos++;
-            }
+        {
+            // Invalidate the area of the line (and the previous line, if overlapping)
+            size_t pos = cur_line.render_backward_height >= line_i ? 0 : line_i - cur_line.render_backward_height;
+            auto& line = m_ui_lines[pos];
+            auto new_height = (line.acc_height - line.height) * m_ui_param_cache.line_height_px_f;
+            m_last_redraw_dirty_height = std::min(m_last_redraw_dirty_height, (uint32_t)new_height);
         }
+        UpdateLineAccMetrics(line_i);
 
         m_cur_printc_count = 0;
 
@@ -3482,8 +3567,11 @@ namespace winrt::MEraEmuWin::implementation {
 
             PrintButtonRegionContext ctx;
 
+            bool last_is_br{};
             parser.parse([&](Parser::VisitEventKind event_kind, Parser::Tag const& tag, param::hstring const& text) {
                 if (event_kind == Parser::VisitEventKind::EnterTag) {
+                    last_is_br = false;
+
                     if (tag.name == L"p") {
                         // Paragraph introduces a new line
                         updated = FlushCurrentPrintLine() || updated;
@@ -3491,6 +3579,7 @@ namespace winrt::MEraEmuWin::implementation {
                     else if (tag.name == L"br") {
                         // Soft line break; do not flush current line
                         m_cur_composing_line.parts.push_back({ .str = hstring(L"\n"), .forbid_button = true });
+                        last_is_br = true;
                     }
                     else if (tag.name == L"button") {
                         ctx = BeginPrintButtonRegion();
@@ -3507,6 +3596,7 @@ namespace winrt::MEraEmuWin::implementation {
                                         width = x;
                                         x = y = {};
                                         height = 100;
+                                        is_valid = true;
                                     }
                                     else if (count == 4) {
                                         is_valid = true;
@@ -3529,7 +3619,8 @@ namespace winrt::MEraEmuWin::implementation {
                                 if (auto it = tag.attrs.find(L"param"); it != tag.attrs.end()) {
                                     int32_t width{};
                                     int count = swscanf(it->second.c_str(), L"%d", &width);
-                                    if (count == 1) {
+                                    // HACK: Skip if width is 0 to avoid game bugs
+                                    if (count == 1 && width != 0) {
                                         auto obj = make_self<EngineUIPrintLineDataInlineObject::InlineObject>(
                                             this, EngineUIPrintLineDataInlineObject::ShapeSpace{ .size = width }
                                         );
@@ -3559,6 +3650,12 @@ namespace winrt::MEraEmuWin::implementation {
                             else {
                                 throw std::runtime_error("Invalid align value");
                             }
+                        }
+
+                        if (last_is_br) {
+                            // Ignore empty lines after <br>
+                            last_is_br = false;
+                            m_cur_composing_line.parts.pop_back();
                         }
 
                         updated = FlushCurrentPrintLine() || updated;
@@ -3623,6 +3720,8 @@ namespace winrt::MEraEmuWin::implementation {
                     }
                 }
                 else if (event_kind == Parser::VisitEventKind::OnText) {
+                    last_is_br = false;
+
                     m_cur_composing_line.parts.push_back({ .str = text, .forbid_button = true });
                     gather_to_part_fn(m_cur_composing_line.parts.back());
                 }
@@ -3707,19 +3806,33 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::RoutineClearLine(uint64_t count) {
         if (count == 0) { return; }
         auto old_count = (uint64_t)size(m_ui_lines);
-        if (count >= old_count) {
-            m_ui_lines.clear();
+        if (count > old_count) {
+            count = old_count;
         }
-        else {
+        {
             auto ie = end(m_ui_lines);
-            m_ui_lines.erase(ie - count, ie);
+            auto ib = ie - count;
+            // Check how many previous lines are affected
+            uint32_t min_line = ib - begin(m_ui_lines);
+            for (auto it = ib; it != ie; ++it) {
+                auto& line = *it;
+                uint32_t i = it - begin(m_ui_lines);
+                if (line.render_backward_height >= i) {
+                    min_line = 0;
+                    break;
+                }
+                min_line = std::min(min_line, i - line.render_backward_height);
+            }
+            auto& line = m_ui_lines[min_line];
+            const auto new_height = (line.acc_height - line.height) * m_ui_param_cache.line_height_px_f;
+            m_last_redraw_dirty_height = std::min(m_last_redraw_dirty_height, (uint32_t)new_height);
+
+            // Erase lines
+            m_ui_lines.erase(ib, ie);
         }
+
         if (m_auto_redraw) {
             UpdateEngineImageOutputLayout(false);
-        }
-        else {
-            auto new_height = GetAccUIHeightInLines() * m_ui_param_cache.line_height_px_f;
-            m_last_redraw_dirty_height = std::min(m_last_redraw_dirty_height, (uint32_t)new_height);
         }
     }
     void EngineControl::RoutinePrintSourceButton(hstring const& content, hstring const& path,
@@ -3740,7 +3853,7 @@ namespace winrt::MEraEmuWin::implementation {
         EndPrintButtonRegion(ctx, [&] { return data; });
     }
     auto EngineControl::BeginPrintButtonRegion() -> PrintButtonRegionContext {
-        uint32_t ui_line_start = size(m_ui_lines);
+        uint32_t ui_line_start = size(m_ui_lines) - m_reused_last_line;
         uint32_t ui_line_offset{};
         for (auto const& part : m_cur_composing_line.parts) {
             ui_line_offset += part.str.size();

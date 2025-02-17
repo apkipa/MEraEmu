@@ -254,9 +254,12 @@ namespace winrt::MEraEmuWin::implementation {
         void UpdateEngineImageOutputLayout(bool invalidate_all, bool recreate_ui_lines = false);
         void InitD2DDevice(bool force_software);
         void RelayoutUILines(bool recreate_all);
-        uint64_t GetAccUIHeightInLines();
+        uint64_t GetAccUIHeightInLines(size_t line_idx = -1);
         // NOTE: Returns count of lines if height exceeds all lines
         size_t GetLineIndexFromHeight(uint64_t height);
+        // Updates line metrics for the given line index. If you were to update multiple lines,
+        // you should call this function in ascending order of line index.
+        void UpdateLineAccMetrics(size_t i);
         void InvalidateLineAtIndex(size_t line);
         void UpdateAndInvalidateActiveButton(Windows::Foundation::Point const& pt);
         bool TryFulfillInputRequest(bool clear_input);
@@ -264,6 +267,9 @@ namespace winrt::MEraEmuWin::implementation {
         IDWriteTextFormat* GetOrCreateTextFormat(hstring const& font_family);
         IDWriteTextFormat* GetDefaultTextFormat() {
             return GetOrCreateTextFormat(m_app_settings->GameDefaultFontName());
+        }
+        float ConvFontUnitToPixels(float font_unit) const noexcept {
+            return font_unit * m_ui_param_cache.font_size_px_f / 100;
         }
 
         void OnInputCountDownTick(IInspectable const&, IInspectable const&);
