@@ -45,8 +45,8 @@ pub use crate::types::EraCompilerHostFile as MEraEngineHostFile;
  * - Since the evaluation goes through the same code paths for compilation and execution,
  * it is possible that the interning pool gets polluted with temporary tokens, which
  * affects both memory usage and snapshot capabilities. To mitigate this, the engine
- * will use a separate interning pool for evaluation, which will be cleared after each
- * evaluation.
+ * will use a separate interning pool for code generated on the fly, which will be
+ * cleared after each evaluation.
  */
 
 #[derive(Debug)]
@@ -3270,7 +3270,12 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
     fn goto_next_safe_ip_inner(&mut self) -> anyhow::Result<()> {
         use hashbrown::hash_map::Entry;
 
-        let cur_ip = self.vm_state.get_cur_ip().context("no current IP")?;
+        let cur_exec_frame_idx = self
+            .vm_state
+            .get_cur_non_transient_exec_frame_index()
+            .context("no current exec frame")?;
+        let transient_exec_frame = self.vm_state.get_exec_frames().get(cur_exec_frame_idx + 1);
+        let cur_ip = self.vm_state.get_exec_frames()[cur_exec_frame_idx].ip;
         let func_info = self
             .ctx
             .func_info_from_chunk_pos(cur_ip.chunk as _, cur_ip.offset as _)
@@ -3444,14 +3449,21 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
                 .with_context(|| format!("IP not found: {}", offset))?;
             if bc_info.stack_balance == this_bc_info.base_stack_balance {
                 // Found a safe IP.
+                let old_stack_len = if let Some(exec_frame) = transient_exec_frame {
+                    // HACK: +1 to compensate for the removed eval string.
+                    exec_frame.real_stack_start as usize + 1
+                } else {
+                    self.vm_state.stack_len()
+                };
                 let new_ip = EraExecIp {
                     chunk: cur_ip.chunk,
                     offset: func_info.bc_offset + offset as u32,
                 };
                 let delta = this_bc_info.stack_balance - this_bc_info.base_stack_balance;
-                let new_len = self.vm_state.stack_len() - delta as usize;
-                self.vm_state.set_cur_ip(new_ip).unwrap();
+                let new_len = old_stack_len - delta as usize;
                 self.vm_state.truncate_stack(new_len);
+                self.vm_state.truncate_exec_frames(cur_exec_frame_idx + 1);
+                self.vm_state.set_cur_ip(new_ip).unwrap();
                 return Ok(());
             }
             offset += cur_inst.bytes_len();

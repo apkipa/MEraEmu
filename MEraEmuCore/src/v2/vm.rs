@@ -494,6 +494,25 @@ impl EraVirtualMachineState {
         self.frames.last().map(|f| f.ip)
     }
 
+    /// Gets the current non-transient instruction pointer.
+    pub fn get_cur_non_transient_ip(&self) -> Option<EraExecIp> {
+        (self.frames.iter().rev())
+            .find(|f| !f.is_transient)
+            .map(|f| f.ip)
+    }
+
+    pub fn get_cur_non_transient_exec_frame_index(&self) -> Option<usize> {
+        self.frames.iter().enumerate().rev().find_map(
+            |(i, f)| {
+                if !f.is_transient {
+                    Some(i)
+                } else {
+                    None
+                }
+            },
+        )
+    }
+
     /// Sets the current instruction pointer.
     pub fn set_cur_ip(&mut self, ip: EraExecIp) -> Result<(), ()> {
         if let Some(frame) = self.frames.last_mut() {
@@ -534,6 +553,10 @@ impl EraVirtualMachineState {
 
     pub fn truncate_stack(&mut self, new_len: usize) {
         self.stack.truncate(new_len);
+    }
+
+    pub fn truncate_exec_frames(&mut self, new_len: usize) {
+        self.frames.truncate(new_len);
     }
 }
 

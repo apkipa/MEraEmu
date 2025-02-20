@@ -329,7 +329,8 @@ namespace winrt::MEraEmuWin::implementation {
         event<Windows::Foundation::EventHandler<MEraEmuWin::EngineUnhandledExceptionEventArgs>> m_ev_UnhandledException;
         IVirtualSurfaceImageSourceNative* m_vsis_noref{};
         ISurfaceImageSourceNativeWithD2D* m_vsis_d2d_noref{};
-        com_ptr<ID2D1DeviceContext> m_d2d_ctx;
+        com_ptr<ID2D1DeviceContext3> m_d2d_ctx;
+        com_ptr<ID2D1SpriteBatch> m_d2d_sprite_batch;
         std::unordered_map<uint32_t, com_ptr<ID2D1SolidColorBrush>> m_brush_map;
         std::unordered_map<hstring, com_ptr<IDWriteTextFormat>> m_font_map;
         std::vector<EngineUIPrintLineData> m_ui_lines;

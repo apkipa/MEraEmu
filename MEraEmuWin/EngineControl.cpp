@@ -568,6 +568,10 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
 
+    static constexpr uint32_t saturate_to_u32(int32_t v) noexcept {
+        return v < 0 ? 0 : v;
+    }
+
     enum class FileBomKind {
         None,
         Utf8,
@@ -1566,7 +1570,7 @@ namespace winrt::MEraEmuWin::implementation {
         STDMETHOD(Draw)(void* clientDrawingContext, IDWriteTextRenderer* renderer, FLOAT originX, FLOAT originY, BOOL isSideways, BOOL isRightToLeft, IUnknown* clientDrawingEffect) override {
             // HACK: Exploits the UNDOCUMENTED `renderer`'s memory layout
             struct TextRenderer : ::IDWriteTextRenderer {
-                ID2D1DeviceContext* d2d_ctx;
+                ID2D1DeviceContext3* d2d_ctx;
                 ID2D1Brush* brush;
             };
             auto get_d2d_ctx = [&] {
@@ -1628,8 +1632,55 @@ namespace winrt::MEraEmuWin::implementation {
                 else {
                     // Draw sprite
                     auto& img = img_it->second;
-                    auto src_rect = D2D1::RectF(float(sprite.x), float(sprite.y), float(sprite.x + sprite.width), float(sprite.y + sprite.height));
-                    d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, src_rect);
+                    /*auto src_rect = D2D1::RectF(sprite.x, sprite.y, sprite.x + sprite.width, sprite.y + sprite.height);
+                    com_ptr<ID2D1Effect> crop_effect;
+                    check_hresult(d2d_ctx->CreateEffect(CLSID_D2D1Crop, crop_effect.put()));
+                    check_hresult(crop_effect->SetValue(D2D1_CROP_PROP_RECT, src_rect));
+                    crop_effect->SetInput(0, img.bitmap.get());
+                    com_ptr<ID2D1Effect> scale_effect;
+                    check_hresult(d2d_ctx->CreateEffect(CLSID_D2D1Scale, scale_effect.put()));
+                    check_hresult(scale_effect->SetValue(D2D1_SCALE_PROP_SCALE, D2D1::Vector2F(
+                        (float)(rect.right - rect.left) / sprite.width,
+                        (float)(rect.bottom - rect.top) / sprite.height
+                    )));
+                    check_hresult(scale_effect->SetValue(D2D1_SCALE_PROP_INTERPOLATION_MODE,
+                        D2D1_SCALE_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC));
+                    scale_effect->SetInputEffect(0, crop_effect.get());
+                    d2d_ctx->DrawImage(scale_effect.get(), D2D1::Point2F(rect.left, rect.top),
+                        D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR);*/
+                    /*auto src_rect = D2D1::RectF(sprite.x, sprite.y, sprite.x + sprite.width, sprite.y + sprite.height);
+                    d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f,
+                        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, src_rect);*/
+                    /*D2D1_RECT_U src_rect;
+                    src_rect.left = saturate_to_u32(sprite.x);
+                    src_rect.top = saturate_to_u32(sprite.y);
+                    src_rect.right = saturate_to_u32(src_rect.left + sprite.width);
+                    src_rect.bottom = saturate_to_u32(src_rect.top + sprite.height);
+                    auto const& sb = ctrl->m_d2d_sprite_batch;
+                    sb->Clear();
+                    sb->AddSprites(1, &rect, &src_rect);
+                    d2d_ctx->DrawSpriteBatch(sb.get(), img.bitmap.get(),
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_SPRITE_OPTIONS_CLAMP_TO_SOURCE_RECTANGLE);*/
+
+                    // HACK: A terrible workaround trying to fix D2D sampling outside the source region,
+                    //       while avoiding degrading the quality under certain circumstances.
+                    if (v.height <= 100) {
+                        auto src_rect = D2D1::RectF(sprite.x, sprite.y, sprite.x + sprite.width, sprite.y + sprite.height);
+                        d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f,
+                            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, src_rect);
+                    }
+                    else {
+                        D2D1_RECT_U src_rect;
+                        src_rect.left = saturate_to_u32(sprite.x);
+                        src_rect.top = saturate_to_u32(sprite.y);
+                        src_rect.right = saturate_to_u32(src_rect.left + sprite.width);
+                        src_rect.bottom = saturate_to_u32(src_rect.top + sprite.height);
+                        auto const& sb = ctrl->m_d2d_sprite_batch;
+                        sb->Clear();
+                        sb->AddSprites(1, &rect, &src_rect);
+                        d2d_ctx->DrawSpriteBatch(sb.get(), img.bitmap.get(),
+                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_SPRITE_OPTIONS_CLAMP_TO_SOURCE_RECTANGLE);
+                    }
                 }
                 return S_OK;
             };
@@ -2776,6 +2827,9 @@ namespace winrt::MEraEmuWin::implementation {
                 auto& line_data = m_ui_lines[line_end];
                 line_end = line_data.lookforward_render_pos;
                 line_end++;
+                if (line_end >= size(m_ui_lines)) {
+                    line_end = size(m_ui_lines);
+                }
             }
             // Look back rendering
             if (line_start < line_end) {
@@ -2918,10 +2972,13 @@ namespace winrt::MEraEmuWin::implementation {
 
         com_ptr<ID2D1Device> d2d_dev;
         check_hresult(D2D1CreateDevice(dxgi_dev.get(), nullptr, d2d_dev.put()));
+        com_ptr<ID2D1DeviceContext> d2d_ctx;
         check_hresult(d2d_dev->CreateDeviceContext(
             D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-            m_d2d_ctx.put()
+            d2d_ctx.put()
         ));
+        d2d_ctx.as(m_d2d_ctx);
+        check_hresult(m_d2d_ctx->CreateSpriteBatch(m_d2d_sprite_batch.put()));
 
         // Associate output image with created Direct2D device
         check_hresult(m_vsis_d2d_noref->SetDevice(d2d_dev.get()));
