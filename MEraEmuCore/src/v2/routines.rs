@@ -180,10 +180,35 @@ pub fn read_int_literal(s: &mut &[u8]) -> Option<i64> {
     Some(num)
 }
 
+pub fn read_int_literal_with_sign(s: &mut &[u8]) -> Option<i64> {
+    let orig_s = s;
+    let mut s = *orig_s;
+    let sign = if s.strip_prefix_inplace(b"-") {
+        -1
+    } else if s.strip_prefix_inplace(b"+") {
+        1
+    } else {
+        1
+    };
+    let r = read_int_literal(&mut s).map(|x| x.wrapping_mul(sign))?;
+    *orig_s = s;
+    Some(r)
+}
+
 pub fn read_int_literal_str(s: &mut &str) -> Option<i64> {
     unsafe {
         let mut slice = s.as_bytes();
         let r = read_int_literal(&mut slice)?;
+        // SAFETY: The input is valid UTF-8
+        *s = std::str::from_utf8_unchecked(slice);
+        Some(r)
+    }
+}
+
+pub fn read_int_literal_str_with_sign(s: &mut &str) -> Option<i64> {
+    unsafe {
+        let mut slice = s.as_bytes();
+        let r = read_int_literal_with_sign(&mut slice)?;
         // SAFETY: The input is valid UTF-8
         *s = std::str::from_utf8_unchecked(slice);
         Some(r)
@@ -198,14 +223,8 @@ pub fn parse_int_literal(s: &[u8]) -> Option<i64> {
 
 pub fn parse_int_literal_with_sign(s: &[u8]) -> Option<i64> {
     let mut s = s;
-    let sign = if s.strip_prefix_inplace(b"-") {
-        -1
-    } else if s.strip_prefix_inplace(b"+") {
-        1
-    } else {
-        1
-    };
-    parse_int_literal(s).map(|x| x.wrapping_mul(sign))
+    let r = read_int_literal_with_sign(&mut s)?;
+    s.is_empty().then_some(r)
 }
 
 #[test]

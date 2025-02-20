@@ -2383,6 +2383,10 @@ mod tests {
         // Read from environment variable
         let config = v2::engine::MEraEngineConfig {
             no_src_map: std::env::var("ERA_NO_SRC_MAP").is_ok(),
+            threads_cnt: std::env::var("ERA_THREADS_CNT")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(1),
             ..Default::default()
         };
         let game_base_dir = std::env::var("ERA_GAME_BASE_DIR").unwrap_or_else(|_| {

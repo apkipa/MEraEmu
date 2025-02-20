@@ -1896,7 +1896,7 @@ namespace winrt::MEraEmuWin::implementation {
             RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
         });
         RootScrollViewer().ViewChanged([this](auto&&, auto&&) {
-            auto pt = m_cur_pt;
+            auto pt = m_cur_pointer.pt;
             auto root_sv = RootScrollViewer();
             if (root_sv.ScrollableHeight() <= 0) {
                 // Slow path
@@ -1980,8 +1980,9 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::EngineOutputImage_PointerMoved(IInspectable const& sender, PointerRoutedEventArgs const& e) {
         e.Handled(true);
         auto root_sv = RootScrollViewer();
-        m_cur_pt = e.GetCurrentPoint(root_sv).Position();
-        auto pt = m_cur_pt;
+        auto ptr_pt = e.GetCurrentPoint(root_sv);
+        m_cur_pointer.pt = ptr_pt.Position();
+        auto pt = m_cur_pointer.pt;
         if (root_sv.ScrollableHeight() <= 0) {
             // Slow path
             pt = root_sv.TransformToVisual(EngineOutputImage()).TransformPoint(pt);
@@ -1991,97 +1992,44 @@ namespace winrt::MEraEmuWin::implementation {
             pt.Y += root_sv.VerticalOffset();
         }
         UpdateAndInvalidateActiveButton(pt);
+
+#if 1
+        // Support left-click while holding right-click.
+        // TODO: This behavior is not consistent with Tapped event, which is fired on LeftButtonReleased.
+        //       Should we change it to all fire on PointerReleased / PointerPressed?
+        using PointerUpdateKind = Windows::UI::Input::PointerUpdateKind;
+        if (ptr_pt.Properties().PointerUpdateKind() == PointerUpdateKind::LeftButtonPressed) {
+            m_user_skipping = true;
+            HandleEngineLeftClick(m_cur_pointer.pt, pt);
+        }
+#endif
+    }
+    void EngineControl::EngineOutputImage_PointerPressed(IInspectable const& sender, PointerRoutedEventArgs const& e) {
+        auto props = e.GetCurrentPoint(nullptr).Properties();
+        m_cur_pointer.left_button_down = props.IsLeftButtonPressed();
+        m_cur_pointer.right_button_down = props.IsRightButtonPressed();
+    }
+    void EngineControl::EngineOutputImage_PointerReleased(IInspectable const& sender, PointerRoutedEventArgs const& e) {
+        auto props = e.GetCurrentPoint(nullptr).Properties();
+        m_cur_pointer.left_button_down = props.IsLeftButtonPressed();
+        m_cur_pointer.right_button_down = props.IsRightButtonPressed();
     }
     void EngineControl::EngineOutputImage_PointerExited(IInspectable const& sender, PointerRoutedEventArgs const& e) {
-        m_cur_pt = { -1, -1 };
-        UpdateAndInvalidateActiveButton(m_cur_pt);
+        m_cur_pointer.pt = { -1, -1 };
+        m_cur_pointer.left_button_down = m_cur_pointer.right_button_down = false;
+        UpdateAndInvalidateActiveButton(m_cur_pointer.pt);
     }
     void EngineControl::EngineOutputImage_PointerCanceled(IInspectable const& sender, PointerRoutedEventArgs const& e) {
-        m_cur_pt = { -1, -1 };
-        UpdateAndInvalidateActiveButton(m_cur_pt);
+        m_cur_pointer.pt = { -1, -1 };
+        m_cur_pointer.left_button_down = m_cur_pointer.right_button_down = false;
+        UpdateAndInvalidateActiveButton(m_cur_pointer.pt);
     }
     void EngineControl::EngineOutputImage_Tapped(IInspectable const& sender, TappedRoutedEventArgs const& e) {
         e.Handled(true);
-        m_cur_pt = e.GetPosition(RootScrollViewer());
-        auto pt = e.GetPosition(EngineOutputImage());
-        UpdateAndInvalidateActiveButton(pt);
-        bool handled_button{};
-        if (m_cur_active_button.line < size(m_ui_lines)) {
-            auto const& cur_line = m_ui_lines[m_cur_active_button.line];
-            if (m_cur_active_button.button_idx < size(cur_line.buttons)) {
-                auto const& cur_button = cur_line.buttons[m_cur_active_button.button_idx];
-                // Clicking a button
-                handled_button = true;
-                auto input_button_fn = [this](EngineUIPrintLineDataButton::InputButton const& v) -> fire_and_forget {
-                    auto input_tb = UserInputTextBox();
-                    auto old_text = input_tb.Text();
-                    input_tb.Text(v.input);
-                    TryFulfillInputRequest(false);
-                    input_tb.Text(old_text);
-                    co_return;
-                };
-                auto source_button_fn = [this](EngineUIPrintLineDataButton::SourceButton const& v) -> fire_and_forget {
-                    ContentDialog cd;
-                    auto cmd = std::format(L"/C code -g \"{}:{}:{}\"", v.path, v.line, v.column);
-                    cd.XamlRoot(XamlRoot());
-                    cd.Title(box_value(L"执行外部命令?"));
-                    cd.Content(box_value(winrt::format(L""
-                        "MEraEmu 将在你的系统中执行以下 Shell 命令:\n{}\n"
-                        "如果不信任此命令, 请不要继续。确实要继续执行吗?",
-                        std::wstring_view{ cmd }.substr(3)
-                    )));
-                    cd.PrimaryButtonText(L"是, 执行");
-                    cd.CloseButtonText(L"取消");
-                    cd.DefaultButton(ContentDialogButton::Primary);
-                    cd.PrimaryButtonClick([&](auto&&, auto&&) {
-                        STARTUPINFOW si{ sizeof si };
-                        PROCESS_INFORMATION pi;
-                        bool succeeded = CreateProcessW(
-                            L"C:\\Windows\\System32\\cmd.exe", cmd.data(),
-                            nullptr, nullptr,
-                            false, CREATE_NO_WINDOW,
-                            nullptr, nullptr,
-                            &si,
-                            &pi
-                        );
-                        if (succeeded) {
-                            CloseHandle(pi.hProcess);
-                            CloseHandle(pi.hThread);
-                        }
-                    });
-                    co_await cd.ShowAsync();
-                };
-                auto engine_error_control_button_fn = [this](EngineUIPrintLineDataButton::EngineErrorControlButton const& v) -> fire_and_forget {
-                    using ButtonType = EngineUIPrintLineDataButton::EngineErrorControlButton::ButtonType;
-                    // Remove the button
-                    // NB: Must copy v.type before RoutineClearLine not to invalidate the reference
-                    auto type = v.type;
-                    RoutinePrint({}, ERA_PEF_IS_LINE);
-                    RoutineClearLine(1);
-                    if (type == ButtonType::Retry) {
-                        QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
-                    }
-                    else if (type == ButtonType::Continue) {
-                        QueueEngineFuncTask([](MEraEngine const& engine) {
-                            engine.goto_next_safe_ip();
-                        }, true);
-                    }
-                    co_return;
-                };
-                std::visit(overloaded{ input_button_fn, source_button_fn, engine_error_control_button_fn }, cur_button.data);
-            }
-        }
-        if (!handled_button) {
-            // Bring to bottom
-            RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
-            // Try to skip input requests
-            if (auto& input_req = m_outstanding_input_req) {
-                if (input_req->can_click) {
-                    input_req->try_fulfill_void();
-                    input_req = nullptr;
-                }
-            }
-        }
+        HandleEngineLeftClick(
+            e.GetPosition(RootScrollViewer()),
+            e.GetPosition(EngineOutputImage())
+        );
     }
     void EngineControl::EngineOutputImage_RightTapped(IInspectable const& sender, RightTappedRoutedEventArgs const& e) {
         e.Handled(true);
@@ -2710,7 +2658,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_no_skip_display_cnt = 0;
         m_cur_printc_count = 0;
         m_user_skipping = false;
-        m_cur_pt = { -1, -1 };
+        m_cur_pointer.pt = { -1, -1 };
         m_brush_map.clear();
         m_font_map.clear();
         m_graphics_objects.clear();
@@ -3232,6 +3180,88 @@ namespace winrt::MEraEmuWin::implementation {
                     m_input_last_prompt = prompt;
                     RoutineReuseLastLine(prompt);
                     UpdateEngineImageOutputLayout(false);
+                }
+            }
+        }
+    }
+    void EngineControl::HandleEngineLeftClick(Windows::Foundation::Point groundtruth_pt, Windows::Foundation::Point engine_pt) {
+        m_cur_pointer.pt = groundtruth_pt;
+        auto pt = engine_pt;
+        UpdateAndInvalidateActiveButton(pt);
+        bool handled_button{};
+        if (m_cur_active_button.line < size(m_ui_lines)) {
+            auto const& cur_line = m_ui_lines[m_cur_active_button.line];
+            if (m_cur_active_button.button_idx < size(cur_line.buttons)) {
+                auto const& cur_button = cur_line.buttons[m_cur_active_button.button_idx];
+                // Clicking a button
+                handled_button = true;
+                auto input_button_fn = [this](EngineUIPrintLineDataButton::InputButton const& v) -> fire_and_forget {
+                    auto input_tb = UserInputTextBox();
+                    auto old_text = input_tb.Text();
+                    input_tb.Text(v.input);
+                    TryFulfillInputRequest(false);
+                    input_tb.Text(old_text);
+                    co_return;
+                };
+                auto source_button_fn = [this](EngineUIPrintLineDataButton::SourceButton const& v) -> fire_and_forget {
+                    ContentDialog cd;
+                    auto cmd = std::format(L"/C code -g \"{}:{}:{}\"", v.path, v.line, v.column);
+                    cd.XamlRoot(XamlRoot());
+                    cd.Title(box_value(L"执行外部命令?"));
+                    cd.Content(box_value(winrt::format(L""
+                        "MEraEmu 将在你的系统中执行以下 Shell 命令:\n{}\n"
+                        "如果不信任此命令, 请不要继续。确实要继续执行吗?",
+                        std::wstring_view{ cmd }.substr(3)
+                    )));
+                    cd.PrimaryButtonText(L"是, 执行");
+                    cd.CloseButtonText(L"取消");
+                    cd.DefaultButton(ContentDialogButton::Primary);
+                    cd.PrimaryButtonClick([&](auto&&, auto&&) {
+                        STARTUPINFOW si{ sizeof si };
+                        PROCESS_INFORMATION pi;
+                        bool succeeded = CreateProcessW(
+                            L"C:\\Windows\\System32\\cmd.exe", cmd.data(),
+                            nullptr, nullptr,
+                            false, CREATE_NO_WINDOW,
+                            nullptr, nullptr,
+                            &si,
+                            &pi
+                        );
+                        if (succeeded) {
+                            CloseHandle(pi.hProcess);
+                            CloseHandle(pi.hThread);
+                        }
+                    });
+                    co_await cd.ShowAsync();
+                };
+                auto engine_error_control_button_fn = [this](EngineUIPrintLineDataButton::EngineErrorControlButton const& v) -> fire_and_forget {
+                    using ButtonType = EngineUIPrintLineDataButton::EngineErrorControlButton::ButtonType;
+                    // Remove the button
+                    // NB: Must copy v.type before RoutineClearLine not to invalidate the reference
+                    auto type = v.type;
+                    RoutinePrint({}, ERA_PEF_IS_LINE);
+                    RoutineClearLine(1);
+                    if (type == ButtonType::Retry) {
+                        QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+                    }
+                    else if (type == ButtonType::Continue) {
+                        QueueEngineFuncTask([](MEraEngine const& engine) {
+                            engine.goto_next_safe_ip();
+                        }, true);
+                    }
+                    co_return;
+                };
+                std::visit(overloaded{ input_button_fn, source_button_fn, engine_error_control_button_fn }, cur_button.data);
+            }
+        }
+        if (!handled_button) {
+            // Bring to bottom
+            RootScrollViewer().ChangeView(nullptr, 1e100, nullptr, true);
+            // Try to skip input requests
+            if (auto& input_req = m_outstanding_input_req) {
+                if (input_req->can_click) {
+                    input_req->try_fulfill_void();
+                    input_req = nullptr;
                 }
             }
         }
@@ -3775,7 +3805,7 @@ namespace winrt::MEraEmuWin::implementation {
             }
         }
         // If user is skipping, skip current request
-        if (m_user_skipping && input_req->can_skip) {
+        if ((m_user_skipping || m_cur_pointer.right_button_down) && input_req->can_skip) {
             std::exchange(input_req, nullptr)->try_fulfill_void();
             return;
         }

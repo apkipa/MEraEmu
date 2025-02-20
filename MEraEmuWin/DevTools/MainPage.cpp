@@ -326,11 +326,16 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         if (node.HasChildren()) { return; }
 
         std::string path_str;
+        bool inverse_slash = true;
         while (node) {
             auto content = node.Content().as<IInspectable>();
             if (!content) { break; }
             auto filename = to_string(unbox_value<hstring>(content));
-            path_str = std::move(filename) + (path_str.empty() ? "" : "\\") + std::move(path_str);
+            if (inverse_slash && filename == "<VM>") {
+                inverse_slash = false;
+            }
+            const auto sep = inverse_slash ? "\\" : "/";
+            path_str = std::move(filename) + (path_str.empty() ? "" : sep) + std::move(path_str);
             node = node.Parent();
         }
 
@@ -511,7 +516,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             std::unordered_map<std::string_view, muxc::TreeViewNode> nodes_map;
             for (std::string_view path : source_files) {
                 auto add_or_make_node = [&](auto self, std::string_view path) {
-                    auto path_delim_pos = path.find_last_of('\\');
+                    auto path_delim_pos = path.find_last_of("/\\");
                     bool has_parent = path_delim_pos != std::string_view::npos;
                     auto parent = has_parent ? path.substr(0, path_delim_pos) : "";
                     auto filename = has_parent ? path.substr(path_delim_pos + 1) : path;
@@ -673,7 +678,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         }
 
         auto tab = make<SourcesFileTabItem>();
-        tab.FileName(path_sv.substr(path_sv.rfind(L'\\') + 1));
+        tab.FileName(path_sv.substr(path_sv.find_last_of(L"/\\") + 1));
         tab.FullPath(path);
         tab.DocType(L"erb");
         auto tab_index = m_sources_file_tab_items.Size();

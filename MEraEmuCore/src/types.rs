@@ -597,7 +597,7 @@ pub struct EraToken {
     pub span: SrcSpan,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EraDefineData {
     pub filename: ArcStr,
     pub span: SrcSpan,
@@ -610,7 +610,7 @@ pub struct EraDefineData {
 //     parent: Option<&'parent EraDefineScope<'parent>>,
 //     defines: HashMap<Box<[u8]>, Box<[u8]>>,
 // }
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct EraDefineScope {
     defines: FxHashMap<ArcStr, EraDefineData>,
 }
@@ -660,7 +660,7 @@ impl EraDefineScope {
 }
 
 /// Macro mappings, from the replaced source span to the original text.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct EraMacroMap {
     /// The list of macro mappings (monotonic).
     mappings: Vec<(SrcSpan, ArcStr)>,
@@ -807,15 +807,18 @@ impl Default for EraSourceFileKind {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct EraSourceFile {
     pub filename: ArcStr,
     /// The original source text.
     pub text: Option<arcstr::ArcStr>,
     /// The compressed original source text. Reduces memory usage.
+    #[serde(skip)]
     pub compressed_text: Option<Box<[u8]>>,
     /// The root AST node of the lossless syntax tree, with macros replaced.
+    #[serde(skip)]
     pub cst_root: Option<cstree::green::GreenNode>,
+    #[serde(skip)]
     pub ast_data: Option<(
         crate::v2::parser::EraNodeRef,
         crate::v2::parser::EraNodeArena,
@@ -828,6 +831,7 @@ pub struct EraSourceFile {
     pub kind: EraSourceFileKind,
     /// The list of newline positions (before expansion of macros).
     pub newline_pos: Vec<SrcPos>,
+    pub is_transient: bool,
 }
 
 #[derive(Debug)]
@@ -852,12 +856,18 @@ impl<'i, Callback> DerefMut for EraCompilerCtx<'i, Callback> {
     }
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct EraCompilerCtxTransient {
+    // pub source_map: FxHashMap<ArcStr, EraSourceFile>,
+    pub interner: ThreadedTokenInterner,
+    // pub bc_chunks: Vec<EraBcChunk>,
+}
+
 #[derive(Debug)]
 pub struct EraCompilerCtxInner<'i> {
     /// Replacements defined in `_Rename.csv`.
     pub global_replace: EraDefineScope,
     /// `#define`'s from erh files are considered global.
-    // global_define: EraDefineScope<'static>,
     pub global_define: EraDefineScope,
     /// The source file map.
     pub source_map: Arc<FxIndexMap<ArcStr, EraSourceFile>>,
@@ -871,13 +881,15 @@ pub struct EraCompilerCtxInner<'i> {
     pub bc_chunks: Arc<Vec<EraBcChunk>>,
     /// The list of function entries. Note that the value is wrapped in `Option` to
     /// allow for soft deletion.
-    pub func_entries: Arc<FxIndexMap<&'i Ascii<str>, Option<EraFuncInfo<'i>>>>,
-    // TODO: Always use `&'i ThreadedRodeo`. We also need to implement a `ThreadedNodeCache` later.
-    //       This helps with concurrent interning, and also helps to eliminate the usage of `unsafe`.
+    pub func_entries: Arc<FxIndexMap<Ascii<ArcStr>, Option<EraFuncInfo<'i>>>>,
     /// The node cache used for CST building.
     pub node_cache: cstree::build::NodeCache<'i, &'i ThreadedTokenInterner>,
     /// All globally stored variables.
     pub variables: EraVarPool,
+    /// The transient data, for eval purposes.
+    pub transient_ctx: Arc<EraCompilerCtxTransient>,
+    /// The file id counter for evaluation source files.
+    pub eval_id_counter: u32,
 }
 
 trait IndexMapExt {
@@ -916,6 +928,8 @@ impl<'i, Callback: EraCompilerCallback> EraCompilerCtx<'i, Callback> {
                 bc_chunks: Arc::new(Vec::new()),
                 func_entries: Default::default(),
                 variables: EraVarPool::new(),
+                transient_ctx: Arc::new(Default::default()),
+                eval_id_counter: 0,
             },
         }
     }
@@ -1035,6 +1049,46 @@ impl<'i> EraCompilerCtxInner<'i> {
 
     pub fn get_chara_save_path(&self, save_id: &str) -> String {
         format!(".\\dat\\chara_{save_id}.dat")
+    }
+
+    pub fn get_transient_src_name(&self, idx: u32) -> String {
+        format!("<VM>/VM{idx}")
+    }
+
+    pub fn generate_next_transient_src_name(&mut self) -> String {
+        self.eval_id_counter += 1;
+        let idx = self.eval_id_counter;
+        self.get_transient_src_name(idx)
+    }
+
+    pub fn push_source_file(
+        &mut self,
+        filename: ArcStr,
+        content: arcstr::ArcStr,
+        kind: EraSourceFileKind,
+        is_transient: bool,
+    ) -> bool {
+        use indexmap::map::Entry;
+
+        let source_map = Arc::get_mut(&mut self.source_map).expect("source map is shared");
+        match source_map.entry(filename.clone()) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(entry) => {
+                entry.insert(EraSourceFile {
+                    filename,
+                    kind,
+                    text: Some(content),
+                    compressed_text: None,
+                    cst_root: None,
+                    ast_data: None,
+                    macro_map: Default::default(),
+                    defines: Default::default(),
+                    newline_pos: Vec::new(),
+                    is_transient,
+                });
+                true
+            }
+        }
     }
 
     pub fn serialize_source_code_into(&self, w: &mut impl std::io::Write) -> bincode::Result<()> {
@@ -3964,6 +4018,9 @@ pub enum EraExtBytecode1 {
     GetConfig,
     GetConfigS,
     FindCharaDataFile,
+    EvalStrForm,
+    EvalIntExpr,
+    EvalStrExpr,
 }
 
 /// Strongly typed version of Era bytecode. All integer values are encoded in native-endian.
@@ -4169,6 +4226,9 @@ pub enum EraBytecodeKind {
     GetConfig,
     GetConfigS,
     FindCharaDataFile,
+    EvalStrForm,
+    EvalIntExpr,
+    EvalStrExpr,
 }
 
 impl EraBytecodeKind {
@@ -4491,6 +4551,9 @@ impl EraBytecodeKind {
                     Ext1::GetConfig => Ok(GetConfig),
                     Ext1::GetConfigS => Ok(GetConfigS),
                     Ext1::FindCharaDataFile => Ok(FindCharaDataFile),
+                    Ext1::EvalStrForm => Ok(EvalStrForm),
+                    Ext1::EvalIntExpr => Ok(EvalIntExpr),
+                    Ext1::EvalStrExpr => Ok(EvalStrExpr),
                     _ => Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "Invalid ext op1 kind",
@@ -5000,7 +5063,18 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::FindCharaDataFile as u8);
             }
-            _ => todo!(),
+            EvalStrForm => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::EvalStrForm as u8);
+            }
+            EvalIntExpr => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::EvalIntExpr as u8);
+            }
+            EvalStrExpr => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::EvalStrExpr as u8);
+            }
         }
         bytes
     }
@@ -5157,6 +5231,7 @@ impl EraBytecodeKind {
             LoadChara => -1,
             GetConfig | GetConfigS => 0,
             FindCharaDataFile => -1,
+            EvalStrForm | EvalIntExpr | EvalStrExpr => 0,
         })
     }
 }
@@ -5345,7 +5420,7 @@ pub struct EraFuncFrameInfo<'i> {
 
 #[derive(Debug, Clone)]
 pub struct EraFuncInfo<'i> {
-    pub name: TokenKey,
+    pub name: ArcStr,
     pub name_span: SrcSpan,
     pub frame_info: EraFuncFrameInfo<'i>,
     pub chunk_idx: u32,

@@ -185,6 +185,8 @@ namespace winrt::MEraEmuWin::implementation {
             return Windows::UI::Xaml::Media::SolidColorBrush(value);
         }
 
+        void EngineOutputImage_PointerPressed(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
+        void EngineOutputImage_PointerReleased(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
         void EngineOutputImage_PointerMoved(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
         void EngineOutputImage_PointerExited(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
         void EngineOutputImage_PointerCanceled(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
@@ -273,6 +275,7 @@ namespace winrt::MEraEmuWin::implementation {
         }
 
         void OnInputCountDownTick(IInspectable const&, IInspectable const&);
+        void HandleEngineLeftClick(Windows::Foundation::Point groundtruth_pt, Windows::Foundation::Point engine_pt);
         bool FlushCurrentPrintLine(bool force_push = false);
         // NOTE: Wait flag is ignored deliberately
         void RoutinePrint(hstring content, PrintExtendedFlags flags);
@@ -379,7 +382,13 @@ namespace winrt::MEraEmuWin::implementation {
             auto operator<=>(ActiveButtonData const& rhs) const noexcept = default;
             bool is_default() const noexcept { return line == -1; }
         } m_cur_active_button{};
-        Windows::Foundation::Point m_cur_pt{};
+        struct {
+            Windows::Foundation::Point pt{ -1, -1 };
+            bool left_button_down{};
+            bool right_button_down{};
+
+            bool is_valid() const noexcept { return pt.X != -1; }
+        } m_cur_pointer;
 
         struct GraphicsObject {
             hstring file_path;

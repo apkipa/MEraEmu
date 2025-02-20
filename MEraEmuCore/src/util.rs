@@ -689,6 +689,48 @@ where
     }
 }
 
+pub struct ZstdSink<W: std::io::Write> {
+    encoder: zstd::stream::AutoFinishEncoder<'static, W>,
+}
+impl<W: std::io::Write> ZstdSink<W> {
+    pub fn new(writer: W) -> Self {
+        Self {
+            encoder: zstd::Encoder::new(writer, 0).unwrap().auto_finish(),
+        }
+    }
+}
+impl<W> std::io::Write for ZstdSink<W>
+where
+    W: std::io::Write,
+{
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.encoder.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.encoder.flush()
+    }
+}
+
+pub struct ZstdSource<R> {
+    decoder: zstd::stream::Decoder<'static, std::io::BufReader<R>>,
+}
+impl<R: std::io::Read> ZstdSource<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            decoder: zstd::Decoder::new(reader).unwrap(),
+        }
+    }
+}
+impl<R> std::io::Read for ZstdSource<R>
+where
+    R: std::io::Read,
+{
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.decoder.read(buf)
+    }
+}
+
 macro_rules! impl_serde_for_modular_bitfield {
     ($name:ident, $type:ty) => {
         impl serde::Serialize for $name {

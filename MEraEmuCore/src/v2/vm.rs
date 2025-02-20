@@ -8,10 +8,11 @@ use std::{
 };
 
 use anyhow::Context;
-use cstree::interning::{InternKey, Resolver, TokenKey};
+use cstree::interning::{InternKey, Interner, Resolver, TokenKey};
 use dynasmrt::{dynasm, AssemblyOffset, DynasmApi, DynasmLabelApi};
 use hashbrown::{HashMap, HashSet};
 use itertools::Itertools;
+use rclite::Arc;
 use rustc_hash::FxBuildHasher;
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +24,7 @@ use crate::{
         rcstr::{self, ArcStr, RcStr},
         AnyhowExt, Ascii,
     },
-    v2::routines,
+    v2::{codegen::EraCodeGenerator, lexer::EraLexer, parser::EraParser, routines},
 };
 use EraBytecodeKind as Bc;
 
@@ -446,6 +447,9 @@ pub struct EraExecIp {
 pub struct EraFuncExecFrame {
     /// The index of the first (normal) stack value in this frame.
     pub stack_start: u32,
+    /// The index of the first (normal) stack value in this frame, without
+    /// considering transient properties.
+    pub real_stack_start: u32,
     /// The index of the first (dynamic) variable storage in this frame.
     pub vars_stack_start: u32,
     pub ip: EraExecIp,
@@ -472,6 +476,7 @@ impl EraVirtualMachineState {
         self.frames.clear();
         self.frames.push(EraFuncExecFrame {
             stack_start: self.stack.len() as _,
+            real_stack_start: self.stack.len() as _,
             vars_stack_start: self.var_stack.len() as _,
             ip,
             ret_ip: EraExecIp {
@@ -794,6 +799,10 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVmExecSite<'ctx, 'i, 's, Ca
 
     fn add_ip_offset(&mut self, offset: i32) {
         self.o.cur_frame.ip.offset = self.o.cur_frame.ip.offset.wrapping_add_signed(offset);
+    }
+
+    pub fn get_cur_ip(&self) -> EraExecIp {
+        self.o.cur_frame.ip
     }
 }
 
@@ -1654,12 +1663,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         // DANGER: Touches the site execution state. Watch out for UB.
         let o = unsafe { self.optr.as_mut() };
         if o.frames.len() <= 1 {
-            anyhow::bail!("no function to return from");
+            anyhow::bail!("no function to return to");
         }
         let cur_frame = o.frames.pop().unwrap();
-        if !cur_frame.is_transient {
-            o.stack.truncate(cur_frame.stack_start as _);
-            o.var_stack.truncate(cur_frame.vars_stack_start as _);
+        o.stack.truncate(cur_frame.real_stack_start as _);
+        o.var_stack.truncate(cur_frame.vars_stack_start as _);
+        if cur_frame.is_transient {
+            // TODO: Remove transient source
         }
         self.remake_site()?;
         self.o.cur_frame.ip = cur_frame.ret_ip;
@@ -1674,16 +1684,17 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let val = val.clone();
         let o = unsafe { self.optr.as_mut() };
         if o.frames.len() <= 1 {
-            anyhow::bail!("no function to return from");
+            anyhow::bail!("no function to return to");
         }
         let cur_frame = o.frames.pop().unwrap();
-        if !cur_frame.is_transient {
-            o.stack.truncate(cur_frame.stack_start as _);
-            o.var_stack.truncate(cur_frame.vars_stack_start as _);
+        o.stack.truncate(cur_frame.real_stack_start as _);
+        o.var_stack.truncate(cur_frame.vars_stack_start as _);
+        if cur_frame.is_transient {
+            // TODO: Remove transient source
         }
         self.remake_site()?;
         self.o.cur_frame.ip = cur_frame.ret_ip;
-        if !cur_frame.ignore_return_value && !cur_frame.is_transient {
+        if !cur_frame.ignore_return_value {
             self.o.stack.push(StackValue::new_int(val));
         }
         Ok(())
@@ -1697,16 +1708,17 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let val = val.clone();
         let o = unsafe { self.optr.as_mut() };
         if o.frames.len() <= 1 {
-            anyhow::bail!("no function to return from");
+            anyhow::bail!("no function to return to");
         }
         let cur_frame = o.frames.pop().unwrap();
-        if !cur_frame.is_transient {
-            o.stack.truncate(cur_frame.stack_start as _);
-            o.var_stack.truncate(cur_frame.vars_stack_start as _);
+        o.stack.truncate(cur_frame.real_stack_start as _);
+        o.var_stack.truncate(cur_frame.vars_stack_start as _);
+        if cur_frame.is_transient {
+            // TODO: Remove transient source
         }
         self.remake_site()?;
         self.o.cur_frame.ip = cur_frame.ret_ip;
-        if !cur_frame.ignore_return_value && !cur_frame.is_transient {
+        if !cur_frame.ignore_return_value {
             self.o.stack.push(StackValue::new_str(val));
         }
         Ok(())
@@ -1730,7 +1742,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let func_idx = func_idx as usize;
         let Some((func_name, func_info)) = (self.o.ctx.func_entries)
             .get_index(func_idx)
-            .and_then(|(&k, v)| v.as_ref().map(|v| (k, v)))
+            .and_then(|(k, v)| v.as_ref().map(|v| (k.clone(), v)))
         else {
             crate::util::cold();
 
@@ -1797,6 +1809,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         };
         o.frames.push(EraFuncExecFrame {
             stack_start: stack_start as _,
+            real_stack_start: stack_start as _,
             vars_stack_start: o.var_stack.len() as _,
             ip: new_ip,
             ret_ip,
@@ -1832,9 +1845,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 let idx = x.val as usize;
                 (self.o.ctx.i.func_entries)
                     .get_index(idx)
-                    .and_then(|(&k, v)| {
+                    .and_then(|(k, v)| {
                         num_func_idx = idx;
-                        v.as_ref().map(|v| (k, v))
+                        v.as_ref().map(|v| (k.clone(), v))
                     })
             }
             RefFlatStackValue::Str(x) => {
@@ -1842,10 +1855,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 let idx = x.val.as_str();
                 (self.o.ctx.i.func_entries)
                     .get_full(Ascii::new_str(idx))
-                    .and_then(|(num_idx, &k, v)| {
+                    .and_then(|(num_idx, k, v)| {
                         v.as_ref().map(|v| {
                             num_func_idx = num_idx;
-                            (k, v)
+                            (k.clone(), v)
                         })
                     })
             }
@@ -2114,6 +2127,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             };
             o.frames.push(EraFuncExecFrame {
                 stack_start: stack_start as _,
+                real_stack_start: stack_start as _,
                 vars_stack_start: o.var_stack.len() as _,
                 ip: new_ip,
                 ret_ip,
@@ -2162,7 +2176,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let func_idx = func_idx as usize;
         let Some((func_name, func_info)) = (self.o.ctx.func_entries)
             .get_index(func_idx)
-            .and_then(|(&k, v)| v.as_ref().map(|v| (k, v)))
+            .and_then(|(k, v)| v.as_ref().map(|v| (k.clone(), v)))
         else {
             let msg = format!("function index {} not found", func_idx);
             let mut diag = Diagnostic::new();
@@ -2201,6 +2215,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         o.frames.clear();
         o.frames.push(EraFuncExecFrame {
             stack_start: stack_start as _,
+            real_stack_start: stack_start as _,
             vars_stack_start: o.var_stack.len() as _,
             ip: new_ip,
             ret_ip,
@@ -4097,13 +4112,14 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         // TODO: Make this more efficient without needing to call `remake_site`.
         // DANGER: Touches the site execution state. Watch out for UB.
         let o = unsafe { self.optr.as_mut() };
+        let mut _temp_str = ArcStr::new();
         let name = if o.frames.len() < 2 {
             ""
         } else {
             let EraExecIp { chunk, offset } = o.frames[o.frames.len() - 2].ip;
             (self.o.ctx)
                 .func_info_from_chunk_pos(chunk as _, offset as _)
-                .map_or("", |x| self.o.ctx.resolve_str(x.name))
+                .map_or("", |x| &x.name)
         };
         let r = StackValue::new_str(name.into());
         self.remake_site()?;
@@ -5405,6 +5421,141 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         Ok(())
     }
 
+    fn instr_eval_str_form(&mut self) -> anyhow::Result<()> {
+        self.instr_eval_str_form_with_return_value()?;
+        Ok(())
+    }
+
+    fn instr_eval_str_form_with_return_value(&mut self) -> anyhow::Result<usize> {
+        self.ensure_pre_step_instruction()?;
+
+        // DANGER: Touches the site execution state. Watch out for UB.
+        let instr_len = Bc::EvalStrForm.bytes_len() as u32;
+        view_stack!(self, _, eval_str:s);
+        let eval_str = arcstr::ArcStr::from(eval_str.as_str());
+
+        // Check call stack depth
+        let o = unsafe { self.optr.as_mut() };
+        if o.frames.len() >= MAX_CALL_DEPTH {
+            crate::util::cold();
+
+            let mut diag = Diagnostic::new();
+            diag.span_err(
+                self.o.cur_filename(),
+                self.o.cur_bc_span(),
+                "maximum call depth exceeded",
+            );
+            self.o.ctx.emit_diag(diag);
+            self.break_reason = EraExecutionBreakReason::InternalError;
+            return Err(FireEscapeError(self.break_reason).into());
+        }
+
+        // Add to sources map and compile
+        let filename = ArcStr::from(self.o.ctx.generate_next_transient_src_name());
+        if !self.o.ctx.push_source_file(
+            filename.clone(),
+            eval_str.clone(),
+            EraSourceFileKind::Source,
+            true,
+        ) {
+            anyhow::bail!("source file `{filename}` already exists");
+        }
+        let ast = {
+            let mut lexer = EraLexer::new(filename.clone(), &eval_str, false);
+            let mut is_str_var_fn = |_: &str| false;
+            let mut parser = EraParser::new(
+                &mut self.o.ctx.callback,
+                &self.o.ctx.i,
+                &mut lexer,
+                &self.o.ctx.i.interner(),
+                &self.o.ctx.i.global_replace,
+                &self.o.ctx.i.global_define,
+                &mut is_str_var_fn,
+                false,
+                true,
+            );
+            parser.parse_string_form()
+        };
+        let bc_chunk = {
+            let func_entries = self.o.ctx.func_entries.clone();
+            let ip = self.get_cur_ip();
+            // TODO: Support nested eval
+            // TODO: Use interner from transient_ctx
+            let (env_func, _) = self
+                .o
+                .ctx
+                .func_idx_and_info_from_chunk_pos(ip.chunk as _, ip.offset as _)
+                .unwrap();
+            let env_func = func_entries
+                .get_index(env_func)
+                .unwrap()
+                .1
+                .as_ref()
+                .unwrap();
+            let mut compiler = EraCodeGenerator::new(self.o.ctx, true, true, true);
+            let Ok(chunk) =
+                compiler.compile_str_expr(filename.clone(), env_func, &ast.nodes, ast.root_node)
+            else {
+                anyhow::bail!("failed to compile `{}`", eval_str);
+            };
+            chunk
+        };
+        let bc_chunks =
+            Arc::get_mut(&mut self.o.ctx.bc_chunks).context_unlikely("bc_chunks is shared")?;
+        let chunk_idx = bc_chunks.len();
+        let bc_chunk_len = bc_chunk.len();
+        bc_chunks.push(bc_chunk);
+        let func_entries = Arc::get_mut(&mut self.o.ctx.func_entries)
+            .context_unlikely("func_entries is shared")?;
+        let func_idx = func_entries.len();
+        let func_name = filename.clone();
+        func_entries.insert(
+            Ascii::new(func_name.clone()),
+            Some(EraFuncInfo {
+                name: func_name.clone(),
+                name_span: Default::default(),
+                frame_info: Default::default(),
+                chunk_idx: chunk_idx as _,
+                bc_offset: 0,
+                bc_size: bc_chunk_len as _,
+                ret_kind: ScalarValueKind::Str,
+                is_transient: true,
+            }),
+        );
+
+        // Prepare for execution environment
+        o.stack.pop().unwrap();
+
+        let new_ip = EraExecIp {
+            chunk: chunk_idx as _,
+            offset: 0,
+        };
+        let ret_ip = EraExecIp {
+            chunk: self.o.cur_frame.ip.chunk,
+            offset: self.o.cur_frame.ip.offset + instr_len,
+        };
+
+        // Create a new execution frame for the function
+        let is_transient = true;
+        let stack_start = if is_transient {
+            o.frames.last().map_or(0, |f| f.stack_start as usize)
+        } else {
+            o.stack.len()
+        };
+        o.frames.push(EraFuncExecFrame {
+            stack_start: stack_start as _,
+            real_stack_start: o.stack.len() as _,
+            vars_stack_start: o.var_stack.len() as _,
+            ip: new_ip,
+            ret_ip,
+            ignore_return_value: false,
+            is_transient,
+        });
+        self.remake_site()?;
+
+        Ok(func_idx)
+    }
+
     fn instr_raise_illegal_instruction(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
@@ -5650,6 +5801,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::GetConfig => s.instr_get_config()?,
             Bc::GetConfigS => s.instr_get_config_s()?,
             Bc::FindCharaDataFile => s.instr_find_chara_data_file()?,
+            Bc::EvalStrForm => s.instr_eval_str_form()?,
+            Bc::EvalIntExpr => todo!(),
+            Bc::EvalStrExpr => todo!(),
             // _ => s.instr_raise_illegal_instruction()?,
             // _ => {
             //     let mut diag = Diagnostic::new();

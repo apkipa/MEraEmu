@@ -235,7 +235,7 @@ namespace winrt::MEraEmuWin::implementation {
             L"UI 版本: {}\n"
             L"引擎版本: {}\n"
             L"作者: apkipa",
-            L"v0.2.0",
+            L"v0.3.1",
             to_hstring(MEraEngine::get_version())
         )));
     }

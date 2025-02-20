@@ -796,12 +796,14 @@ impl<'i, I> EraNodeBuilder<'i, I> {
     }
 }
 
-pub struct EraParsedProgram {
+pub struct EraParsedAst {
     pub root_node: EraNodeRef,
     pub nodes: EraNodeArena,
     pub macro_map: EraMacroMap,
     pub defines: EraDefineScope,
 }
+
+pub type EraParsedProgram = EraParsedAst;
 
 pub struct EraParser<'a, 'b, 'i> {
     diag_emit: &'b mut dyn EraEmitDiagnostic,
@@ -810,8 +812,11 @@ pub struct EraParser<'a, 'b, 'i> {
     interner: &'i ThreadedTokenInterner,
     replaces: &'b EraDefineScope,
     defines: &'b EraDefineScope,
+    /// Function to check if a variable is of string type. This hack is needed because
+    /// we can't determine the type of a variable without the context of the program.
     is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
     is_header: bool,
+    is_transient: bool,
 }
 
 impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
@@ -824,6 +829,7 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
         defines: &'b EraDefineScope,
         is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
         is_header: bool,
+        is_transient: bool,
     ) -> Self {
         EraParser {
             diag_emit,
@@ -834,21 +840,13 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
             defines,
             is_str_var_fn,
             is_header,
+            is_transient,
         }
     }
 
+    /// Parses a program. This is the usual main entry point for parsing.
     pub fn parse_program(&mut self) -> EraParsedProgram {
-        let builder = EraNodeBuilder::with_interner(self.interner);
-        let mut site = EraParserSite::new(
-            self.diag_emit,
-            self.ctx,
-            self.lexer,
-            builder,
-            self.replaces,
-            self.defines,
-            self.is_str_var_fn,
-            self.is_header,
-        );
+        let mut site = self.new_parser_site();
         // NOTE: We use error-tolerant parsing here, so theoretically this should never fail.
         let program_root = site.program().unwrap();
         let (node_arena, macro_map, defines) = site.into_inner();
@@ -858,6 +856,61 @@ impl<'a, 'b, 'i> EraParser<'a, 'b, 'i> {
             macro_map,
             defines,
         }
+    }
+
+    /// Parses a string form. Usually used for eval scenarios.
+    pub fn parse_string_form(&mut self) -> EraParsedAst {
+        let mut site = self.new_parser_site();
+        let root_node = site.raw_strform();
+        let (node_arena, macro_map, defines) = site.into_inner();
+        EraParsedAst {
+            root_node,
+            nodes: node_arena,
+            macro_map,
+            defines,
+        }
+    }
+
+    pub fn parse_expression(&mut self) -> EraParsedAst {
+        let mut site = self.new_parser_site();
+        let root_node = site.or_sync_to(
+            |site| site.expression(true),
+            EraTerminalTokenKind::LineBreak.into(),
+        );
+        let (node_arena, macro_map, defines) = site.into_inner();
+        EraParsedAst {
+            root_node,
+            nodes: node_arena,
+            macro_map,
+            defines,
+        }
+    }
+
+    pub fn parse_statements_list(&mut self) -> EraParsedAst {
+        let mut site = self.new_parser_site();
+        let (root_node, _) = site.statements_list(None);
+        let (node_arena, macro_map, defines) = site.into_inner();
+        EraParsedAst {
+            root_node,
+            nodes: node_arena,
+            macro_map,
+            defines,
+        }
+    }
+
+    fn new_parser_site(&mut self) -> EraParserSite<'a, '_, 'i> {
+        let builder = EraNodeBuilder::with_interner(self.interner);
+        EraParserSite::new(
+            self.diag_emit,
+            self.ctx,
+            self.lexer,
+            builder,
+            self.replaces,
+            self.defines,
+            self.is_str_var_fn,
+            self.is_header,
+            self.is_transient,
+        )
     }
 }
 
@@ -873,9 +926,28 @@ struct EraParserOuter<'a, 'b, 'i> {
     local_defines: EraDefineScope,
     is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
     is_header: bool,
+    transient_ctx: Option<Arc<EraCompilerCtxTransient>>,
     is_panicking: bool,
     macro_place: EraParserMacroPlace<'a>,
     node_arena: EraNodeArena,
+}
+
+impl<'i> EraParserOuter<'_, '_, 'i> {
+    // fn interner(&self) -> &'i ThreadedTokenInterner {
+    //     if let Some(transient_ctx) = &self.transient_ctx {
+    //         let i: &ThreadedTokenInterner = &transient_ctx.interner;
+    //         debug_assert!(transient_ctx.strong_count() > 1);
+    //         // SAFETY: We know that the interner is alive because the transient context is kept
+    //         //         alive by the compiler context.
+    //         unsafe { std::mem::transmute(i) }
+    //     } else {
+    //         self.b.interner()
+    //     }
+    // }
+
+    fn interner(&self) -> &'i ThreadedTokenInterner {
+        self.b.interner()
+    }
 }
 
 // ((macro_span, covering_span, start_pos), macro_map, src)
@@ -945,9 +1017,11 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
         defines: &'b EraDefineScope,
         is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
         is_header: bool,
+        is_transient: bool,
     ) -> Self {
         let mut macro_place = EraParserMacroPlace::default();
         macro_place.2 = l.get_src();
+        let transient_ctx = is_transient.then(|| ctx.transient_ctx.clone());
         EraParserOuter {
             diag_emit,
             ctx,
@@ -958,6 +1032,7 @@ impl<'a, 'b, 'i> EraParserOuter<'a, 'b, 'i> {
             local_defines: Default::default(),
             is_str_var_fn,
             is_header,
+            transient_ctx,
             is_panicking: false,
             macro_place,
             node_arena: EraNodeArena::new(),
@@ -1088,6 +1163,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         defines: &'b EraDefineScope,
         is_str_var_fn: &'b mut dyn FnMut(&str) -> bool,
         is_header: bool,
+        is_transient: bool,
     ) -> Self {
         let base_diag = l.make_diag();
         let o = EraParserOuter::new(
@@ -1099,6 +1175,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             defines,
             is_str_var_fn,
             is_header,
+            is_transient,
         );
         EraParserSite {
             o,
@@ -1258,7 +1335,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     }
 
     fn make_identifier(&mut self, name: &str) -> EraNodeRef {
-        let name = self.o.b.interner().get_or_intern(name);
+        let name = self.o.interner().get_or_intern(name);
         let span = self.o.l.current_src_span();
         self.o
             .node_arena
@@ -1273,7 +1350,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     }
 
     fn make_str_literal(&mut self, val: &str) -> EraNodeRef {
-        let val = self.o.b.interner().get_or_intern(val);
+        let val = self.o.interner().get_or_intern(val);
         let span = self.o.l.current_src_span();
         self.o
             .node_arena
@@ -1431,7 +1508,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         let EraNode::Identifier(name) = self.o.node_arena.get_node(name_node) else {
             unreachable!();
         };
-        let name = self.o.b.interner().resolve(name);
+        let name = self.o.interner().resolve(name);
 
         // HACK: For string assignment check
         if is_str {
@@ -1691,7 +1768,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     }
 
     fn identifier(&mut self) -> ParseResult<EraNodeRef> {
-        let mut interner = self.o.b.interner();
+        let mut interner = self.o.interner();
         let token = self.eat(Mode::Normal, Token::Identifier)?;
         let span = token.token.span;
         let token_key = interner.get_or_intern(token.lexeme);
@@ -1736,7 +1813,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             Terminal::DoubleQuote | Terminal::LineBreak,
         );
 
-        let token_key = self.o.b.interner().get_or_intern(&buf);
+        let token_key = self.o.interner().get_or_intern(&buf);
         let span = self.span_to_now(span);
         Ok(self
             .o
@@ -1766,7 +1843,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
 
         // NOTE: No need to sync, leave it to the caller
 
-        let token_key = self.o.b.interner().get_or_intern(&buf);
+        let token_key = self.o.interner().get_or_intern(&buf);
         let span = self.span_to_now(span);
         Ok(self
             .o
@@ -2120,7 +2197,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                                 lhs
                             };
                             if let EraNode::Identifier(name) = self.o.node_arena.get_node(lhs) {
-                                let name = self.o.b.interner().resolve(name);
+                                let name = self.o.interner().resolve(name);
                                 if self.is_var_str(name) {
                                     is_str_assign_mode = true;
                                 }
@@ -2187,7 +2264,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             }
         }
 
-        let token_key = self.o.b.interner().get_or_intern(&buf);
+        let token_key = self.o.interner().get_or_intern(&buf);
         let span = self.span_to_now(span);
         self.o
             .node_arena
@@ -2214,7 +2291,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             }
             // Finish current string literal, prepare for expressions
             if !buf.is_empty() {
-                let token_key = self.o.b.interner().get_or_intern(&buf);
+                let token_key = self.o.interner().get_or_intern(&buf);
                 let span = self.span_to_now(literal_span);
                 let node = self
                     .o
@@ -2286,7 +2363,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             }
             // Finish current string literal, prepare for expressions
             if !buf.is_empty() {
-                let token_key = self.o.b.interner().get_or_intern(&buf);
+                let token_key = self.o.interner().get_or_intern(&buf);
                 let span = self.span_to_now(literal_span);
                 let node = self
                     .o
@@ -2406,7 +2483,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 if !matches!(token.kind, Token::LBrace | Token::Percentage) {
                     buf.truncate(buf.trim_ascii_end().len());
                 }
-                let token_key = self.o.b.interner().get_or_intern(&buf);
+                let token_key = self.o.interner().get_or_intern(&buf);
                 let span = self.span_to_now(literal_span);
                 let node = self
                     .o
@@ -2472,7 +2549,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 if !matches!(token.kind, Token::LBrace | Token::Percentage) {
                     buf.truncate(buf.trim_ascii_end().len());
                 }
-                let token_key = self.o.b.interner().get_or_intern(&buf);
+                let token_key = self.o.interner().get_or_intern(&buf);
                 let span = self.span_to_now(literal_span);
                 let node = self
                     .o
@@ -3588,7 +3665,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             }
             // Finish current string literal, prepare for expressions
             if !buf.is_empty() {
-                let token_key = self.o.b.interner().get_or_intern(&buf);
+                let token_key = self.o.interner().get_or_intern(&buf);
                 let span = self.span_to_now(literal_span);
                 let node = self
                     .o

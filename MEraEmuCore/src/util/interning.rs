@@ -1,7 +1,9 @@
 use cstree::interning::{InternKey, Interner, Resolver, TokenKey};
 use rustc_hash::FxBuildHasher;
-
+use serde::Serialize;
 use std::{cell::UnsafeCell, mem::MaybeUninit};
+
+use crate::util::rcstr::ArcStr;
 
 // static mut rodeo: MaybeUninit<lasso::Rodeo<TokenKey, FxBuildHasher>> = MaybeUninit::uninit();
 
@@ -14,6 +16,29 @@ pub struct ThreadedTokenInterner {
 
 unsafe impl Sync for ThreadedTokenInterner {}
 unsafe impl Send for ThreadedTokenInterner {}
+
+impl Serialize for ThreadedTokenInterner {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.rodeo.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ThreadedTokenInterner {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut r = lasso::ThreadedRodeo::deserialize(deserializer).map(|rodeo| Self {
+            rodeo,
+            strings: UnsafeCell::new(Vec::new()),
+        })?;
+        r.optimize_lookup();
+        Ok(r)
+    }
+}
 
 impl Default for ThreadedTokenInterner {
     fn default() -> Self {
@@ -130,5 +155,100 @@ impl Interner<TokenKey> for &ThreadedTokenInterner {
     fn get_or_intern(&mut self, text: &str) -> TokenKey {
         self.rodeo.get_or_intern(text)
         // unsafe { rodeo.assume_init_mut().get_or_intern(text) }
+    }
+}
+
+// Faster version with higher memory usage
+#[derive(Debug)]
+pub struct VecThreadedTokenInterner {
+    vec: orx_concurrent_vec::ConcurrentVec<ArcStr>,
+}
+
+impl Default for VecThreadedTokenInterner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VecThreadedTokenInterner {
+    pub fn new() -> Self {
+        Self {
+            vec: orx_concurrent_vec::ConcurrentVec::new(),
+        }
+    }
+
+    pub fn optimize_lookup(&mut self) {
+        // Do nothing
+    }
+
+    /// # Safety
+    ///
+    /// Caller must ensure that the `VecThreadedTokenInterner` is not accessed concurrently.
+    pub unsafe fn optimize_lookup_unchecked(&self) {
+        // Do nothing
+    }
+}
+
+impl Resolver<TokenKey> for VecThreadedTokenInterner {
+    #[inline]
+    fn try_resolve(&self, key: TokenKey) -> Option<&str> {
+        unsafe {
+            self.vec
+                .get_ref(key.into_u32() as usize)
+                .map(|s| s.as_str())
+        }
+    }
+
+    #[inline]
+    fn resolve(&self, key: TokenKey) -> &str {
+        self.try_resolve(key).expect("TokenKey does not exist")
+    }
+}
+
+impl Interner<TokenKey> for VecThreadedTokenInterner {
+    type Error = std::convert::Infallible;
+
+    #[inline]
+    fn try_get_or_intern(&mut self, text: &str) -> Result<TokenKey, Self::Error> {
+        let arc = ArcStr::from(text);
+        let index = self.vec.push(arc);
+        Ok(TokenKey::try_from_u32(index as u32).unwrap())
+    }
+
+    #[inline]
+    fn get_or_intern(&mut self, text: &str) -> TokenKey {
+        self.try_get_or_intern(text).expect("Failed to intern")
+    }
+}
+
+impl Resolver<TokenKey> for &VecThreadedTokenInterner {
+    #[inline]
+    fn try_resolve(&self, key: TokenKey) -> Option<&str> {
+        unsafe {
+            self.vec
+                .get_ref(key.into_u32() as usize)
+                .map(|s| s.as_str())
+        }
+    }
+
+    #[inline]
+    fn resolve(&self, key: TokenKey) -> &str {
+        self.try_resolve(key).expect("TokenKey does not exist")
+    }
+}
+
+impl Interner<TokenKey> for &VecThreadedTokenInterner {
+    type Error = std::convert::Infallible;
+
+    #[inline]
+    fn try_get_or_intern(&mut self, text: &str) -> Result<TokenKey, Self::Error> {
+        let arc = ArcStr::from(text);
+        let index = self.vec.push(arc);
+        Ok(TokenKey::try_from_u32(index as u32).unwrap())
+    }
+
+    #[inline]
+    fn get_or_intern(&mut self, text: &str) -> TokenKey {
+        self.try_get_or_intern(text).expect("Failed to intern")
     }
 }

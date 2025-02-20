@@ -46,6 +46,24 @@ use crate::util::*;
 
 pub use crate::types::EraCompilerHostFile as MEraEngineHostFile;
 
+/* Design notes:
+ * * Dynamic evaluation from strings:
+ * - The engine can evaluate expressions (Int/Str) / statements (Void) from strings.
+ * When requested from the debugger eval interface, the engine will protect the
+ * current execution state and evaluate the expression in a new context inherited
+ * from the current one, which cannot be inspected (if something goes wrong, the
+ * engine will restore the original state before giving control back to the user).
+ * If evaluation happens in code because of stuff like PRINTFORMS, the engine will
+ * do the same thing, but will instead allow the user to pause and inspect the new context.
+ * The new context appears as a special "<VM>/VM{number}" source file in the source
+ * map, and the user can inspect the variables and call stack as usual.
+ * - Since the evaluation goes through the same code paths for compilation and execution,
+ * it is possible that the interning pool gets polluted with temporary tokens, which
+ * affects both memory usage and snapshot capabilities. To mitigate this, the engine
+ * will use a separate interning pool for evaluation, which will be cleared after each
+ * evaluation.
+ */
+
 #[derive(Debug)]
 struct InitialVarDesc {
     pub is_string: bool,
@@ -806,6 +824,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 defines: EraDefineScope::new(),
                 kind: EraSourceFileKind::Csv,
                 newline_pos: Vec::new(),
+                is_transient: false,
             },
         );
 
@@ -889,7 +908,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         };
         let parse_i64_tail = |this: &mut Self, val: &str| -> Result<i64, ()> {
             let mut val = val;
-            let Some(r) = crate::v2::routines::read_int_literal_str(&mut val) else {
+            let Some(r) = crate::v2::routines::read_int_literal_str_with_sign(&mut val) else {
                 let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
                 let offset = content.subslice_offset(val).unwrap();
                 diag.span_err(
@@ -1767,6 +1786,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                             &i.global_define,
                             &mut is_str_var_fn,
                             false,
+                            false,
                         );
                         let EraParsedProgram {
                             root_node,
@@ -1786,6 +1806,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                             defines: Default::default(),
                             kind: EraSourceFileKind::Source,
                             newline_pos: Vec::new(),
+                            is_transient: false,
                         };
 
                         (idx, (src_file, err_accum))
@@ -1839,6 +1860,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                             defines: Default::default(),
                             kind: EraSourceFileKind::Source,
                             newline_pos,
+                            is_transient: false,
                         },
                     );
 
@@ -1870,6 +1892,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                         &self.ctx.i.global_replace,
                         &self.ctx.i.global_define,
                         &mut is_str_var_fn,
+                        false,
                         false,
                     );
                     let EraParsedProgram {
@@ -1918,6 +1941,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             .collect::<Vec<_>>();
         let mut codegen = EraCodeGenerator::new(
             &mut self.ctx,
+            false,
             self.config.no_src_map,
             !self.config.no_src_map,
         );
@@ -2136,6 +2160,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                     EraSourceFileKind::Source
                 },
                 newline_pos,
+                is_transient: false,
             },
         );
 
@@ -2168,6 +2193,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             &self.ctx.i.global_define,
             &mut is_str_var_fn,
             is_header,
+            false,
         );
         let EraParsedProgram {
             root_node,
@@ -2931,7 +2957,7 @@ pub struct EraFuncInfo {
 impl EraFuncInfo {
     pub fn from_with(x: &crate::types::EraFuncInfo, i: &impl Interner) -> Self {
         EraFuncInfo {
-            name: i.resolve(x.name).to_owned(),
+            name: x.name.as_str().to_owned(),
             name_span: x.name_span,
             frame_info: EraFuncFrameInfo {
                 args: x.frame_info.args.clone(),
@@ -3103,7 +3129,7 @@ pub trait MEraEngineRpc {
 
 impl<Callback> MEraEngine<Callback> {
     pub fn get_version() -> &'static str {
-        "MEraEngine in MEraEmuCore v0.3.0"
+        "MEraEngine in MEraEmuCore v0.3.1"
     }
 }
 
@@ -3167,27 +3193,32 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         use byteorder::{WriteBytesExt, LE};
 
         let mut snapshot = Vec::new();
-        if parts_to_add.contains(EraEngineSnapshotKind::SOURCE_CODE) {
-            snapshot.write_u32::<LE>(EraEngineSnapshotKind::SOURCE_CODE.bits())?;
+        for kind in [
+            EraEngineSnapshotKind::SOURCE_CODE,
+            EraEngineSnapshotKind::GLOBAL_VAR,
+            EraEngineSnapshotKind::EXEC_STATE,
+        ] {
+            if !parts_to_add.contains(kind) {
+                continue;
+            }
+            snapshot.write_u32::<LE>(kind.bits())?;
             let pos = snapshot.len();
             snapshot.write_u32::<LE>(0)?;
-            self.dump_source_code_snapshot_to_sink(&mut snapshot)?;
-            let size = snapshot.len() - pos - 4;
-            (&mut snapshot[pos..pos + 4]).write_u32::<LE>(size as u32)?;
-        }
-        if parts_to_add.contains(EraEngineSnapshotKind::GLOBAL_VAR) {
-            snapshot.write_u32::<LE>(EraEngineSnapshotKind::GLOBAL_VAR.bits())?;
-            let pos = snapshot.len();
-            snapshot.write_u32::<LE>(0)?;
-            self.dump_global_var_snapshot_to_sink(&mut snapshot)?;
-            let size = snapshot.len() - pos - 4;
-            (&mut snapshot[pos..pos + 4]).write_u32::<LE>(size as u32)?;
-        }
-        if parts_to_add.contains(EraEngineSnapshotKind::EXEC_STATE) {
-            snapshot.write_u32::<LE>(EraEngineSnapshotKind::EXEC_STATE.bits())?;
-            let pos = snapshot.len();
-            snapshot.write_u32::<LE>(0)?;
-            self.dump_exec_state_snapshot_to_sink(&mut snapshot)?;
+            let mut sink = ZstdSink::new(&mut snapshot);
+            match kind {
+                EraEngineSnapshotKind::GLOBAL_VAR => {
+                    self.ctx.serialize_global_var_into(&mut sink)?;
+                }
+                EraEngineSnapshotKind::SOURCE_CODE => {
+                    self.ctx.serialize_source_code_into(&mut sink)?;
+                }
+                EraEngineSnapshotKind::EXEC_STATE => {
+                    let value = (&*self.ctx.transient_ctx, &self.vm_state);
+                    bincode::serialize_into(&mut sink, &value)?;
+                }
+                _ => unreachable!(),
+            }
+            drop(sink);
             let size = snapshot.len() - pos - 4;
             (&mut snapshot[pos..pos + 4]).write_u32::<LE>(size as u32)?;
         }
@@ -3201,8 +3232,9 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         while !snapshot.is_empty() {
             let kind = EraEngineSnapshotKind::from_bits_truncate(snapshot.read_u32::<LE>()?);
             let size = snapshot.read_u32::<LE>()? as usize;
-            let mut chunk = &snapshot[..size];
+            let chunk = &snapshot[..size];
             snapshot = &snapshot[size..];
+            let mut chunk = ZstdSource::new(chunk);
             match kind {
                 EraEngineSnapshotKind::GLOBAL_VAR => {
                     self.ctx.deserialize_global_var_from(&mut chunk)?;
@@ -3211,41 +3243,13 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
                     self.ctx.deserialize_source_code_from(&mut chunk, true)?;
                 }
                 EraEngineSnapshotKind::EXEC_STATE => {
-                    self.vm_state = bincode::deserialize(chunk)?;
+                    let (transient_ctx, vm_state) = bincode::deserialize_from(&mut chunk)?;
+                    self.ctx.transient_ctx = Arc::new(transient_ctx);
+                    self.vm_state = vm_state;
                 }
                 _ => return Err(anyhow::anyhow!("unknown snapshot kind")),
             }
         }
-        Ok(())
-    }
-
-    fn dump_global_var_snapshot_to_sink(
-        &self,
-        sink: &mut impl std::io::Write,
-    ) -> anyhow::Result<()> {
-        let mut compressor = zstd::stream::Encoder::new(sink, 0)?;
-        self.ctx.serialize_global_var_into(&mut compressor)?;
-        compressor.finish()?;
-        Ok(())
-    }
-
-    fn dump_source_code_snapshot_to_sink(
-        &self,
-        sink: &mut impl std::io::Write,
-    ) -> anyhow::Result<()> {
-        let mut compressor = zstd::stream::Encoder::new(sink, 0)?;
-        self.ctx.serialize_source_code_into(&mut compressor)?;
-        compressor.finish()?;
-        Ok(())
-    }
-
-    fn dump_exec_state_snapshot_to_sink(
-        &self,
-        sink: &mut impl std::io::Write,
-    ) -> anyhow::Result<()> {
-        let mut compressor = zstd::stream::Encoder::new(sink, 0)?;
-        bincode::serialize_into(&mut compressor, &self.vm_state)?;
-        compressor.finish()?;
         Ok(())
     }
 

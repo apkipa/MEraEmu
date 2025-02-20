@@ -8,8 +8,8 @@ use rayon::prelude::*;
 use rclite::{Arc, Rc};
 use rustc_hash::{FxBuildHasher, FxHasher};
 use smallvec::smallvec;
-use yoke::Yoke;
 
+use crate::util::interning::ThreadedTokenInterner;
 use crate::util::iter::SequentialBridge;
 use crate::v2::parser::*;
 use crate::v2::routines;
@@ -36,6 +36,7 @@ type CompileResult<T> = Result<T, ()>;
 /// Generates bytecode from the AST. Also adds variables into the global pool.
 pub struct EraCodeGenerator<'ctx, 'i, Callback> {
     ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
+    transient_ctx: Option<Arc<EraCompilerCtxTransient>>,
     trim_nodes: bool,
     keep_src: bool,
 }
@@ -106,6 +107,10 @@ impl EraBcChunkBuilder {
 
     fn finish(self) -> EraBcChunk {
         EraBcChunk::new(Default::default(), self.bc, self.src_spans)
+    }
+
+    fn finish_with_name(self, name: ArcStr) -> EraBcChunk {
+        EraBcChunk::new(name, self.bc, self.src_spans)
     }
 
     fn rollback_to(&mut self, checkpoint: EraBcChunkCheckpoint) {
@@ -294,19 +299,20 @@ struct EraFuncPrebuildInfo {
 impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callback> {
     pub fn new(
         ctx: &'ctx mut EraCompilerCtx<'i, Callback>,
+        is_transient: bool,
         trim_nodes: bool,
         keep_src: bool,
     ) -> Self {
+        let transient_ctx = is_transient.then(|| ctx.transient_ctx.clone());
         Self {
             ctx,
+            transient_ctx,
             trim_nodes,
             keep_src,
         }
     }
 
     /// Compiles given programs into bytecode chunks. Will also merge result into global context.
-    /// Note that this function will return function entries that have relative chunk indices,
-    /// and the caller should convert them as needed.
     pub fn compile_merge_many_programs(
         &mut self,
         filenames: &[ArcStr],
@@ -316,7 +322,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
         let mut t = std::time::Instant::now();
 
         let mut prebuild_funcs: FxIndexMap<
-            &'i Ascii<str>,
+            Ascii<ArcStr>,
             (EraArcNodeRef, EraFuncPrebuildInfo, Option<EraFuncInfo<'i>>),
         > = Default::default();
 
@@ -361,6 +367,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                             &self.ctx.i.global_define,
                             &mut is_str_var_fn,
                             is_header,
+                            false,
                         );
                         let parsed_program = parser.parse_program();
                         (parsed_program.root_node, parsed_program.nodes)
@@ -421,11 +428,13 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                 else {
                     continue;
                 };
-                let name = site.o.ctx.resolve_str(prebuild_info.name);
                 func_info.chunk_idx = chunk_idx;
                 // eprintln!("[Add func {}, span={:?}]", name, func_info.name_span);
                 let item = EraArcNodeRef::new(item_ref, arena.clone());
-                prebuild_funcs.insert(Ascii::new_str(name), (item, prebuild_info, Some(func_info)));
+                prebuild_funcs.insert(
+                    Ascii::new(prebuild_info.name_str.clone()),
+                    (item, prebuild_info, Some(func_info)),
+                );
             }
         }
         drop(site);
@@ -437,7 +446,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
         let func_entries = Arc::get_mut(&mut self.ctx.func_entries).unwrap();
         for (func_name, (_, prebuild_info, func_info)) in &mut prebuild_funcs {
             let func_info = func_info.take().unwrap();
-            let (idx, _) = func_entries.insert_full(func_name, Some(func_info));
+            let (idx, _) = func_entries.insert_full(func_name.clone(), Some(func_info));
             prebuild_info.func_idx = idx.try_into().expect("too many functions");
         }
         _ = func_entries;
@@ -494,6 +503,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                         chunk,
                         node,
                         prebuild_info,
+                        self.transient_ctx.as_deref(),
                     );
                     let func_size = chunk.get_len() - func_offset as usize;
                     func_offsets.push((func_idx, func_offset, func_size as _));
@@ -531,6 +541,7 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
                         chunk,
                         node,
                         prebuild_info,
+                        self.transient_ctx.as_deref(),
                     );
                     let func_size = chunk.get_len() - func_offset as usize;
                     chunk.push_bc(BcKind::DebugBreak, SrcSpan::default());
@@ -575,7 +586,112 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
 
         println!("Finalization time: {:?}", t.elapsed());
     }
+
+    /// Compiles an expression (including string form). Used for eval scenarios.
+    pub fn compile_expression(
+        &mut self,
+        filename: ArcStr,
+        env_func: &EraFuncInfo<'i>,
+        arena: &EraNodeArena,
+        root_node: EraNodeRef,
+    ) -> Result<(ScalarValueKind, EraBcChunk), ()> {
+        let mut chunk = EraBcChunkBuilder::new();
+        let mut site = EraCodeGenSite::with_func(
+            &mut self.ctx.callback,
+            &self.ctx.i,
+            filename,
+            &mut chunk,
+            arena,
+            env_func,
+            self.transient_ctx.as_deref(),
+        );
+        let ty = site.expression(root_node)?;
+        let filename = site.filename;
+        match ty {
+            ScalarValueKind::Int => {
+                chunk.push_bc(BcKind::ReturnInt, Default::default());
+            }
+            ScalarValueKind::Str => {
+                chunk.push_bc(BcKind::ReturnStr, Default::default());
+            }
+            _ => (),
+        }
+        Ok((ty, chunk.finish_with_name(filename)))
+    }
+
+    /// Compiles a string form. Used for eval scenarios.
+    pub fn compile_int_expr(
+        &mut self,
+        filename: ArcStr,
+        env_func: &EraFuncInfo<'i>,
+        arena: &EraNodeArena,
+        root_node: EraNodeRef,
+    ) -> Result<EraBcChunk, ()> {
+        let mut chunk = EraBcChunkBuilder::new();
+        let mut site = EraCodeGenSite::with_func(
+            &mut self.ctx.callback,
+            &self.ctx.i,
+            filename,
+            &mut chunk,
+            arena,
+            env_func,
+            self.transient_ctx.as_deref(),
+        );
+        site.int_expr(root_node)?;
+        let filename = site.filename;
+        chunk.push_bc(BcKind::ReturnInt, Default::default());
+        Ok(chunk.finish_with_name(filename))
+    }
+
+    /// Compiles a string form. Used for eval scenarios.
+    pub fn compile_str_expr(
+        &mut self,
+        filename: ArcStr,
+        env_func: &EraFuncInfo<'i>,
+        arena: &EraNodeArena,
+        root_node: EraNodeRef,
+    ) -> Result<EraBcChunk, ()> {
+        let mut chunk = EraBcChunkBuilder::new();
+        let mut site = EraCodeGenSite::with_func(
+            &mut self.ctx.callback,
+            &self.ctx.i,
+            filename,
+            &mut chunk,
+            arena,
+            env_func,
+            self.transient_ctx.as_deref(),
+        );
+        site.str_expr(root_node)?;
+        let filename = site.filename;
+        chunk.push_bc(BcKind::ReturnStr, Default::default());
+        Ok(chunk.finish_with_name(filename))
+    }
+
+    pub fn compile_statements_list(
+        &mut self,
+        filename: ArcStr,
+        env_func: &EraFuncInfo<'i>,
+        arena: &EraNodeArena,
+        root_node: EraNodeRef,
+    ) -> Result<EraBcChunk, ()> {
+        let mut chunk = EraBcChunkBuilder::new();
+        let mut site = EraCodeGenSite::with_func(
+            &mut self.ctx.callback,
+            &self.ctx.i,
+            filename,
+            &mut chunk,
+            arena,
+            env_func,
+            self.transient_ctx.as_deref(),
+        );
+        site.statements_list(root_node, 1)?;
+        let filename = site.filename;
+        chunk.push_bc(BcKind::ReturnVoid, Default::default());
+        Ok(chunk.finish_with_name(filename))
+    }
 }
+
+impl<'i, Callback: EraCompilerCallback> EraCodeGenerator<'_, 'i, Callback> {}
 
 struct EraCodeGenPrebuildSite<'o, 'ctx, 'i, Callback> {
     o: &'o mut EraCodeGenerator<'ctx, 'i, Callback>,
@@ -672,7 +788,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
 
         // Generate function info
         let mut func_info = EraFuncInfo {
-            name,
+            name: name_str.clone(),
             name_span,
             frame_info: Default::default(),
             chunk_idx: 0,
@@ -1306,21 +1422,20 @@ struct EraLoopStructCodeMetadata {
     break_cp: EraBcChunkCheckpoint,
 }
 
-struct EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
+struct EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena, 'f> {
     diag_emit: &'diag mut dyn EraEmitDiagnostic,
     ctx: &'ctx EraCompilerCtxInner<'i>,
     filename: ArcStr,
     chunk: &'b mut EraBcChunkBuilder,
     arena: &'arena EraNodeArena,
-    cur_func: Yoke<
-        &'static EraFuncInfo<'static>,
-        &'static FxIndexMap<&'static Ascii<str>, Option<EraFuncInfo<'static>>>,
-    >,
+    cur_func: &'f EraFuncInfo<'i>,
+    transient_ctx: Option<&'b EraCompilerCtxTransient>,
     /// The position where the function body starts. Used by `RESTART`.
     body_start_pos: EraBcChunkCheckpoint,
     /// The scope generation ID allocation counter. Used to prevent invalid `GOTO`'s
     /// (i.e. jumping into a `FOR` loop from outside). This is incremented every time a new scope
-    /// is created. Control flow can transfer into scopes with smaller IDs, but not larger IDs.
+    /// is created. Control flow can transfer into scopes with smaller IDs, but not larger IDs
+    /// (unless there exists a fix for otherwise unbalanced stack).
     scope_generation_id: u32,
     /// The scope stack balances. Used to store the balance of the scope stack at each scope.
     scope_stack_balances: Vec<u32>,
@@ -1336,7 +1451,27 @@ struct EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
     cur_loop_struct: Option<EraLoopStructCodeQueue>,
 }
 
-impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
+impl<'i> EraCodeGenSite<'_, '_, 'i, '_, '_, '_> {
+    // fn interner(&self) -> &'i ThreadedTokenInterner {
+    //     if let Some(transient_ctx) = &self.transient_ctx {
+    //         let i: &ThreadedTokenInterner = &transient_ctx.interner;
+    //         // SAFETY: String comes from parent Arc<TransientCtx>, and parent keeps it alive.
+    //         unsafe { std::mem::transmute(i) }
+    //     } else {
+    //         self.ctx.interner()
+    //     }
+    // }
+
+    fn interner(&self) -> &'i ThreadedTokenInterner {
+        self.ctx.interner()
+    }
+
+    fn resolve_str(&self, key: TokenKey) -> &'i str {
+        self.interner().resolve(key)
+    }
+}
+
+impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena, 'f> {
     fn allocate_scope_id(&mut self, parent_scope: u32, stack_size: u32) -> u32 {
         let id = self.scope_generation_id;
         self.scope_generation_id += 1;
@@ -1349,6 +1484,34 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
         Diagnostic::with_file(self.filename.clone())
     }
 
+    fn with_func(
+        diag_emit: &'diag mut dyn EraEmitDiagnostic,
+        ctx: &'ctx EraCompilerCtxInner<'i>,
+        filename: ArcStr,
+        chunk: &'b mut EraBcChunkBuilder,
+        arena: &'arena EraNodeArena,
+        cur_func: &'f EraFuncInfo<'i>,
+        transient_ctx: Option<&'b EraCompilerCtxTransient>,
+    ) -> Self {
+        let body_start_pos = chunk.checkpoint();
+        Self {
+            diag_emit,
+            ctx,
+            filename,
+            chunk,
+            arena,
+            cur_func,
+            transient_ctx,
+            body_start_pos,
+            scope_generation_id: 1,
+            scope_stack_balances: vec![0],
+            goto_labels: Default::default(),
+            pending_goto_jumps: Default::default(),
+            pending_return_jumps: Default::default(),
+            cur_loop_struct: None,
+        }
+    }
+
     /// Compiles a function into bytecode, based on prebuilt information. Note that this function
     /// never fails, since `prebuild_function` should have already checked for errors which would
     /// prevent the function from being compiled.
@@ -1359,10 +1522,13 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
         chunk: &'b mut EraBcChunkBuilder,
         node: EraArcNodeRef,
         prebuild_info: EraFuncPrebuildInfo,
+        transient_ctx: Option<&'b EraCompilerCtxTransient>,
     ) {
         let arena = node.arena();
         let func_span = node.get_span();
         let node = EraNodeItemFunction::try_get_from(arena, node.node_ref()).unwrap();
+
+        let interner = transient_ctx.map_or_else(|| ctx.interner(), |x| &x.interner);
 
         // Stage 3 - Generate bytecode
         let cur_func_idx = prebuild_info.func_idx as _;
@@ -1370,13 +1536,12 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
         // Lock down func_entries so that lifetime is decoupled from ctx, and content is freezed
         // (i.e. prevents modifications)
         let func_entries = ctx.func_entries.clone();
-        // SAFETY: We pretend that func_entries is 'static in order to use it in Yoke
-        let func_info_yoke: Yoke<&EraFuncInfo, &FxIndexMap<&Ascii<str>, Option<EraFuncInfo>>> = unsafe {
-            Yoke::attach_to_cart(std::mem::transmute(&*func_entries), |x| {
-                x.get_index(cur_func_idx).unwrap().1.as_ref().unwrap()
-            })
-        };
-        let func_info = func_info_yoke.get();
+        let func_info = func_entries
+            .get_index(cur_func_idx)
+            .unwrap()
+            .1
+            .as_ref()
+            .unwrap();
         let name_span = func_info.name_span;
 
         // Generate function prologue (local frame)
@@ -1391,15 +1556,14 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
             let arg_idx = arg.local_slot as _;
 
             // Load target
-            let target_str = ctx.interner().resolve(arg.target);
+            let target_str = interner.resolve(arg.target);
             let (target_in_local_frame, target_idx, is_mdarray);
             if let Some(local_var) = func_info.frame_info.vars.get(Ascii::new_str(target_str)) {
                 target_in_local_frame = local_var.in_local_frame;
                 target_idx = local_var.var_idx;
                 is_mdarray = local_var.dims_cnt > 1;
-            } else if let Some(global_var_idx) = ctx
-                .variables
-                .get_var_idx(ctx.interner().resolve(arg.target))
+            } else if let Some(global_var_idx) =
+                ctx.variables.get_var_idx(interner.resolve(arg.target))
             {
                 target_in_local_frame = false;
                 target_idx = global_var_idx.try_into().expect("too many variables");
@@ -1451,7 +1615,8 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
             filename,
             chunk,
             arena,
-            cur_func: func_info_yoke,
+            cur_func: func_info,
+            transient_ctx,
             body_start_pos,
             scope_generation_id: 1,
             scope_stack_balances: vec![0],
@@ -1490,7 +1655,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
             jump.complete_here(chunk);
         }
         // Fallback return
-        match cur_func.get().ret_kind {
+        match cur_func.ret_kind {
             ScalarValueKind::Int => {
                 chunk.push_load_imm(0, func_span);
                 chunk.push_bc(BcKind::ReturnInt, func_span);
@@ -1507,7 +1672,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
 
         // Complete `GOTO` jumps
         for jump in pending_goto_jumps {
-            let jump_target = ctx.interner().resolve(jump.target);
+            let jump_target = interner.resolve(jump.target);
             let Some(jump_target) = goto_labels.get(Ascii::new_str(jump_target)) else {
                 let mut diag = make_diag_fn();
                 diag.span_err(
@@ -1559,7 +1724,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
     fn safe_statement(&mut self, stmt: EraNodeRef, cur_scope: u32) {
         if self.statement(stmt, cur_scope).is_err() {
             let stmt_span = self.arena.get_node_span(stmt);
-            let err_msg = self.ctx.interner().get_or_intern("Invalid code");
+            let err_msg = self.interner().get_or_intern("Invalid code");
             self.chunk.push_bc(
                 BcKind::LoadConstStr {
                     idx: err_msg.into_u32(),
@@ -1660,17 +1825,6 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
             EraNode::StmtPrint(Pad2(need_eval), flags, args) => {
                 let args = self.unwrap_list_expr(args)?;
                 if need_eval {
-                    // HACK: Before we support eval, handle them as constants now
-                    {
-                        let mut diag = self.make_diag();
-                        diag.span_err(
-                            Default::default(),
-                            stmt_span,
-                            "PRINTFORMS is not yet supported and will be ignored for now",
-                        );
-                        self.ctx.emit_diag_to(diag, self.diag_emit);
-                    }
-
                     let mut parts_cnt = 0;
                     for arg in args.iter().map(|x| EraNodeRef(*x)) {
                         let arg_span = self.arena.get_node_span(arg);
@@ -1686,6 +1840,8 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                         parts_cnt += 1;
                     }
                     self.chunk.push_build_string(parts_cnt, stmt_span);
+                    // Evaluate the string form
+                    self.chunk.push_bc(BcKind::EvalStrForm, stmt_span);
                 } else {
                     let mut parts_cnt = 0;
                     for arg in args.iter().map(|x| EraNodeRef(*x)) {
@@ -1777,7 +1933,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
             }
             EraNode::StmtReturn(values) => {
                 let values = self.unwrap_list_expr(values)?;
-                let ret_kind = self.cur_func.get().ret_kind;
+                let ret_kind = self.cur_func.ret_kind;
                 if ret_kind == ScalarValueKind::Void {
                     // Procedure, assign return values to RESULT(S)
                     // NOTE: Emuera only assigns values to RESULT:*, and we keep this behavior
@@ -2762,7 +2918,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                         self.int_var_static_idx("RESULT", span, 0)?;
                     }
                 }
-                let key = self.ctx.interner().get_or_intern("表示するセーブデータ数");
+                let key = self.interner().get_or_intern("表示するセーブデータ数");
                 self.chunk.push_load_const_str(key, stmt_span);
                 self.chunk.push_bc(BcKind::GetConfig, stmt_span);
                 self.chunk.push_bc(BcKind::SetArrValFlat, stmt_span);
@@ -2915,7 +3071,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 EraNode::ListExpr(part) => {
                     let part = self.arena.get_extra_data_view(part);
                     let mut parts_cnt = 0;
-                    let newline_key = self.ctx.interner().get_or_intern("\n");
+                    let newline_key = self.interner().get_or_intern("\n");
                     for part in part.iter().map(|x| EraNodeRef(*x)) {
                         if parts_cnt != 0 {
                             self.chunk.push_load_const_str(newline_key, part_span);
@@ -4416,7 +4572,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                                     let mut flags = EraPadStringFlags::new();
                                     let align_span = self.arena.get_node_span(align);
                                     let align = self.unwrap_identifier(align)?;
-                                    let align = self.ctx.interner().resolve(align);
+                                    let align = self.resolve_str(align);
                                     if align.eq_ignore_ascii_case("LEFT") {
                                         flags.set_left_pad(true);
                                     } else if align.eq_ignore_ascii_case("RIGHT") {
@@ -4656,14 +4812,14 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
         let name_str = match self.arena.get_node(var) {
             EraNode::Identifier(name_key) => {
                 name = Some(name_key);
-                self.ctx.interner().resolve(name_key)
+                self.resolve_str(name_key)
             }
             EraNode::ExprVarNamespace(var_name, namespace) => {
                 name = None;
                 let var_name = self.unwrap_identifier(var_name)?;
                 let namespace = self.unwrap_identifier(namespace)?;
-                let var_name = self.ctx.interner().resolve(var_name);
-                let namespace = self.ctx.interner().resolve(namespace);
+                let var_name = self.resolve_str(var_name);
+                let namespace = self.resolve_str(namespace);
                 &format!("{var_name}@{namespace}")
             }
             _ => {
@@ -4674,7 +4830,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
             }
         };
 
-        let func_info = self.cur_func.get();
+        let func_info = self.cur_func;
 
         if let Some(name) = name {
             // Try lookup in local scope
@@ -4781,7 +4937,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 let is_charadata = id_info.is_charadata;
                 let (is_chara_nodim, csv_var_kind);
                 if let Some(name_token) = id_info.name_token {
-                    let name = self.ctx.interner().resolve(name_token);
+                    let name = self.resolve_str(name_token);
                     is_chara_nodim = routines::is_chara_nodim(name);
                     csv_var_kind = EraCsvVarKind::try_from_var(name);
                 } else {
@@ -4863,7 +5019,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                     {
                         let csv_var_kind = csv_var_kind.unwrap();
                         let name = self.unwrap_identifier(idx).unwrap();
-                        let name = self.ctx.interner().resolve(name);
+                        let name = self.resolve_str(name);
                         if let Some(idx) = (self.ctx.csv_indices)
                             .get(Ascii::new_str(name))
                             .and_then(|x| x.iter().find(|x| x.0 == csv_var_kind))
@@ -5084,13 +5240,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
         name: &str,
         name_span: SrcSpan,
     ) -> CompileResult<ScalarValueKind> {
-        if let Some(var) = self
-            .cur_func
-            .get()
-            .frame_info
-            .vars
-            .get(Ascii::new_str(name))
-        {
+        if let Some(var) = self.cur_func.frame_info.vars.get(Ascii::new_str(name)) {
             let var_idx = var.var_idx;
             if var.in_local_frame {
                 self.chunk
@@ -5394,7 +5544,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 match expr_ty {
                     ScalarValueKind::Str => (),
                     ScalarValueKind::Empty => {
-                        let value = self.ctx.interner().get_or_intern(fallback);
+                        let value = self.interner().get_or_intern(fallback);
                         self.chunk.push_bc(
                             BcKind::LoadConstStr {
                                 idx: value.into_u32(),
@@ -5415,7 +5565,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 }
             }
             EraExprOrSpan::Span(span) => {
-                let value = self.ctx.interner().get_or_intern(fallback);
+                let value = self.interner().get_or_intern(fallback);
                 self.chunk.push_bc(
                     BcKind::LoadConstStr {
                         idx: value.into_u32(),
@@ -5525,9 +5675,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
         is_fallible: bool,
     ) -> CompileResult<ScalarValueKind> {
         // Find in user-defined functions first
-        let Some((target_idx, target_func)) = self
-            .cur_func
-            .backing_cart()
+        let Some((target_idx, target_func)) = (self.ctx.func_entries)
             .get_full(Ascii::new_str(name))
             .and_then(|(idx, _, v)| v.as_ref().map(|x| (idx, x)))
         else {
@@ -5666,7 +5814,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                             let val = target_param.default_value.coerce_as_str().unwrap();
                             self.chunk.push_bc(
                                 BcKind::LoadConstStr {
-                                    idx: self.ctx.interner().get_or_intern(val).into_u32(),
+                                    idx: self.interner().get_or_intern(val).into_u32(),
                                 },
                                 arg_span,
                             );
@@ -5826,29 +5974,31 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
     ) -> CompileResult<ScalarValueKind> {
         use std::ops::{Deref, DerefMut};
 
-        struct Site<'this, 'o, 'ctx, 'i, 'b, 'arena, 'name> {
-            this: &'this mut EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena>,
+        struct Site<'this, 'o, 'ctx, 'i, 'b, 'arena, 'f, 'name> {
+            this: &'this mut EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, 'f>,
             ret_kind: ScalarValueKind,
             name: &'name str,
             name_span: SrcSpan,
             assign_to_result: bool,
         }
 
-        impl<'this, 'o, 'ctx, 'i, 'b, 'arena> Deref for Site<'this, 'o, 'ctx, 'i, 'b, 'arena, '_> {
-            type Target = EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena>;
+        impl<'this, 'o, 'ctx, 'i, 'b, 'arena, 'f> Deref for Site<'this, 'o, 'ctx, 'i, 'b, 'arena, 'f, '_> {
+            type Target = EraCodeGenSite<'o, 'ctx, 'i, 'b, 'arena, 'f>;
 
             fn deref(&self) -> &Self::Target {
                 self.this
             }
         }
 
-        impl<'this, 'o, 'ctx, 'i, 'b, 'arena> DerefMut for Site<'this, 'o, 'ctx, 'i, 'b, 'arena, '_> {
+        impl<'this, 'o, 'ctx, 'i, 'b, 'arena, 'f> DerefMut
+            for Site<'this, 'o, 'ctx, 'i, 'b, 'arena, 'f, '_>
+        {
             fn deref_mut(&mut self) -> &mut Self::Target {
                 self.this
             }
         }
 
-        impl<'arena> Site<'_, '_, '_, '_, '_, 'arena, '_> {
+        impl<'arena> Site<'_, '_, '_, '_, '_, 'arena, '_, '_> {
             fn result(&mut self) -> CompileResult<()> {
                 self.ret_kind = ScalarValueKind::Int;
                 if !self.assign_to_result {
@@ -6527,8 +6677,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                     self.ctx.emit_diag_to(diag, self.diag_emit);
                     return Err(());
                 };
-                let Some(kind) = EraCsvVarKind::try_from_var(site.ctx.interner().resolve(target))
-                else {
+                let Some(kind) = EraCsvVarKind::try_from_var(site.resolve_str(target)) else {
                     let mut diag = self.make_diag();
                     diag.span_err(Default::default(), name_span, "unknown CSV var type");
                     self.ctx.emit_diag_to(diag, self.diag_emit);
@@ -6701,7 +6850,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 // TODO: Support https://learn.microsoft.com/ja-jp/dotnet/api/system.int64.tostring
                 site.results()?;
                 if is_money {
-                    let key = site.ctx.interner().get_or_intern("$");
+                    let key = site.interner().get_or_intern("$");
                     site.chunk.push_bc(
                         BcKind::LoadConstStr {
                             idx: key.into_u32(),
@@ -6913,7 +7062,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena> {
                 // The same as GETCONFIG("表示するセーブデータ数")
                 site.result()?;
                 let [] = site.unpack_args(args)?;
-                let key = site.ctx.interner().get_or_intern("表示するセーブデータ数");
+                let key = site.interner().get_or_intern("表示するセーブデータ数");
                 site.chunk.push_load_const_str(key, name_span);
                 site.chunk.push_bc(BcKind::GetConfig, name_span);
             }

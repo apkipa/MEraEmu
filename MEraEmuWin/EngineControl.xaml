@@ -27,6 +27,8 @@
                 <SwapChainPanel x:Name="BackgroundSwapchainPanel"/>
                 <StackPanel Orientation="Vertical" VerticalAlignment="Bottom" HorizontalAlignment="Left">
                     <Image x:Name="EngineOutputImage" Stretch="UniformToFill" IsDoubleTapEnabled="False"
+                           PointerPressed="EngineOutputImage_PointerPressed"
+                           PointerReleased="EngineOutputImage_PointerReleased"
                            PointerMoved="EngineOutputImage_PointerMoved"
                            PointerExited="EngineOutputImage_PointerExited"
                            PointerCanceled="EngineOutputImage_PointerCanceled"
