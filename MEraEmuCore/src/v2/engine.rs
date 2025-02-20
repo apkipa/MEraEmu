@@ -1,37 +1,23 @@
-use std::{
-    any,
-    borrow::Cow,
-    cell::RefCell,
-    collections::{BTreeMap, VecDeque},
-    num::{NonZero, NonZeroUsize},
-    ops::{ControlFlow, DerefMut},
-    sync::atomic::AtomicBool,
-};
+use std::{borrow::Cow, collections::VecDeque, ops::ControlFlow, sync::atomic::AtomicBool};
 
 use anyhow::Context;
 use bstr::ByteSlice;
-use cstree::{
-    build::NodeCache,
-    interning::{InternKey, Interner, Resolver, TokenKey},
-};
-use either::Either;
+use cstree::interning::{InternKey, Interner, Resolver, TokenKey};
 use hashbrown::{HashMap, HashSet};
 use indoc::indoc;
 use interning::ThreadedTokenInterner;
 use iter::{IndexedSequentialParallelBridge, ParallelIndexedSequentialBridge};
 use itertools::Itertools;
-use num_ordinal::{ordinal0, Ordinal, Osize};
+use num_ordinal::{Ordinal, Osize};
 use once_cell::sync::Lazy;
 use rayon::iter::ParallelIterator;
-use rclite::{Arc, Rc};
+use rclite::Arc;
 use regex::Regex;
 use rustc_hash::FxBuildHasher;
 use safer_ffi::derive_ReprC;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 
-#[cfg(feature = "legacy_cst")]
-use crate::cst::interpret::{EraInterpretError, EraInterpreter};
 use crate::types::*;
 
 use super::{
@@ -41,7 +27,6 @@ use super::{
 };
 
 use crate::util::rcstr::{self, ArcStr, RcStr};
-use crate::util::syntax::*;
 use crate::util::*;
 
 pub use crate::types::EraCompilerHostFile as MEraEngineHostFile;
@@ -818,7 +803,6 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 filename: filename.clone(),
                 text: Some(content.clone()),
                 compressed_text: None,
-                cst_root: None,
                 ast_data: None,
                 macro_map: Default::default(),
                 defines: EraDefineScope::new(),
@@ -1703,11 +1687,6 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         self.load_erb_inner(filename, content, true)
     }
 
-    #[cfg(feature = "legacy_cst")]
-    pub fn cst_load_erh(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
-        self.cst_load_erb_inner(filename, content, true)
-    }
-
     pub fn finish_load_erh(&mut self) -> Result<(), MEraEngineError> {
         if self.is_header_finished {
             return Ok(());
@@ -1718,27 +1697,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         self.finish_load_erh_inner()
     }
 
-    #[cfg(feature = "legacy_cst")]
-    pub fn cst_finish_load_erh(&mut self) -> Result<(), MEraEngineError> {
-        if self.is_header_finished {
-            return Ok(());
-        }
-
-        self.is_header_finished = true;
-
-        let result = self.cst_finish_load_erh_inner();
-        self.ctx.active_source = ArcStr::default();
-
-        result
-    }
-
     pub fn load_erb(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
         self.load_erb_inner(filename, content, false)
-    }
-
-    #[cfg(feature = "legacy_cst")]
-    pub fn cst_load_erb(&mut self, filename: &str, content: &[u8]) -> Result<(), MEraEngineError> {
-        self.cst_load_erb_inner(filename, content, false)
     }
 
     pub fn start_async_erb_loader(&mut self) -> MEraEngineAsyncErbLoader {
@@ -1800,7 +1760,6 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                             text: Some(content.clone()),
                             // compressed_text: lz4_flex::compress_prepend_size(content.as_bytes()).into(),
                             compressed_text: None,
-                            cst_root: None,
                             ast_data: Some((root_node, nodes)),
                             macro_map,
                             defines: Default::default(),
@@ -1854,7 +1813,6 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                             text: Some(content.clone()),
                             // compressed_text: lz4_flex::compress_prepend_size(content.as_bytes()).into(),
                             compressed_text: None,
-                            cst_root: None,
                             ast_data: None,
                             macro_map: Default::default(),
                             defines: Default::default(),
@@ -1992,69 +1950,6 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         })
     }
 
-    #[cfg(feature = "legacy_cst")]
-    pub fn cst_build(mut self) -> Result<MEraEngine<T>, MEraEngineError> {
-        _ = self.finish_load_csv()?;
-        _ = self.cst_finish_load_erh()?;
-
-        // Load builtin source
-        {
-            const SYS_SRC: &str = include_str!("../sys_src.ERB");
-            self.cst_load_erb("<builtin>", SYS_SRC.as_bytes())?;
-        }
-
-        self.optimize_interner();
-
-        // Process .erb files
-        let filenames = self
-            .ctx
-            .source_map
-            .values()
-            .filter(|x| !x.is_header)
-            .map(|x| x.filename.clone())
-            .collect::<Vec<_>>();
-        let mut codegen = cst::codegen::EraCodeGenerator::new(
-            &mut self.ctx,
-            self.config.no_src_map,
-            !self.config.no_src_map,
-        );
-        codegen.compile_merge_many_programs(&filenames, |progress| {
-            if let Some(callback) = &mut self.builder_callback {
-                callback.on_build_progress(
-                    "erb",
-                    &MEraEngineBuildProgress {
-                        current: progress,
-                        total: self.erb_count,
-                    },
-                );
-            }
-        });
-
-        self.optimize_interner();
-
-        if self.config.no_src_map {
-            // let src_map = Arc::get_mut(&mut self.ctx.source_map).unwrap();
-            // for (_, src_file) in src_map {
-            //     src_file.final_root = None;
-            // }
-            // TODO: Reset node_cache when upstream is ready
-            // let interner = self.ctx.node_cache.into_interner().unwrap();
-            // self.ctx.node_cache = NodeCache::from_interner(interner);
-        }
-
-        // TODO: Call `optimize_resolution` on entering VM on the interner (which populates the
-        //       resolution cache Vec<&str> from DashMap), which helps speed up the VM. Requires
-        //       modification to the (multi-threaded) interner to allow this.
-
-        // TODO: Handle watching variables
-
-        Ok(MEraEngine {
-            ctx: self.ctx,
-            interner: self.interner,
-            vm_state: EraVirtualMachineState::new(),
-        })
-    }
-
     pub fn register_variable(
         &mut self,
         name: &str,
@@ -2150,7 +2045,6 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                 text: Some(content.clone()),
                 // compressed_text: lz4_flex::compress_prepend_size(content.as_bytes()).into(),
                 compressed_text: None,
-                cst_root: None,
                 ast_data: None,
                 macro_map: Default::default(),
                 defines: Default::default(),
@@ -2236,251 +2130,6 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
             self.erh_count += 1;
         } else {
             self.erb_count += 1;
-        }
-
-        Ok(())
-    }
-
-    #[cfg(feature = "legacy_cst")]
-    fn cst_load_erb_inner(
-        &mut self,
-        filename: &str,
-        content: &[u8],
-        is_header: bool,
-    ) -> Result<(), MEraEngineError> {
-        if is_header && self.is_header_finished {
-            return Err(MEraEngineError::new("header loaded too late".into()));
-        }
-
-        // Handle UTF-8 BOM
-        let content = content
-            .strip_prefix("\u{feff}".as_bytes())
-            .unwrap_or(content);
-        let content = &content.to_str_lossy();
-        let filename = ArcStr::from(filename);
-
-        // Parse ERB file into AST
-        self.ctx.active_source = filename.clone();
-        // let node_cache = &mut self.node_cache;
-        let mut lexer = EraLexer::new(filename.clone(), content, false);
-        let mut is_str_var_fn = |x: &str| {
-            (self.ctx.variables)
-                .get_var(x)
-                .map_or(false, |x| x.kind().is_str())
-        };
-        let mut parser = cst::parser::EraParser::new(
-            &mut self.ctx.callback,
-            &mut lexer,
-            &mut self.ctx.i.node_cache,
-            &self.ctx.i.global_replace,
-            &self.ctx.i.global_define,
-            &mut is_str_var_fn,
-            is_header,
-        );
-        let cst::parser::EraParsedProgram {
-            ast,
-            macro_map,
-            defines,
-        } = parser.parse_program();
-        if is_header {
-            // Merge defines into global defines
-            let mut errors = Vec::new();
-            self.ctx
-                .global_define
-                .extend(defines, |name, new_define, old_define| {
-                    let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
-                    diag.span_err(
-                        Default::default(),
-                        new_define.span,
-                        format!("redefinition of macro `{name}`"),
-                    );
-                    diag.span_note(
-                        old_define.filename.clone(),
-                        old_define.span,
-                        "previous definition here",
-                    );
-                    errors.push(diag);
-                });
-            for diag in errors {
-                self.ctx.emit_diag(diag);
-            }
-        }
-        let newline_pos = {
-            let mut newline_pos = lexer.newline_positions();
-            // // Fix newline positions
-            // // NOTE: Newlines will never occur inside macros
-            // // TODO: Optimize performance with the hint above
-            // for pos in newline_pos.iter_mut() {
-            //     let span = SrcSpan::new(*pos, 0);
-            //     let span = macro_map.inverse_translate_span(span);
-            //     *pos = span.start();
-            // }
-            newline_pos
-        };
-        self.ctx.active_source = ArcStr::default();
-
-        // Add source map entry
-        let source_map = Arc::get_mut(&mut self.ctx.source_map).unwrap();
-        let src_file = source_map.insert(
-            filename.clone(),
-            EraSourceFile {
-                filename: filename.clone(),
-                text: None,
-                // compressed_text: lz4_flex::compress_prepend_size(content.as_bytes()).into(),
-                compressed_text: None,
-                cst_root: Some(ast),
-                ast_data: None,
-                macro_map,
-                defines: Default::default(),
-                is_header,
-                newline_pos,
-            },
-        );
-
-        if src_file.is_some() {
-            let mut diag = Diagnostic::with_src(filename.clone(), content.as_bytes());
-            diag.span_err(
-                Default::default(),
-                Default::default(),
-                "file already loaded; overriding previous content",
-            );
-            self.ctx.emit_diag(diag);
-        }
-
-        // Count files
-        if is_header {
-            self.erh_count += 1;
-        } else {
-            self.erb_count += 1;
-        }
-
-        Ok(())
-    }
-
-    #[cfg(feature = "legacy_cst")]
-    fn cst_finish_load_erh_inner(&mut self) -> Result<(), MEraEngineError> {
-        use crate::cst::ast::*;
-
-        // Materialize .erh variable definitions
-        let mut unresolved_vars = Vec::new();
-        let source_map = Arc::clone(&self.ctx.source_map);
-        let mut interp = EraInterpreter::new(&mut self.ctx, true);
-
-        for (i, erh) in source_map.values().filter(|x| x.is_header).enumerate() {
-            interp.get_ctx_mut().active_source = erh.filename.clone();
-
-            let final_root = erh.cst_root.as_ref().unwrap().clone();
-            let node = SyntaxNode::new_root(final_root);
-            let program = EraProgramNode::cast(&node).unwrap();
-            for decl in program.children() {
-                let var_info = match interp.interpret_var_decl(decl) {
-                    Ok(x) => {
-                        if x.is_ref || x.is_dynamic {
-                            let mut diag = interp.make_diag();
-                            diag.span_err(
-                                Default::default(),
-                                decl.src_span(),
-                                "global variable definition cannot be REF or DYNAMIC",
-                            );
-                            interp.get_ctx_mut().emit_diag(diag);
-                            continue;
-                        }
-                        x.var_info
-                    }
-                    Err(EraInterpretError::VarNotFound(_)) => {
-                        // Delay resoultion of variable definitions containing unresolved variables
-                        unresolved_vars.push((erh.filename.clone(), decl.to_owned()));
-                        continue;
-                    }
-                    _ => continue,
-                };
-                let var_name = var_info.name.clone();
-
-                // Create variable
-                // TODO: Report where the previous definition was
-                if interp.get_ctx_mut().variables.add_var(var_info).is_none() {
-                    let mut diag = interp.make_diag();
-                    diag.span_err(
-                        Default::default(),
-                        decl.src_span(),
-                        format!("variable `{var_name}` already defined"),
-                    );
-                    interp.get_ctx_mut().emit_diag(diag);
-                    continue;
-                }
-            }
-
-            if let Some(callback) = &mut self.builder_callback {
-                callback.on_build_progress(
-                    "erh",
-                    &MEraEngineBuildProgress {
-                        current: i + 1,
-                        total: self.erh_count,
-                    },
-                );
-            }
-        }
-
-        // Second pass for unresolved variables
-        while !unresolved_vars.is_empty() {
-            let mut has_progress = false;
-            let mut failures = Vec::new();
-
-            unresolved_vars.retain(|(filename, decl)| {
-                interp.get_ctx_mut().active_source = filename.clone();
-
-                let decl = decl.as_ref();
-
-                let var_info = match interp.interpret_var_decl(decl) {
-                    Ok(x) => {
-                        if x.is_ref || x.is_dynamic {
-                            let mut diag = interp.make_diag();
-                            diag.span_err(
-                                Default::default(),
-                                decl.src_span(),
-                                "global variable definition cannot be REF or DYNAMIC",
-                            );
-                            interp.get_ctx_mut().emit_diag(diag);
-                            return false;
-                        }
-                        x.var_info
-                    }
-                    Err(EraInterpretError::VarNotFound(var)) => {
-                        failures.push((filename.clone(), var.to_cloned()));
-                        return true;
-                    }
-                    _ => return false,
-                };
-                let var_name = var_info.name.clone();
-
-                // Create variable
-                // TODO: Report where the previous definition was
-                if interp.get_ctx_mut().variables.add_var(var_info).is_none() {
-                    let mut diag = interp.make_diag();
-                    diag.span_err(
-                        Default::default(),
-                        decl.src_span(),
-                        format!("variable `{var_name}` already defined"),
-                    );
-                    interp.get_ctx_mut().emit_diag(diag);
-                    return false;
-                }
-
-                has_progress = true;
-
-                false
-            });
-
-            if !has_progress {
-                for (filename, var) in failures {
-                    let var_span = var.src_span();
-                    let var = var.resolve_text(interp.get_ctx_mut().node_cache.interner());
-                    let mut diag = interp.make_diag();
-                    diag.span_err(filename, var_span, format!("undefined variable `{var}`"));
-                    interp.get_ctx_mut().emit_diag(diag);
-                }
-                break;
-            }
         }
 
         Ok(())

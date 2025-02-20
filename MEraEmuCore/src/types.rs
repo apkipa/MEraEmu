@@ -815,9 +815,6 @@ pub struct EraSourceFile {
     /// The compressed original source text. Reduces memory usage.
     #[serde(skip)]
     pub compressed_text: Option<Box<[u8]>>,
-    /// The root AST node of the lossless syntax tree, with macros replaced.
-    #[serde(skip)]
-    pub cst_root: Option<cstree::green::GreenNode>,
     #[serde(skip)]
     pub ast_data: Option<(
         crate::v2::parser::EraNodeRef,
@@ -1079,7 +1076,6 @@ impl<'i> EraCompilerCtxInner<'i> {
                     kind,
                     text: Some(content),
                     compressed_text: None,
-                    cst_root: None,
                     ast_data: None,
                     macro_map: Default::default(),
                     defines: Default::default(),
@@ -1721,108 +1717,7 @@ impl<'a> DiagnosticResolver<'a> {
             let len = span.len();
             let src_file = self.src_map?.get(filename)?;
 
-            if let (Some(final_root), Some(resolver)) = (&src_file.cst_root, self.resolver) {
-                // Only resolve necessary lines from CST to improve performance.
-                let final_root_len = {
-                    let len = final_root.text_len().into();
-                    let span = SrcSpan::new(SrcPos(len), 0);
-                    src_file.macro_map.translate_span(span).start().0
-                };
-                // NOTE: We can guarantee that `start_line` never overflows.
-                let start_line = src_file
-                    .newline_pos
-                    .partition_point(|&pos| pos <= span.start())
-                    - 1;
-                let end_line = src_file
-                    .newline_pos
-                    .partition_point(|&pos| pos <= span.end());
-                let start_pos = src_file.newline_pos[start_line];
-                let end_pos = src_file
-                    .newline_pos
-                    .get(end_line)
-                    .copied()
-                    .unwrap_or_else(|| SrcPos(final_root_len));
-                let snippet_span = SrcSpan::with_ends(start_pos, end_pos);
-
-                // HACK: Fix src pos from original to CST (should replace text to original instead)
-                let input_span = src_file.macro_map.inverse_translate_span(input_span);
-                let len = input_span.len();
-                let snippet_span = src_file.macro_map.inverse_translate_span(snippet_span);
-
-                // Find covering element first, then find the children elements.
-                // if let Some(mut node) = src_file.final_root.as_ref() {
-                let mut node = final_root;
-                let mut covering_snippet = String::new();
-                let mut span = SrcSpan::new(SrcPos(0), final_root_len);
-                let mut covering_snippet_start_pos = SrcPos(0);
-                if !span.contains_span(snippet_span) {
-                    return None;
-                }
-                'outer: loop {
-                    for i in node.children() {
-                        let i_len = i.text_len().into();
-                        span = SrcSpan::new(span.start(), i_len);
-                        if span.contains_span(snippet_span) {
-                            // Enter the covering element.
-                            node = match i {
-                                NodeOrToken::Node(n) => n,
-                                NodeOrToken::Token(t) => {
-                                    covering_snippet += t.resolve_text::<EraTokenKind, _>(resolver);
-                                    break 'outer;
-                                }
-                            };
-                            continue 'outer;
-                        }
-                        if span.intersects(snippet_span) {
-                            if covering_snippet.is_empty() {
-                                covering_snippet_start_pos = span.start();
-                            }
-                            i.write_display::<EraTokenKind, _>(resolver, &mut covering_snippet)
-                                .unwrap();
-                        } else if !covering_snippet.is_empty() {
-                            break 'outer;
-                        }
-                        span = SrcSpan::new(span.end(), 0);
-                    }
-                }
-
-                // Trim the covering snippet to the actual snippet.
-                // if cfg!(debug_assertions) {
-                //     println!(
-                //         "covering_snippet: {:?}, len: {} -> {}",
-                //         covering_snippet,
-                //         covering_snippet.len(),
-                //         snippet_span.len()
-                //     );
-                // }
-                let covering_snippet_span =
-                    SrcSpan::new(covering_snippet_start_pos, covering_snippet.len() as _);
-                covering_snippet.replace_range(
-                    (covering_snippet.len()
-                        - ((covering_snippet_span.end().0 - snippet_span.end().0) as usize))..,
-                    "",
-                );
-                covering_snippet.replace_range(
-                    ..(snippet_span.start().0 - covering_snippet_start_pos.0) as usize,
-                    "",
-                );
-                while covering_snippet.ends_with(['\r', '\n']) {
-                    covering_snippet.pop();
-                }
-
-                let offset = (input_span.start().0 - snippet_span.start().0) as _;
-                let loc = SrcLoc {
-                    line: (start_line + 1) as _,
-                    col: covering_snippet[..offset as usize].chars().count() as _,
-                };
-
-                return Some(DiagnosticResolveSrcSpanResult {
-                    snippet: covering_snippet,
-                    offset,
-                    loc,
-                    len,
-                });
-            } else if let Some(text) = &src_file.text {
+            if let Some(text) = &src_file.text {
                 Cow::Borrowed(text.as_bytes())
             } else {
                 // Must decompress the entire source text.
