@@ -73,6 +73,7 @@ struct EraLexerOuterState<'a> {
     cart: Vec<u8>,
     filename: ArcStr,
     skip_whitespace: bool,
+    ignore_newline_suppression: bool,
 }
 
 impl<'a> EraLexerOuterState<'a> {
@@ -90,6 +91,7 @@ impl<'a> EraLexer<'a> {
                 cart: Vec::new(),
                 filename,
                 skip_whitespace,
+                ignore_newline_suppression: false,
             },
             i: EraLexerInnerState::new(),
             next_i: None,
@@ -114,6 +116,10 @@ impl<'a> EraLexer<'a> {
 
     pub fn make_diag(&self) -> Diagnostic {
         self.o.new_diag()
+    }
+
+    pub fn set_ignore_newline_suppression(&mut self, ignore: bool) {
+        self.o.ignore_newline_suppression = ignore;
     }
 
     // NOTE: We split `ctx` into finer-grained parts to avoid lifetime & ownership issues
@@ -357,6 +363,8 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
         };
 
         let Some(ch) = self.next_char() else {
+            // EOF
+            self.i.suppress_newline_cnt = 0;
             return if !matches!(self.i.last_token, LineBreak | Eof) {
                 // HACK: Ensure newline so that parser can handle it correctly
                 LineBreak
@@ -433,7 +441,7 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
         }
 
         // Handle newline suppression
-        if self.i.last_is_newline {
+        if self.i.last_is_newline && !self.o.ignore_newline_suppression {
             match ch {
                 b'{' => {
                     self.push_suppress_newline();

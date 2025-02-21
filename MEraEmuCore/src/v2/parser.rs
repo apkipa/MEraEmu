@@ -1781,7 +1781,15 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
     fn integer_literal(&mut self) -> ParseResult<EraNodeRef> {
         let token = self.eat(Mode::Normal, Token::IntLiteral)?;
         let span = token.token.span;
-        let val = routines::parse_int_literal(token.lexeme.as_bytes()).unwrap();
+        let val = if let Some(val) = routines::parse_int_literal(token.lexeme.as_bytes()) {
+            val
+        } else {
+            let msg = format!("integer literal `{}` overflowed i64", token.lexeme);
+            let mut diag = self.base_diag.clone();
+            diag.span_err(Default::default(), span, msg);
+            self.o.emit_diag(diag);
+            return Err(());
+        };
         Ok(self
             .o
             .node_arena
@@ -2054,7 +2062,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         let (first, first_lexeme) = (first.token, first.lexeme);
         // Read lhs
         let mut lhs = match first.kind {
-            Token::IntLiteral => self.integer_literal().unwrap(),
+            Token::IntLiteral => self.integer_literal()?,
             // TODO: Remove the branch `StringLiteral` since it's never produced by the lexer
             Token::StringLiteral => self.plain_string_literal().unwrap(),
             Token::StringFormStart => self.expression_strform().unwrap(),

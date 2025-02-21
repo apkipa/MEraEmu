@@ -18,7 +18,10 @@ use safer_ffi::derive_ReprC;
 use serde::{Deserialize, Serialize};
 use smallvec::smallvec;
 
-use crate::types::*;
+use crate::{
+    types::*,
+    v2::{codegen::EraBcChunkBuilder, parser::EraParser},
+};
 
 use super::{
     codegen::EraCodeGenerator,
@@ -3170,10 +3173,9 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
             });
         }
 
-        // TODO: Finish `evaluate_expr`
-        Err(MEraEngineError::new(
-            "expr eval not yet implemented".to_owned(),
-        ))
+        // Evaluate as expression
+        self.evaluate_expr_inner(expr, scope_idx, offset, count, eval_limit)
+            .map_err(|e| MEraEngineError::new(format!("{:?}", e)))
     }
 
     fn get_functions_list(&self) -> Vec<String> {
@@ -3267,12 +3269,178 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
 }
 
 impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
+    fn evaluate_expr_inner(
+        &mut self,
+        expr: &str,
+        scope_idx: Option<u32>,
+        offset: u64,
+        count: u64,
+        eval_limit: u64,
+    ) -> anyhow::Result<EraEvaluateExprResult> {
+        let expr = arcstr::ArcStr::from(expr);
+        let scope_idx = scope_idx
+            .map(|x| x as usize)
+            .unwrap_or_else(|| self.vm_state.get_exec_frames().len());
+        if scope_idx == 0 {
+            anyhow::bail!("global scope eval not yet implemented");
+        }
+        let mut new_frame = (self.vm_state)
+            .diverge_transient_exec_frame_from(scope_idx - 1)
+            .context("failed to diverge transient frame")?;
+        let env_func = {
+            let ip = new_frame.ip;
+            let (env_func, _) = (self.ctx)
+                .func_idx_and_info_from_chunk_pos(ip.chunk as _, ip.offset as _)
+                .context("failed to get function info")?;
+            env_func
+        };
+        new_frame.ret_ip = EraExecIp {
+            chunk: u32::MAX,
+            offset: u32::MAX,
+        };
+        new_frame.ignore_return_value = true;
+
+        // Add to sources map and compile
+        let filename = ArcStr::from(self.ctx.generate_next_transient_src_name());
+        if !self.ctx.push_source_file(
+            filename.clone(),
+            expr.clone(),
+            EraSourceFileKind::Source,
+            true,
+        ) {
+            anyhow::bail!("source file `{filename}` already exists");
+        }
+        let ast = {
+            let mut lexer = EraLexer::new(filename.clone(), &expr, false);
+            lexer.set_ignore_newline_suppression(true);
+            let mut is_str_var_fn = |_: &str| false;
+            // TODO: Use interner from transient_ctx
+            let mut parser = EraParser::new(
+                &mut self.ctx.callback,
+                &self.ctx.i,
+                &mut lexer,
+                &self.ctx.i.interner(),
+                &self.ctx.i.global_replace,
+                &self.ctx.i.global_define,
+                &mut is_str_var_fn,
+                false,
+                true,
+            );
+            parser.parse_expression()
+        };
+        let (expr_ty, bc_chunk) = {
+            // TODO: Use interner from transient_ctx
+            let func_entries = self.ctx.func_entries.clone();
+            let env_func = func_entries
+                .get_index(env_func)
+                .unwrap()
+                .1
+                .as_ref()
+                .unwrap();
+            let mut compiler = EraCodeGenerator::new(&mut self.ctx, true, true, true);
+            let mut bc_builder = EraBcChunkBuilder::new();
+            let Ok(ty) = compiler.compile_expression(
+                filename.clone(),
+                env_func,
+                &ast.nodes,
+                ast.root_node,
+                &mut bc_builder,
+            ) else {
+                anyhow::bail!("failed to compile `{}`", expr);
+            };
+            // We choose DebugBreak because it can never be produced by the user code.
+            bc_builder.push_bc(EraBytecodeKind::DebugBreak, Default::default());
+            (ty, bc_builder.finish_with_name(filename.clone()))
+        };
+        let bc_chunks =
+            Arc::get_mut(&mut self.ctx.bc_chunks).context_unlikely("bc_chunks is shared")?;
+        let chunk_idx = bc_chunks.len();
+        let bc_chunk_len = bc_chunk.len();
+        bc_chunks.push(bc_chunk);
+        let func_entries =
+            Arc::get_mut(&mut self.ctx.func_entries).context_unlikely("func_entries is shared")?;
+        let func_name = filename.clone();
+        func_entries.insert(
+            Ascii::new(func_name.clone()),
+            Some(crate::types::EraFuncInfo {
+                name: func_name.clone(),
+                name_span: Default::default(),
+                frame_info: Default::default(),
+                chunk_idx: chunk_idx as _,
+                bc_offset: 0,
+                bc_size: bc_chunk_len as _,
+                ret_kind: expr_ty,
+                is_transient: true,
+            }),
+        );
+        new_frame.ip = EraExecIp {
+            chunk: chunk_idx as _,
+            offset: 0,
+        };
+
+        // Create a new execution frame for the function
+        let vm_state = self.vm_state.clone();
+        self.vm_state.push_exec_frame(new_frame);
+
+        // Evaluate the code
+        let start_vm_counter = self.ctx.eval_id_counter;
+        let mut vm = EraVirtualMachine::new(&mut self.ctx, &mut self.vm_state);
+        vm.set_enable_jit(self.config.vm_cache_strategy == MEraEngineVmCacheStrategy::FastJit);
+        // TODO: Guard against BEGIN TRAIN?
+        let break_reason = vm.execute(&AtomicBool::new(true), eval_limit);
+        // Remove from sources map
+        let end_vm_counter = self.ctx.eval_id_counter;
+        for i in start_vm_counter..=end_vm_counter {
+            let filename = self.ctx.get_transient_src_name(i);
+            self.ctx.remove_source_file(&filename);
+            let bc_chunks = Arc::get_mut(&mut self.ctx.bc_chunks).unwrap();
+            bc_chunks.pop();
+            let func_entries = Arc::get_mut(&mut self.ctx.func_entries).unwrap();
+            let func_name = filename;
+            func_entries.swap_remove(Ascii::new_str(&func_name));
+        }
+        let value = if expr_ty.is_value() {
+            self.vm_state
+                .get_stack()
+                .last()
+                .cloned()
+                .context("no value on stack")?
+        } else {
+            StackValue::new_int(0)
+        };
+        self.vm_state = vm_state;
+        match break_reason {
+            EraExecutionBreakReason::DebugBreakInstruction => (),
+            EraExecutionBreakReason::ReachedMaxInstructions => {
+                anyhow::bail!("reached evaluation limit")
+            }
+            EraExecutionBreakReason::InternalError => {
+                anyhow::bail!("internal error during evaluation")
+            }
+            _ => anyhow::bail!("unexpected break reason: {:?}", break_reason),
+        }
+
+        let value = match value.into_unpacked() {
+            _ if !expr_ty.is_value() => ScalarValue::Void,
+            FlatStackValue::Int(x) => ScalarValue::Int(x.val),
+            FlatStackValue::Str(x) => ScalarValue::Str(x.val.to_string()),
+            x => anyhow::bail!("unexpected stack value: {:?}", x),
+        };
+        Ok(EraEvaluateExprResult {
+            value,
+            children: Vec::new(),
+            offset,
+            count,
+            children_total_count: None,
+        })
+    }
+
     fn goto_next_safe_ip_inner(&mut self) -> anyhow::Result<()> {
         use hashbrown::hash_map::Entry;
 
         let cur_exec_frame_idx = self
             .vm_state
-            .get_cur_non_transient_exec_frame_index()
+            .get_cur_non_transient_exec_frame_index(None)
             .context("no current exec frame")?;
         let transient_exec_frame = self.vm_state.get_exec_frames().get(cur_exec_frame_idx + 1);
         let cur_ip = self.vm_state.get_exec_frames()[cur_exec_frame_idx].ip;

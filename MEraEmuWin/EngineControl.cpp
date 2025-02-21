@@ -3891,7 +3891,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_reused_last_line = true;
     }
     void EngineControl::RoutineClearLine(uint64_t count) {
-        if (count == 0) { return; }
+        if (count == 0 || size(m_ui_lines) == 0) { return; }
         auto old_count = (uint64_t)size(m_ui_lines);
         if (count > old_count) {
             count = old_count;

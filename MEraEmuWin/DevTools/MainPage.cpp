@@ -120,7 +120,20 @@ static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesT
         item.BriefValue(to_hstring(*value.value.as_int()));
     }
     else if (value.value.is_str()) {
-        item.BriefValue(to_hstring(*value.value.as_str()));
+        if (value.children_total_count.has_value()) {
+            // Compound value
+            item.BriefValue(to_hstring(*value.value.as_str()));
+        }
+        else {
+            // String value
+            std::wstring result = L"\"";
+            escape_to_literal_sink(result, to_hstring(*value.value.as_str()));
+            result += L"\"";
+            item.BriefValue(result);
+        }
+    }
+    else if (value.value.is_void()) {
+        item.BriefValue(L"<void>");
     }
 
     // Sub items

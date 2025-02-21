@@ -84,70 +84,70 @@ impl EraBcChunkJumpPoint {
 // }
 
 #[derive(Debug, Default)]
-struct EraBcChunkBuilder {
+pub struct EraBcChunkBuilder {
     bc: Vec<u8>,
     src_spans: Vec<(SrcSpan, u8)>,
 }
 
 impl EraBcChunkBuilder {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             bc: Vec::new(),
             src_spans: Vec::new(),
         }
     }
 
-    fn checkpoint(&self) -> EraBcChunkCheckpoint {
+    pub fn checkpoint(&self) -> EraBcChunkCheckpoint {
         EraBcChunkCheckpoint(self.bc.len() as _, self.src_spans.len() as _)
     }
 
-    fn get_len(&self) -> usize {
+    pub fn get_len(&self) -> usize {
         self.bc.len()
     }
 
-    fn finish(self) -> EraBcChunk {
+    pub fn finish(self) -> EraBcChunk {
         EraBcChunk::new(Default::default(), self.bc, self.src_spans)
     }
 
-    fn finish_with_name(self, name: ArcStr) -> EraBcChunk {
+    pub fn finish_with_name(self, name: ArcStr) -> EraBcChunk {
         EraBcChunk::new(name, self.bc, self.src_spans)
     }
 
-    fn rollback_to(&mut self, checkpoint: EraBcChunkCheckpoint) {
+    pub fn rollback_to(&mut self, checkpoint: EraBcChunkCheckpoint) {
         let pos = checkpoint.pos();
         assert!(pos <= self.bc.len(), "invalid checkpoint");
         self.bc.truncate(pos);
         self.src_spans.truncate(checkpoint.instruction_index());
     }
 
-    fn push_bc(&mut self, bc: EraBytecodeKind, span: SrcSpan) {
+    pub fn push_bc(&mut self, bc: EraBytecodeKind, span: SrcSpan) {
         let bc = bc.to_bytes();
         self.bc.extend_from_slice(&bc);
         self.src_spans.push((span, bc.len() as u8));
     }
 
-    fn push_u8(&mut self, value: u8, span: SrcSpan) {
+    pub fn push_u8(&mut self, value: u8, span: SrcSpan) {
         self.bc.push(value);
         self.src_spans.push((span, 1));
     }
 
-    fn push_u16(&mut self, value: u16, span: SrcSpan) {
+    pub fn push_u16(&mut self, value: u16, span: SrcSpan) {
         self.bc.extend_from_slice(&value.to_le_bytes());
         self.src_spans.push((span, 2));
     }
 
-    fn push_u32(&mut self, value: u32, span: SrcSpan) {
+    pub fn push_u32(&mut self, value: u32, span: SrcSpan) {
         self.bc.extend_from_slice(&value.to_le_bytes());
         self.src_spans.push((span, 4));
     }
 
-    fn push_u64(&mut self, value: u64, span: SrcSpan) {
+    pub fn push_u64(&mut self, value: u64, span: SrcSpan) {
         self.bc.extend_from_slice(&value.to_le_bytes());
         self.src_spans.push((span, 8));
     }
 
     #[must_use]
-    fn push_jump(&mut self, span: SrcSpan) -> EraBcChunkJumpPoint {
+    pub fn push_jump(&mut self, span: SrcSpan) -> EraBcChunkJumpPoint {
         let pos = self.bc.len();
         let bc = BcKind::JumpWW { offset: 0 };
         self.push_bc(
@@ -160,7 +160,7 @@ impl EraBcChunkBuilder {
     }
 
     #[must_use]
-    fn push_jump_if(&mut self, span: SrcSpan) -> EraBcChunkJumpPoint {
+    pub fn push_jump_if(&mut self, span: SrcSpan) -> EraBcChunkJumpPoint {
         let pos = self.bc.len();
         let bc = BcKind::JumpIfWW { offset: 0 };
         self.push_bc(
@@ -173,7 +173,7 @@ impl EraBcChunkBuilder {
     }
 
     #[must_use]
-    fn push_jump_if_not(&mut self, span: SrcSpan) -> EraBcChunkJumpPoint {
+    pub fn push_jump_if_not(&mut self, span: SrcSpan) -> EraBcChunkJumpPoint {
         let pos = self.bc.len();
         let bc = BcKind::JumpIfNotWW { offset: 0 };
         self.push_bc(
@@ -185,7 +185,7 @@ impl EraBcChunkBuilder {
         EraBcChunkJumpPoint(pos)
     }
 
-    fn complete_jump(&mut self, jump_point: EraBcChunkJumpPoint, dest: EraBcChunkCheckpoint) {
+    pub fn complete_jump(&mut self, jump_point: EraBcChunkJumpPoint, dest: EraBcChunkCheckpoint) {
         let mut delta: i32 = (dest.0 as usize)
             .abs_diff(jump_point.0)
             .try_into()
@@ -201,12 +201,12 @@ impl EraBcChunkBuilder {
         std::mem::forget(jump_point);
     }
 
-    fn complete_jump_here(&mut self, jump_point: EraBcChunkJumpPoint) {
+    pub fn complete_jump_here(&mut self, jump_point: EraBcChunkJumpPoint) {
         let dest = self.checkpoint();
         self.complete_jump(jump_point, dest);
     }
 
-    fn push_load_imm(&mut self, imm: i64, span: SrcSpan) {
+    pub fn push_load_imm(&mut self, imm: i64, span: SrcSpan) {
         if let Ok(imm) = imm.try_into() {
             self.push_bc(BcKind::LoadImm8 { imm }, span);
         } else if let Ok(imm) = imm.try_into() {
@@ -218,7 +218,7 @@ impl EraBcChunkBuilder {
         }
     }
 
-    fn push_pop_all(&mut self, count: u8, span: SrcSpan) {
+    pub fn push_pop_all(&mut self, count: u8, span: SrcSpan) {
         let bc = match count {
             0 => return,
             1 => BcKind::Pop,
@@ -227,7 +227,7 @@ impl EraBcChunkBuilder {
         self.push_bc(bc, span);
     }
 
-    fn push_pop_one(&mut self, idx: u8, span: SrcSpan) {
+    pub fn push_pop_one(&mut self, idx: u8, span: SrcSpan) {
         assert_ne!(idx, 0, "pop_one with idx 0");
         let bc = match idx {
             1 => BcKind::Pop,
@@ -236,7 +236,7 @@ impl EraBcChunkBuilder {
         self.push_bc(bc, span);
     }
 
-    fn push_duplicate_all(&mut self, count: u8, span: SrcSpan) {
+    pub fn push_duplicate_all(&mut self, count: u8, span: SrcSpan) {
         let bc = match count {
             0 => return,
             1 => BcKind::Duplicate,
@@ -245,7 +245,7 @@ impl EraBcChunkBuilder {
         self.push_bc(bc, span);
     }
 
-    fn push_duplicate_one(&mut self, idx: u8, span: SrcSpan) {
+    pub fn push_duplicate_one(&mut self, idx: u8, span: SrcSpan) {
         assert_ne!(idx, 0, "duplicate_one with idx 0");
         let bc = match idx {
             1 => BcKind::Duplicate,
@@ -254,7 +254,7 @@ impl EraBcChunkBuilder {
         self.push_bc(bc, span);
     }
 
-    fn push_build_string(&mut self, count: u8, span: SrcSpan) {
+    pub fn push_build_string(&mut self, count: u8, span: SrcSpan) {
         let bc = match count {
             1 => return,
             _ => BcKind::BuildString { count },
@@ -262,7 +262,7 @@ impl EraBcChunkBuilder {
         self.push_bc(bc, span);
     }
 
-    fn push_load_const_str(&mut self, token_key: TokenKey, span: SrcSpan) {
+    pub fn push_load_const_str(&mut self, token_key: TokenKey, span: SrcSpan) {
         self.push_bc(
             BcKind::LoadConstStr {
                 idx: token_key.into_u32(),
@@ -594,29 +594,19 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
         env_func: &EraFuncInfo<'i>,
         arena: &EraNodeArena,
         root_node: EraNodeRef,
-    ) -> Result<(ScalarValueKind, EraBcChunk), ()> {
-        let mut chunk = EraBcChunkBuilder::new();
+        bc_builder: &mut EraBcChunkBuilder,
+    ) -> Result<ScalarValueKind, ()> {
         let mut site = EraCodeGenSite::with_func(
             &mut self.ctx.callback,
             &self.ctx.i,
             filename,
-            &mut chunk,
+            bc_builder,
             arena,
             env_func,
             self.transient_ctx.as_deref(),
         );
         let ty = site.expression(root_node)?;
-        let filename = site.filename;
-        match ty {
-            ScalarValueKind::Int => {
-                chunk.push_bc(BcKind::ReturnInt, Default::default());
-            }
-            ScalarValueKind::Str => {
-                chunk.push_bc(BcKind::ReturnStr, Default::default());
-            }
-            _ => (),
-        }
-        Ok((ty, chunk.finish_with_name(filename)))
+        Ok(ty)
     }
 
     /// Compiles a string form. Used for eval scenarios.
@@ -7079,6 +7069,24 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                     "function `BITMAP_CACHE_ENABLE` is not supported and will be ignored",
                 );
                 site.ctx.emit_diag_to(diag, site.diag_emit);
+            }
+            b"STRFORM" => {
+                site.results()?;
+                let [form] = site.unpack_args(args)?;
+                apply_args!(name_span, form:s);
+                site.chunk.push_bc(BcKind::EvalStrForm, name_span);
+            }
+            b"MEE_EVALI" => {
+                site.result()?;
+                let [expr] = site.unpack_args(args)?;
+                apply_args!(name_span, expr:s);
+                site.chunk.push_bc(BcKind::EvalIntExpr, name_span);
+            }
+            b"MEE_EVALS" => {
+                site.results()?;
+                let [expr] = site.unpack_args(args)?;
+                apply_args!(name_span, expr:s);
+                site.chunk.push_bc(BcKind::EvalStrExpr, name_span);
             }
             _ if name.eq_ignore_ascii_case("SYSINTRINSIC_LoadGameInit") => {
                 // Do nothing
