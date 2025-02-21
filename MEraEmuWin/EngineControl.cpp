@@ -69,6 +69,33 @@ Windows::UI::Color color_from_diagnostic_level(DiagnosticLevel level) noexcept {
     }
 }
 
+template <typename T>
+struct ValueCache {
+    ValueCache() : m_value{ std::nullopt } {}
+
+    void set(T value) {
+        m_value = value;
+    }
+    template <typename F>
+    T get_or_update(F&& f) {
+        if (!m_value.has_value()) {
+            m_value = f();
+        }
+        return *m_value;
+    }
+    std::optional<T> get_opt() const {
+        return m_value;
+    }
+    void invalidate() {
+        m_value = std::nullopt;
+    }
+    operator bool() const noexcept {
+        return m_value.has_value();
+    }
+
+    std::optional<T> m_value;
+};
+
 template <typename CharT>
 struct SimpleHtmlParser {
     using string_type = std::basic_string<CharT>;
@@ -1114,16 +1141,20 @@ namespace winrt::MEraEmuWin::implementation {
         }
         int64_t on_var_get_int(std::string_view name, size_t idx) override {
             if (name == "@COLOR") {
-                return exec_ui_work([sd = m_sd] {
-                    return to_u32(sd->ui_ctrl->EngineForeColor()) & ~0xff000000;
+                return m_ui_cache.fore_color.get_or_update([&] {
+                    return exec_ui_work([sd = m_sd] {
+                        return to_u32(sd->ui_ctrl->EngineForeColor()) & ~0xff000000;
+                    });
                 });
             }
             if (name == "@DEFCOLOR") {
                 return to_u32(m_sd->app_settings->GameForegroundColor());
             }
             if (name == "@BGCOLOR") {
-                return exec_ui_work([sd = m_sd] {
-                    return to_u32(sd->ui_ctrl->EngineBackColor()) & ~0xff000000;
+                return m_ui_cache.back_color.get_or_update([&] {
+                    return exec_ui_work([sd = m_sd] {
+                        return to_u32(sd->ui_ctrl->EngineBackColor()) & ~0xff000000;
+                    });
                 });
             }
             if (name == "@DEFBGCOLOR") {
@@ -1230,15 +1261,19 @@ namespace winrt::MEraEmuWin::implementation {
         }
         void on_var_set_int(std::string_view name, size_t idx, int64_t val) override {
             if (name == "@COLOR") {
+                if (m_ui_cache.fore_color.get_opt() == val) { return; }
                 queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->EngineForeColor(to_winrt_color((uint32_t)val | 0xff000000));
                 });
+                m_ui_cache.fore_color.set(val);
                 return;
             }
             if (name == "@BGCOLOR") {
+                if (m_ui_cache.back_color.get_opt() == val) { return; }
                 queue_ui_work([sd = m_sd, val]() {
                     sd->ui_ctrl->EngineBackColor(to_winrt_color((uint32_t)val | 0xff000000));
                 });
+                m_ui_cache.back_color.set(val);
                 return;
             }
             if (name == "@STYLE") {
@@ -1510,6 +1545,10 @@ namespace winrt::MEraEmuWin::implementation {
             return 0;
         }
 
+        void reset_ui_cache() {
+            m_ui_cache = {};
+        }
+
     private:
         void queue_ui_work(std::move_only_function<void()> work) {
             if (m_ui_task_tx->send(work) && !m_sd->ui_queue_work_debounce.load(std::memory_order_relaxed)) {
@@ -1543,6 +1582,12 @@ namespace winrt::MEraEmuWin::implementation {
         util::sync::spsc::Sender<std::move_only_function<void()>> const* const m_ui_task_tx;
         std::string m_str_cache;
         std::mt19937_64 m_rand_gen{ std::random_device{}() };
+
+        // UI value caches
+        struct {
+            ValueCache<uint32_t> fore_color;
+            ValueCache<uint32_t> back_color;
+        } m_ui_cache;
 
     public:
         int64_t m_tick_compensation{};
@@ -1648,22 +1693,22 @@ namespace winrt::MEraEmuWin::implementation {
                     scale_effect->SetInputEffect(0, crop_effect.get());
                     d2d_ctx->DrawImage(scale_effect.get(), D2D1::Point2F(rect.left, rect.top),
                         D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR);*/
-                    /*auto src_rect = D2D1::RectF(sprite.x, sprite.y, sprite.x + sprite.width, sprite.y + sprite.height);
-                    d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f,
-                        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, src_rect);*/
-                    /*D2D1_RECT_U src_rect;
-                    src_rect.left = saturate_to_u32(sprite.x);
-                    src_rect.top = saturate_to_u32(sprite.y);
-                    src_rect.right = saturate_to_u32(src_rect.left + sprite.width);
-                    src_rect.bottom = saturate_to_u32(src_rect.top + sprite.height);
-                    auto const& sb = ctrl->m_d2d_sprite_batch;
-                    sb->Clear();
-                    sb->AddSprites(1, &rect, &src_rect);
-                    d2d_ctx->DrawSpriteBatch(sb.get(), img.bitmap.get(),
-                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_SPRITE_OPTIONS_CLAMP_TO_SOURCE_RECTANGLE);*/
+                        /*auto src_rect = D2D1::RectF(sprite.x, sprite.y, sprite.x + sprite.width, sprite.y + sprite.height);
+                        d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f,
+                            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, src_rect);*/
+                            /*D2D1_RECT_U src_rect;
+                            src_rect.left = saturate_to_u32(sprite.x);
+                            src_rect.top = saturate_to_u32(sprite.y);
+                            src_rect.right = saturate_to_u32(src_rect.left + sprite.width);
+                            src_rect.bottom = saturate_to_u32(src_rect.top + sprite.height);
+                            auto const& sb = ctrl->m_d2d_sprite_batch;
+                            sb->Clear();
+                            sb->AddSprites(1, &rect, &src_rect);
+                            d2d_ctx->DrawSpriteBatch(sb.get(), img.bitmap.get(),
+                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_SPRITE_OPTIONS_CLAMP_TO_SOURCE_RECTANGLE);*/
 
-                    // HACK: A terrible workaround trying to fix D2D sampling outside the source region,
-                    //       while avoiding degrading the quality under certain circumstances.
+                                // HACK: A terrible workaround trying to fix D2D sampling outside the source region,
+                                //       while avoiding degrading the quality under certain circumstances.
                     if (v.height <= 100) {
                         auto src_rect = D2D1::RectF(sprite.x, sprite.y, sprite.x + sprite.width, sprite.y + sprite.height);
                         d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f,
@@ -2460,6 +2505,7 @@ namespace winrt::MEraEmuWin::implementation {
                         auto cfg = engine.get_config();
                         update_config_fn(cfg);
                         engine.set_config(cfg);
+                        callback->reset_ui_cache();
                     }
 
                     // If not reached max instructions, we treat engine as halted

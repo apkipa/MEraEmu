@@ -721,17 +721,27 @@ struct EraVmExecSiteOuter<'ctx, 'i, 's, Callback> {
 struct EraJitCompiledFunction {
     index: usize,
     code: dynasmrt::ExecutableBuffer,
+    jit_unwind_registry_guard: Option<JitUnwindRegistryGuard>,
 }
 
 impl EraJitCompiledFunction {
-    fn new(index: usize, code: dynasmrt::ExecutableBuffer) -> Self {
-        Self { index, code }
+    fn new(
+        index: usize,
+        code: dynasmrt::ExecutableBuffer,
+        jit_unwind_registry_guard: Option<JitUnwindRegistryGuard>,
+    ) -> Self {
+        Self {
+            index,
+            code,
+            jit_unwind_registry_guard,
+        }
     }
 
     fn new_invalid(index: usize) -> Self {
         Self {
             index,
             code: dynasmrt::ExecutableBuffer::new(0).unwrap(),
+            jit_unwind_registry_guard: None,
         }
     }
 
@@ -758,7 +768,6 @@ struct EraVmExecSite<'ctx, 'i, 's, Callback> {
     remaining_inst_cnt: u64,
     jit_compiled_functions: Vec<Option<EraJitCompiledFunction>>,
     jit_side_frame: Vec<EraJitExecFrame>,
-    jit_unwind_registry: JitUnwindRegistry,
 }
 
 impl<Callback> Deref for EraVmExecSite<'_, '_, '_, Callback> {
@@ -823,7 +832,6 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVmExecSite<'ctx, 'i, 's, Ca
                 remaining_inst_cnt,
                 jit_compiled_functions: Vec::new(),
                 jit_side_frame: Vec::new(),
-                jit_unwind_registry: JitUnwindRegistry::new(),
             }
         };
         this.remake_site()?;
@@ -1747,7 +1755,25 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         o.stack.truncate(cur_frame.real_stack_start as _);
         o.var_stack.truncate(cur_frame.vars_stack_start as _);
         if cur_frame.is_transient {
-            // TODO: Remove transient source
+            // Remove transient source (should be the latest one)
+            let source_map = Arc::get_mut(&mut self.o.ctx.i.source_map)
+                .context_unlikely("source_map is shared")?;
+            let func_entries = Arc::get_mut(&mut self.o.ctx.i.func_entries)
+                .context_unlikely("function_entries is shared")?;
+            let bc_chunks = Arc::get_mut(&mut self.o.ctx.i.bc_chunks)
+                .context_unlikely("bc_chunks is shared")?;
+            if let Some(chunk) = bc_chunks.last() {
+                use indexmap::map::Entry;
+                match source_map.entry(chunk.name.clone()) {
+                    Entry::Occupied(e) if e.get().is_transient => {
+                        e.swap_remove();
+                        let func_name = chunk.name.clone();
+                        func_entries.swap_remove(Ascii::new_str(&func_name));
+                        bc_chunks.pop();
+                    }
+                    _ => (),
+                }
+            }
         }
         self.remake_site()?;
         self.o.cur_frame.ip = cur_frame.ret_ip;
@@ -1768,7 +1794,25 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         o.stack.truncate(cur_frame.real_stack_start as _);
         o.var_stack.truncate(cur_frame.vars_stack_start as _);
         if cur_frame.is_transient {
-            // TODO: Remove transient source
+            // Remove transient source (should be the latest one)
+            let source_map = Arc::get_mut(&mut self.o.ctx.i.source_map)
+                .context_unlikely("source_map is shared")?;
+            let func_entries = Arc::get_mut(&mut self.o.ctx.i.func_entries)
+                .context_unlikely("function_entries is shared")?;
+            let bc_chunks = Arc::get_mut(&mut self.o.ctx.i.bc_chunks)
+                .context_unlikely("bc_chunks is shared")?;
+            if let Some(chunk) = bc_chunks.last() {
+                use indexmap::map::Entry;
+                match source_map.entry(chunk.name.clone()) {
+                    Entry::Occupied(e) if e.get().is_transient => {
+                        e.swap_remove();
+                        let func_name = chunk.name.clone();
+                        func_entries.swap_remove(Ascii::new_str(&func_name));
+                        bc_chunks.pop();
+                    }
+                    _ => (),
+                }
+            }
         }
         self.remake_site()?;
         self.o.cur_frame.ip = cur_frame.ret_ip;
@@ -1792,7 +1836,25 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         o.stack.truncate(cur_frame.real_stack_start as _);
         o.var_stack.truncate(cur_frame.vars_stack_start as _);
         if cur_frame.is_transient {
-            // TODO: Remove transient source
+            // Remove transient source (should be the latest one)
+            let source_map = Arc::get_mut(&mut self.o.ctx.i.source_map)
+                .context_unlikely("source_map is shared")?;
+            let func_entries = Arc::get_mut(&mut self.o.ctx.i.func_entries)
+                .context_unlikely("function_entries is shared")?;
+            let bc_chunks = Arc::get_mut(&mut self.o.ctx.i.bc_chunks)
+                .context_unlikely("bc_chunks is shared")?;
+            if let Some(chunk) = bc_chunks.last() {
+                use indexmap::map::Entry;
+                match source_map.entry(chunk.name.clone()) {
+                    Entry::Occupied(e) if e.get().is_transient => {
+                        e.swap_remove();
+                        let func_name = chunk.name.clone();
+                        func_entries.swap_remove(Ascii::new_str(&func_name));
+                        bc_chunks.pop();
+                    }
+                    _ => (),
+                }
+            }
         }
         self.remake_site()?;
         self.o.cur_frame.ip = cur_frame.ret_ip;
@@ -6107,41 +6169,36 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 }
 
-struct JitUnwindRegistry {
-    identifiers: Vec<usize>,
+struct JitUnwindRegistryGuard {
+    identifier: NonZeroUsize,
 }
 
-impl JitUnwindRegistry {
-    fn new() -> Self {
-        Self {
-            identifiers: Vec::new(),
-        }
-    }
-
+impl JitUnwindRegistryGuard {
     fn add_function_table(
-        &mut self,
         func_table: *const windows_sys::Win32::System::Diagnostics::Debug::IMAGE_RUNTIME_FUNCTION_ENTRY,
         base_addr: usize,
-    ) {
+    ) -> Option<JitUnwindRegistryGuard> {
         use windows_sys::Win32::System::Diagnostics::Debug::*;
 
         unsafe {
             let r = RtlAddFunctionTable(func_table, 1, base_addr as _);
             if r != 0 {
-                self.identifiers.push(func_table as _);
+                Some(JitUnwindRegistryGuard {
+                    identifier: NonZeroUsize::new(func_table as _).unwrap(),
+                })
+            } else {
+                None
             }
         }
     }
 }
 
-impl Drop for JitUnwindRegistry {
+impl Drop for JitUnwindRegistryGuard {
     fn drop(&mut self) {
         use windows_sys::Win32::System::Diagnostics::Debug::*;
 
         unsafe {
-            for &id in &self.identifiers {
-                RtlDeleteFunctionTable(id as _);
-            }
+            RtlDeleteFunctionTable(self.identifier.get() as _);
         }
     }
 }
@@ -6470,6 +6527,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                             site: &mut EraVmExecSite<Callback>,
                             next_rip: usize,
                         ) -> usize {
+                            // NB: Clear the JIT code cache here instead of at return, so that we don't get crashes.
+                            site.jit_compiled_functions.truncate(site.o.ctx.func_entries.len());
+
                             let func_idx = match site.[<$routine _with_return_value>]() {
                                 Ok(x) => x,
                                 Err(e) => std::panic::panic_any(e),
@@ -6526,6 +6586,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         >(
                             site: &mut EraVmExecSite<Callback>,
                         ) -> usize {
+                            // NB: Do NOT pop site.jit_compiled_functions here, it will invalidate the JIT code.
+                            // if site.o.cur_frame.is_transient {
+                            //     site.jit_compiled_functions.pop();
+                            // }
                             if let Err(e) = site.instr_return_void() {
                                 std::panic::panic_any(e);
                             }
@@ -7274,7 +7338,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         }
 
         // Invoke RtlAddFunctionTable to support unwinding
-        self.jit_unwind_registry.add_function_table(
+        let jit_guard = JitUnwindRegistryGuard::add_function_table(
             buf.ptr(AssemblyOffset(func_size as _)) as _,
             buf.ptr(AssemblyOffset(0)) as _,
         );
@@ -7283,7 +7347,11 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             .jit_compiled_functions
             .get_mut(func_idx as usize)
             .unwrap();
-        *jit_func_slot = Some(EraJitCompiledFunction::new(func_idx as usize, buf));
+        *jit_func_slot = Some(EraJitCompiledFunction::new(
+            func_idx as usize,
+            buf,
+            jit_guard,
+        ));
 
         Ok(())
     }
