@@ -4842,20 +4842,34 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 resolve_array_mut_unsafe!(self, arr:i;arr_idx;dim_pos);
                 resolve_any_scalar!(self, value:i);
                 let end_idx = end_idx.min(arr.len());
-                for i in start_idx..end_idx {
-                    arr.get_mut(i)
+                if let Some(arr) = arr.as_slice_mut() {
+                    // Optimize for 1-D (dim_pos = 0)
+                    arr.get_mut(start_idx..end_idx)
                         .context_unlikely("invalid indices into array")?
-                        .val = value.clone();
+                        .fill_with(|| IntValue { val: value.clone() });
+                } else {
+                    for i in start_idx..end_idx {
+                        arr.get_mut(i)
+                            .context_unlikely("invalid indices into array")?
+                            .val = value.clone();
+                    }
                 }
             }
             ArrayValueKind::ArrStr => {
                 resolve_array_mut_unsafe!(self, arr:s;arr_idx;dim_pos);
                 resolve_any_scalar!(self, value:s);
                 let end_idx = end_idx.min(arr.len());
-                for i in start_idx..end_idx {
-                    arr.get_mut(i)
+                if let Some(arr) = arr.as_slice_mut() {
+                    // Optimize for 1-D (dim_pos = 0)
+                    arr.get_mut(start_idx..end_idx)
                         .context_unlikely("invalid indices into array")?
-                        .val = value.clone();
+                        .fill_with(|| StrValue { val: value.clone() });
+                } else {
+                    for i in start_idx..end_idx {
+                        arr.get_mut(i)
+                            .context_unlikely("invalid indices into array")?
+                            .val = value.clone();
+                    }
                 }
             }
         }
