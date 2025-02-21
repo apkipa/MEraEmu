@@ -1089,7 +1089,7 @@ impl<'i> EraCompilerCtxInner<'i> {
 
     pub fn remove_source_file(&mut self, filename: &str) -> bool {
         let source_map = Arc::get_mut(&mut self.source_map).expect("source map is shared");
-        source_map.remove(filename).is_some()
+        source_map.swap_remove(filename).is_some()
     }
 
     pub fn serialize_source_code_into(&self, w: &mut impl std::io::Write) -> bincode::Result<()> {

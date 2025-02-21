@@ -2274,6 +2274,26 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             ignore_return_value: false,
             is_transient: false,
         });
+        {
+            // Clean up all transient sources
+            let source_map = Arc::get_mut(&mut self.o.ctx.i.source_map)
+                .context_unlikely("source_map is shared")?;
+            let func_entries = Arc::get_mut(&mut self.o.ctx.i.func_entries)
+                .context_unlikely("function_entries is shared")?;
+            let bc_chunks = Arc::get_mut(&mut self.o.ctx.i.bc_chunks)
+                .context_unlikely("bc_chunks is shared")?;
+            while let Some(chunk) = bc_chunks.last() {
+                // We must stop as soon as we encounter a non-transient source
+                use indexmap::map::Entry;
+                _ = match source_map.entry(chunk.name.clone()) {
+                    Entry::Occupied(e) if e.get().is_transient => e.swap_remove(),
+                    _ => break,
+                };
+                let func_name = chunk.name.clone();
+                func_entries.swap_remove(Ascii::new_str(&func_name));
+                bc_chunks.pop();
+            }
+        }
         self.remake_site()?;
 
         Ok(func_idx)
@@ -6408,6 +6428,71 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 )
             };
         }
+        macro_rules! call_0_and_goto_ip {
+            ($routine:ident) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    ; mov rax, QWORD $routine as _
+                    ; call rax
+                    ; test rax, rax
+                    ; jz >skipcall
+                    ; jmp rax
+                    ; skipcall:
+                    ; add rsp, 0x28
+                    ; ret
+                )
+            };
+        }
+        macro_rules! call_0_rip_and_goto_ip {
+            ($routine:ident) => {
+                dynasm!(ops
+                    ; .arch x64
+                    ; mov rcx, [rsp+0x20] // self
+                    ; lea rdx, [>next_instr] // next_rip
+                    ; mov rax, QWORD $routine as _
+                    ; call rax
+                    ; test rax, rax
+                    ; jz >skipcall
+                    ; jmp rax
+                    ; skipcall:
+                    ; add rsp, 0x28
+                    ; ret
+                    ; next_instr:
+                );
+            }
+        }
+        macro_rules! call_subroutine_eval {
+            ($routine:ident) => {
+                paste::paste! {{
+                    let subroutine = {
+                        extern "win64-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
+                            site: &mut EraVmExecSite<Callback>,
+                            next_rip: usize,
+                        ) -> usize {
+                            let func_idx = match site.[<$routine _with_return_value>]() {
+                                Ok(x) => x,
+                                Err(e) => std::panic::panic_any(e),
+                            };
+                            site.jit_side_frame.last_mut().unwrap().ip = next_rip;
+                            // Alloc slot
+                            // TODO: Do we really need func_idx?
+                            site.jit_compiled_functions.push(None);
+                            let asm_ip = site.jit_compiled_functions[func_idx as usize]
+                                .as_ref()
+                                .map_or(0, |x| x.code.ptr(AssemblyOffset(0)) as usize);
+                            site.jit_side_frame.push(EraJitExecFrame {
+                                func_idx: func_idx as _,
+                                ip: asm_ip,
+                            });
+                            asm_ip
+                        }
+                        [<jit_ $routine>]::<Callback>
+                    };
+                    call_0_rip_and_goto_ip!(subroutine);
+                }}
+            };
+        }
 
         let mut dyn_labels = HashMap::new();
         while let Some((inst, len)) = Bc::with_len_from_bytes(&mut bc) {
@@ -6419,11 +6504,11 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             // }
             ip_map.insert(inst_offset, ops.offset());
             if let Some(label) = dyn_labels.remove(&inst_offset) {
-                // ops.dynamic_label(label);
-                dynasm!(ops
-                    ; .arch x64
-                    ; =>label
-                );
+                ops.dynamic_label(label);
+                // dynasm!(ops
+                //     ; .arch x64
+                //     ; =>label
+                // );
             }
             // Translate bytecode
             match inst {
@@ -6449,18 +6534,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         }
                         jit_instr_return_void::<Callback>
                     };
-                    dynasm!(ops
-                        ; .arch x64
-                        ; mov rcx, [rsp+0x20] // self
-                        ; mov rax, QWORD subroutine as _
-                        ; call rax
-                        ; test rax, rax
-                        ; jz >skipcall
-                        ; jmp rax
-                        ; skipcall:
-                        ; add rsp, 0x28
-                        ; ret
-                    );
+                    call_0_and_goto_ip!(subroutine);
                 }
                 Bc::ReturnInt => {
                     // call_subroutine_0!(instr_return_int);
@@ -6479,18 +6553,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         }
                         jit_instr_return_int::<Callback>
                     };
-                    dynasm!(ops
-                        ; .arch x64
-                        ; mov rcx, [rsp+0x20] // self
-                        ; mov rax, QWORD subroutine as _
-                        ; call rax
-                        ; test rax, rax
-                        ; jz >skipcall
-                        ; jmp rax
-                        ; skipcall:
-                        ; add rsp, 0x28
-                        ; ret
-                    );
+                    call_0_and_goto_ip!(subroutine);
                 }
                 Bc::ReturnStr => {
                     // call_subroutine_0!(instr_return_str);
@@ -6509,18 +6572,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         }
                         jit_instr_return_str::<Callback>
                     };
-                    dynasm!(ops
-                        ; .arch x64
-                        ; mov rcx, [rsp+0x20] // self
-                        ; mov rax, QWORD subroutine as _
-                        ; call rax
-                        ; test rax, rax
-                        ; jz >skipcall
-                        ; jmp rax
-                        ; skipcall:
-                        ; add rsp, 0x28
-                        ; ret
-                    );
+                    call_0_and_goto_ip!(subroutine);
                 }
                 Bc::CallFun { args_cnt, func_idx } => {
                     let subroutine: i64 = {
@@ -6668,6 +6720,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                                 Err(e) => std::panic::panic_any(e),
                             };
                             site.jit_side_frame.clear();
+                            site.jit_compiled_functions
+                                .truncate(site.o.ctx.func_entries.len());
                             let asm_ip = site.jit_compiled_functions[func_idx as usize]
                                 .as_ref()
                                 .map_or(0, |x| x.code.ptr(AssemblyOffset(0)) as usize);
@@ -7105,6 +7159,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 Bc::GetConfig => call_subroutine_0!(instr_get_config),
                 Bc::GetConfigS => call_subroutine_0!(instr_get_config_s),
                 Bc::FindCharaDataFile => call_subroutine_0!(instr_find_chara_data_file),
+                Bc::EvalStrForm => call_subroutine_eval!(instr_eval_str_form),
+                Bc::EvalIntExpr => call_subroutine_eval!(instr_eval_int_expr),
+                Bc::EvalStrExpr => call_subroutine_eval!(instr_eval_str_expr),
                 _ => anyhow::bail!("unimplemented bytecode {:?}", inst),
             }
         }
