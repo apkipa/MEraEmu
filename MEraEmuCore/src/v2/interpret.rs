@@ -389,6 +389,24 @@ impl<'ctx, 'i, 'n, T: EraEmitDiagnostic + ?Sized> EraInterpreter<'ctx, 'i, 'n, T
                         };
                         ScalarValue::Int(result)
                     }
+                    "GETDEFCOLOR" if args_count == 0 => {
+                        let color = (self.ctx.variables)
+                            .get_var_i_0("@DEFCOLOR")
+                            .or_else(|| {
+                                routines::color_from_name("SILVER").map(|x| (x & !0xFF000000) as _)
+                            })
+                            .unwrap();
+                        ScalarValue::Int(color as _)
+                    }
+                    "GETDEFBGCOLOR" if args_count == 0 => {
+                        let color = (self.ctx.variables)
+                            .get_var_i_0("@DEFBGCOLOR")
+                            .or_else(|| {
+                                routines::color_from_name("BLACK").map(|x| (x & !0xFF000000) as _)
+                            })
+                            .unwrap();
+                        ScalarValue::Int(color as _)
+                    }
                     _ => {
                         let mut diag = self.make_diag();
                         diag.span_err(

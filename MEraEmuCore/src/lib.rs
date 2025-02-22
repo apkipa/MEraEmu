@@ -1036,6 +1036,32 @@ fn mee_engine_builder_register_variable(
 }
 
 #[ffi_export]
+fn mee_engine_builder_set_variable_int(
+    builder: &mut MEraEngineBuilderFfi,
+    name: char_p::Ref<'_>,
+    index: usize,
+    value: i64,
+) -> MeeResult<()> {
+    builder
+        .i
+        .set_variable_int(name.to_str(), index, value)
+        .into_mee_result()
+}
+
+#[ffi_export]
+fn mee_engine_builder_set_variable_str(
+    builder: &mut MEraEngineBuilderFfi,
+    name: char_p::Ref<'_>,
+    index: usize,
+    value: string::str_ref<'_>,
+) -> MeeResult<()> {
+    builder
+        .i
+        .set_variable_str(name.to_str(), index, value.as_str())
+        .into_mee_result()
+}
+
+#[ffi_export]
 fn mee_engine_get_config(engine: &MEraEngineFfi) -> MEraEngineConfig {
     engine.i.get_config().clone()
 }

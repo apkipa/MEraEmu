@@ -1212,6 +1212,16 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
             // Handle argument target
             let target_span = arena.get_node_span(target);
             let EraNode::Identifier(target) = arena.get_node(target) else {
+                if matches!(arena.get_node(target), EraNode::Empty) {
+                    let mut diag = make_diag_fn();
+                    diag.span_warn(
+                        Default::default(),
+                        target_span,
+                        "empty argument declaration",
+                    );
+                    interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
+                    continue;
+                }
                 let mut diag = make_diag_fn();
                 diag.span_err(Default::default(), target_span, "expected identifier");
                 interp.get_ctx().emit_diag_to(diag, interp.get_diag_emit());
@@ -1821,13 +1831,16 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
             }
             EraNode::StmtDebugPrint(flags, args) => {
                 // TODO: DebugPrintStmt
-                let mut diag = self.make_diag();
-                diag.span_err(
-                    Default::default(),
-                    stmt_span,
-                    "DEBUGPRINT is not yet supported and will be ignored for now",
-                );
-                self.ctx.emit_diag_to(diag, self.diag_emit);
+
+                // Just assume DEBUG is false for now
+
+                // let mut diag = self.make_diag();
+                // diag.span_err(
+                //     Default::default(),
+                //     stmt_span,
+                //     "DEBUGPRINT is not yet supported and will be ignored for now",
+                // );
+                // self.ctx.emit_diag_to(diag, self.diag_emit);
             }
             EraNode::StmtPrint(Pad2(need_eval), flags, args) => {
                 let args = self.unwrap_list_expr(args)?;
@@ -2903,13 +2916,16 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
             }
             EraNode::StmtDebugClear => {
                 // TODO: DebugClearStmt
-                let mut diag = self.make_diag();
-                diag.span_err(
-                    Default::default(),
-                    stmt_span,
-                    "DEBUGCLEAR is not yet supported; ignoring",
-                );
-                self.ctx.emit_diag_to(diag, self.diag_emit);
+
+                // Just assume DEBUG is false for now
+
+                // let mut diag = self.make_diag();
+                // diag.span_err(
+                //     Default::default(),
+                //     stmt_span,
+                //     "DEBUGCLEAR is not yet supported; ignoring",
+                // );
+                // self.ctx.emit_diag_to(diag, self.diag_emit);
             }
             EraNode::StmtResetData => {
                 self.chunk.push_bc(BcKind::ResetData, stmt_span);
@@ -2934,6 +2950,12 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 let ([milliseconds], []) = self.unpack_list_expr(args)?;
                 self.int_expr(milliseconds)?;
                 self.chunk.push_bc(BcKind::Await, stmt_span);
+            }
+            EraNode::StmtSetColorByName(args) => {
+                self.stmt_setcolorbyname(stmt, "@COLOR")?;
+            }
+            EraNode::StmtSetBgColorByName(args) => {
+                self.stmt_setcolorbyname(stmt, "@BGCOLOR")?;
             }
             _ => {
                 let mut diag = self.make_diag();
@@ -3755,6 +3777,37 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 return Err(());
             }
         }
+        self.chunk.push_bc(BcKind::SetArrValFlat, stmt_span);
+        self.chunk.push_pop_all(1, stmt_span);
+        Ok(())
+    }
+
+    fn stmt_setcolorbyname(&mut self, stmt: EraNodeRef, dest_var: &str) -> CompileResult<()> {
+        let stmt_span = self.arena.get_node_span(stmt);
+        let (EraNode::StmtSetColorByName(args) | EraNode::StmtSetBgColorByName(args)) =
+            self.arena.get_node(stmt)
+        else {
+            let mut diag = self.make_diag();
+            diag.span_err(Default::default(), stmt_span, "invalid SETCOLOR statement");
+            self.ctx.emit_diag_to(diag, self.diag_emit);
+            return Err(());
+        };
+        let ([name], []) = self.unpack_list_expr(args)?;
+        let name = self.unwrap_identifier(name)?;
+        let name = self.ctx.resolve_str(name);
+        let Some(color) = routines::color_from_name(name) else {
+            let mut diag = self.make_diag();
+            diag.span_err(
+                Default::default(),
+                stmt_span,
+                format!("unknown color name: {name}"),
+            );
+            self.ctx.emit_diag_to(diag, self.diag_emit);
+            return Err(());
+        };
+        self.int_var_static_idx(dest_var, stmt_span, 0)?;
+        self.chunk
+            .push_load_imm((color & !0xFF000000) as _, stmt_span);
         self.chunk.push_bc(BcKind::SetArrValFlat, stmt_span);
         self.chunk.push_pop_all(1, stmt_span);
         Ok(())
@@ -7085,7 +7138,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 //       smartly.
                 let [_enable] = site.unpack_args(args)?;
                 let mut diag = site.make_diag();
-                diag.span_err(
+                diag.span_warn(
                     Default::default(),
                     name_span,
                     "function `BITMAP_CACHE_ENABLE` is not supported and will be ignored",

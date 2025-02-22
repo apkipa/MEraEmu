@@ -2302,6 +2302,10 @@ namespace winrt::MEraEmuWin::implementation {
                 eri("LINECOUNT");
                 ers("SAVEDATA_TEXT", false);
                 eri("RANDDATA");
+                builder.set_variable_int("@DEFCOLOR", 0,
+                    to_u32(sd->app_settings->GameForegroundColor()) & ~0xff000000);
+                builder.set_variable_int("@DEFBGCOLOR", 0,
+                    to_u32(sd->app_settings->GameBackgroundColor()) & ~0xff000000);
 
                 auto return_to_title = [&] {
                     EraFuncInfo func_info;
@@ -3933,6 +3937,7 @@ namespace winrt::MEraEmuWin::implementation {
         }
         // If user is skipping, skip current request
         if ((m_user_skipping || m_cur_pointer.right_button_down) && input_req->can_skip) {
+            m_user_skipping = true;
             std::exchange(input_req, nullptr)->try_fulfill_void();
             return;
         }

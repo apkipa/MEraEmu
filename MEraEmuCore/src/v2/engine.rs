@@ -1739,6 +1739,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
                         // Parse ERB file into AST
                         let mut lexer = EraLexer::new(filename.clone(), &content, false);
+                        lexer.set_ignore_insignificant_replacement(true);
                         let mut is_str_var_fn = |x: &str| {
                             (i.variables)
                                 .get_var(x)
@@ -1845,6 +1846,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                     self.ctx.active_source = filename.clone();
                     // let node_cache = &mut self.node_cache;
                     let mut lexer = EraLexer::new(filename.clone(), &content, false);
+                    lexer.set_ignore_insignificant_replacement(true);
                     let mut is_str_var_fn = |x: &str| {
                         (self.ctx.i.variables)
                             .get_var(x)
@@ -1992,6 +1994,26 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         Ok(())
     }
 
+    pub fn set_variable_int(
+        &mut self,
+        name: &str,
+        index: usize,
+        value: i64,
+    ) -> Result<(), MEraEngineError> {
+        self.set_variable_inner(name, index, ScalarValue::Int(value))
+            .map_err(|e| MEraEngineError::new(format!("{e:?}")))
+    }
+
+    pub fn set_variable_str(
+        &mut self,
+        name: &str,
+        index: usize,
+        value: &str,
+    ) -> Result<(), MEraEngineError> {
+        self.set_variable_inner(name, index, ScalarValue::Str(value.into()))
+            .map_err(|e| MEraEngineError::new(format!("{e:?}")))
+    }
+
     pub fn ensure_rayon_threadpool(&mut self) {
         if self.rayon_threadpool.is_some() {
             return;
@@ -2081,6 +2103,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         self.ctx.active_source = filename.clone();
         // let node_cache = &mut self.node_cache;
         let mut lexer = EraLexer::new(filename.clone(), &content, false);
+        lexer.set_ignore_insignificant_replacement(true);
         let mut is_str_var_fn = |x: &str| {
             (self.ctx.i.variables)
                 .get_var(x)
@@ -2508,6 +2531,30 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         self.add_int(rcstr::literal!("DE"), smallvec![1, 1], false);
         self.add_int(rcstr::literal!("TA"), smallvec![1, 1, 1], false);
         self.add_int(rcstr::literal!("TB"), smallvec![1, 1, 1], false);
+    }
+
+    fn set_variable_inner(
+        &mut self,
+        name: &str,
+        index: usize,
+        value: ScalarValue,
+    ) -> anyhow::Result<()> {
+        let var = (self.ctx.variables)
+            .get_var_mut(name)
+            .context(format!("variable `{name}` not found"))?;
+        var.ensure_alloc();
+        match (var.as_unpacked_mut(), value) {
+            (FlatArrayValueRefMut::ArrInt(dst), ScalarValue::Int(src)) => {
+                dst.flat_set_val(index, IntValue { val: src })
+                    .with_context(|| format!("index out of bounds of {:?}", dst.dims))?;
+            }
+            (FlatArrayValueRefMut::ArrStr(dst), ScalarValue::Str(src)) => {
+                dst.flat_set_val(index, StrValue { val: src.into() })
+                    .with_context(|| format!("index out of bounds of {:?}", dst.dims))?;
+            }
+            (_, value) => anyhow::bail!("expected {:?}, got {:?}", var.kind(), value.kind()),
+        }
+        Ok(())
     }
 
     fn parse_csv<'a, const COL_COUNT: usize>(

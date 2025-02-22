@@ -365,6 +365,8 @@ pub enum EraNode {
     StmtResetData,
     StmtSaveNos(EraNodeRef),
     StmtAwait(EraNodeRef),
+    StmtSetColorByName(EraNodeRef),
+    StmtSetBgColorByName(EraNodeRef),
 
     SelectCaseCondSingle(EraNodeRef),
     SelectCaseCondRange(EraNodeRef, EraNodeRef),
@@ -2896,6 +2898,12 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 b"RESETDATA" => make!(EraNode::StmtResetData),
                 b"SAVENOS" => make!(EraNode::StmtSaveNos(self.cmd_arg_limit(1, 1))),
                 b"AWAIT" => make!(EraNode::StmtAwait(self.cmd_arg_limit(1, 1))),
+                b"SETCOLORBYNAME" => {
+                    make!(EraNode::StmtSetColorByName(self.cmd_arg_limit(1, 1)))
+                }
+                b"SETBGCOLORBYNAME" => {
+                    make!(EraNode::StmtSetBgColorByName(self.cmd_arg_limit(1, 1)))
+                }
                 b"GCREATE"
                 | b"GCREATEFROMFILE"
                 | b"GDISPOSE"

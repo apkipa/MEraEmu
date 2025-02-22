@@ -578,6 +578,8 @@ struct MEraEngineBuilder {
     void finish_load_csv() const;
     void finish_load_erh() const;
     void register_variable(const char* name, bool is_string, uint32_t dimension, bool watch) const;
+    void set_variable_int(const char* name, size_t index, int64_t value) const;
+    void set_variable_str(const char* name, size_t index, std::string_view value) const;
     MEraEngine build();
 
 private:

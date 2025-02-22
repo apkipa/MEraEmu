@@ -74,6 +74,7 @@ struct EraLexerOuterState<'a> {
     filename: ArcStr,
     skip_whitespace: bool,
     ignore_newline_suppression: bool,
+    ignore_insignificant_replacement: bool,
 }
 
 impl<'a> EraLexerOuterState<'a> {
@@ -92,6 +93,7 @@ impl<'a> EraLexer<'a> {
                 filename,
                 skip_whitespace,
                 ignore_newline_suppression: false,
+                ignore_insignificant_replacement: false,
             },
             i: EraLexerInnerState::new(),
             next_i: None,
@@ -120,6 +122,10 @@ impl<'a> EraLexer<'a> {
 
     pub fn set_ignore_newline_suppression(&mut self, ignore: bool) {
         self.o.ignore_newline_suppression = ignore;
+    }
+
+    pub fn set_ignore_insignificant_replacement(&mut self, ignore: bool) {
+        self.o.ignore_insignificant_replacement = ignore;
     }
 
     // NOTE: We split `ctx` into finer-grained parts to avoid lifetime & ownership issues
@@ -736,7 +742,7 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
                         // Scan until found `[end_name]`
                         let mut last_is_newline = false;
                         loop {
-                            let Some(ch) = self.next_char() else {
+                            let Some(ch) = self.next_char_ignore_replacement() else {
                                 let mut diag = self.o.new_diag();
                                 diag.span_err(
                                     Default::default(),
@@ -767,9 +773,13 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
                                     last_is_newline = false;
                                 }
                                 b';' => {
-                                    if matches!(self.next_char(), Some(b'!' | b'^'))
-                                        && matches!(self.next_char(), Some(b';'))
-                                    {
+                                    if matches!(
+                                        self.next_char_ignore_replacement(),
+                                        Some(b'!' | b'^')
+                                    ) && matches!(
+                                        self.next_char_ignore_replacement(),
+                                        Some(b';')
+                                    ) {
                                         // Emuera only - non-comment
                                     } else {
                                         self.skip_char_until_newline();
@@ -986,6 +996,35 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
         None
     }
 
+    pub fn peek_char_ignore_replacement(&mut self) -> Option<u8> {
+        if self.has_replacement() {
+            // NOTE: We assume that the replacement does not contain a newline.
+            return self.i.alternate_src.first().copied();
+        }
+        self.src().first().copied()
+    }
+
+    pub fn next_char_ignore_replacement(&mut self) -> Option<u8> {
+        // TODO: Increment self.i.loc
+
+        // Handle alternate source
+        if let [ch, rest @ ..] = self.i.alternate_src {
+            self.has_replaced = true;
+            self.append_lexeme(self.i.alternate_src.as_ptr());
+            self.i.alternate_src = rest;
+            return Some(*ch);
+        }
+
+        // Handle normal
+        if let [ch, _rest @ ..] = self.src() {
+            self.append_lexeme(self.src().as_ptr());
+            self.i.src_pos += 1;
+            return Some(*ch);
+        }
+
+        None
+    }
+
     pub fn try_eat_u8(&mut self, ch: u8) -> bool {
         if self.peek_char() == Some(ch) {
             self.next_char();
@@ -1101,6 +1140,37 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
         self.cur_lexeme_len += 1;
     }
 
+    // NOTE: We use `*const u8` instead of `&u8` in order to make Miri happy.
+    fn append_lexeme_with_count(&mut self, ch: *const u8, count: usize) {
+        if self.cur_lexeme_start.is_null() && self.cur_lexeme_len == 0 {
+            // Initial state
+            self.cur_lexeme_start = ch;
+            self.cur_lexeme_len += count;
+
+            return;
+        }
+
+        if !self.cur_lexeme_start.is_null() {
+            // Verify if the lexeme can still stay continuous
+            if unsafe { self.cur_lexeme_start.add(self.cur_lexeme_len) } != ch {
+                // Lexeme is no longer continuous, must use cart to guarantee continuity
+                let old_lexeme = unsafe {
+                    std::slice::from_raw_parts(self.cur_lexeme_start, self.cur_lexeme_len)
+                };
+                self.cur_lexeme_start = std::ptr::null();
+                self.o.cart.extend_from_slice(old_lexeme);
+            }
+        }
+
+        if self.cur_lexeme_start.is_null() {
+            // Empty lexeme, need to modify cart
+            let slice = unsafe { std::slice::from_raw_parts(ch, count) };
+            self.o.cart.extend_from_slice(slice);
+        }
+
+        self.cur_lexeme_len += count;
+    }
+
     fn reset_lexeme(&mut self) {
         self.o.cart.clear();
         self.cur_lexeme_start = std::ptr::null();
@@ -1190,13 +1260,28 @@ impl<'a, 'c, 'i> EraLexerInnerSite<'a, 'c, 'i> {
     }
 
     fn skip_char_until_newline(&mut self) {
-        // NOTE: Cannot optimize because we need to handle replacement and
-        //       return this information to the caller.
-        while let Some(ch) = self.peek_char() {
-            if ch == b'\r' || ch == b'\n' {
-                break;
+        if self.o.ignore_insignificant_replacement {
+            // Optimization: Skip until newline without handling replacement.
+            while let [ch, rest @ ..] = self.i.alternate_src {
+                self.has_replaced = true;
+                self.append_lexeme(self.i.alternate_src.as_ptr());
+                self.i.alternate_src = rest;
             }
-            self.next_char();
+            let src = self.src();
+            let search_len = memchr::memchr2(b'\r', b'\n', src).unwrap_or(src.len());
+            if search_len > 0 {
+                self.i.src_pos += search_len;
+                self.append_lexeme_with_count(src.as_ptr(), search_len);
+            }
+        } else {
+            // Cannot optimize because we need to handle replacement and
+            // return this information to the caller.
+            while let Some(ch) = self.peek_char() {
+                if ch == b'\r' || ch == b'\n' {
+                    break;
+                }
+                self.next_char();
+            }
         }
     }
 

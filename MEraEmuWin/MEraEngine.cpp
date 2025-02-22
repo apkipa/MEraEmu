@@ -483,6 +483,12 @@ void MEraEngineBuilder::finish_load_erh() const {
 void MEraEngineBuilder::register_variable(const char* name, bool is_string, uint32_t dimension, bool watch) const {
     unwrap_rust(mee_engine_builder_register_variable(m_builder, name, is_string, dimension, watch));
 }
+void MEraEngineBuilder::set_variable_int(const char* name, size_t index, int64_t value) const {
+    unwrap_rust(mee_engine_builder_set_variable_int(m_builder, name, index, value));
+}
+void MEraEngineBuilder::set_variable_str(const char* name, size_t index, std::string_view value) const {
+    unwrap_rust(mee_engine_builder_set_variable_str(m_builder, name, index, TO_RUST_STR(value)));
+}
 MEraEngine MEraEngineBuilder::build() {
     auto builder = std::exchange(m_builder, nullptr);
     return MEraEngine(unwrap_rust(mee_build_engine(builder)));
