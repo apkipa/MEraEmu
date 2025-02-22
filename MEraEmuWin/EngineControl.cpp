@@ -1544,6 +1544,17 @@ namespace winrt::MEraEmuWin::implementation {
             // TODO: on_get_key_state
             return 0;
         }
+        void on_await(int64_t milliseconds) override {
+            if (milliseconds < 0) {
+                milliseconds = 0;
+            }
+            if (milliseconds > 10000) {
+                milliseconds = 10000;
+            }
+            // Sleep `milliseconds` milliseconds or until UI is dead
+            bool expected = true;
+            WaitOnAddress(&m_sd->ui_is_alive, &expected, sizeof expected, (DWORD)milliseconds);
+        }
 
         void reset_ui_cache() {
             m_ui_cache = {};

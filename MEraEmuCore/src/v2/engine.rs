@@ -342,6 +342,7 @@ pub trait MEraEngineSysCallback {
     fn on_get_key_state(&mut self, key_code: i64) -> i64 {
         0
     }
+    fn on_await(&mut self, milliseconds: i64) {}
 }
 
 impl<T: MEraEngineSysCallback> EraCompilerCallback for T {
@@ -622,6 +623,10 @@ impl<T: MEraEngineSysCallback> EraCompilerCallback for T {
 
     fn on_get_key_state(&mut self, key_code: i64) -> i64 {
         self.on_get_key_state(key_code)
+    }
+
+    fn on_await(&mut self, milliseconds: i64) {
+        self.on_await(milliseconds)
     }
 }
 

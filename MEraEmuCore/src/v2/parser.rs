@@ -364,6 +364,7 @@ pub enum EraNode {
     StmtDebugClear,
     StmtResetData,
     StmtSaveNos(EraNodeRef),
+    StmtAwait(EraNodeRef),
 
     SelectCaseCondSingle(EraNodeRef),
     SelectCaseCondRange(EraNodeRef, EraNodeRef),
@@ -2279,6 +2280,29 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
             .add_node(EraNode::LiteralStr(token_key), span, span)
     }
 
+    fn raw_string_end_trimmed(&mut self) -> EraNodeRef {
+        let span = self.o.l.current_src_span();
+        let mut buf = String::new();
+        loop {
+            let result = self.o.peek_token(Mode::RawStr);
+            let token = result.token;
+            if token.kind == Token::PlainStringLiteral {
+                routines::unescape_to_sink(result.lexeme, &mut buf);
+                _ = self.o.bump();
+                continue;
+            }
+            match token.kind {
+                _ => break,
+            }
+        }
+
+        let token_key = self.o.interner().get_or_intern(buf.trim_ascii_end());
+        let span = self.span_to_now(span);
+        self.o
+            .node_arena
+            .add_node(EraNode::LiteralStr(token_key), span, span)
+    }
+
     fn raw_strform(&mut self) -> EraNodeRef {
         let mut buf = String::new();
         let cp = self.o.b.checkpoint();
@@ -2871,6 +2895,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 b"DEBUGCLEAR" => make!(EraNode::StmtDebugClear),
                 b"RESETDATA" => make!(EraNode::StmtResetData),
                 b"SAVENOS" => make!(EraNode::StmtSaveNos(self.cmd_arg_limit(1, 1))),
+                b"AWAIT" => make!(EraNode::StmtAwait(self.cmd_arg_limit(1, 1))),
                 b"GCREATE"
                 | b"GCREATEFROMFILE"
                 | b"GDISPOSE"
@@ -3726,7 +3751,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         let var = self.or_sync_to(|s| s.expression(true), terminals);
         _ = self.eat_sync(Mode::Normal, Token::Comma, terminals);
         self.o.l.skip_whitespace(Mode::Normal);
-        let factor = self.raw_string();
+        let factor = self.raw_string_end_trimmed();
         EraNode::StmtTimes(var, factor)
     }
 

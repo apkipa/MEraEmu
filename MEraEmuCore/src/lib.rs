@@ -544,6 +544,7 @@ trait MEraEngineSysCallbackFfi {
     // NOTE: Returns { b15 = <key down>, b0 = <key triggered> }. For key codes, refer
     //       to https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes.
     fn on_get_key_state(&mut self, key_code: i64) -> i64;
+    fn on_await(&mut self, milliseconds: i64);
 }
 
 #[derive_ReprC(dyn)]
@@ -872,6 +873,9 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackFfi> {
     }
     fn on_get_key_state(&mut self, key_code: i64) -> i64 {
         MEraEngineSysCallbackFfi::on_get_key_state(self, key_code)
+    }
+    fn on_await(&mut self, milliseconds: i64) {
+        MEraEngineSysCallbackFfi::on_await(self, milliseconds);
     }
 }
 

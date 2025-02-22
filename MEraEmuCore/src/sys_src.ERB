@@ -170,34 +170,27 @@
 @SYSPROC_STORE_MANAGER
     ; A meta function playing the role of storage provider
     LOCAL = -1
-@SYSPROC_TRYINVOKE_USER_EVENT(func_name)
+@SYSPROC_TRYINVOKE_USER_EVENT(event_name)
     #FUNCTION
-    #DIMS DYNAMIC func_name
+    #DIMS DYNAMIC event_name
+    #DIMS DYNAMIC cur_handler
+    #DIM DYNAMIC cur_priority
     #DIM DYNAMIC invoked = 0
-    TRYCCALLFORM %func_name%@ONLY
-        invoked = 1
-    CATCH
-    ENDCATCH
-    IF invoked == 0
-        TRYCCALLFORM %func_name%@PRI
+    ; Priority order: ONLY, PRI, NORMAL, LATER (0, 1, 2, 3)
+    FOR cur_priority, 0, 4
+        WHILE (cur_handler = SYSINTRINSIC_GetNextEventHandler(event_name, cur_priority, cur_handler)) != ""
+            CALLFORM %cur_handler%
             invoked = 1
-        CATCH
-        ENDCATCH
-        TRYCCALLFORM %func_name%@NORMAL
-            invoked = 1
-        CATCH
-        ENDCATCH
-        TRYCCALLFORM %func_name%@LATER
-            invoked = 1
-        CATCH
-        ENDCATCH
-    ENDIF
+        WEND
+        SIF cur_priority == 0 && invoked
+            BREAK
+    NEXT
     RETURNF invoked
-@SYSPROC_INVOKE_USER_EVENT_NORETURN(func_name)
-    #DIMS DYNAMIC func_name
-    SIF !SYSPROC_TRYINVOKE_USER_EVENT(func_name)
-        THROW Cannot invoke event @%func_name%
-    THROW %func_name% must not return
+@SYSPROC_INVOKE_USER_EVENT_NORETURN(event_name)
+    #DIMS DYNAMIC event_name
+    SIF !SYSPROC_TRYINVOKE_USER_EVENT(event_name)
+        THROW Cannot invoke event @%event_name%
+    THROW %event_name% must not return
 @SYSPROC_INVOKE_USER_FUNC_FORCE(func_name)
     #DIMS DYNAMIC func_name
     ; TRYCCALLFORM %func_name%

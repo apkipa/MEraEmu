@@ -461,6 +461,7 @@ struct MEraEngineSysCallback {
     // NOTE: Can throw std::exception
     virtual const char* on_get_config_str(std::string_view name) = 0;
     virtual int64_t on_get_key_state(int64_t key_code) = 0;
+    virtual void on_await(int64_t milliseconds) = 0;
 };
 
 struct MEraEngineAsyncErbLoader {

@@ -438,6 +438,9 @@ MEraEngineBuilder::MEraEngineBuilder(std::unique_ptr<MEraEngineSysCallback> call
         .on_get_key_state = [](Erased_t* self, int64_t key_code) noexcept {
             return ((MEraEngineSysCallback*)self)->on_get_key_state(key_code);
         },
+        .on_await = [](Erased_t* self, int64_t milliseconds) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_await(milliseconds);
+        },
     };
     VirtualPtr__Erased_ptr_MEraEngineSysCallbackFfiVTable_t c{
         .ptr = (Erased_t*)callback.release(),

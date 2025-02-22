@@ -3,7 +3,7 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
     mem::ManuallyDrop,
     ops::{ControlFlow, Deref, DerefMut},
@@ -887,6 +887,8 @@ pub struct EraCompilerCtxInner<'i> {
     pub transient_ctx: Arc<EraCompilerCtxTransient>,
     /// The file id counter for evaluation source files.
     pub eval_id_counter: u32,
+    /// The list of event functions.
+    pub event_func_registry: FxHashMap<Ascii<ArcStr>, [Vec<Ascii<ArcStr>>; 4]>,
 }
 
 trait IndexMapExt {
@@ -927,6 +929,7 @@ impl<'i, Callback: EraCompilerCallback> EraCompilerCtx<'i, Callback> {
                 variables: EraVarPool::new(),
                 transient_ctx: Arc::new(Default::default()),
                 eval_id_counter: 0,
+                event_func_registry: Default::default(),
             },
         }
     }
@@ -1336,6 +1339,7 @@ pub trait EraCompilerCallback {
     // NOTE: Returns { b15 = <key down>, b0 = <key triggered> }. For key codes, refer
     //       to https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes.
     fn on_get_key_state(&mut self, key_code: i64) -> i64;
+    fn on_await(&mut self, milliseconds: i64);
 }
 
 pub trait EraCompilerHostFile {
@@ -3842,6 +3846,7 @@ pub enum EraPriBytecode {
     GetRandomMax,
     /// Extra (fused) operations group #1. Introduced for performance reasons.
     ExtOp1,
+    ExtOp2,
 }
 
 #[derive_ReprC]
@@ -3921,6 +3926,14 @@ pub enum EraExtBytecode1 {
     EvalStrForm,
     EvalIntExpr,
     EvalStrExpr,
+    Await,
+}
+
+#[derive_ReprC]
+#[repr(u8)]
+#[derive(num_derive::FromPrimitive, num_derive::ToPrimitive, Debug, Clone, Copy)]
+pub enum EraExtBytecode2 {
+    IntrinsicGetNextEventHandler,
 }
 
 /// Strongly typed version of Era bytecode. All integer values are encoded in native-endian.
@@ -4129,6 +4142,9 @@ pub enum EraBytecodeKind {
     EvalStrForm,
     EvalIntExpr,
     EvalStrExpr,
+    Await,
+    // ----- ExtOp2 -----
+    IntrinsicGetNextEventHandler,
 }
 
 impl EraBytecodeKind {
@@ -4136,6 +4152,7 @@ impl EraBytecodeKind {
         use byteorder::{ReadBytesExt, LE};
         use EraBytecodeKind::*;
         use EraExtBytecode1 as Ext1;
+        use EraExtBytecode2 as Ext2;
         use EraPriBytecode as Pri;
 
         trait Adhoc {
@@ -4454,9 +4471,21 @@ impl EraBytecodeKind {
                     Ext1::EvalStrForm => Ok(EvalStrForm),
                     Ext1::EvalIntExpr => Ok(EvalIntExpr),
                     Ext1::EvalStrExpr => Ok(EvalStrExpr),
+                    Ext1::Await => Ok(Await),
                     _ => Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "Invalid ext op1 kind",
+                    )),
+                }
+            }
+            Pri::ExtOp2 => {
+                match num_traits::FromPrimitive::from_u8(reader.ru8()?).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid ext op1 kind")
+                })? {
+                    Ext2::IntrinsicGetNextEventHandler => Ok(IntrinsicGetNextEventHandler),
+                    _ => Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Invalid ext op2 kind",
                     )),
                 }
             }
@@ -4486,6 +4515,7 @@ impl EraBytecodeKind {
     pub fn to_bytes_inline(&self) -> ArrayVec<[u8; 12]> {
         use EraBytecodeKind::*;
         use EraExtBytecode1 as Ext1;
+        use EraExtBytecode2 as Ext2;
         use EraPriBytecode as Pri;
         let mut bytes = ArrayVec::new();
         match *self {
@@ -4975,6 +5005,15 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::EvalStrExpr as u8);
             }
+            Await => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::Await as u8);
+            }
+            // ----- ExtOp2 -----
+            IntrinsicGetNextEventHandler => {
+                bytes.push(Pri::ExtOp2 as u8);
+                bytes.push(Ext2::IntrinsicGetNextEventHandler as u8);
+            }
         }
         bytes
     }
@@ -5132,6 +5171,9 @@ impl EraBytecodeKind {
             GetConfig | GetConfigS => 0,
             FindCharaDataFile => -1,
             EvalStrForm | EvalIntExpr | EvalStrExpr => 0,
+            Await => -1,
+            // ----- ExtOp2 -----
+            IntrinsicGetNextEventHandler => -2,
         })
     }
 }

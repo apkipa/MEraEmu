@@ -290,6 +290,7 @@ struct EraFuncPrebuildInfo {
     func_idx: u32,
     name: TokenKey,
     name_str: ArcStr,
+    orig_name_str: ArcStr,
     args: Vec<EraFuncArgsBinding>,
     event_kind: Option<EraEventFuncKind>,
     // (init_val_idx, var_span)
@@ -443,11 +444,25 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
         t = std::time::Instant::now();
 
         // Merge prebuild functions into global function table
-        let func_entries = Arc::get_mut(&mut self.ctx.func_entries).unwrap();
+        let func_entries = Arc::get_mut(&mut self.ctx.i.func_entries).unwrap();
         for (func_name, (_, prebuild_info, func_info)) in &mut prebuild_funcs {
             let func_info = func_info.take().unwrap();
             let (idx, _) = func_entries.insert_full(func_name.clone(), Some(func_info));
             prebuild_info.func_idx = idx.try_into().expect("too many functions");
+
+            // Add event function to registry
+            if let Some(event_kind) = prebuild_info.event_kind {
+                let pri = match event_kind {
+                    EraEventFuncKind::Only => 0,
+                    EraEventFuncKind::Pri => 1,
+                    EraEventFuncKind::Normal => 2,
+                    EraEventFuncKind::Later => 3,
+                };
+                (self.ctx.i.event_func_registry)
+                    .entry(Ascii::new(prebuild_info.orig_name_str.clone()))
+                    .or_default()[pri]
+                    .push(func_name.clone());
+            }
         }
         _ = func_entries;
 
@@ -724,7 +739,8 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
         let name_str = self.o.ctx.node_cache.interner().resolve(name);
         let mut event_func_kind =
             routines::is_event_name(&name_str).then_some(EraEventFuncKind::Normal);
-        let mut name_str = ArcStr::from(name_str);
+        let orig_name_str = ArcStr::from(name_str);
+        let mut name_str = orig_name_str.clone();
         let EraNode::ListSharpDecl(decls) = arena.get_node(node.sharp_decls) else {
             unreachable!();
         };
@@ -752,7 +768,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
 
             // HACK: Rename function based on event kind
             // TODO: Maybe support multiple declarations of event functions with same event kind?
-            name_str = rcstr::format!("{}@{}", name_str, event_func_kind.unwrap());
+            name_str = rcstr::format!("{}@{}@{}", name_str, event_func_kind.unwrap(), filename);
             name = self.o.ctx.interner().get_or_intern(&name_str);
         }
         if let Some((prev_func_filename, prev_func_span)) = lookup_func_fn(self, &name_str) {
@@ -1373,6 +1389,7 @@ impl<'o, 'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenPrebuildSite<'o, 'ct
                 func_idx: 0,
                 name,
                 name_str,
+                orig_name_str,
                 args: arg_bindings,
                 event_kind: event_func_kind,
                 dyn_vars,
@@ -2912,6 +2929,11 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 self.chunk.push_load_const_str(key, stmt_span);
                 self.chunk.push_bc(BcKind::GetConfig, stmt_span);
                 self.chunk.push_bc(BcKind::SetArrValFlat, stmt_span);
+            }
+            EraNode::StmtAwait(args) => {
+                let ([milliseconds], []) = self.unpack_list_expr(args)?;
+                self.int_expr(milliseconds)?;
+                self.chunk.push_bc(BcKind::Await, stmt_span);
             }
             _ => {
                 let mut diag = self.make_diag();
@@ -7094,9 +7116,14 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
             _ if name.eq_ignore_ascii_case("SYSINTRINSIC_LoadGameUninit") => {
                 // Do nothing
             }
-            // _ if name.eq_ignore_ascii_case("SYSINTRINSIC_LoadGamePrintText") => {
-            //     // Do nothing
-            // }
+            _ if name.eq_ignore_ascii_case("SYSINTRINSIC_GetNextEventHandler") => {
+                site.results()?;
+                // fn(event, cur_priority, cur_handler) -> next_handler
+                let [event, cur_priority, cur_handler] = site.unpack_args(args)?;
+                apply_args!(name_span, event:s, cur_priority:i, cur_handler:s);
+                site.chunk
+                    .push_bc(BcKind::IntrinsicGetNextEventHandler, name_span);
+            }
             _ => {
                 let mut diag = self.make_diag();
                 diag.span_err(

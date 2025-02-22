@@ -5917,6 +5917,41 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         Ok(func_idx)
     }
 
+    fn instr_await(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, milliseconds:i);
+        self.o.ctx.callback.on_await(milliseconds);
+        self.o.stack.replace_tail(stack_count, []);
+        self.add_ip_offset(Bc::Await.bytes_len() as i32);
+        Ok(())
+    }
+
+    fn instr_intrinsic_get_next_event_handler(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, event:s, cur_priority:i, cur_handler:s);
+        let handler = (self.o.ctx)
+            .event_func_registry
+            .get(Ascii::new_str(event))
+            .and_then(|x| x.get(cur_priority as usize))
+            .and_then(|x| {
+                if cur_handler.is_empty() {
+                    x.get(0)
+                } else {
+                    x.iter()
+                        .position(|x| x.as_ascii_ref() == Ascii::new_str(cur_handler))
+                        .and_then(|h| x.get(h + 1))
+                }
+            })
+            .map(|x| x.as_ref())
+            .unwrap_or_default();
+        let r = StackValue::new_str(handler.into());
+        self.o.stack.replace_tail(stack_count, [r]);
+        self.add_ip_offset(Bc::IntrinsicGetNextEventHandler.bytes_len() as i32);
+        Ok(())
+    }
+
     fn instr_raise_illegal_instruction(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
@@ -6165,6 +6200,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::EvalStrForm => s.instr_eval_str_form()?,
             Bc::EvalIntExpr => s.instr_eval_int_expr()?,
             Bc::EvalStrExpr => s.instr_eval_str_expr()?,
+            Bc::Await => s.instr_await()?,
+            Bc::IntrinsicGetNextEventHandler => s.instr_intrinsic_get_next_event_handler()?,
             // _ => s.instr_raise_illegal_instruction()?,
             // _ => {
             //     let mut diag = Diagnostic::new();
@@ -7240,6 +7277,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 Bc::EvalStrForm => call_subroutine_eval!(instr_eval_str_form),
                 Bc::EvalIntExpr => call_subroutine_eval!(instr_eval_int_expr),
                 Bc::EvalStrExpr => call_subroutine_eval!(instr_eval_str_expr),
+                Bc::Await => call_subroutine_0!(instr_await),
+                Bc::IntrinsicGetNextEventHandler => {
+                    call_subroutine_0!(instr_intrinsic_get_next_event_handler)
+                }
                 _ => anyhow::bail!("unimplemented bytecode {:?}", inst),
             }
         }
