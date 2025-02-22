@@ -1142,7 +1142,7 @@ namespace winrt::MEraEmuWin::implementation {
         int64_t on_var_get_int(std::string_view name, size_t idx) override {
             if (name == "@COLOR") {
                 return m_ui_cache.fore_color.get_or_update([&] {
-                    return exec_ui_work([sd = m_sd] {
+                    return exec_ui_work_or([sd = m_sd] {
                         return to_u32(sd->ui_ctrl->EngineForeColor()) & ~0xff000000;
                     });
                 });
@@ -1152,7 +1152,7 @@ namespace winrt::MEraEmuWin::implementation {
             }
             if (name == "@BGCOLOR") {
                 return m_ui_cache.back_color.get_or_update([&] {
-                    return exec_ui_work([sd = m_sd] {
+                    return exec_ui_work_or([sd = m_sd] {
                         return to_u32(sd->ui_ctrl->EngineBackColor()) & ~0xff000000;
                     });
                 });
@@ -1164,17 +1164,17 @@ namespace winrt::MEraEmuWin::implementation {
                 return to_u32(m_sd->app_settings->GameHighlightColor());
             }
             if (name == "@STYLE") {
-                return exec_ui_work([sd = m_sd] {
+                return exec_ui_work_or([sd = m_sd] {
                     return sd->ui_ctrl->GetCurrentFontStyle();
                 });
             }
             if (name == "@REDRAW") {
-                return exec_ui_work([sd = m_sd] {
+                return exec_ui_work_or([sd = m_sd] {
                     return sd->ui_ctrl->GetRedrawState();
                 });
             }
             if (name == "@ALIGN") {
-                return exec_ui_work([sd = m_sd] {
+                return exec_ui_work_or([sd = m_sd] {
                     return sd->ui_ctrl->GetCurrentLineAlignment();
                 });
             }
@@ -1187,7 +1187,7 @@ namespace winrt::MEraEmuWin::implementation {
                 return 0;
             }
             if (name == "@SKIPDISP") {
-                return exec_ui_work([sd = m_sd] {
+                return exec_ui_work_or([sd = m_sd] {
                     return sd->ui_ctrl->GetSkipDisplay();
                 });
             }
@@ -1206,23 +1206,23 @@ namespace winrt::MEraEmuWin::implementation {
                 return m_sd->app_settings->GamePrintCCharCount();
             }
             if (name == "@LINEISEMPTY") {
-                return exec_ui_work([sd = m_sd] {
+                return exec_ui_work_or([sd = m_sd] {
                     return sd->ui_ctrl->m_cur_composing_line.parts.empty();
                 });
             }
             if (name == "SCREENWIDTH") {
-                return exec_ui_work([sd = m_sd] {
+                return exec_ui_work_or([sd = m_sd] {
                     return sd->ui_ctrl->m_ui_param_cache.line_char_capacity;
                 });
             }
             if (name == "SCREENPIXELWIDTH") {
                 // NOTE: Returns width in logical pixels
-                return exec_ui_work([sd = m_sd] {
+                return exec_ui_work_or([sd = m_sd] {
                     return sd->ui_ctrl->m_ui_param_cache.canvas_width_px / sd->ui_ctrl->m_ui_param_cache.ui_scale;
                 });
             }
             if (name == "LINECOUNT") {
-                return exec_ui_work([sd = m_sd] {
+                return exec_ui_work_or([sd = m_sd] {
                     return (int64_t)sd->ui_ctrl->m_ui_lines.size();
                 });
             }
@@ -1338,22 +1338,22 @@ namespace winrt::MEraEmuWin::implementation {
             });
         }
         int64_t on_gcreate(int64_t gid, int64_t width, int64_t height) override {
-            return exec_ui_work([&] {
+            return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineGCreate(gid, width, height);
             });
         }
         int64_t on_gcreatefromfile(int64_t gid, std::string_view path) override {
-            return exec_ui_work([&] {
+            return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineGCreateFromFile(gid, to_hstring(path));
             });
         }
         int64_t on_gdispose(int64_t gid) override {
-            return exec_ui_work([&] {
+            return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineGDispose(gid);
             });
         }
         int64_t on_gcreated(int64_t gid) override {
-            return exec_ui_work([&] {
+            return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineGCreated(gid);
             });
         }
@@ -1366,17 +1366,17 @@ namespace winrt::MEraEmuWin::implementation {
             return 0;
         }
         int64_t on_spritecreate(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) override {
-            return exec_ui_work([&] {
+            return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineSpriteCreate(to_hstring(name), gid, x, y, width, height);
             });
         }
         int64_t on_spritedispose(std::string_view name) override {
-            return exec_ui_work([&] {
+            return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineSpriteDispose(to_hstring(name));
             });
         }
         int64_t on_spritecreated(std::string_view name) override {
-            return exec_ui_work([&] {
+            return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineSpriteCreated(to_hstring(name));
             });
         }
@@ -1587,6 +1587,19 @@ namespace winrt::MEraEmuWin::implementation {
                 promise.set_value(f());
             });
             return future.get();
+        }
+        template <typename F>
+        auto exec_ui_work_or(F&& f, std::invoke_result_t<F> def_val = {}) {
+            try { return exec_ui_work(std::forward<F>(f)); }
+            catch (std::future_error const& e) {
+                if (e.code() == std::future_errc::broken_promise) {
+                    // UI thread is dead
+                    return def_val;
+                }
+                else {
+                    throw;
+                }
+            }
         }
 
         EngineSharedData* const m_sd;
