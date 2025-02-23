@@ -1224,6 +1224,9 @@ pub trait EraCompilerCallback {
     // TODO: Debug is a global flag inside VM?
     fn on_debugprint(&mut self, content: &str, flags: EraPrintExtendedFlags);
     fn on_html_print(&mut self, content: &str, no_single: i64);
+    fn on_html_popprintingstr(&mut self) -> String;
+    fn on_html_getprintedstr(&mut self, line_no: i64) -> String;
+    fn on_html_stringlen(&mut self, content: &str, return_pixel: bool) -> i64;
     fn on_wait(&mut self, any_key: bool, is_force: bool);
     fn on_twait(&mut self, duration: i64, is_force: bool);
     fn on_input_int(
@@ -3281,7 +3284,7 @@ impl EraCsvVarKind {
             || is("CDOWN")
         {
             CsvPalam
-        } else if is("TRAIN") {
+        } else if is("TRAINNAME") {
             CsvTrain
         } else if is("MARK") {
             CsvMark
@@ -3864,6 +3867,9 @@ pub enum EraExtBytecode1 {
     ForLoopNoStep,
     ExtendStrToWidth,
     HtmlPrint,
+    HtmlPopPrintingStr,
+    HtmlGetPrintedStr,
+    HtmlStringLen,
     PrintButton,
     PrintImg,
     // PrintImg2,
@@ -3927,6 +3933,7 @@ pub enum EraExtBytecode1 {
     EvalIntExpr,
     EvalStrExpr,
     Await,
+    VarExists,
 }
 
 #[derive_ReprC]
@@ -4082,6 +4089,9 @@ pub enum EraBytecodeKind {
     ForLoopNoStep,
     ExtendStrToWidth,
     HtmlPrint,
+    HtmlPopPrintingStr,
+    HtmlGetPrintedStr,
+    HtmlStringLen,
     PrintButton { flags: EraPrintExtendedFlags },
     PrintImg,
     PrintImg4,
@@ -4143,6 +4153,7 @@ pub enum EraBytecodeKind {
     EvalIntExpr,
     EvalStrExpr,
     Await,
+    VarExists,
     // ----- ExtOp2 -----
     IntrinsicGetNextEventHandler,
 }
@@ -4394,6 +4405,9 @@ impl EraBytecodeKind {
                     Ext1::ForLoopNoStep => Ok(ForLoopNoStep),
                     Ext1::ExtendStrToWidth => Ok(ExtendStrToWidth),
                     Ext1::HtmlPrint => Ok(HtmlPrint),
+                    Ext1::HtmlPopPrintingStr => Ok(HtmlPopPrintingStr),
+                    Ext1::HtmlGetPrintedStr => Ok(HtmlGetPrintedStr),
+                    Ext1::HtmlStringLen => Ok(HtmlStringLen),
                     Ext1::PrintButton => Ok(PrintButton {
                         flags: EraPrintExtendedFlags::from(reader.ru8()?),
                     }),
@@ -4472,6 +4486,7 @@ impl EraBytecodeKind {
                     Ext1::EvalIntExpr => Ok(EvalIntExpr),
                     Ext1::EvalStrExpr => Ok(EvalStrExpr),
                     Ext1::Await => Ok(Await),
+                    Ext1::VarExists => Ok(VarExists),
                     _ => Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "Invalid ext op1 kind",
@@ -4760,6 +4775,18 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::HtmlPrint as u8);
             }
+            HtmlPopPrintingStr => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::HtmlPopPrintingStr as u8);
+            }
+            HtmlGetPrintedStr => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::HtmlGetPrintedStr as u8);
+            }
+            HtmlStringLen => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::HtmlStringLen as u8);
+            }
             PrintButton { flags } => {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::PrintButton as u8);
@@ -5009,6 +5036,10 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::Await as u8);
             }
+            VarExists => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::VarExists as u8);
+            }
             // ----- ExtOp2 -----
             IntrinsicGetNextEventHandler => {
                 bytes.push(Pri::ExtOp2 as u8);
@@ -5126,6 +5157,9 @@ impl EraBytecodeKind {
             ForLoopNoStep => 1,
             ExtendStrToWidth => -1,
             HtmlPrint => -2,
+            HtmlPopPrintingStr => 1,
+            HtmlGetPrintedStr => 0,
+            HtmlStringLen => -1,
             PrintButton { .. } => -2,
             PrintImg | PrintImg4 => return None,
             PrintRect => -4,
@@ -5172,6 +5206,7 @@ impl EraBytecodeKind {
             FindCharaDataFile => -1,
             EvalStrForm | EvalIntExpr | EvalStrExpr => 0,
             Await => -1,
+            VarExists => 0,
             // ----- ExtOp2 -----
             IntrinsicGetNextEventHandler => -2,
         })

@@ -411,6 +411,9 @@ struct MEraEngineSysCallback {
     virtual uint64_t on_get_rand() = 0;
     virtual void on_print(std::string_view content, PrintExtendedFlags flags) = 0;
     virtual void on_html_print(std::string_view content, int64_t no_single) = 0;
+    virtual const char* on_html_popprintingstr() = 0;
+    virtual const char* on_html_getprintedstr(int64_t line_no) = 0;
+    virtual int64_t on_html_stringlen(std::string_view content, bool return_pixel) = 0;
     virtual void on_wait(bool any_key, bool is_force) = 0;
     virtual void on_twait(int64_t duration, bool is_force) = 0;
     virtual ControlFlow<std::monostate, std::optional<int64_t>> on_input_int(std::optional<int64_t> default_value, bool can_click, bool allow_skip) = 0;

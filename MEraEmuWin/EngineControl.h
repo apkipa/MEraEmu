@@ -98,6 +98,51 @@ namespace winrt::MEraEmuWin::implementation {
         std::vector<bool> m_valid;
     };
 
+    struct EngineUILength {
+        int32_t len;
+        enum class Type {
+            FontPercent,
+            Pixel,
+        } type;
+
+        EngineUILength() : len(0), type(Type::FontPercent) {}
+        EngineUILength(int32_t len, Type type) : len(len), type(type) {}
+
+        static EngineUILength FontPercent(int32_t len) {
+            return EngineUILength(len, Type::FontPercent);
+        }
+        static EngineUILength Pixel(int32_t len) {
+            return EngineUILength(len, Type::Pixel);
+        }
+
+        bool operator==(EngineUILength const& other) const {
+            return len == other.len && type == other.type;
+        }
+
+        friend std::string to_string(EngineUILength const& value) {
+            auto unit = [&] {
+                using Type = winrt::MEraEmuWin::implementation::EngineUILength::Type;
+                switch (value.type) {
+                case Type::FontPercent: return "";
+                case Type::Pixel: return "px";
+                default: return "";
+                }
+            }();
+            return std::to_string(value.len) + unit;
+        }
+        friend winrt::hstring to_hstring(EngineUILength const& value) {
+            auto unit = [&] {
+                using Type = winrt::MEraEmuWin::implementation::EngineUILength::Type;
+                switch (value.type) {
+                case Type::FontPercent: return L"";
+                case Type::Pixel: return L"px";
+                default: return L"";
+                }
+            }();
+            return to_hstring(value.len) + unit;
+        }
+    };
+
     struct EngineUIPrintLineDataButton {
         // For input command
         struct InputButton {
@@ -124,15 +169,14 @@ namespace winrt::MEraEmuWin::implementation {
 
     struct EngineUIPrintLineDataInlineObject {
         struct ShapeRect {
-            int32_t x, y, width, height;
+            EngineUILength x, y, width, height;
         };
         struct ShapeSpace {
-            int32_t size;
+            EngineUILength size;
         };
         struct Image {
             hstring sprite;
-            int32_t width, height;
-            int32_t ypos;
+            EngineUILength width, height, ypos;
         };
 
         using InlineObjectData = std::variant<ShapeRect, ShapeSpace, Image>;
@@ -273,6 +317,24 @@ namespace winrt::MEraEmuWin::implementation {
         float ConvFontUnitToPixels(float font_unit) const noexcept {
             return font_unit * m_ui_param_cache.font_size_px_f / 100;
         }
+        float ConvPixelUnitToPixels(float font_unit) const noexcept {
+            return font_unit * m_ui_param_cache.ui_scale;
+        }
+        float ConvLengthToPixels(EngineUILength const& len) const noexcept {
+            using Type = EngineUILength::Type;
+            switch (len.type) {
+            case Type::FontPercent:
+                return ConvFontUnitToPixels(len.len);
+            case Type::Pixel:
+                return ConvPixelUnitToPixels(len.len);
+            default:
+                // Should not happen
+                return len.len;
+            }
+        }
+        int32_t ConvLengthToPixelsI32(EngineUILength const& len) const noexcept {
+            return static_cast<int32_t>(ConvLengthToPixels(len));
+        }
 
         void OnInputCountDownTick(IInspectable const&, IInspectable const&);
         void HandleEngineLeftClick(Windows::Foundation::Point groundtruth_pt, Windows::Foundation::Point engine_pt);
@@ -280,6 +342,9 @@ namespace winrt::MEraEmuWin::implementation {
         // NOTE: Wait flag is ignored deliberately
         void RoutinePrint(hstring content, PrintExtendedFlags flags);
         void RoutineHtmlPrint(hstring const& content, int64_t no_single);
+        hstring RoutineHtmlPopPrintingStr();
+        hstring RoutineHtmlGetPrintedStr(int64_t line_no);
+        int64_t RoutineHtmlStringLen(hstring const& content, bool return_pixel);
         void RoutineInput(std::unique_ptr<InputRequest> request);
         void RoutineReuseLastLine(hstring const& content);
         void RoutineClearLine(uint64_t count);
@@ -291,6 +356,9 @@ namespace winrt::MEraEmuWin::implementation {
         PrintButtonRegionContext BeginPrintButtonRegion();
         template <typename F>
         void EndPrintButtonRegion(PrintButtonRegionContext ctx, F&& f);
+        /// Creates a new UI lines snapshot and restores the previous state (discards new lines)
+        /// when the guard goes out of scope.
+        auto MakeUILinesSnapshotGuard();
         int64_t RoutineGCreate(int64_t gid, int64_t width, int64_t height);
         int64_t RoutineGCreateFromFile(int64_t gid, hstring const& path);
         int64_t RoutineGDispose(int64_t gid);

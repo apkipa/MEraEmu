@@ -31,5 +31,6 @@ namespace MEraEmuWin {
         Boolean EnableFontSmoothing;
         Boolean EnablePixelSnapping;
         Boolean EnableHtmlRendering;
+        Boolean EnableGdiCompatRender;
     };
 }

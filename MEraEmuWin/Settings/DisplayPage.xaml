@@ -34,6 +34,8 @@
                           IsOn="{x:Bind ParentPage.Settings.EnablePixelSnapping,Mode=TwoWay}" />
             <ToggleSwitch Header="启用 HTML 渲染支持"
                           IsOn="{x:Bind ParentPage.Settings.EnableHtmlRendering,Mode=TwoWay}" />
+            <ToggleSwitch Header="启用 GDI 兼容渲染"
+                          IsOn="{x:Bind ParentPage.Settings.EnableGdiCompatRender,Mode=TwoWay}" />
         </local:StackPanel>
     </ScrollViewer>
 </Page>

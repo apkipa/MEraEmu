@@ -43,7 +43,7 @@ using namespace Windows::System::Threading;
 template<class... Ts>
 struct overloaded : Ts... { using Ts::operator()...; };
 
-std::string to_string(DiagnosticLevel value) {
+static inline std::string to_string(DiagnosticLevel value) {
     switch (value) {
     case DIAGNOSTIC_LEVEL_ERROR: return "错误";
     case DIAGNOSTIC_LEVEL_WARNING: return "警告";
@@ -54,11 +54,11 @@ std::string to_string(DiagnosticLevel value) {
     }
 }
 
-hstring to_hstring(DiagnosticLevel value) {
+static inline hstring to_hstring(DiagnosticLevel value) {
     return to_hstring(to_string(value));
 }
 
-Windows::UI::Color color_from_diagnostic_level(DiagnosticLevel level) noexcept {
+static inline winrt::Windows::UI::Color color_from_diagnostic_level(DiagnosticLevel level) noexcept {
     switch (level) {
     case DIAGNOSTIC_LEVEL_ERROR: return Colors::Red();
     case DIAGNOSTIC_LEVEL_WARNING: return Colors::Orange();
@@ -67,6 +67,84 @@ Windows::UI::Color color_from_diagnostic_level(DiagnosticLevel level) noexcept {
     case DIAGNOSTIC_LEVEL_SUGGESTION: return Colors::Purple();
     default: return Colors::Black();
     }
+}
+static inline auto recur_dir_iter(hstring const& base, hstring const& dir) {
+    return std::filesystem::recursive_directory_iterator((base + dir).c_str());
+}
+template<typename T>
+static inline bool checked_add(T a, T b, T& out) noexcept {
+    constexpr auto MAX = std::numeric_limits<T>::max();
+    constexpr auto MIN = std::numeric_limits<T>::min();
+    if (a > 0 && b > 0) {
+        if (a > MAX - b) { return false; }
+    }
+    if (a < 0 && b < 0) {
+        if (a < MIN - b) { return false; }
+    }
+    out = a + b;
+    return true;
+}
+template<typename T>
+static inline bool checked_mul(T a, T b, T& out) noexcept {
+    constexpr auto MAX = std::numeric_limits<T>::max();
+    constexpr auto MIN = std::numeric_limits<T>::min();
+    if (a == 0 || b == 0) {
+        out = 0;
+        return true;
+    }
+    if ((a > 0 && b > 0) || (a < 0 && b < 0)) {
+        if (a > MAX / b) { return false; }
+    }
+    else {
+        if (a > b) { std::swap(a, b); }
+        if (a < MIN / b) { return false; }
+    }
+    out = a * b;
+    return true;
+}
+template<typename T>
+static inline std::optional<T> checked_add(T a, T b) noexcept {
+    T out;
+    if (!checked_add(a, b, out)) { return std::nullopt; }
+    return out;
+}
+template<typename T>
+static inline std::optional<T> checked_mul(T a, T b) noexcept {
+    T out;
+    if (!checked_mul(a, b, out)) { return std::nullopt; }
+    return out;
+}
+template<typename T>
+static inline std::optional<T> parse(std::wstring_view str) noexcept {
+    if (str.empty()) { return std::nullopt; }
+    std::wstring_view::size_type n = str.size();
+    std::wstring_view::size_type i;
+    T r{};
+    bool is_negative{};
+    for (i = 0; i < n; i++) {
+        auto ch = str[i];
+        if (i == 0 && ch == L'-') {
+            is_negative = true;
+            if (str.size() == 1) { return std::nullopt; }
+            continue;
+        }
+        if (!(L'0' <= ch && ch <= L'9')) {
+            return std::nullopt;
+        }
+        if (!checked_mul<T>(r, 10, r)) { return std::nullopt; }
+        if (!checked_add<T>(r, ch - L'0', r)) { return std::nullopt; }
+    }
+    if (i != n) { return std::nullopt; }
+    if (is_negative) {
+        return checked_mul<T>(r, -1);
+    }
+    else {
+        return r;
+    }
+}
+
+static inline constexpr uint32_t saturate_to_u32(int32_t v) noexcept {
+    return v < 0 ? 0 : v;
 }
 
 template <typename T>
@@ -95,6 +173,80 @@ struct ValueCache {
 
     std::optional<T> m_value;
 };
+
+static inline bool key_is_value(auto&& map, auto&& key, auto&& value) {
+    auto it = map.find(std::forward<decltype(key)>(key));
+    if (it == map.end()) { return false; }
+    return it->second == value;
+}
+
+static inline std::string_view trim_ascii(std::string_view str) {
+    while (!str.empty() && std::isspace(static_cast<unsigned char>(str.front()))) {
+        str.remove_prefix(1);
+    }
+    while (!str.empty() && std::isspace(static_cast<unsigned char>(str.back()))) {
+        str.remove_suffix(1);
+    }
+    return str;
+}
+
+static inline std::wstring_view trim_ascii(std::wstring_view str) {
+    while (!str.empty() && std::iswspace(str.front())) {
+        str.remove_prefix(1);
+    }
+    while (!str.empty() && std::iswspace(str.back())) {
+        str.remove_suffix(1);
+    }
+    return str;
+}
+
+// WARN: ASCII only!
+template <typename CharT>
+static inline bool sv_equals(std::basic_string_view<CharT> str, std::string_view expected) {
+    if (str.size() != expected.size()) { return false; }
+    return std::equal(str.begin(), str.end(), expected.begin(), expected.end());
+}
+
+template <typename T, typename CharT>
+static inline auto parse_comma_separated_length_sv(std::basic_string_view<CharT> str, size_t min_count = 0, size_t max_count = SIZE_MAX) {
+    using string_view_type = std::basic_string_view<CharT>;
+    std::vector<std::pair<T, string_view_type>> result;
+    while (!str.empty()) {
+        auto comma_pos = str.find(',');
+        if (comma_pos == string_view_type::npos) {
+            comma_pos = str.size();
+        }
+        auto whole_value_str = trim_ascii(str.substr(0, comma_pos));
+        //size_t unit_pos = whole_value_str.find_first_not_of("-0123456789");
+        size_t unit_pos{};
+        for (unit_pos = 0; unit_pos < whole_value_str.size(); unit_pos++) {
+            auto ch = whole_value_str[unit_pos];
+            if (ch == '-' || ('0' <= ch && ch <= '9')) {
+                continue;
+            }
+            break;
+        }
+        auto value_str = trim_ascii(whole_value_str.substr(0, unit_pos));
+        auto unit_str = trim_ascii(whole_value_str.substr(unit_pos));
+        result.push_back({ parse<T>(value_str).value(), unit_str });
+        if (comma_pos == str.size()) { break; }
+        str.remove_prefix(comma_pos + 1);
+    }
+    if (result.size() < min_count || result.size() > max_count) {
+        char buf[256];
+        snprintf(buf, sizeof buf, "Invalid count of comma-separated values: %zu not in [%zu, %zu]",
+            result.size(), min_count, max_count);
+        throw std::runtime_error(buf);
+    }
+    return result;
+}
+
+template <typename T>
+static inline auto parse_comma_separated_length(auto&& in_str, size_t min_count = 0, size_t max_count = SIZE_MAX) {
+    std::basic_string_view str(in_str);
+    using string_view_type = decltype(str);
+    return parse_comma_separated_length_sv<T>(str, min_count, max_count);
+}
 
 template <typename CharT>
 struct SimpleHtmlParser {
@@ -520,83 +672,41 @@ private:
 };
 
 namespace winrt::MEraEmuWin::implementation {
-    auto recur_dir_iter(hstring const& base, hstring const& dir) {
-        return std::filesystem::recursive_directory_iterator((base + dir).c_str());
+    static size_t width(std::wstring_view str) noexcept {
+        return rust_get_wstring_view_width({ (const uint16_t*)str.data(), str.size() });
     }
-    template<typename T>
-    bool checked_add(T a, T b, T& out) noexcept {
-        constexpr auto MAX = std::numeric_limits<T>::max();
-        constexpr auto MIN = std::numeric_limits<T>::min();
-        if (a > 0 && b > 0) {
-            if (a > MAX - b) { return false; }
-        }
-        if (a < 0 && b < 0) {
-            if (a < MIN - b) { return false; }
-        }
-        out = a + b;
-        return true;
+    static size_t width(hstring const& str) noexcept {
+        return rust_get_wstring_width((const uint16_t*)str.c_str());
     }
-    template<typename T>
-    bool checked_mul(T a, T b, T& out) noexcept {
-        constexpr auto MAX = std::numeric_limits<T>::max();
-        constexpr auto MIN = std::numeric_limits<T>::min();
-        if (a == 0 || b == 0) {
-            out = 0;
-            return true;
-        }
-        if ((a > 0 && b > 0) || (a < 0 && b < 0)) {
-            if (a > MAX / b) { return false; }
-        }
-        else {
-            if (a > b) { std::swap(a, b); }
-            if (a < MIN / b) { return false; }
-        }
-        out = a * b;
-        return true;
+    static size_t width(std::string const& str) noexcept {
+        return rust_get_string_width(str.c_str());
     }
-    template<typename T>
-    std::optional<T> checked_add(T a, T b) noexcept {
-        T out;
-        if (!checked_add(a, b, out)) { return std::nullopt; }
-        return out;
-    }
-    template<typename T>
-    std::optional<T> checked_mul(T a, T b) noexcept {
-        T out;
-        if (!checked_mul(a, b, out)) { return std::nullopt; }
-        return out;
-    }
-    template<typename T>
-    std::optional<T> parse(std::wstring_view str) noexcept {
-        if (str.empty()) { return std::nullopt; }
-        std::wstring_view::size_type n = str.size();
-        std::wstring_view::size_type i;
-        T r{};
-        bool is_negative{};
-        for (i = 0; i < n; i++) {
-            auto ch = str[i];
-            if (i == 0 && ch == L'-') {
-                is_negative = true;
-                if (str.size() == 1) { return std::nullopt; }
-                continue;
-            }
-            if (!(L'0' <= ch && ch <= L'9')) {
-                return std::nullopt;
-            }
-            if (!checked_mul<T>(r, 10, r)) { return std::nullopt; }
-            if (!checked_add<T>(r, ch - L'0', r)) { return std::nullopt; }
-        }
-        if (i != n) { return std::nullopt; }
-        if (is_negative) {
-            return checked_mul<T>(r, -1);
-        }
-        else {
-            return r;
-        }
+    static size_t width(const char* str) noexcept {
+        return rust_get_string_width(str);
     }
 
-    static constexpr uint32_t saturate_to_u32(int32_t v) noexcept {
-        return v < 0 ? 0 : v;
+    template <typename CharT>
+    static inline auto parse_comma_separated_ui_length_sv(std::basic_string_view<CharT> str, size_t min_count = 0, size_t max_count = SIZE_MAX) {
+        using Type = EngineUILength::Type;
+        std::vector<EngineUILength> result;
+        for (auto&& [value, unit] : parse_comma_separated_length_sv<int32_t>(str, min_count, max_count)) {
+            if (sv_equals(unit, "px")) {
+                result.push_back({ value, Type::Pixel });
+            }
+            else if (sv_equals(unit, "")) {
+                result.push_back({ value, Type::FontPercent });
+            }
+            else {
+                throw std::runtime_error("Invalid unit");
+            }
+        }
+        return result;
+    }
+
+    static inline auto parse_comma_separated_ui_length(auto&& in_str, size_t min_count = 0, size_t max_count = SIZE_MAX) {
+        std::basic_string_view str(in_str);
+        using string_view_type = decltype(str);
+        return parse_comma_separated_ui_length_sv(str, min_count, max_count);
     }
 
     enum class FileBomKind {
@@ -969,6 +1079,23 @@ namespace winrt::MEraEmuWin::implementation {
                 sd->ui_ctrl->RoutineHtmlPrint(content, no_single);
             });
         }
+        const char* on_html_popprintingstr() override {
+            m_str_cache = exec_ui_work_or([sd = m_sd] {
+                return to_string(sd->ui_ctrl->RoutineHtmlPopPrintingStr());
+            });
+            return m_str_cache.c_str();
+        }
+        const char* on_html_getprintedstr(int64_t line_no) override {
+            m_str_cache = exec_ui_work_or([sd = m_sd, line_no] {
+                return to_string(sd->ui_ctrl->RoutineHtmlGetPrintedStr(line_no));
+            });
+            return m_str_cache.c_str();
+        }
+        int64_t on_html_stringlen(std::string_view content, bool return_pixel) override {
+            return exec_ui_work_or([sd = m_sd, content = to_hstring(content), return_pixel] {
+                return sd->ui_ctrl->RoutineHtmlStringLen(content, return_pixel);
+            });
+        }
         void on_wait(bool any_key, bool is_force) override {
             int64_t time_limit{ -1 };
             auto input_req = std::make_unique<InputRequestVoid>(time_limit);
@@ -1210,12 +1337,12 @@ namespace winrt::MEraEmuWin::implementation {
                     return sd->ui_ctrl->m_cur_composing_line.parts.empty();
                 });
             }
-            if (name == "SCREENWIDTH") {
+            if (name == "@CLIENTCHARWIDTH") {
                 return exec_ui_work_or([sd = m_sd] {
                     return sd->ui_ctrl->m_ui_param_cache.line_char_capacity;
                 });
             }
-            if (name == "SCREENPIXELWIDTH") {
+            if (name == "@CLIENTWIDTH") {
                 // NOTE: Returns width in logical pixels
                 return exec_ui_work_or([sd = m_sd] {
                     return sd->ui_ctrl->m_ui_param_cache.canvas_width_px / sd->ui_ctrl->m_ui_param_cache.ui_scale;
@@ -1226,7 +1353,9 @@ namespace winrt::MEraEmuWin::implementation {
                     return (int64_t)sd->ui_ctrl->m_ui_lines.size();
                 });
             }
-            throw std::exception("no such variable");
+            std::string msg = "no such variable: ";
+            msg += name;
+            throw std::runtime_error(msg);
         }
         const char* on_var_get_str(std::string_view name, size_t idx) override {
             if (name == "@FONT") {
@@ -1257,7 +1386,9 @@ namespace winrt::MEraEmuWin::implementation {
                 m_str_cache = future.get();
                 return m_str_cache.c_str();
             }
-            throw std::exception("no such variable");
+            std::string msg = "no such variable: ";
+            msg += name;
+            throw std::runtime_error(msg);
         }
         void on_var_set_int(std::string_view name, size_t idx, int64_t val) override {
             if (name == "@COLOR") {
@@ -1315,7 +1446,9 @@ namespace winrt::MEraEmuWin::implementation {
             }
             // TODO: Prohibit setting variables @DEF*COLOR?
             // TODO...
-            throw std::exception("no such variable");
+            std::string msg = "no such variable: ";
+            msg += name;
+            throw std::runtime_error(msg);
         }
         void on_var_set_str(std::string_view name, size_t idx, std::string_view val) override {
             if (name == "@FONT") {
@@ -1330,7 +1463,9 @@ namespace winrt::MEraEmuWin::implementation {
                 });
                 return;
             }
-            throw std::exception("no such variable");
+            std::string msg = "no such variable: ";
+            msg += name;
+            throw std::runtime_error(msg);
         }
         void on_print_button(std::string_view content, std::string_view value, PrintExtendedFlags flags) override {
             queue_ui_work([sd = m_sd, content = to_hstring(content), value = to_hstring(value), flags] {
@@ -1521,7 +1656,7 @@ namespace winrt::MEraEmuWin::implementation {
             }
             if (name == ERA_CONFIG_NAME_WINDOW_WIDTH) {
                 // Window width
-                return on_var_get_int("SCREENPIXELWIDTH", 0);
+                return on_var_get_int("@CLIENTWIDTH", 0);
             }
             if (name == ERA_CONFIG_NAME_SAVE_DATA_COUNT) {
                 // Save data count
@@ -1651,11 +1786,10 @@ namespace winrt::MEraEmuWin::implementation {
 
             auto shape_rect = [&](EngineUIPrintLineDataInlineObject::ShapeRect const& v) -> HRESULT {
                 D2D1_RECT_F rect;
-                rect.left = originX + v.x * ctrl->m_ui_param_cache.font_size_px_f / 100;
-                //rect.top = originY + v.y * ctrl->m_ui_param_cache.font_size_px_f / 100;
+                rect.left = originX + ctrl->ConvLengthToPixels(v.x);
                 rect.top = originY;
-                rect.right = rect.left + v.width * ctrl->m_ui_param_cache.font_size_px_f / 100;
-                rect.bottom = rect.top + v.height * ctrl->m_ui_param_cache.font_size_px_f / 100;
+                rect.right = rect.left + ctrl->ConvLengthToPixels(v.width);
+                rect.bottom = rect.top + ctrl->ConvLengthToPixels(v.height);
                 auto d2d_ctx = get_d2d_ctx();
                 if (clientDrawingEffect) {
                     com_ptr<ID2D1Brush> brush;
@@ -1685,10 +1819,10 @@ namespace winrt::MEraEmuWin::implementation {
                     originY = std::round(originY);
                 }
                 rect.left = originX;
-                //rect.top = originY + v.ypos * ctrl->m_ui_param_cache.font_size_px_f / 100;
                 rect.top = originY;
-                rect.right = rect.left + v.width * ctrl->m_ui_param_cache.font_size_px_f / 100;
-                rect.bottom = rect.top + v.height * ctrl->m_ui_param_cache.font_size_px_f / 100;
+                rect.right = rect.left + ctrl->ConvLengthToPixels(v.width);
+                auto height_in_pixels = ctrl->ConvLengthToPixels(v.height);
+                rect.bottom = rect.top + height_in_pixels;
                 auto d2d_ctx = get_d2d_ctx();
                 auto img_it = ctrl->m_graphics_objects.find(sprite.gid);
                 if (img_it == ctrl->m_graphics_objects.end() || !img_it->second.try_ensure_loaded(ctrl)) {
@@ -1733,7 +1867,7 @@ namespace winrt::MEraEmuWin::implementation {
 
                                 // HACK: A terrible workaround trying to fix D2D sampling outside the source region,
                                 //       while avoiding degrading the quality under certain circumstances.
-                    if (v.height <= 100) {
+                    if (std::fabs(height_in_pixels - ctrl->m_ui_param_cache.font_size_px_f) < 1.0f) {
                         auto src_rect = D2D1::RectF(sprite.x, sprite.y, sprite.x + sprite.width, sprite.y + sprite.height);
                         d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f,
                             D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, src_rect);
@@ -1775,8 +1909,6 @@ namespace winrt::MEraEmuWin::implementation {
 
             float baselineOffset = 0.0f;
             auto shape_rect = [&](EngineUIPrintLineDataInlineObject::ShapeRect const& v) {
-                /*overhangs->top = ctrl->ConvFontUnitToPixels(-v.y);
-                overhangs->bottom = ctrl->ConvFontUnitToPixels(v.y + v.height - 100);*/
                 baselineOffset = vrange.first;
             };
             auto shape_space = [&](EngineUIPrintLineDataInlineObject::ShapeSpace const& v) {
@@ -1784,8 +1916,6 @@ namespace winrt::MEraEmuWin::implementation {
                 inlineMetrics.height = ctrl->ConvFontUnitToPixels(100);
             };
             auto image = [&](EngineUIPrintLineDataInlineObject::Image const& v) {
-                /*overhangs->top = ctrl->ConvFontUnitToPixels(-v.ypos);
-                overhangs->bottom = ctrl->ConvFontUnitToPixels(v.ypos + v.height - 100);*/
                 baselineOffset = vrange.first;
             };
             std::visit(overloaded(
@@ -1826,13 +1956,13 @@ namespace winrt::MEraEmuWin::implementation {
 
         float get_object_width() {
             auto shape_rect = [this](EngineUIPrintLineDataInlineObject::ShapeRect const& v) {
-                return std::max(ctrl->ConvFontUnitToPixels(v.x + v.width), 0.0f);
+                return std::max(ctrl->ConvLengthToPixels(v.x) + ctrl->ConvLengthToPixels(v.width), 0.0f);
             };
             auto shape_space = [this](EngineUIPrintLineDataInlineObject::ShapeSpace const& v) {
-                return std::max(ctrl->ConvFontUnitToPixels(v.size), 0.0f);
+                return std::max(ctrl->ConvLengthToPixels(v.size), 0.0f);
             };
             auto image = [this](EngineUIPrintLineDataInlineObject::Image const& v) {
-                return std::max(ctrl->ConvFontUnitToPixels(v.width), 0.0f);
+                return std::max(ctrl->ConvLengthToPixels(v.width), 0.0f);
             };
             return std::visit(overloaded(
                 shape_rect,
@@ -1843,8 +1973,8 @@ namespace winrt::MEraEmuWin::implementation {
         std::pair<float, float> get_object_vertical_range() {
             auto shape_rect = [this](EngineUIPrintLineDataInlineObject::ShapeRect const& v) {
                 return std::make_pair(
-                    ctrl->ConvFontUnitToPixels(v.y),
-                    ctrl->ConvFontUnitToPixels(v.y + v.height)
+                    ctrl->ConvLengthToPixels(v.y),
+                    ctrl->ConvLengthToPixels(v.y) + ctrl->ConvLengthToPixels(v.height)
                 );
             };
             auto shape_space = [this](EngineUIPrintLineDataInlineObject::ShapeSpace const& v) {
@@ -1852,8 +1982,8 @@ namespace winrt::MEraEmuWin::implementation {
             };
             auto image = [this](EngineUIPrintLineDataInlineObject::Image const& v) {
                 return std::make_pair(
-                    ctrl->ConvFontUnitToPixels(v.ypos),
-                    ctrl->ConvFontUnitToPixels(v.ypos + v.height)
+                    ctrl->ConvLengthToPixels(v.ypos),
+                    ctrl->ConvLengthToPixels(v.ypos) + ctrl->ConvLengthToPixels(v.height)
                 );
             };
             return std::visit(overloaded(
@@ -1880,7 +2010,7 @@ namespace winrt::MEraEmuWin::implementation {
          * the current line, and they correspond to `lookback_render_pos` and
          * `lookforward_render_pos`, the accumulated line indices for actual rendering.
          * In other words, `render*` values describe the drawing area produced by the
-         * current line, while `look*` values describe the lines that draws inside the
+         * current line, while `look*` values describe the lines that draw inside the
          * current line's area.
          */
         uint32_t render_forward_height{}; // Unit: line; usually >= height
@@ -1903,13 +2033,27 @@ namespace winrt::MEraEmuWin::implementation {
         void ensure_layout(EngineControl* ctrl, uint32_t width) {
             if (txt_layout) { return; }
             com_ptr<IDWriteTextLayout> tmp_layout;
-            check_hresult(g_dwrite_factory->CreateTextLayout(
-                txt.c_str(), static_cast<UINT32>(txt.size()),
-                ctrl->GetDefaultTextFormat(),
-                static_cast<float>(width),
-                0,
-                tmp_layout.put()
-            ));
+            if (ctrl->m_app_settings->EnableGdiCompatRender()) {
+                check_hresult(g_dwrite_factory->CreateGdiCompatibleTextLayout(
+                    txt.c_str(), static_cast<UINT32>(txt.size()),
+                    ctrl->GetDefaultTextFormat(),
+                    static_cast<float>(width),
+                    0,
+                    1,
+                    nullptr,
+                    true,
+                    tmp_layout.put()
+                ));
+            }
+            else {
+                check_hresult(g_dwrite_factory->CreateTextLayout(
+                    txt.c_str(), static_cast<UINT32>(txt.size()),
+                    ctrl->GetDefaultTextFormat(),
+                    static_cast<float>(width),
+                    0,
+                    tmp_layout.put()
+                ));
+            }
             tmp_layout.as(txt_layout);
             auto line_height = ctrl->m_ui_param_cache.line_height_px_f;
             check_hresult(txt_layout->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM,
@@ -1970,6 +2114,108 @@ namespace winrt::MEraEmuWin::implementation {
             }
         }
 
+        float get_actual_width() const {
+            if (!txt_layout) { return 0.0f; }
+            DWRITE_TEXT_METRICS1 metrics;
+            check_hresult(txt_layout->GetMetrics(&metrics));
+            return metrics.width;
+        }
+
+        hstring to_html_string() const {
+            if (txt.empty()) { return {}; }
+
+            // TODO: Use map<pos, vec of tags> for memory efficiency?
+            std::vector<std::vector<hstring>> tag_strs(txt.size() + 1);
+            {
+                auto align = [&] {
+                    switch (alignment) {
+                    case HorizontalAlignment::Left: return L"left";
+                    case HorizontalAlignment::Center: return L"center";
+                    case HorizontalAlignment::Right: return L"right";
+                    default: return L"left";
+                    }
+                }();
+                tag_strs[0].push_back(winrt::format(L"<p align=\"{}\">", align));
+                tag_strs[txt.size()].push_back(L"</p>");
+            }
+            for (auto const& style : styles) {
+                auto set_color = [&](EngineUIPrintLineDataStyle::Color const& v) {
+                    tag_strs[style.starti].push_back(winrt::format(L"<font color=\"#{:06X}\">", v.color));
+                    tag_strs[style.starti + style.len].push_back(L"</font>");
+                };
+                auto set_style = [&](EngineUIPrintLineDataStyle::Style const& v) {
+                    if (v.style & ERA_FONT_STYLE_BOLD) {
+                        tag_strs[style.starti].push_back(L"<b>");
+                        tag_strs[style.starti + style.len].push_back(L"</b>");
+                    }
+                    if (v.style & ERA_FONT_STYLE_ITALIC) {
+                        tag_strs[style.starti].push_back(L"<i>");
+                        tag_strs[style.starti + style.len].push_back(L"</i>");
+                    }
+                    if (v.style & ERA_FONT_STYLE_STRIKEOUT) {
+                        tag_strs[style.starti].push_back(L"<s>");
+                        tag_strs[style.starti + style.len].push_back(L"</s>");
+                    }
+                    if (v.style & ERA_FONT_STYLE_UNDERLINE) {
+                        tag_strs[style.starti].push_back(L"<u>");
+                        tag_strs[style.starti + style.len].push_back(L"</u>");
+                    }
+                };
+                auto set_font = [&](EngineUIPrintLineDataStyle::Font const& v) {
+                    tag_strs[style.starti].push_back(winrt::format(L"<font face=\"{}\">", v.name));
+                    tag_strs[style.starti + style.len].push_back(L"</font>");
+                };
+                std::visit(overloaded(
+                    set_color,
+                    set_style,
+                    set_font
+                ), style.data);
+            }
+            for (auto const& button : buttons) {
+                if (auto data = std::get_if<EngineUIPrintLineDataButton::InputButton>(&button.data)) {
+                    tag_strs[button.starti].push_back(winrt::format(L"<button value=\"{}\">", data->input));
+                    tag_strs[button.starti + button.len].push_back(L"</button>");
+                }
+            }
+            for (auto const& inline_obj : inline_objs) {
+                auto set_shape_rect = [&](EngineUIPrintLineDataInlineObject::ShapeRect const& v) {
+                    tag_strs[inline_obj.starti].push_back(winrt::format(
+                        LR"(<shape type="rect" param="{},{},{},{}">)",
+                        to_hstring(v.x), to_hstring(v.y), to_hstring(v.width), to_hstring(v.height)
+                    ));
+                };
+                auto set_shape_space = [&](EngineUIPrintLineDataInlineObject::ShapeSpace const& v) {
+                    tag_strs[inline_obj.starti].push_back(winrt::format(
+                        LR"(<shape type="space" param="{}">)",
+                        to_hstring(v.size)
+                    ));
+                };
+                auto set_image = [&](EngineUIPrintLineDataInlineObject::Image const& v) {
+                    tag_strs[inline_obj.starti].push_back(winrt::format(
+                        LR"("<img src="{}" width="{}" height="{}" ypos="{}">)",
+                        v.sprite, to_hstring(v.width), to_hstring(v.height), to_hstring(v.ypos)
+                    ));
+                };
+                std::visit(overloaded(
+                    set_image,
+                    [](auto&&) {}
+                ), inline_obj.obj->data);
+            }
+
+            // Combine tags
+            std::wstring result;
+            for (size_t i = 0; i < txt.size(); ++i) {
+                for (auto const& tag : tag_strs[i]) {
+                    result += tag;
+                }
+                result += txt[i];
+            }
+            for (auto const& tag : tag_strs[txt.size()]) {
+                result += tag;
+            }
+            return hstring(result);
+        }
+
     private:
         void flush_metrics(EngineControl* ctrl) {
             //acc_height -= line_height;
@@ -1983,6 +2229,15 @@ namespace winrt::MEraEmuWin::implementation {
             //acc_height += line_height;
         }
     };
+
+    auto EngineControl::MakeUILinesSnapshotGuard() {
+        return tenkai::cpp_utils::ScopeExit([this, old_line_count = m_ui_lines.size(), old_composing_line = m_cur_composing_line]() mutable {
+            while (size(m_ui_lines) > old_line_count) {
+                m_ui_lines.pop_back();
+            }
+            m_cur_composing_line = std::move(old_composing_line);
+        });
+    }
 
     EngineControl::EngineControl() {
         ensure_global_factory();
@@ -2061,6 +2316,7 @@ namespace winrt::MEraEmuWin::implementation {
         }));
 
         bool font_changed{};
+        bool layout_changed{};
         if (old_settings) {
             if (old_settings->GameDefaultFontName() != new_settings->GameDefaultFontName()) {
                 font_changed = true;
@@ -2068,9 +2324,13 @@ namespace winrt::MEraEmuWin::implementation {
                     m_cur_font_name = new_settings->GameDefaultFontName();
                 }
             }
+            if (old_settings->EnableGdiCompatRender() != new_settings->EnableGdiCompatRender()) {
+                layout_changed = true;
+            }
         }
 
-        UpdateEngineImageOutputLayout(true, font_changed);
+        bool recreate_ui_lines = font_changed || layout_changed;
+        UpdateEngineImageOutputLayout(true, recreate_ui_lines);
     }
     bool EngineControl::IsStarted() {
         return m_sd && m_sd->thread_is_alive.load(std::memory_order_relaxed);
@@ -2136,7 +2396,7 @@ namespace winrt::MEraEmuWin::implementation {
     }
     void EngineControl::EngineOutputImage_PointerExited(IInspectable const& sender, PointerRoutedEventArgs const& e) {
         m_cur_pointer.pt = { -1, -1 };
-        m_cur_pointer.left_button_down = m_cur_pointer.right_button_down = false;
+        //m_cur_pointer.left_button_down = m_cur_pointer.right_button_down = false;
         UpdateAndInvalidateActiveButton(m_cur_pointer.pt);
     }
     void EngineControl::EngineOutputImage_PointerCanceled(IInspectable const& sender, PointerRoutedEventArgs const& e) {
@@ -2297,8 +2557,8 @@ namespace winrt::MEraEmuWin::implementation {
                 eri("@LINEISEMPTY");
                 ers("WINDOW_TITLE");
                 ers("DRAWLINESTR");
-                eri("SCREENWIDTH");
-                eri("SCREENPIXELWIDTH");
+                eri("@CLIENTCHARWIDTH");
+                eri("@CLIENTWIDTH");
                 eri("LINECOUNT");
                 ers("SAVEDATA_TEXT", false);
                 eri("RANDDATA");
@@ -3710,15 +3970,14 @@ namespace winrt::MEraEmuWin::implementation {
             }
         };
 
-        auto old_line_count = m_ui_lines.size();
-        auto old_composing_line = m_cur_composing_line;
-
         bool updated = false;
         // NOTE: HTML_PRINT is SINGLE by default
         if (!no_single) {
             updated = FlushCurrentPrintLine() || updated;
         }
         try {
+            auto ui_lines_guard = MakeUILinesSnapshotGuard();
+
             auto old_alignment = m_cur_line_alignment;
             auto old_font_name = std::move(m_cur_font_name);
             auto se_restore = tenkai::cpp_utils::ScopeExit([&] {
@@ -3729,7 +3988,8 @@ namespace winrt::MEraEmuWin::implementation {
             PrintButtonRegionContext ctx;
 
             bool last_is_br{};
-            parser.parse([&](Parser::VisitEventKind event_kind, Parser::Tag const& tag, param::hstring const& text) {
+            parser.parse([&](Parser::VisitEventKind event_kind, Parser::Tag const& tag, param::hstring const& param_text) {
+                hstring const& text = param_text;
                 if (event_kind == Parser::VisitEventKind::EnterTag) {
                     last_is_br = false;
 
@@ -3746,51 +4006,51 @@ namespace winrt::MEraEmuWin::implementation {
                         ctx = BeginPrintButtonRegion();
                     }
                     else if (tag.name == L"shape") {
-                        if (auto it = tag.attrs.find(L"type"); it != tag.attrs.end()) {
-                            if (it->second == L"rect") {
-                                // Rectangle shape
-                                if (auto it = tag.attrs.find(L"param"); it != tag.attrs.end()) {
-                                    int32_t x{}, y{}, width{}, height{};
-                                    int count = swscanf(it->second.c_str(), L"%d,%d,%d,%d", &x, &y, &width, &height);
-                                    bool is_valid = false;
-                                    if (count == 1) {
-                                        width = x;
-                                        x = y = {};
-                                        height = 100;
-                                        is_valid = true;
+                        auto& type = tag.attrs.at(L"type");
+                        if (type == L"rect") {
+                            // Rectangle shape
+                            auto param = parse_comma_separated_ui_length(tag.attrs.at(L"param"), 1, 4);
+                            com_ptr<EngineUIPrintLineDataInlineObject::InlineObject> obj;
+                            if (param.size() == 1) {
+                                EngineUILength x, y, width, height;
+                                x = y = EngineUILength::FontPercent(0);
+                                width = param[0];
+                                height = EngineUILength::FontPercent(100);
+                                obj = make_self<EngineUIPrintLineDataInlineObject::InlineObject>(
+                                    this, EngineUIPrintLineDataInlineObject::ShapeRect{
+                                        .x = x, .y = y, .width = width, .height = height
                                     }
-                                    else if (count == 4) {
-                                        is_valid = true;
-                                    }
-                                    if (is_valid) {
-                                        auto obj = make_self<EngineUIPrintLineDataInlineObject::InlineObject>(
-                                            this, EngineUIPrintLineDataInlineObject::ShapeRect{
-                                                .x = x, .y = y, .width = width, .height = height
-                                            }
-                                        );
-                                        m_cur_composing_line.parts.push_back({
-                                            .str = hstring(L"■"), .inline_obj = std::move(obj), .forbid_button = true,
-                                            });
-                                        gather_to_part_fn(m_cur_composing_line.parts.back());
-                                    }
-                                }
+                                );
                             }
-                            else if (it->second == L"space") {
-                                // Space shape
-                                if (auto it = tag.attrs.find(L"param"); it != tag.attrs.end()) {
-                                    int32_t width{};
-                                    int count = swscanf(it->second.c_str(), L"%d", &width);
-                                    // HACK: Skip if width is 0 to avoid game bugs
-                                    if (count == 1 && width != 0) {
-                                        auto obj = make_self<EngineUIPrintLineDataInlineObject::InlineObject>(
-                                            this, EngineUIPrintLineDataInlineObject::ShapeSpace{ .size = width }
-                                        );
-                                        m_cur_composing_line.parts.push_back({
-                                            .str = hstring(L"�"), .inline_obj = std::move(obj), .forbid_button = true,
-                                            });
-                                        gather_to_part_fn(m_cur_composing_line.parts.back());
+                            else if (param.size() == 4) {
+                                obj = make_self<EngineUIPrintLineDataInlineObject::InlineObject>(
+                                    this, EngineUIPrintLineDataInlineObject::ShapeRect{
+                                        .x = param[0], .y = param[1], .width = param[2], .height = param[3]
                                     }
-                                }
+                                );
+                            }
+                            else {
+                                throw std::runtime_error("Invalid shape rect param count");
+                            }
+                            if (obj) {
+                                m_cur_composing_line.parts.push_back({
+                                    .str = hstring(L"■"), .inline_obj = std::move(obj), .forbid_button = true,
+                                    });
+                                gather_to_part_fn(m_cur_composing_line.parts.back());
+                            }
+                        }
+                        else if (type == L"space") {
+                            // Space shape
+                            auto param = parse_comma_separated_ui_length(tag.attrs.at(L"param"), 1, 1);
+                            // HACK: Skip if width is 0 to avoid game bugs
+                            if (param[0].len != 0) {
+                                auto obj = make_self<EngineUIPrintLineDataInlineObject::InlineObject>(
+                                    this, EngineUIPrintLineDataInlineObject::ShapeSpace{ .size = param[0] }
+                                );
+                                m_cur_composing_line.parts.push_back({
+                                    .str = hstring(L"�"), .inline_obj = std::move(obj), .forbid_button = true,
+                                    });
+                                gather_to_part_fn(m_cur_composing_line.parts.back());
                             }
                         }
                     }
@@ -3832,33 +4092,22 @@ namespace winrt::MEraEmuWin::implementation {
                     }
                     else if (tag.name == L"img") {
                         hstring sprite_name;
-                        if (auto it = tag.attrs.find(L"src"); it != tag.attrs.end()) {
-                            sprite_name = it->second;
-                        }
-                        else {
-                            throw std::runtime_error("Image tag missing src attribute");
-                        }
+                        sprite_name = tag.attrs.at(L"src");
                         auto sprite_it = m_sprite_objects.find(sprite_name);
                         if (sprite_it != m_sprite_objects.end()) {
                             auto& sprite = sprite_it->second;
-                            int32_t width, height, ypos;
+                            EngineUILength width, height = EngineUILength::FontPercent(100), ypos;
                             if (auto it = tag.attrs.find(L"ypos"); it != tag.attrs.end()) {
-                                ypos = parse<int32_t>(it->second).value();
-                            }
-                            else {
-                                ypos = 0;
+                                ypos = parse_comma_separated_ui_length(it->second, 1, 1)[0];
                             }
                             if (auto it = tag.attrs.find(L"height"); it != tag.attrs.end()) {
-                                height = parse<int32_t>(it->second).value();
-                            }
-                            else {
-                                height = 100;
+                                height = parse_comma_separated_ui_length(it->second, 1, 1)[0];
                             }
                             if (auto it = tag.attrs.find(L"width"); it != tag.attrs.end()) {
-                                width = parse<int32_t>(it->second).value();
+                                width = parse_comma_separated_ui_length(it->second, 1, 1)[0];
                             }
                             else {
-                                width = sprite.width * height / sprite.height;
+                                width = EngineUILength((float)height.len * sprite.width / sprite.height, height.type);
                             }
                             auto obj = make_self<EngineUIPrintLineDataInlineObject::InlineObject>(
                                 this, EngineUIPrintLineDataInlineObject::Image{
@@ -3874,7 +4123,7 @@ namespace winrt::MEraEmuWin::implementation {
                             // Sprite does not exist or is invalid; print html content as plain text
                             auto start_pos = tag.start_tag_pos_range.first;
                             auto end_pos = tag.end_tag_pos_range.second;
-                            hstring html(std::wstring_view(hstring(content)).substr(start_pos, end_pos - start_pos));
+                            hstring html(std::wstring_view(content).substr(start_pos, end_pos - start_pos));
                             m_cur_composing_line.parts.push_back({ .str = html, .forbid_button = true });
                             gather_to_part_fn(m_cur_composing_line.parts.back());
                         }
@@ -3888,16 +4137,15 @@ namespace winrt::MEraEmuWin::implementation {
                 }
             });
 
+            // Finish HTML printing
+            ui_lines_guard.release();
+
             if (!no_single) {
                 updated = FlushCurrentPrintLine() || updated;
             }
         }
         catch (...) {
             // Syntax error; recover and fallback to plain text
-            while (size(m_ui_lines) > old_line_count) {
-                m_ui_lines.pop_back();
-            }
-            m_cur_composing_line = std::move(old_composing_line);
             RoutinePrint(content, ERA_PEF_FORCE_PLAIN | ERA_PEF_IS_LINE);
             return;
         }
@@ -3906,6 +4154,130 @@ namespace winrt::MEraEmuWin::implementation {
         if (updated && m_auto_redraw) {
             UpdateEngineImageOutputLayout(false);
         }
+    }
+    hstring EngineControl::RoutineHtmlPopPrintingStr() {
+        if (!FlushCurrentPrintLine()) {
+            return {};
+        }
+        auto se_pop_line = tenkai::cpp_utils::ScopeExit([&] {
+            m_ui_lines.pop_back();
+        });
+        return RoutineHtmlGetPrintedStr(0);
+    }
+    hstring EngineControl::RoutineHtmlGetPrintedStr(int64_t line_no) {
+        if (line_no < 0 || (size_t)line_no >= size(m_ui_lines)) {
+            return {};
+        }
+        return m_ui_lines[line_no].to_html_string();
+    }
+    int64_t EngineControl::RoutineHtmlStringLen(hstring const& content, bool return_pixel) {
+        using Parser = SimpleHtmlParser<wchar_t>;
+        Parser parser(content);
+
+        // Temporarily render the html content to calculate the width
+        size_t cur_line_no = size(m_ui_lines);
+        auto ui_lines_guard = MakeUILinesSnapshotGuard();
+        auto se_auto_redraw = tenkai::cpp_utils::ScopeExit([&, old_auto_redraw = m_auto_redraw] {
+            m_auto_redraw = old_auto_redraw;
+        });
+        m_cur_composing_line = {};
+        m_auto_redraw = false;
+
+        RoutineHtmlPrint(content, 0);
+
+        if (cur_line_no >= size(m_ui_lines)) {
+            return {};
+        }
+        float total_width = m_ui_lines[cur_line_no].get_actual_width() / m_ui_param_cache.ui_scale;
+        return (int64_t)std::ceil(return_pixel ? total_width : (total_width * 2.0f / m_ui_param_cache.font_size_px_f));
+
+        //try {
+        //    float total_width = 0;
+
+        //    parser.parse([&](Parser::VisitEventKind event_kind, Parser::Tag const& tag, param::hstring const& param_text) {
+        //        hstring const& text = param_text;
+        //        if (event_kind == Parser::VisitEventKind::EnterTag) {
+        //            if (tag.name == L"shape") {
+        //                if (auto it = tag.attrs.find(L"type"); it != tag.attrs.end()) {
+        //                    if (it->second == L"rect") {
+        //                        // Rectangle shape
+        //                        if (auto it = tag.attrs.find(L"param"); it != tag.attrs.end()) {
+        //                            int32_t x{}, y{}, width{}, height{};
+        //                            int count = swscanf(it->second.c_str(), L"%d,%d,%d,%d", &x, &y, &width, &height);
+        //                            bool is_valid = false;
+        //                            if (count == 1) {
+        //                                width = x;
+        //                                x = y = {};
+        //                                height = 100;
+        //                                is_valid = true;
+        //                            }
+        //                            else if (count == 4) {
+        //                                is_valid = true;
+        //                            }
+        //                            if (is_valid) {
+        //                                total_width += ConvFontUnitToPixels(width);
+        //                            }
+        //                        }
+        //                    }
+        //                    else if (it->second == L"space") {
+        //                        // Space shape
+        //                        if (auto it = tag.attrs.find(L"param"); it != tag.attrs.end()) {
+        //                            int32_t width{};
+        //                            int count = swscanf(it->second.c_str(), L"%d", &width);
+        //                            if (count == 1) {
+        //                                total_width += ConvFontUnitToPixels(width);
+        //                            }
+        //                        }
+        //                    }
+        //                }
+        //            }
+        //        }
+        //        else if (event_kind == Parser::VisitEventKind::LeaveTag || event_kind == Parser::VisitEventKind::ImplicitlyLeaveTag) {
+        //            if (tag.name == L"img") {
+        //                hstring sprite_name;
+        //                if (auto it = tag.attrs.find(L"src"); it != tag.attrs.end()) {
+        //                    sprite_name = it->second;
+        //                }
+        //                else {
+        //                    throw std::runtime_error("Image tag missing src attribute");
+        //                }
+        //                auto sprite_it = m_sprite_objects.find(sprite_name);
+        //                if (sprite_it != m_sprite_objects.end()) {
+        //                    auto& sprite = sprite_it->second;
+        //                    int32_t width, height;
+        //                    if (auto it = tag.attrs.find(L"height"); it != tag.attrs.end()) {
+        //                        height = parse<int32_t>(it->second).value();
+        //                    }
+        //                    else {
+        //                        height = 100;
+        //                    }
+        //                    if (auto it = tag.attrs.find(L"width"); it != tag.attrs.end()) {
+        //                        width = parse<int32_t>(it->second).value();
+        //                    }
+        //                    else {
+        //                        width = sprite.width * height / sprite.height;
+        //                    }
+        //                    total_width += ConvFontUnitToPixels(width);
+        //                }
+        //                else {
+        //                    // Sprite does not exist or is invalid; print html content as plain text
+        //                    auto start_pos = tag.start_tag_pos_range.first;
+        //                    auto end_pos = tag.end_tag_pos_range.second;
+        //                    auto html = std::wstring_view(content).substr(start_pos, end_pos - start_pos);
+        //                    total_width += ConvFontUnitToPixels(width(html) / 2.0f);
+        //                }
+        //            }
+        //        }
+        //        else if (event_kind == Parser::VisitEventKind::OnText) {
+        //            total_width += ConvFontUnitToPixels(width(text) / 2.0f);
+        //        }
+        //    });
+
+        //    return (int64_t)std::ceil(return_pixel ? total_width : total_width * 2.0f / m_ui_param_cache.font_size_px_f);
+        //}
+        //catch (...) {
+        //    return {};
+        //}
     }
     void EngineControl::RoutineInput(std::unique_ptr<InputRequest> request) {
         assert(request);

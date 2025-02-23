@@ -254,6 +254,15 @@ MEraEngineBuilder::MEraEngineBuilder(std::unique_ptr<MEraEngineSysCallback> call
         .on_html_print = [](Erased_t* self, slice_ref_uint8_t content, int64_t no_single) noexcept {
             ((MEraEngineSysCallback*)self)->on_html_print(STR_VIEW(content), no_single);
         },
+        .on_html_popprintingstr = [](Erased_t* self) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_html_popprintingstr();
+        },
+        .on_html_getprintedstr = [](Erased_t* self, int64_t line_no) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_html_getprintedstr(line_no);
+        },
+        .on_html_stringlen = [](Erased_t* self, slice_ref_uint8_t content, bool return_pixel) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_html_stringlen(STR_VIEW(content), return_pixel);
+        },
         .on_wait = [](Erased_t* self, bool any_key, bool is_force) noexcept {
             ((MEraEngineSysCallback*)self)->on_wait(any_key, is_force);
         },

@@ -158,6 +158,15 @@ pub trait MEraEngineSysCallback {
     //fn on_debugprint(&mut self, content: &str, flags: EraPrintExtendedFlags);
     /// Callback for HTML_PRINT statements.
     fn on_html_print(&mut self, content: &str, no_single: i64) {}
+    fn on_html_popprintingstr(&mut self) -> String {
+        String::new()
+    }
+    fn on_html_getprintedstr(&mut self, line_no: i64) -> String {
+        String::new()
+    }
+    fn on_html_stringlen(&mut self, content: &str, return_pixel: bool) -> i64 {
+        0
+    }
     fn on_wait(&mut self, any_key: bool, is_force: bool) {}
     fn on_twait(&mut self, duration: i64, is_force: bool) {}
     fn on_input_int(
@@ -365,6 +374,18 @@ impl<T: MEraEngineSysCallback> EraCompilerCallback for T {
 
     fn on_html_print(&mut self, content: &str, no_single: i64) {
         self.on_html_print(content, no_single)
+    }
+
+    fn on_html_popprintingstr(&mut self) -> String {
+        self.on_html_popprintingstr()
+    }
+
+    fn on_html_getprintedstr(&mut self, line_no: i64) -> String {
+        self.on_html_getprintedstr(line_no)
+    }
+
+    fn on_html_stringlen(&mut self, content: &str, return_pixel: bool) -> i64 {
+        self.on_html_stringlen(content, return_pixel)
     }
 
     fn on_wait(&mut self, any_key: bool, is_force: bool) {
@@ -3460,7 +3481,8 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         } else {
             StackValue::new_int(0)
         };
-        self.vm_state = vm_state;
+        self.vm_state.clone_from(&vm_state);
+        drop(vm_state);
         match break_reason {
             EraExecutionBreakReason::DebugBreakInstruction => (),
             EraExecutionBreakReason::ReachedMaxInstructions => {

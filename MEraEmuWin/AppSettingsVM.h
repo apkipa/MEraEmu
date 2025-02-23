@@ -43,7 +43,8 @@ namespace winrt::MEraEmuWin::implementation {
     X(uint32_t, GamePrintCCharCount, game_printc_char_count) \
     X(bool, EnableFontSmoothing, enable_font_smoothing) \
     X(bool, EnablePixelSnapping, enable_pixel_snapping) \
-    X(bool, EnableHtmlRendering, enable_html_rendering)
+    X(bool, EnableHtmlRendering, enable_html_rendering) \
+    X(bool, EnableGdiCompatRender, enable_gdi_compat_render)
 
 #define GenGetSetter(type, name, member)    \
         type name() { return member; }      \
@@ -103,6 +104,7 @@ namespace winrt::MEraEmuWin::implementation {
         bool enable_font_smoothing = false;
         bool enable_pixel_snapping = true;
         bool enable_html_rendering = true;
+        bool enable_gdi_compat_render = false;
     };
 }
 

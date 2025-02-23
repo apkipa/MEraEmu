@@ -589,7 +589,7 @@ impl EraVirtualMachineState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EraVirtualMachineStateInner {
     #[serde(skip)]
     rand_gen: SimpleUniformGenerator,
@@ -601,8 +601,29 @@ pub struct EraVirtualMachineStateInner {
     charas_count: u32,
 }
 
+impl Clone for EraVirtualMachineStateInner {
+    fn clone(&self) -> Self {
+        // NB: Never clone regex_cache, it is meaningless to do so.
+        Self {
+            rand_gen: self.rand_gen.clone(),
+            regex_cache: make_default_regex_cache(),
+            trap_vars: self.trap_vars.clone(),
+            charas_count: self.charas_count,
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        self.rand_gen.clone_from(&source.rand_gen);
+        // self.regex_cache = make_default_regex_cache();
+        self.trap_vars.clone_from(&source.trap_vars);
+        self.charas_count.clone_from(&source.charas_count);
+    }
+}
+
 fn make_default_regex_cache() -> lru::LruCache<ArcStr, regex::Regex> {
-    lru::LruCache::new(NonZeroUsize::new(1023).unwrap())
+    // lru::LruCache::new(NonZeroUsize::new(1023).unwrap())
+    // TODO: LruCache::unbounded().clone() panics, fix it when necessary.
+    lru::LruCache::unbounded()
 }
 
 // TODO: Custom serde support for EraVirtualMachineState which involves
@@ -4429,6 +4450,38 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         Ok(())
     }
 
+    fn instr_html_pop_printing_str(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        let r = self.o.ctx.callback.on_html_popprintingstr();
+        let r = StackValue::new_str(r.into());
+        self.o.stack.push(r);
+        self.add_ip_offset(Bc::HtmlPopPrintingStr.bytes_len() as i32);
+        Ok(())
+    }
+
+    fn instr_html_get_printed_str(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, line_no:i);
+        let r = self.o.ctx.callback.on_html_getprintedstr(line_no);
+        let r = StackValue::new_str(r.into());
+        self.o.stack.replace_tail(stack_count, [r]);
+        self.add_ip_offset(Bc::HtmlGetPrintedStr.bytes_len() as i32);
+        Ok(())
+    }
+
+    fn instr_html_string_len(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, content:s, return_pixel:i);
+        let r = (self.o.ctx.callback).on_html_stringlen(content, return_pixel != 0);
+        let r = StackValue::new_int(r);
+        self.o.stack.replace_tail(stack_count, [r]);
+        self.add_ip_offset(Bc::HtmlStringLen.bytes_len() as i32);
+        Ok(())
+    }
+
     fn instr_print_button(&mut self, flags: EraPrintExtendedFlags) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
@@ -5927,6 +5980,22 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         Ok(())
     }
 
+    fn instr_var_exists(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, var:s);
+        let ip = self.o.cur_frame.ip;
+        let func_info = (self.o.ctx)
+            .func_info_from_chunk_pos(ip.chunk as _, ip.offset as _)
+            .context_unlikely("function info not found")?;
+        let r = func_info.frame_info.vars.contains_key(Ascii::new_str(var))
+            || self.o.ctx.variables.get_var(var).is_some();
+        let r = StackValue::new_int(r as _);
+        self.o.stack.replace_tail(stack_count, [r]);
+        self.add_ip_offset(Bc::VarExists.bytes_len() as i32);
+        Ok(())
+    }
+
     fn instr_intrinsic_get_next_event_handler(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
@@ -6141,6 +6210,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::ForLoopNoStep => s.instr_for_loop_no_step()?,
             Bc::ExtendStrToWidth => s.instr_extend_str_to_width()?,
             Bc::HtmlPrint => s.instr_html_print()?,
+            Bc::HtmlPopPrintingStr => s.instr_html_pop_printing_str()?,
+            Bc::HtmlGetPrintedStr => s.instr_html_get_printed_str()?,
+            Bc::HtmlStringLen => s.instr_html_string_len()?,
             Bc::PrintButton { flags } => s.instr_print_button(flags)?,
             Bc::PrintImg | Bc::PrintImg4 => s.instr_print_img()?,
             Bc::PrintRect => s.instr_print_rect()?,
@@ -6201,6 +6273,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::EvalIntExpr => s.instr_eval_int_expr()?,
             Bc::EvalStrExpr => s.instr_eval_str_expr()?,
             Bc::Await => s.instr_await()?,
+            Bc::VarExists => s.instr_var_exists()?,
             Bc::IntrinsicGetNextEventHandler => s.instr_intrinsic_get_next_event_handler()?,
             // _ => s.instr_raise_illegal_instruction()?,
             // _ => {
@@ -7168,6 +7241,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 Bc::ForLoopNoStep => call_subroutine_0!(instr_for_loop_no_step),
                 Bc::ExtendStrToWidth => call_subroutine_0!(instr_extend_str_to_width),
                 Bc::HtmlPrint => call_subroutine_0!(instr_html_print),
+                Bc::HtmlPopPrintingStr => call_subroutine_0!(instr_html_pop_printing_str),
+                Bc::HtmlGetPrintedStr => call_subroutine_0!(instr_html_get_printed_str),
+                Bc::HtmlStringLen => call_subroutine_0!(instr_html_string_len),
                 Bc::PrintButton { flags } => {
                     call_subroutine_1_any!(instr_print_button, u8, u8::from(flags))
                 }
@@ -7278,6 +7354,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 Bc::EvalIntExpr => call_subroutine_eval!(instr_eval_int_expr),
                 Bc::EvalStrExpr => call_subroutine_eval!(instr_eval_str_expr),
                 Bc::Await => call_subroutine_0!(instr_await),
+                Bc::VarExists => call_subroutine_0!(instr_var_exists),
                 Bc::IntrinsicGetNextEventHandler => {
                     call_subroutine_0!(instr_intrinsic_get_next_event_handler)
                 }

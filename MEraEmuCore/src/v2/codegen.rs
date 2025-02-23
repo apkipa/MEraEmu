@@ -2466,7 +2466,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
             EraNode::StmtCustomDrawLine(args) => {
                 let ([content], []) = self.unpack_list_expr(args)?;
                 self.str_expr(content)?;
-                self.int_var_static_idx("SCREENWIDTH", stmt_span, 0)?;
+                self.int_var_static_idx("@CLIENTCHARWIDTH", stmt_span, 0)?;
                 self.chunk.push_bc(BcKind::GetArrValFlat, stmt_span);
                 self.chunk.push_bc(BcKind::ExtendStrToWidth, stmt_span);
                 self.chunk.push_bc(BcKind::PrintLine, stmt_span);
@@ -7162,6 +7162,55 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 let [expr] = site.unpack_args(args)?;
                 apply_args!(name_span, expr:s);
                 site.chunk.push_bc(BcKind::EvalStrExpr, name_span);
+            }
+            b"EXISTVAR" => {
+                site.result()?;
+                let [var] = site.unpack_args(args)?;
+                apply_args!(name_span, var:s);
+                site.chunk.push_bc(BcKind::VarExists, name_span);
+            }
+            b"GETVAR" => {
+                // TODO: GETVAR should only accept variable terms
+                site.result()?;
+                let [var] = site.unpack_args(args)?;
+                apply_args!(name_span, var:s);
+                site.chunk.push_bc(BcKind::EvalIntExpr, name_span);
+            }
+            b"GETVARS" => {
+                // TODO: GETVAR should only accept variable terms
+                site.results()?;
+                let [var] = site.unpack_args(args)?;
+                apply_args!(name_span, var:s);
+                site.chunk.push_bc(BcKind::EvalStrExpr, name_span);
+            }
+            b"HTML_POPPRINTINGSTR" => {
+                site.results()?;
+                let [] = site.unpack_args(args)?;
+                site.chunk.push_bc(BcKind::HtmlPopPrintingStr, name_span);
+            }
+            b"HTML_GETPRINTEDSTR" => {
+                site.results()?;
+                let [line_no] = site.unpack_args(args)?;
+                apply_args!(name_span, line_no:i);
+                site.chunk.push_bc(BcKind::HtmlGetPrintedStr, name_span);
+            }
+            b"HTML_STRINGLEN" => {
+                site.result()?;
+                let [content, return_pixel] = site.unpack_args(args)?;
+                apply_args!(name_span, content:s, return_pixel:i);
+                site.chunk.push_bc(BcKind::HtmlStringLen, name_span);
+            }
+            b"CLIENTWIDTH" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@CLIENTWIDTH", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"CLIENTHEIGHT" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@CLIENTHEIGHT", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
             }
             _ if name.eq_ignore_ascii_case("SYSINTRINSIC_LoadGameInit") => {
                 // Do nothing

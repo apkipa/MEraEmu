@@ -409,6 +409,9 @@ trait MEraEngineSysCallbackFfi {
     //fn on_debugprint(&mut self, content: string::str_ref<'_>, flags: u8);
     /// Callback for HTML_PRINT statements.
     fn on_html_print(&mut self, content: string::str_ref<'_>, no_single: i64);
+    fn on_html_popprintingstr(&mut self) -> char_p::Raw;
+    fn on_html_getprintedstr(&mut self, line_no: i64) -> char_p::Raw;
+    fn on_html_stringlen(&mut self, content: string::str_ref<'_>, return_pixel: bool) -> i64;
     fn on_wait(&mut self, any_key: bool, is_force: bool);
     fn on_twait(&mut self, duration: i64, is_force: bool);
     fn on_input_int(
@@ -601,6 +604,23 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackFfi> {
     //fn on_debugprint(&mut self, content: &str, flags: EraPrintExtendedFlags);
     fn on_html_print(&mut self, content: &str, no_single: i64) {
         MEraEngineSysCallbackFfi::on_html_print(self, content.into(), no_single);
+    }
+    fn on_html_popprintingstr(&mut self) -> String {
+        unsafe {
+            MEraEngineSysCallbackFfi::on_html_popprintingstr(self)
+                .as_ref()
+                .to_string()
+        }
+    }
+    fn on_html_getprintedstr(&mut self, line_no: i64) -> String {
+        unsafe {
+            MEraEngineSysCallbackFfi::on_html_getprintedstr(self, line_no)
+                .as_ref()
+                .to_string()
+        }
+    }
+    fn on_html_stringlen(&mut self, content: &str, return_pixel: bool) -> i64 {
+        MEraEngineSysCallbackFfi::on_html_stringlen(self, content.into(), return_pixel)
     }
     fn on_wait(&mut self, any_key: bool, is_force: bool) {
         MEraEngineSysCallbackFfi::on_wait(self, any_key, is_force);
@@ -1881,7 +1901,7 @@ mod tests {
         builder.reg_int("@LINEISEMPTY")?;
         // builder.reg_str("DRAWLINESTR_UNIT")?;
         builder.reg_str("DRAWLINESTR")?;
-        builder.reg_int("SCREENWIDTH")?;
+        builder.reg_int("@CLIENTWIDTH")?;
         builder.reg_int("LINECOUNT")?;
         builder.reg_str("SAVEDATA_TEXT")?;
 

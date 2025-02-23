@@ -3015,7 +3015,15 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 | b"GETKEYTRIGGERED"
                 | b"FIND_CHARADATA"
                 | b"CHKDATA"
-                | b"BITMAP_CACHE_ENABLE" => {
+                | b"BITMAP_CACHE_ENABLE"
+                | b"EXISTVAR"
+                | b"GETVAR"
+                | b"GETVARS"
+                | b"HTML_POPPRINTINGSTR"
+                | b"HTML_GETPRINTEDSTR"
+                | b"HTML_STRINGLEN"
+                | b"CLIENTWIDTH"
+                | b"CLIENTHEIGHT" => {
                     // NOTE: Cannot use `make!` because we cannot bump the token here.
                     let node = EraNode::StmtResultCmdCall(
                         self.identifier().unwrap(),
