@@ -1,3 +1,13 @@
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
+
+#[cfg(target_arch = "aarch64")]
+use aarch64 as arch;
+#[cfg(target_arch = "x86_64")]
+use x86_64 as arch;
+
 use std::{
     borrow::Cow,
     mem::ManuallyDrop,
@@ -742,14 +752,14 @@ struct EraVmExecSiteOuter<'ctx, 'i, 's, Callback> {
 struct EraJitCompiledFunction {
     index: usize,
     code: dynasmrt::ExecutableBuffer,
-    jit_unwind_registry_guard: Option<JitUnwindRegistryGuard>,
+    jit_unwind_registry_guard: Option<arch::JitUnwindRegistryGuard>,
 }
 
 impl EraJitCompiledFunction {
     fn new(
         index: usize,
         code: dynasmrt::ExecutableBuffer,
-        jit_unwind_registry_guard: Option<JitUnwindRegistryGuard>,
+        jit_unwind_registry_guard: Option<arch::JitUnwindRegistryGuard>,
     ) -> Self {
         Self {
             index,
@@ -6293,44 +6303,12 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     }
 }
 
-struct JitUnwindRegistryGuard {
-    identifier: NonZeroUsize,
-}
-
-impl JitUnwindRegistryGuard {
-    fn add_function_table(
-        func_table: *const windows_sys::Win32::System::Diagnostics::Debug::IMAGE_RUNTIME_FUNCTION_ENTRY,
-        base_addr: usize,
-    ) -> Option<JitUnwindRegistryGuard> {
-        use windows_sys::Win32::System::Diagnostics::Debug::*;
-
-        unsafe {
-            let r = RtlAddFunctionTable(func_table, 1, base_addr as _);
-            if r != 0 {
-                Some(JitUnwindRegistryGuard {
-                    identifier: NonZeroUsize::new(func_table as _).unwrap(),
-                })
-            } else {
-                None
-            }
-        }
-    }
-}
-
-impl Drop for JitUnwindRegistryGuard {
-    fn drop(&mut self) {
-        use windows_sys::Win32::System::Diagnostics::Debug::*;
-
-        unsafe {
-            RtlDeleteFunctionTable(self.identifier.get() as _);
-        }
-    }
-}
-
 impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     /// Generates JITed code for the given function if it is not already generated, and
     /// updates the JIT lookup table accordingly.
     fn ensure_jit_function(&mut self, func_idx: u32) -> anyhow::Result<()> {
+        use arch::{AssemblerRoutineReturnValue, JitUnwindRegistryGuard, NextLocalLabel};
+
         let jit_func_slot = self
             .jit_compiled_functions
             .get_mut(func_idx as usize)
@@ -6349,11 +6327,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         *jit_func_slot = Some(EraJitCompiledFunction::new_invalid(func_idx as _));
 
         // Step 1: Scan for all possible instruction entry points
-        let mut ops = dynasmrt::x64::Assembler::new()?;
-        dynasm!(ops
-            ; .arch x64
-            ; ->main_block_entry:
-        );
+        let mut ops = arch::new_assembler();
 
         // Gather all ip offsets that need updating
         // let mut ip_map = {
@@ -6384,90 +6358,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             .get(func_info.bc_offset as usize..(func_info.bc_offset + func_info.bc_size) as usize)
             .with_context_unlikely(|| format!("invalid function ip {:?}", func_info))?;
 
-        // macro_rules! extern_c {
-        //     (|$($name:ident: $type:ty),*| -> $ret:ty $body:block) => {{
-        //         extern "C" fn __era_vm_extern_fn($($name: $type),*) -> $ret $body;
-        //         __era_vm_extern_fn
-        //     }};
-        // }
-
-        macro_rules! make_subroutine_simple_0 {
-            ($routine:ident) => {{
+        macro_rules! make_subroutine {
+            ($routine:ident $(-> $ret:ty)? $(,$arg:ident:$type:ty)*) => {{
                 paste::paste! {
-                    extern "win64-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
-                        s: &mut EraVmExecSite<Callback>,
-                    ) {
-                        if let Err(e) = s.$routine() {
-                            std::panic::panic_any(e);
-                        }
-                    }
-                    [<jit_ $routine>]::<Callback>
-                }
-            }};
-            ($alt_name:ident, $($tok:tt)+) => {{
-                paste::paste! {
-                    extern "win64-unwind" fn [<jit_ $alt_name>]<Callback: EraCompilerCallback>(
-                        s: &mut EraVmExecSite<Callback>,
-                    ) {
-                        if let Err(e) = s.$($tok)+() {
-                            std::panic::panic_any(e);
-                        }
-                    }
-                    [<jit_ $alt_name>]::<Callback>
-                }
-            }};
-        }
-        macro_rules! make_subroutine_closure_0 {
-            ($alt_name:ident, $clos:expr) => {{
-                paste::paste! {
-                    extern "win64-unwind" fn [<jit_ $alt_name>]<Callback: EraCompilerCallback>(
-                        s: &mut EraVmExecSite<Callback>,
-                    ) {
-                        if let Err(e) = $clos(s) {
-                            std::panic::panic_any(e);
-                        }
-                    }
-                    [<jit_ $alt_name>]::<Callback>
-                }
-            }};
-        }
-        macro_rules! make_subroutine_simple_n {
-            ($routine:ident, $($arg:ident:$type:ty),*) => {{
-                paste::paste! {
-                    extern "win64-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
+                    extern "C-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
                         s: &mut EraVmExecSite<Callback>,
                         $($arg: $type),*
-                    ) {
-                        if let Err(e) = s.$routine($($arg.try_into().unwrap()),*) {
-                            std::panic::panic_any(e);
-                        }
-                    }
-                    [<jit_ $routine>]::<Callback>
-                }
-            }};
-        }
-        macro_rules! make_subroutine_closure_n {
-            ($routine:ident, $($arg:ident:$type:ty),*, $clo:expr) => {{
-                paste::paste! {
-                    extern "win64-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
-                        s: &mut EraVmExecSite<Callback>,
-                        $($arg: $type),*
-                    ) {
-                        if let Err(e) = $clo(s, $($arg.into()),*) {
-                            std::panic::panic_any(e);
-                        }
-                    }
-                    [<jit_ $routine>]::<Callback>
-                }
-            }};
-        }
-        macro_rules! make_subroutine_simple_n_ret_bool {
-            ($routine:ident, $($arg:ident:$type:ty),*) => {{
-                paste::paste! {
-                    extern "win64-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
-                        s: &mut EraVmExecSite<Callback>,
-                        $($arg: $type),*
-                    ) -> bool {
+                    ) $(-> $ret)? {
                         match s.$routine($($arg),*) {
                             Ok(r) => r,
                             Err(e) => {
@@ -6479,175 +6376,90 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 }
             }};
         }
+        macro_rules! make_subroutine_closure {
+            ($routine:ident $(-> $ret:ty)?, $clo:expr $(,$arg:ident:$type:ty)*) => {{
+                paste::paste! {
+                    extern "C-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
+                        s: &mut EraVmExecSite<Callback>,
+                        $($arg: $type),*
+                    ) $(-> $ret)? {
+                        match $clo(s, $($arg),*) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                std::panic::panic_any(e);
+                            }
+                        }
+                    }
+                    [<jit_ $routine>]::<Callback>
+                }
+            }};
+        }
 
-        macro_rules! call_subroutine_0 {
+        macro_rules! call_subroutine {
+            ($routine:ident $(-> $ret:ty)?) => {{
+                let subroutine = make_subroutine!($routine $(-> $ret)?);
+                arch::emit_call_subroutine_0(&mut ops, subroutine);
+            }};
+            ($routine:ident $(-> $ret:ty)?, $arg1:ident:$type1:ty) => {{
+                let subroutine = make_subroutine!($routine $(-> $ret)?, $arg1:$type1);
+                arch::emit_call_subroutine_1(&mut ops, subroutine, $arg1);
+            }};
+            ($routine:ident $(-> $ret:ty)?, $arg1:ident:$type1:ty, $arg2:ident:$type2:ty) => {{
+                let subroutine = make_subroutine!($routine $(-> $ret)?, $arg1:$type1, $arg2:$type2);
+                arch::emit_call_subroutine_2(&mut ops, subroutine, $arg1, $arg2);
+            }};
+            ($routine:ident $(-> $ret:ty)?, $arg1:ident:$type1:ty, $arg2:ident:$type2:ty, $arg3:ident:$type3:ty) => {{
+                let subroutine = make_subroutine!($routine $(-> $ret)?, $arg1:$type1, $arg2:$type2, $arg3:$type3);
+                arch::emit_call_subroutine_3(&mut ops, subroutine, $arg1, $arg2, $arg3);
+            }};
+        }
+        macro_rules! call_subroutine_closure {
+            ($routine:ident $(-> $ret:ty)?, $clo:expr) => {{
+                let subroutine = make_subroutine_closure!($routine $(-> $ret)?, $clo);
+                arch::emit_call_subroutine_0(&mut ops, subroutine);
+            }};
+            ($routine:ident $(-> $ret:ty)?, $clo:expr, $arg1:ident:$type1:ty) => {{
+                let subroutine = make_subroutine_closure!($routine $(-> $ret)?, $clo, $arg1:$type1);
+                arch::emit_call_subroutine_1(&mut ops, subroutine, $arg1);
+            }};
+            ($routine:ident $(-> $ret:ty)?, $clo:expr, $arg1:ident:$type1:ty, $arg2:ident:$type2:ty) => {{
+                let subroutine = make_subroutine_closure!($routine $(-> $ret)?, $clo, $arg1:$type1, $arg2:$type2);
+                arch::emit_call_subroutine_2(&mut ops, subroutine, $arg1, $arg2);
+            }};
+            ($routine:ident $(-> $ret:ty)?, $clo:expr, $arg1:ident:$type1:ty, $arg2:ident:$type2:ty, $arg3:ident:$type3:ty) => {{
+                let subroutine = make_subroutine_closure!($routine $(-> $ret)?, $clo, $arg1:$type1, $arg2:$type2, $arg3:$type3);
+                arch::emit_call_subroutine_3(&mut ops, subroutine, $arg1, $arg2, $arg3);
+            }};
+        }
+        macro_rules! call_subroutine_return {
             ($routine:ident) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    ; mov rax, QWORD make_subroutine_simple_0!($routine) as _
-                    ; call rax
-                )
+                paste::paste! {{
+                    let subroutine = {
+                        extern "C-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
+                            site: &mut EraVmExecSite<Callback>,
+                        ) -> usize {
+                            // NB: Do NOT pop site.jit_compiled_functions here, it will invalidate the JIT code.
+                            // if site.o.cur_frame.is_transient {
+                            //     site.jit_compiled_functions.pop();
+                            // }
+                            if let Err(e) = site.$routine() {
+                                std::panic::panic_any(e);
+                            }
+                            site.jit_side_frame.pop();
+                            site.jit_side_frame.last().map_or(0, |x| x.ip)
+                        }
+                        [<jit_ $routine>]::<Callback>
+                    };
+                    arch::emit_call_subroutine_0(&mut ops, subroutine);
+                    arch::emit_test_jump_to_return_ip_or_break(&mut ops);
+                }}
             };
-            ($alt_name:ident, $($tok:tt)+) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    ; mov rax, QWORD make_subroutine_simple_0!($alt_name, $($tok)+) as _
-                    ; call rax
-                )
-            };
-        }
-        macro_rules! call_subroutine_closure_0 {
-            ($routine:ident, $clos:expr) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    ; mov rax, QWORD make_subroutine_closure_0!($routine, $clos) as _
-                    ; call rax
-                )
-            };
-        }
-        macro_rules! call_subroutine_1_any {
-            ($routine:ident, i8, $imm:expr) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    // ; xor eax, eax
-                    ; mov dl, BYTE $imm as _
-                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:i8) as _
-                    ; call rax
-                )
-            };
-            ($routine:ident, u8, $imm:expr) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    // ; xor eax, eax
-                    ; mov dl, BYTE $imm as _
-                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:u8) as _
-                    ; call rax
-                )
-            };
-            ($routine:ident, i16, $imm:expr) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    // ; xor eax, eax
-                    ; mov dx, WORD $imm as _
-                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:i16) as _
-                    ; call rax
-                )
-            };
-            ($routine:ident, i32, $imm:expr) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    ; mov edx, DWORD $imm as _
-                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:i32) as _
-                    ; call rax
-                )
-            };
-            ($routine:ident, u32, $imm:expr) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    ; mov edx, DWORD $imm as _
-                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:u32) as _
-                    ; call rax
-                )
-            };
-            ($routine:ident, i64, $imm:expr) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    ; mov rdx, QWORD $imm as _
-                    ; mov rax, QWORD make_subroutine_simple_n!($routine, a1:i64) as _
-                    ; call rax
-                )
-            };
-        }
-        macro_rules! call_subroutine_1_any_ret_bool {
-            ($routine:ident, i32, $imm:expr) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    ; mov edx, DWORD $imm as _
-                    ; mov rax, QWORD make_subroutine_simple_n_ret_bool!($routine, a1:i32) as _
-                    ; call rax
-                )
-            };
-        }
-        macro_rules! call_subroutine_closure_1_any {
-            ($routine:ident, i8, $imm:expr, $clo:expr) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    // ; xor eax, eax
-                    ; mov dl, BYTE $imm as _
-                    ; mov rax, QWORD make_subroutine_closure_n!($routine, a1:i8, $clo) as _
-                    ; call rax
-                )
-            };
-            ($routine:ident, u8, $imm:expr, $clo:expr) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    // ; xor eax, eax
-                    ; mov dl, BYTE $imm as _
-                    ; mov rax, QWORD make_subroutine_closure_n!($routine, a1:u8, $clo) as _
-                    ; call rax
-                )
-            };
-        }
-        macro_rules! func_leave_epilogue {
-            () => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; add rsp, 0x28
-                    ; ret
-                )
-            };
-        }
-        macro_rules! call_0_and_goto_ip {
-            ($routine:ident) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    ; mov rax, QWORD $routine as _
-                    ; call rax
-                    ; test rax, rax
-                    ; jz >skipcall
-                    ; jmp rax
-                    ; skipcall:
-                    ; add rsp, 0x28
-                    ; ret
-                )
-            };
-        }
-        macro_rules! call_0_rip_and_goto_ip {
-            ($routine:ident) => {
-                dynasm!(ops
-                    ; .arch x64
-                    ; mov rcx, [rsp+0x20] // self
-                    ; lea rdx, [>next_instr] // next_rip
-                    ; mov rax, QWORD $routine as _
-                    ; call rax
-                    ; test rax, rax
-                    ; jz >skipcall
-                    ; jmp rax
-                    ; skipcall:
-                    ; add rsp, 0x28
-                    ; ret
-                    ; next_instr:
-                );
-            }
         }
         macro_rules! call_subroutine_eval {
             ($routine:ident) => {
                 paste::paste! {{
                     let subroutine = {
-                        extern "win64-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
+                        extern "C-unwind" fn [<jit_ $routine>]<Callback: EraCompilerCallback>(
                             site: &mut EraVmExecSite<Callback>,
                             next_rip: usize,
                         ) -> usize {
@@ -6673,7 +6485,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                         }
                         [<jit_ $routine>]::<Callback>
                     };
-                    call_0_rip_and_goto_ip!(subroutine);
+                    arch::emit_call_subroutine_1(&mut ops, subroutine, NextLocalLabel);
+                    arch::emit_test_jump_to_return_ip_or_break(&mut ops);
+                    NextLocalLabel::add_here(&mut ops);
                 }}
             };
         }
@@ -6683,90 +6497,26 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             let inst_offset = unsafe { bc.as_ptr().offset_from(func_bc.as_ptr()) as u32 };
             bc = &bc[len as usize..];
             // Update ip
-            // if let Some(new_ip) = ip_map.get_mut(&inst_offset) {
-            //     *new_ip = ops.offset();
-            // }
             ip_map.insert(inst_offset, ops.offset());
             if let Some(label) = dyn_labels.remove(&inst_offset) {
                 ops.dynamic_label(label);
                 // dynasm!(ops
-                //     ; .arch x64
                 //     ; =>label
                 // );
             }
             // Translate bytecode
             match inst {
-                Bc::FailWithMsg => call_subroutine_0!(instr_fail_with_msg),
-                Bc::Nop => call_subroutine_0!(instr_nop),
-                Bc::DebugBreak => call_subroutine_0!(instr_debug_break),
-                Bc::Quit => call_subroutine_0!(instr_quit),
-                Bc::Throw => call_subroutine_0!(instr_throw),
-                Bc::ReturnVoid => {
-                    // call_subroutine_0!(instr_return_void);
-                    // func_leave_epilogue!();
-                    let subroutine = {
-                        extern "win64-unwind" fn jit_instr_return_void<
-                            Callback: EraCompilerCallback,
-                        >(
-                            site: &mut EraVmExecSite<Callback>,
-                        ) -> usize {
-                            // NB: Do NOT pop site.jit_compiled_functions here, it will invalidate the JIT code.
-                            // if site.o.cur_frame.is_transient {
-                            //     site.jit_compiled_functions.pop();
-                            // }
-                            if let Err(e) = site.instr_return_void() {
-                                std::panic::panic_any(e);
-                            }
-                            site.jit_side_frame.pop();
-                            site.jit_side_frame.last().map_or(0, |x| x.ip)
-                        }
-                        jit_instr_return_void::<Callback>
-                    };
-                    call_0_and_goto_ip!(subroutine);
-                }
-                Bc::ReturnInt => {
-                    // call_subroutine_0!(instr_return_int);
-                    // func_leave_epilogue!();
-                    let subroutine = {
-                        extern "win64-unwind" fn jit_instr_return_int<
-                            Callback: EraCompilerCallback,
-                        >(
-                            site: &mut EraVmExecSite<Callback>,
-                        ) -> usize {
-                            if let Err(e) = site.instr_return_int() {
-                                std::panic::panic_any(e);
-                            }
-                            site.jit_side_frame.pop();
-                            site.jit_side_frame.last().map_or(0, |x| x.ip)
-                        }
-                        jit_instr_return_int::<Callback>
-                    };
-                    call_0_and_goto_ip!(subroutine);
-                }
-                Bc::ReturnStr => {
-                    // call_subroutine_0!(instr_return_str);
-                    // func_leave_epilogue!();
-                    let subroutine = {
-                        extern "win64-unwind" fn jit_instr_return_str<
-                            Callback: EraCompilerCallback,
-                        >(
-                            site: &mut EraVmExecSite<Callback>,
-                        ) -> usize {
-                            if let Err(e) = site.instr_return_str() {
-                                std::panic::panic_any(e);
-                            }
-                            site.jit_side_frame.pop();
-                            site.jit_side_frame.last().map_or(0, |x| x.ip)
-                        }
-                        jit_instr_return_str::<Callback>
-                    };
-                    call_0_and_goto_ip!(subroutine);
-                }
+                Bc::FailWithMsg => call_subroutine!(instr_fail_with_msg),
+                Bc::Nop => call_subroutine!(instr_nop),
+                Bc::DebugBreak => call_subroutine!(instr_debug_break),
+                Bc::Quit => call_subroutine!(instr_quit),
+                Bc::Throw => call_subroutine!(instr_throw),
+                Bc::ReturnVoid => call_subroutine_return!(instr_return_void),
+                Bc::ReturnInt => call_subroutine_return!(instr_return_int),
+                Bc::ReturnStr => call_subroutine_return!(instr_return_str),
                 Bc::CallFun { args_cnt, func_idx } => {
-                    let subroutine: i64 = {
-                        extern "win64-unwind" fn jit_instr_call_fun<
-                            Callback: EraCompilerCallback,
-                        >(
+                    let subroutine = {
+                        extern "C-unwind" fn jit_instr_call_fun<Callback: EraCompilerCallback>(
                             site: &mut EraVmExecSite<Callback>,
                             args_cnt: u8,
                             func_idx: u32,
@@ -6788,27 +6538,20 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                             asm_ip
                         }
                         jit_instr_call_fun::<Callback>
-                    } as _;
-                    dynasm!(ops
-                        ; .arch x64
-                        ; mov rcx, [rsp+0x20] // self
-                        ; mov dl, BYTE args_cnt as _ // args_cnt
-                        ; mov r8, DWORD func_idx as _ // func_idx
-                        ; lea r9, [>next_instr] // next_rip
-                        ; mov rax, QWORD subroutine as _
-                        ; call rax
-                        ; test rax, rax
-                        ; jz >skipcall
-                        ; jmp rax
-                        ; skipcall:
-                        ; add rsp, 0x28
-                        ; ret
-                        ; next_instr:
+                    };
+                    arch::emit_call_subroutine_3(
+                        &mut ops,
+                        subroutine,
+                        args_cnt,
+                        func_idx,
+                        NextLocalLabel,
                     );
+                    arch::emit_test_jump_to_return_ip_or_break(&mut ops);
+                    NextLocalLabel::add_here(&mut ops);
                 }
                 Bc::TryCallFun { args_cnt } => {
-                    let subroutine: i64 = {
-                        extern "win64-unwind" fn jit_instr_try_call_fun<
+                    let subroutine = {
+                        extern "C-unwind" fn jit_instr_try_call_fun<
                             Callback: EraCompilerCallback,
                         >(
                             site: &mut EraVmExecSite<Callback>,
@@ -6836,26 +6579,14 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                             }
                         }
                         jit_instr_try_call_fun::<Callback>
-                    } as _;
-                    dynasm!(ops
-                        ; .arch x64
-                        ; mov rcx, [rsp+0x20] // self
-                        ; mov dl, BYTE args_cnt as _ // args_cnt
-                        ; lea r8, [>next_instr] // next_rip
-                        ; mov rax, QWORD subroutine as _
-                        ; call rax
-                        ; test rax, rax
-                        ; jz >skipcall
-                        ; jmp rax
-                        ; skipcall:
-                        ; add rsp, 0x28
-                        ; ret
-                        ; next_instr:
-                    );
+                    };
+                    arch::emit_call_subroutine_2(&mut ops, subroutine, args_cnt, NextLocalLabel);
+                    arch::emit_test_jump_to_return_ip_or_break(&mut ops);
+                    NextLocalLabel::add_here(&mut ops);
                 }
                 Bc::TryCallFunForce { args_cnt } => {
-                    let subroutine: i64 = {
-                        extern "win64-unwind" fn jit_instr_try_call_fun_force<
+                    let subroutine = {
+                        extern "C-unwind" fn jit_instr_try_call_fun_force<
                             Callback: EraCompilerCallback,
                         >(
                             site: &mut EraVmExecSite<Callback>,
@@ -6878,26 +6609,14 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                             asm_ip
                         }
                         jit_instr_try_call_fun_force::<Callback>
-                    } as _;
-                    dynasm!(ops
-                        ; .arch x64
-                        ; mov rcx, [rsp+0x20] // self
-                        ; mov dl, BYTE args_cnt as _ // args_cnt
-                        ; lea r8, [>next_instr] // next_rip
-                        ; mov rax, QWORD subroutine as _
-                        ; call rax
-                        ; test rax, rax
-                        ; jz >skipcall
-                        ; jmp rax
-                        ; skipcall:
-                        ; add rsp, 0x28
-                        ; ret
-                        ; next_instr:
-                    );
+                    };
+                    arch::emit_call_subroutine_2(&mut ops, subroutine, args_cnt, NextLocalLabel);
+                    arch::emit_test_jump_to_return_ip_or_break(&mut ops);
+                    NextLocalLabel::add_here(&mut ops);
                 }
                 Bc::RestartExecAtFun => {
-                    let subroutine: i64 = {
-                        extern "win64-unwind" fn jit_instr_restart_exec_at_fun<
+                    let subroutine = {
+                        extern "C-unwind" fn jit_instr_restart_exec_at_fun<
                             Callback: EraCompilerCallback,
                         >(
                             site: &mut EraVmExecSite<Callback>,
@@ -6919,446 +6638,394 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                             });
                         }
                         jit_instr_restart_exec_at_fun::<Callback>
-                    } as _;
-                    dynasm!(ops
-                        ; .arch x64
-                        ; mov rcx, [rsp+0x20] // self
-                        ; mov rax, QWORD subroutine as _
-                        ; call rax
-                        ; add rsp, 0x28
-                        ; ret
-                    );
+                    };
+                    arch::emit_call_subroutine_0(&mut ops, subroutine);
+                    arch::emit_epilogue(&mut ops);
                 }
                 Bc::JumpWW { offset } => {
-                    call_subroutine_1_any!(instr_jump_ww, i32, offset);
+                    call_subroutine!(instr_jump_ww, offset: i32);
                     let bc_ip = inst_offset.wrapping_add_signed(offset);
                     if let Some(asm_ip) = ip_map.get(&bc_ip) {
                         // Resolve immediately
-                        dynasm!(ops
-                            ; .arch x64
-                            ; jmp ->main_block_entry + asm_ip.0 as _
-                        );
+                        arch::emit_jump(&mut ops, *asm_ip);
                     } else {
                         // Delay resolution
                         let label = *dyn_labels
                             .entry(bc_ip)
                             .or_insert_with(|| ops.new_dynamic_label());
-                        dynasm!(ops
-                            ; .arch x64
-                            ; jmp =>label
-                        );
+                        arch::emit_jump_dynamic(&mut ops, label);
                     }
                 }
                 Bc::JumpIfWW { offset } => {
-                    call_subroutine_1_any_ret_bool!(
-                        instr_jump_if_ww_with_return_value,
-                        i32,
-                        offset
-                    );
+                    call_subroutine!(instr_jump_if_ww_with_return_value -> bool, offset: i32);
                     let bc_ip = inst_offset.wrapping_add_signed(offset);
                     if let Some(asm_ip) = ip_map.get(&bc_ip) {
                         // Resolve immediately
-                        dynasm!(ops
-                            ; .arch x64
-                            ; test al, al
-                            ; jnz ->main_block_entry + asm_ip.0 as _
-                        );
+                        bool::emit_cmp_0_and_jump_if(&mut ops, *asm_ip);
                     } else {
                         // Delay resolution
                         let label = *dyn_labels
                             .entry(bc_ip)
                             .or_insert_with(|| ops.new_dynamic_label());
-                        dynasm!(ops
-                            ; .arch x64
-                            ; test al, al
-                            ; jnz =>label
-                        );
+                        bool::emit_cmp_0_and_jump_dynamic_if(&mut ops, label);
                     }
                 }
                 Bc::JumpIfNotWW { offset } => {
-                    call_subroutine_1_any_ret_bool!(
-                        instr_jump_if_not_ww_with_return_value,
-                        i32,
-                        offset
-                    );
+                    call_subroutine!(instr_jump_if_not_ww_with_return_value -> bool, offset: i32);
                     let bc_ip = inst_offset.wrapping_add_signed(offset);
                     if let Some(asm_ip) = ip_map.get(&bc_ip) {
                         // Resolve immediately
-                        dynasm!(ops
-                            ; .arch x64
-                            ; test al, al
-                            ; jnz ->main_block_entry + asm_ip.0 as _
-                        );
+                        bool::emit_cmp_0_and_jump_if(&mut ops, *asm_ip);
                     } else {
                         // Delay resolution
                         let label = *dyn_labels
                             .entry(bc_ip)
                             .or_insert_with(|| ops.new_dynamic_label());
-                        dynasm!(ops
-                            ; .arch x64
-                            ; test al, al
-                            ; jnz =>label
-                        );
+                        bool::emit_cmp_0_and_jump_dynamic_if(&mut ops, label);
                     }
                 }
                 Bc::LoadConstStr { idx } => {
-                    call_subroutine_1_any!(instr_load_const_str, u32, idx);
+                    call_subroutine!(instr_load_const_str, idx: u32);
                 }
                 Bc::LoadImm8 { imm } => {
-                    call_subroutine_1_any!(instr_load_imm8, i8, imm);
+                    call_subroutine!(instr_load_imm8, imm: i8);
                 }
                 Bc::LoadImm16 { imm } => {
-                    call_subroutine_1_any!(instr_load_imm16, i16, imm);
+                    call_subroutine!(instr_load_imm16, imm: i16);
                 }
                 Bc::LoadImm32 { imm } => {
-                    call_subroutine_1_any!(instr_load_imm32, i32, imm);
+                    call_subroutine!(instr_load_imm32, imm: i32);
                 }
                 Bc::LoadImm64 { imm } => {
-                    call_subroutine_1_any!(instr_load_imm64, i64, imm);
+                    call_subroutine!(instr_load_imm64, imm: i64);
                 }
                 Bc::LoadVarWW { idx } => {
-                    call_subroutine_1_any!(instr_load_var_ww, u32, idx);
+                    call_subroutine!(instr_load_var_ww, idx: u32);
                 }
                 Bc::LoadConstVarWW { idx } => {
-                    call_subroutine_1_any!(instr_load_const_var_ww, u32, idx);
+                    call_subroutine!(instr_load_const_var_ww, idx: u32);
                 }
                 Bc::LoadLocalVar { idx } => {
-                    call_subroutine_1_any!(instr_load_local_var, u8, idx);
+                    call_subroutine!(instr_load_local_var, idx: u8);
                 }
-                Bc::Pop => call_subroutine_0!(instr_pop),
-                Bc::PopAllN { count } => call_subroutine_1_any!(instr_pop_all_n, u8, count),
-                Bc::PopOneN { idx } => call_subroutine_1_any!(instr_pop_one_n, u8, idx),
-                Bc::Swap2 => call_subroutine_0!(instr_swap_2),
-                Bc::Duplicate => call_subroutine_0!(instr_duplicate),
+                Bc::Pop => call_subroutine!(instr_pop),
+                Bc::PopAllN { count } => call_subroutine!(instr_pop_all_n, count: u8),
+                Bc::PopOneN { idx } => call_subroutine!(instr_pop_one_n, idx: u8),
+                Bc::Swap2 => call_subroutine!(instr_swap_2),
+                Bc::Duplicate => call_subroutine!(instr_duplicate),
                 Bc::DuplicateAllN { count } => {
-                    call_subroutine_1_any!(instr_duplicate_all_n, u8, count)
+                    call_subroutine!(instr_duplicate_all_n, count: u8)
                 }
-                Bc::DuplicateOneN { idx } => call_subroutine_1_any!(instr_duplicate_one_n, u8, idx),
-                Bc::AddInt => call_subroutine_0!(instr_add_int),
-                Bc::SubInt => call_subroutine_0!(instr_sub_int),
-                Bc::MulInt => call_subroutine_0!(instr_mul_int),
-                Bc::DivInt => call_subroutine_0!(instr_div_int),
-                Bc::ModInt => call_subroutine_0!(instr_mod_int),
-                Bc::NegInt => call_subroutine_0!(instr_neg_int),
-                Bc::BitAndInt => call_subroutine_0!(instr_bit_and_int),
-                Bc::BitOrInt => call_subroutine_0!(instr_bit_or_int),
-                Bc::BitXorInt => call_subroutine_0!(instr_bit_xor_int),
-                Bc::BitNotInt => call_subroutine_0!(instr_bit_not_int),
-                Bc::ShlInt => call_subroutine_0!(instr_shl_int),
-                Bc::ShrInt => call_subroutine_0!(instr_shr_int),
-                Bc::CmpIntLT => call_subroutine_0!(instr_cmp_int_lt),
-                Bc::CmpIntLEq => call_subroutine_0!(instr_cmp_int_leq),
-                Bc::CmpIntGT => call_subroutine_0!(instr_cmp_int_gt),
-                Bc::CmpIntGEq => call_subroutine_0!(instr_cmp_int_geq),
-                Bc::CmpIntEq => call_subroutine_0!(instr_cmp_int_eq),
-                Bc::CmpIntNEq => call_subroutine_0!(instr_cmp_int_neq),
-                Bc::CmpStrLT => call_subroutine_0!(instr_cmp_str_lt),
-                Bc::CmpStrLEq => call_subroutine_0!(instr_cmp_str_leq),
-                Bc::CmpStrGT => call_subroutine_0!(instr_cmp_str_gt),
-                Bc::CmpStrGEq => call_subroutine_0!(instr_cmp_str_geq),
-                Bc::CmpStrEq => call_subroutine_0!(instr_cmp_str_eq),
-                Bc::CmpStrNEq => call_subroutine_0!(instr_cmp_str_neq),
-                Bc::LogicalNot => call_subroutine_0!(instr_logical_not),
-                Bc::MaxInt => call_subroutine_0!(instr_max_int),
-                Bc::MinInt => call_subroutine_0!(instr_min_int),
-                Bc::ClampInt => call_subroutine_0!(instr_clamp_int),
-                Bc::InRangeInt => call_subroutine_0!(instr_in_range_int),
-                Bc::InRangeStr => call_subroutine_0!(instr_in_range_str),
-                Bc::GetBit => call_subroutine_0!(instr_get_bit),
-                Bc::SetBit => call_subroutine_0!(instr_set_bit),
-                Bc::ClearBit => call_subroutine_0!(instr_clear_bit),
-                Bc::InvertBit => call_subroutine_0!(instr_invert_bit),
-                Bc::BuildString { count } => call_subroutine_1_any!(instr_build_string, u8, count),
+                Bc::DuplicateOneN { idx } => call_subroutine!(instr_duplicate_one_n, idx: u8),
+                Bc::AddInt => call_subroutine!(instr_add_int),
+                Bc::SubInt => call_subroutine!(instr_sub_int),
+                Bc::MulInt => call_subroutine!(instr_mul_int),
+                Bc::DivInt => call_subroutine!(instr_div_int),
+                Bc::ModInt => call_subroutine!(instr_mod_int),
+                Bc::NegInt => call_subroutine!(instr_neg_int),
+                Bc::BitAndInt => call_subroutine!(instr_bit_and_int),
+                Bc::BitOrInt => call_subroutine!(instr_bit_or_int),
+                Bc::BitXorInt => call_subroutine!(instr_bit_xor_int),
+                Bc::BitNotInt => call_subroutine!(instr_bit_not_int),
+                Bc::ShlInt => call_subroutine!(instr_shl_int),
+                Bc::ShrInt => call_subroutine!(instr_shr_int),
+                Bc::CmpIntLT => call_subroutine!(instr_cmp_int_lt),
+                Bc::CmpIntLEq => call_subroutine!(instr_cmp_int_leq),
+                Bc::CmpIntGT => call_subroutine!(instr_cmp_int_gt),
+                Bc::CmpIntGEq => call_subroutine!(instr_cmp_int_geq),
+                Bc::CmpIntEq => call_subroutine!(instr_cmp_int_eq),
+                Bc::CmpIntNEq => call_subroutine!(instr_cmp_int_neq),
+                Bc::CmpStrLT => call_subroutine!(instr_cmp_str_lt),
+                Bc::CmpStrLEq => call_subroutine!(instr_cmp_str_leq),
+                Bc::CmpStrGT => call_subroutine!(instr_cmp_str_gt),
+                Bc::CmpStrGEq => call_subroutine!(instr_cmp_str_geq),
+                Bc::CmpStrEq => call_subroutine!(instr_cmp_str_eq),
+                Bc::CmpStrNEq => call_subroutine!(instr_cmp_str_neq),
+                Bc::LogicalNot => call_subroutine!(instr_logical_not),
+                Bc::MaxInt => call_subroutine!(instr_max_int),
+                Bc::MinInt => call_subroutine!(instr_min_int),
+                Bc::ClampInt => call_subroutine!(instr_clamp_int),
+                Bc::InRangeInt => call_subroutine!(instr_in_range_int),
+                Bc::InRangeStr => call_subroutine!(instr_in_range_str),
+                Bc::GetBit => call_subroutine!(instr_get_bit),
+                Bc::SetBit => call_subroutine!(instr_set_bit),
+                Bc::ClearBit => call_subroutine!(instr_clear_bit),
+                Bc::InvertBit => call_subroutine!(instr_invert_bit),
+                Bc::BuildString { count } => call_subroutine!(instr_build_string, count: u8),
                 Bc::PadString { flags } => {
-                    call_subroutine_1_any!(instr_pad_string, u8, u8::from(flags))
+                    call_subroutine!(instr_pad_string, flags: EraPadStringFlags)
                 }
-                Bc::RepeatStr => call_subroutine_0!(instr_repeat_str),
+                Bc::RepeatStr => call_subroutine!(instr_repeat_str),
                 Bc::BuildArrIdxFromMD { count } => {
-                    call_subroutine_1_any!(instr_build_arr_idx_from_md, u8, count)
+                    call_subroutine!(instr_build_arr_idx_from_md, count: u8)
                 }
-                Bc::GetArrValFlat => call_subroutine_0!(instr_get_arr_val_flat),
-                Bc::SetArrValFlat => call_subroutine_0!(instr_set_arr_val_flat),
-                Bc::TimesFloat => call_subroutine_0!(instr_times_float),
-                Bc::FunExists => call_subroutine_0!(instr_fun_exists),
-                Bc::ReplaceStr => call_subroutine_0!(instr_replace_str),
-                Bc::SubStr | Bc::SubStrU => call_subroutine_0!(instr_sub_str),
-                Bc::StrFind | Bc::StrFindU => call_subroutine_0!(instr_str_find),
-                Bc::StrLen | Bc::StrLenU => call_subroutine_0!(instr_str_len),
-                Bc::CountSubStr => call_subroutine_0!(instr_count_sub_str),
-                Bc::StrCharAtU => call_subroutine_0!(instr_str_char_at),
-                Bc::IntToStr => call_subroutine_0!(instr_int_to_str),
-                Bc::StrToInt => call_subroutine_0!(instr_str_to_int),
-                Bc::FormatIntToStr => call_subroutine_0!(instr_format_int_to_str),
-                Bc::StrIsValidInt => call_subroutine_0!(instr_str_is_valid_int),
-                Bc::StrToUpper => call_subroutine_0!(instr_str_to_upper),
-                Bc::StrToLower => call_subroutine_0!(instr_str_to_lower),
-                Bc::StrToHalf => call_subroutine_0!(instr_str_to_half),
-                Bc::StrToFull => call_subroutine_0!(instr_str_to_full),
-                Bc::BuildBarStr => call_subroutine_0!(instr_build_bar_str),
-                Bc::EscapeRegexStr => call_subroutine_0!(instr_escape_regex_str),
-                Bc::EncodeToUnicode => call_subroutine_0!(instr_encode_to_unicode),
-                Bc::UnicodeToStr => call_subroutine_0!(instr_unicode_to_str),
-                Bc::IntToStrWithBase => call_subroutine_0!(instr_int_to_str_with_base),
-                Bc::HtmlTagSplit => call_subroutine_0!(instr_html_tag_split),
-                Bc::HtmlToPlainText => call_subroutine_0!(instr_html_to_plain_text),
-                Bc::HtmlEscape => call_subroutine_0!(instr_html_escape),
-                Bc::PowerInt => call_subroutine_0!(instr_power_int),
-                Bc::SqrtInt => call_subroutine_0!(instr_sqrt_int),
-                Bc::CbrtInt => call_subroutine_0!(instr_cbrt_int),
-                Bc::LogInt => call_subroutine_0!(instr_log_int),
-                Bc::Log10Int => call_subroutine_0!(instr_log_10_int),
-                Bc::ExponentInt => call_subroutine_0!(instr_exponent_int),
-                Bc::AbsInt => call_subroutine_0!(instr_abs_int),
-                Bc::SignInt => call_subroutine_0!(instr_sign_int),
-                Bc::GroupMatch { count } => call_subroutine_1_any!(instr_group_match, u8, count),
+                Bc::GetArrValFlat => call_subroutine!(instr_get_arr_val_flat),
+                Bc::SetArrValFlat => call_subroutine!(instr_set_arr_val_flat),
+                Bc::TimesFloat => call_subroutine!(instr_times_float),
+                Bc::FunExists => call_subroutine!(instr_fun_exists),
+                Bc::ReplaceStr => call_subroutine!(instr_replace_str),
+                Bc::SubStr | Bc::SubStrU => call_subroutine!(instr_sub_str),
+                Bc::StrFind | Bc::StrFindU => call_subroutine!(instr_str_find),
+                Bc::StrLen | Bc::StrLenU => call_subroutine!(instr_str_len),
+                Bc::CountSubStr => call_subroutine!(instr_count_sub_str),
+                Bc::StrCharAtU => call_subroutine!(instr_str_char_at),
+                Bc::IntToStr => call_subroutine!(instr_int_to_str),
+                Bc::StrToInt => call_subroutine!(instr_str_to_int),
+                Bc::FormatIntToStr => call_subroutine!(instr_format_int_to_str),
+                Bc::StrIsValidInt => call_subroutine!(instr_str_is_valid_int),
+                Bc::StrToUpper => call_subroutine!(instr_str_to_upper),
+                Bc::StrToLower => call_subroutine!(instr_str_to_lower),
+                Bc::StrToHalf => call_subroutine!(instr_str_to_half),
+                Bc::StrToFull => call_subroutine!(instr_str_to_full),
+                Bc::BuildBarStr => call_subroutine!(instr_build_bar_str),
+                Bc::EscapeRegexStr => call_subroutine!(instr_escape_regex_str),
+                Bc::EncodeToUnicode => call_subroutine!(instr_encode_to_unicode),
+                Bc::UnicodeToStr => call_subroutine!(instr_unicode_to_str),
+                Bc::IntToStrWithBase => call_subroutine!(instr_int_to_str_with_base),
+                Bc::HtmlTagSplit => call_subroutine!(instr_html_tag_split),
+                Bc::HtmlToPlainText => call_subroutine!(instr_html_to_plain_text),
+                Bc::HtmlEscape => call_subroutine!(instr_html_escape),
+                Bc::PowerInt => call_subroutine!(instr_power_int),
+                Bc::SqrtInt => call_subroutine!(instr_sqrt_int),
+                Bc::CbrtInt => call_subroutine!(instr_cbrt_int),
+                Bc::LogInt => call_subroutine!(instr_log_int),
+                Bc::Log10Int => call_subroutine!(instr_log_10_int),
+                Bc::ExponentInt => call_subroutine!(instr_exponent_int),
+                Bc::AbsInt => call_subroutine!(instr_abs_int),
+                Bc::SignInt => call_subroutine!(instr_sign_int),
+                Bc::GroupMatch { count } => call_subroutine!(instr_group_match, count: u8),
                 Bc::ArrayCountMatches => {
-                    call_subroutine_closure_0!(
-                        instr_array_count_matches,
-                        |s: &mut EraVmExecSite<Callback>| s.instr_array_count_matches(-1)
-                    )
+                    call_subroutine_closure!(instr_array_count_matches, |s: &mut EraVmExecSite<
+                        Callback,
+                    >| s
+                        .instr_array_count_matches(-1))
                 }
                 Bc::CArrayCountMatches => {
-                    call_subroutine_closure_0!(
+                    call_subroutine_closure!(
                         instr_c_array_count_matches,
                         |s: &mut EraVmExecSite<Callback>| s.instr_array_count_matches(0)
                     )
                 }
                 Bc::SumArray => {
-                    call_subroutine_closure_0!(instr_sum_array, |s: &mut EraVmExecSite<
-                        Callback,
-                    >| {
+                    call_subroutine_closure!(instr_sum_array, |s: &mut EraVmExecSite<Callback>| {
                         s.instr_array_aggregate::<crate::util::SumAggregator, 1>(-1)
                     })
                 }
                 Bc::SumCArray => {
-                    call_subroutine_closure_0!(instr_sum_c_array, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_sum_c_array, |s: &mut EraVmExecSite<
                         Callback,
                     >| {
                         s.instr_array_aggregate::<crate::util::SumAggregator, 1>(0)
                     })
                 }
                 Bc::MaxArray => {
-                    call_subroutine_closure_0!(instr_max_array, |s: &mut EraVmExecSite<
-                        Callback,
-                    >| {
+                    call_subroutine_closure!(instr_max_array, |s: &mut EraVmExecSite<Callback>| {
                         s.instr_array_aggregate::<crate::util::MaxAggregator, 1>(-1)
                     })
                 }
                 Bc::MaxCArray => {
-                    call_subroutine_closure_0!(instr_max_c_array, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_max_c_array, |s: &mut EraVmExecSite<
                         Callback,
                     >| {
                         s.instr_array_aggregate::<crate::util::MaxAggregator, 1>(0)
                     })
                 }
                 Bc::MinArray => {
-                    call_subroutine_closure_0!(instr_min_array, |s: &mut EraVmExecSite<
-                        Callback,
-                    >| {
+                    call_subroutine_closure!(instr_min_array, |s: &mut EraVmExecSite<Callback>| {
                         s.instr_array_aggregate::<crate::util::MinAggregator, 1>(-1)
                     })
                 }
                 Bc::MinCArray => {
-                    call_subroutine_closure_0!(instr_min_c_array, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_min_c_array, |s: &mut EraVmExecSite<
                         Callback,
                     >| {
                         s.instr_array_aggregate::<crate::util::MinAggregator, 1>(0)
                     })
                 }
                 Bc::InRangeArray => {
-                    call_subroutine_closure_0!(instr_in_range_array, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_in_range_array, |s: &mut EraVmExecSite<
                         Callback,
                     >| {
                         s.instr_array_in_range(-1)
                     })
                 }
                 Bc::InRangeCArray => {
-                    call_subroutine_closure_0!(instr_in_range_c_array, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_in_range_c_array, |s: &mut EraVmExecSite<
                         Callback,
                     >| {
                         s.instr_array_in_range(0)
                     })
                 }
-                Bc::ArrayRemove => call_subroutine_0!(instr_array_remove),
+                Bc::ArrayRemove => call_subroutine!(instr_array_remove),
                 Bc::ArraySortAsc => {
-                    call_subroutine_closure_0!(instr_array_sort_asc, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_array_sort_asc, |s: &mut EraVmExecSite<
                         Callback,
                     >| {
                         s.instr_array_sort(true)
                     })
                 }
                 Bc::ArraySortDesc => {
-                    call_subroutine_closure_0!(instr_array_sort_desc, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_array_sort_desc, |s: &mut EraVmExecSite<
                         Callback,
                     >| {
                         s.instr_array_sort(false)
                     })
                 }
                 Bc::ArrayMSort { subs_cnt } => {
-                    call_subroutine_1_any!(instr_array_multi_sort, u8, subs_cnt)
+                    call_subroutine!(instr_array_multi_sort, subs_cnt: u8)
                 }
-                Bc::ArrayCopy => call_subroutine_0!(instr_array_copy),
-                Bc::ArrayShift => call_subroutine_0!(instr_array_shift),
+                Bc::ArrayCopy => call_subroutine!(instr_array_copy),
+                Bc::ArrayShift => call_subroutine!(instr_array_shift),
                 Bc::Print => {
-                    call_subroutine_closure_0!(instr_print, |s: &mut EraVmExecSite<Callback>| {
+                    call_subroutine_closure!(instr_print, |s: &mut EraVmExecSite<Callback>| {
                         s.instr_print_with_flags::<1>(EraPrintExtendedFlags::new())
                     })
                 }
                 Bc::PrintLine => {
-                    call_subroutine_closure_0!(instr_print_line, |s: &mut EraVmExecSite<
-                        Callback,
-                    >| {
+                    call_subroutine_closure!(instr_print_line, |s: &mut EraVmExecSite<Callback>| {
                         s.instr_print_with_flags::<1>(
                             EraPrintExtendedFlags::new().with_is_line(true),
                         )
                     })
                 }
-                Bc::PrintExtended { flags } => call_subroutine_closure_1_any!(
+                Bc::PrintExtended { flags } => call_subroutine_closure!(
                     instr_print_extended,
-                    u8,
-                    u8::from(flags),
-                    |s: &mut EraVmExecSite<Callback>, flags: u8| {
-                        s.instr_print_with_flags::<2>(flags.into())
-                    }
+                    |s: &mut EraVmExecSite<Callback>, flags: EraPrintExtendedFlags| {
+                        s.instr_print_with_flags::<2>(flags)
+                    },
+                    flags: EraPrintExtendedFlags
                 ),
-                Bc::ReuseLastLine => call_subroutine_0!(instr_reuse_last_line),
-                Bc::ClearLine => call_subroutine_0!(instr_clear_line),
-                Bc::Wait { flags } => call_subroutine_1_any!(instr_wait, u8, u8::from(flags)),
-                Bc::TWait => call_subroutine_0!(instr_twait),
-                Bc::Input { flags } => call_subroutine_1_any!(instr_input, u8, u8::from(flags)),
-                Bc::KbGetKeyState => call_subroutine_0!(instr_kb_get_key_state),
-                Bc::GetCallerFuncName => call_subroutine_0!(instr_get_caller_func_name),
-                Bc::GetCharaNum => call_subroutine_0!(instr_get_chara_num),
+                Bc::ReuseLastLine => call_subroutine!(instr_reuse_last_line),
+                Bc::ClearLine => call_subroutine!(instr_clear_line),
+                Bc::Wait { flags } => call_subroutine!(instr_wait, flags: EraWaitFlags),
+                Bc::TWait => call_subroutine!(instr_twait),
+                Bc::Input { flags } => call_subroutine!(instr_input, flags: EraInputExtendedFlags),
+                Bc::KbGetKeyState => call_subroutine!(instr_kb_get_key_state),
+                Bc::GetCallerFuncName => call_subroutine!(instr_get_caller_func_name),
+                Bc::GetCharaNum => call_subroutine!(instr_get_chara_num),
                 Bc::CsvGetNum { kind } => {
-                    call_subroutine_1_any!(instr_csv_get_num, u8, u8::from(kind))
+                    call_subroutine!(instr_csv_get_num, kind: EraCsvVarKind)
                 }
-                Bc::GetRandomRange => call_subroutine_0!(instr_get_random_range),
-                Bc::GetRandomMax => call_subroutine_0!(instr_get_random_max),
+                Bc::GetRandomRange => call_subroutine!(instr_get_random_range),
+                Bc::GetRandomMax => call_subroutine!(instr_get_random_max),
                 Bc::RowAssign { vals_cnt } => {
-                    call_subroutine_1_any!(instr_row_assign, u8, vals_cnt)
+                    call_subroutine!(instr_row_assign, vals_cnt: u8)
                 }
-                Bc::ForLoopStep => call_subroutine_0!(instr_for_loop_step),
-                Bc::ForLoopNoStep => call_subroutine_0!(instr_for_loop_no_step),
-                Bc::ExtendStrToWidth => call_subroutine_0!(instr_extend_str_to_width),
-                Bc::HtmlPrint => call_subroutine_0!(instr_html_print),
-                Bc::HtmlPopPrintingStr => call_subroutine_0!(instr_html_pop_printing_str),
-                Bc::HtmlGetPrintedStr => call_subroutine_0!(instr_html_get_printed_str),
-                Bc::HtmlStringLen => call_subroutine_0!(instr_html_string_len),
+                Bc::ForLoopStep => call_subroutine!(instr_for_loop_step),
+                Bc::ForLoopNoStep => call_subroutine!(instr_for_loop_no_step),
+                Bc::ExtendStrToWidth => call_subroutine!(instr_extend_str_to_width),
+                Bc::HtmlPrint => call_subroutine!(instr_html_print),
+                Bc::HtmlPopPrintingStr => call_subroutine!(instr_html_pop_printing_str),
+                Bc::HtmlGetPrintedStr => call_subroutine!(instr_html_get_printed_str),
+                Bc::HtmlStringLen => call_subroutine!(instr_html_string_len),
                 Bc::PrintButton { flags } => {
-                    call_subroutine_1_any!(instr_print_button, u8, u8::from(flags))
+                    call_subroutine!(instr_print_button, flags: EraPrintExtendedFlags)
                 }
-                Bc::PrintImg | Bc::PrintImg4 => call_subroutine_0!(instr_print_img),
-                Bc::PrintRect => call_subroutine_0!(instr_print_rect),
-                Bc::PrintSpace => call_subroutine_0!(instr_print_space),
-                Bc::SplitString => call_subroutine_0!(instr_split_string),
-                Bc::GCreate => call_subroutine_0!(instr_gcreate),
-                Bc::GCreateFromFile => call_subroutine_0!(instr_gcreate_from_file),
-                Bc::GDispose => call_subroutine_0!(instr_gdispose),
-                Bc::GCreated => call_subroutine_0!(instr_gcreated),
-                Bc::GDrawSprite => call_subroutine_0!(instr_gdraw_sprite),
+                Bc::PrintImg | Bc::PrintImg4 => call_subroutine!(instr_print_img),
+                Bc::PrintRect => call_subroutine!(instr_print_rect),
+                Bc::PrintSpace => call_subroutine!(instr_print_space),
+                Bc::SplitString => call_subroutine!(instr_split_string),
+                Bc::GCreate => call_subroutine!(instr_gcreate),
+                Bc::GCreateFromFile => call_subroutine!(instr_gcreate_from_file),
+                Bc::GDispose => call_subroutine!(instr_gdispose),
+                Bc::GCreated => call_subroutine!(instr_gcreated),
+                Bc::GDrawSprite => call_subroutine!(instr_gdraw_sprite),
                 Bc::GDrawSpriteWithColorMatrix => {
-                    call_subroutine_0!(instr_gdraw_sprite_with_color_matrix)
+                    call_subroutine!(instr_gdraw_sprite_with_color_matrix)
                 }
-                Bc::GClear => call_subroutine_0!(instr_gclear),
-                Bc::SpriteCreate => call_subroutine_0!(instr_sprite_create),
-                Bc::SpriteDispose => call_subroutine_0!(instr_sprite_dispose),
-                Bc::SpriteCreated => call_subroutine_0!(instr_sprite_created),
-                Bc::SpriteAnimeCreate => call_subroutine_0!(instr_sprite_anime_create),
-                Bc::SpriteAnimeAddFrame => call_subroutine_0!(instr_sprite_anime_add_frame),
-                Bc::SpriteWidth => call_subroutine_0!(instr_sprite_width),
-                Bc::SpriteHeight => call_subroutine_0!(instr_sprite_height),
-                Bc::CheckFont => call_subroutine_0!(instr_check_font),
-                Bc::SaveText => call_subroutine_0!(instr_save_text),
-                Bc::LoadText => call_subroutine_0!(instr_load_text),
+                Bc::GClear => call_subroutine!(instr_gclear),
+                Bc::SpriteCreate => call_subroutine!(instr_sprite_create),
+                Bc::SpriteDispose => call_subroutine!(instr_sprite_dispose),
+                Bc::SpriteCreated => call_subroutine!(instr_sprite_created),
+                Bc::SpriteAnimeCreate => call_subroutine!(instr_sprite_anime_create),
+                Bc::SpriteAnimeAddFrame => call_subroutine!(instr_sprite_anime_add_frame),
+                Bc::SpriteWidth => call_subroutine!(instr_sprite_width),
+                Bc::SpriteHeight => call_subroutine!(instr_sprite_height),
+                Bc::CheckFont => call_subroutine!(instr_check_font),
+                Bc::SaveText => call_subroutine!(instr_save_text),
+                Bc::LoadText => call_subroutine!(instr_load_text),
                 Bc::FindElement => {
-                    call_subroutine_closure_0!(instr_find_element, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_find_element, |s: &mut EraVmExecSite<
                         Callback,
                     >| s
                         .instr_generic_find_element_with_match::<2>(true, -1))
                 }
                 Bc::FindLastElement => {
-                    call_subroutine_closure_0!(instr_find_last_element, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_find_last_element, |s: &mut EraVmExecSite<
                         Callback,
                     >| s
                         .instr_generic_find_element_with_match::<2>(false, -1))
                 }
                 Bc::FindChara => {
-                    call_subroutine_closure_0!(instr_find_chara, |s: &mut EraVmExecSite<
-                        Callback,
-                    >| s
+                    call_subroutine_closure!(instr_find_chara, |s: &mut EraVmExecSite<Callback>| s
                         .instr_generic_find_element::<2>(true, 0))
                 }
                 Bc::FindLastChara => {
-                    call_subroutine_closure_0!(instr_find_last_chara, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_find_last_chara, |s: &mut EraVmExecSite<
                         Callback,
                     >| s
                         .instr_generic_find_element::<2>(false, 0))
                 }
                 Bc::VarSet => {
-                    call_subroutine_closure_0!(instr_var_set, |s: &mut EraVmExecSite<Callback>| s
+                    call_subroutine_closure!(instr_var_set, |s: &mut EraVmExecSite<Callback>| s
                         .instr_var_set(-1))
                 }
                 Bc::CVarSet => {
-                    call_subroutine_closure_0!(instr_c_var_set, |s: &mut EraVmExecSite<
-                        Callback,
-                    >| s
+                    call_subroutine_closure!(instr_c_var_set, |s: &mut EraVmExecSite<Callback>| s
                         .instr_var_set(0))
                 }
-                Bc::GetVarSizeByName => call_subroutine_0!(instr_get_var_size_by_name),
-                Bc::GetVarAllSize => call_subroutine_0!(instr_get_var_all_size),
-                Bc::GetHostTimeRaw => call_subroutine_0!(instr_get_host_time_raw),
-                Bc::GetHostTime => call_subroutine_0!(instr_get_host_time),
-                Bc::GetHostTimeS => call_subroutine_0!(instr_get_host_time_s),
+                Bc::GetVarSizeByName => call_subroutine!(instr_get_var_size_by_name),
+                Bc::GetVarAllSize => call_subroutine!(instr_get_var_all_size),
+                Bc::GetHostTimeRaw => call_subroutine!(instr_get_host_time_raw),
+                Bc::GetHostTime => call_subroutine!(instr_get_host_time),
+                Bc::GetHostTimeS => call_subroutine!(instr_get_host_time_s),
                 Bc::CsvGetProp2 { csv_kind } => {
-                    call_subroutine_1_any!(instr_csv_get_prop_2, u8, u8::from(csv_kind))
+                    call_subroutine!(instr_csv_get_prop_2, csv_kind: EraCharaCsvPropType)
                 }
-                Bc::CharaCsvExists => call_subroutine_0!(instr_chara_csv_exists),
+                Bc::CharaCsvExists => call_subroutine!(instr_chara_csv_exists),
                 Bc::GetPalamLv => {
-                    call_subroutine_closure_0!(instr_get_palam_lv, |s: &mut EraVmExecSite<
+                    call_subroutine_closure!(instr_get_palam_lv, |s: &mut EraVmExecSite<
                         Callback,
                     >| s
                         .instr_generic_get_lv::<2>("PALAMLV"))
                 }
                 Bc::GetExpLv => {
-                    call_subroutine_closure_0!(instr_get_exp_lv, |s: &mut EraVmExecSite<
-                        Callback,
-                    >| s
+                    call_subroutine_closure!(instr_get_exp_lv, |s: &mut EraVmExecSite<Callback>| s
                         .instr_generic_get_lv::<2>("EXPLV"))
                 }
-                Bc::AddChara => call_subroutine_0!(instr_add_chara),
-                Bc::AddVoidChara => call_subroutine_0!(instr_add_void_chara),
+                Bc::AddChara => call_subroutine!(instr_add_chara),
+                Bc::AddVoidChara => call_subroutine!(instr_add_void_chara),
                 Bc::PickUpChara { charas_cnt } => {
-                    call_subroutine_1_any!(instr_pick_up_chara, u8, charas_cnt)
+                    call_subroutine!(instr_pick_up_chara, charas_cnt: u8)
                 }
                 Bc::DeleteChara { charas_cnt } => {
-                    call_subroutine_1_any!(instr_delete_chara, u8, charas_cnt)
+                    call_subroutine!(instr_delete_chara, charas_cnt: u8)
                 }
-                Bc::SwapChara => call_subroutine_0!(instr_swap_chara),
-                Bc::AddCopyChara => call_subroutine_0!(instr_add_copy_chara),
-                Bc::LoadData => call_subroutine_0!(instr_load_data),
-                Bc::SaveData => call_subroutine_0!(instr_save_data),
-                Bc::CheckData => call_subroutine_0!(instr_check_data),
-                Bc::GetCharaRegNum => call_subroutine_0!(instr_get_chara_reg_num),
-                Bc::LoadGlobal => call_subroutine_0!(instr_load_global),
-                Bc::SaveGlobal => call_subroutine_0!(instr_save_global),
-                Bc::ResetData => call_subroutine_0!(instr_reset_data),
-                Bc::ResetCharaStain => call_subroutine_0!(instr_reset_chara_stain),
+                Bc::SwapChara => call_subroutine!(instr_swap_chara),
+                Bc::AddCopyChara => call_subroutine!(instr_add_copy_chara),
+                Bc::LoadData => call_subroutine!(instr_load_data),
+                Bc::SaveData => call_subroutine!(instr_save_data),
+                Bc::CheckData => call_subroutine!(instr_check_data),
+                Bc::GetCharaRegNum => call_subroutine!(instr_get_chara_reg_num),
+                Bc::LoadGlobal => call_subroutine!(instr_load_global),
+                Bc::SaveGlobal => call_subroutine!(instr_save_global),
+                Bc::ResetData => call_subroutine!(instr_reset_data),
+                Bc::ResetCharaStain => call_subroutine!(instr_reset_chara_stain),
                 Bc::SaveChara { charas_cnt } => {
-                    call_subroutine_1_any!(instr_save_chara, u8, charas_cnt)
+                    call_subroutine!(instr_save_chara, charas_cnt: u8)
                 }
-                Bc::LoadChara => call_subroutine_0!(instr_load_chara),
-                Bc::GetConfig => call_subroutine_0!(instr_get_config),
-                Bc::GetConfigS => call_subroutine_0!(instr_get_config_s),
-                Bc::FindCharaDataFile => call_subroutine_0!(instr_find_chara_data_file),
+                Bc::LoadChara => call_subroutine!(instr_load_chara),
+                Bc::GetConfig => call_subroutine!(instr_get_config),
+                Bc::GetConfigS => call_subroutine!(instr_get_config_s),
+                Bc::FindCharaDataFile => call_subroutine!(instr_find_chara_data_file),
                 Bc::EvalStrForm => call_subroutine_eval!(instr_eval_str_form),
                 Bc::EvalIntExpr => call_subroutine_eval!(instr_eval_int_expr),
                 Bc::EvalStrExpr => call_subroutine_eval!(instr_eval_str_expr),
-                Bc::Await => call_subroutine_0!(instr_await),
-                Bc::VarExists => call_subroutine_0!(instr_var_exists),
+                Bc::Await => call_subroutine!(instr_await),
+                Bc::VarExists => call_subroutine!(instr_var_exists),
                 Bc::IntrinsicGetNextEventHandler => {
-                    call_subroutine_0!(instr_intrinsic_get_next_event_handler)
-                }
-                _ => anyhow::bail!("unimplemented bytecode {:?}", inst),
+                    call_subroutine!(instr_intrinsic_get_next_event_handler)
+                } // _ => anyhow::bail!("unimplemented bytecode {:?}", inst),
             }
         }
         if !bc.is_empty() {
@@ -7376,78 +7043,11 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         // Code generated, now write stack unwinding information
         // NOTE: Unwind information must be placed aligned.
-        while ops.offset().0 % 4 != 0 {
-            dynasm!(ops
-                ; .arch x64
-                ; nop
-            );
-        }
+        dynasm!(ops
+            ; .align 4
+        );
         let func_size = ops.offset().0 as u32;
-        #[allow(non_snake_case)]
-        #[allow(non_camel_case_types)]
-        // #[cfg_attr(rustfmt, rustfmt::skip)]
-        {
-            use crate::util::transmute_to_bytes;
-            use windows_sys::Win32::System::Diagnostics::Debug::*;
-
-            /*
-               UBYTE: 3	Version
-               UBYTE: 5	Flags
-               UBYTE	Size of prolog
-               UBYTE	Count of unwind codes
-               UBYTE: 4	Frame Register
-               UBYTE: 4	Frame Register offset (scaled)
-               USHORT * n	Unwind codes array
-               variable	Can either be of form (1) or (2) below
-            */
-            #[derive(Clone, Copy, Debug)]
-            #[repr(C)]
-            pub struct UNWIND_INFO_N<const N: usize> {
-                pub VersionFlags: u8,
-                pub SizeOfProlog: u8,
-                pub CountOfCodes: u8,
-                pub FrameRegisterOffset: u8,
-                pub UnwindCode: [UNWIND_CODE; N],
-            }
-            #[derive(Clone, Copy, Debug)]
-            #[repr(C)]
-            pub struct UNWIND_CODE {
-                pub CodeOffset: u8,
-                pub UnwindOpInfo: u8,
-            }
-            pub const UWOP_PUSH_NONVOL: u8 = 0; // info == register number
-            pub const UWOP_ALLOC_LARGE: u8 = 1; // no info, alloc size in next 2 slots
-            pub const UWOP_ALLOC_SMALL: u8 = 2; // info == size of allocation / 8 - 1
-            pub const UWOP_SET_FPREG: u8 = 3; // no info, FP = RSP + UNWIND_INFO.FPRegOffset*16
-            pub const UWOP_SAVE_NONVOL: u8 = 4; // info == register number, offset in next slot
-            pub const UWOP_SAVE_NONVOL_FAR: u8 = 5; // info == register number, offset in next 2 slots
-            pub const UWOP_SAVE_XMM128: u8 = 8; // info == XMM reg number, offset in next slot
-            pub const UWOP_SAVE_XMM128_FAR: u8 = 9; // info == XMM reg number, offset in next 2 slots
-            pub const UWOP_PUSH_MACHFRAME: u8 = 10; // info == 0: no error-code, 1: error-code
-
-            let entry = IMAGE_RUNTIME_FUNCTION_ENTRY {
-                BeginAddress: 0,
-                EndAddress: func_size,
-                Anonymous: IMAGE_RUNTIME_FUNCTION_ENTRY_0 {
-                    UnwindInfoAddress: func_size
-                        + std::mem::size_of::<IMAGE_RUNTIME_FUNCTION_ENTRY>() as u32,
-                },
-            };
-            let unwind_info = UNWIND_INFO_N::<1> {
-                VersionFlags: 1 | (0 << 3),
-                SizeOfProlog: 0,
-                CountOfCodes: 1,
-                FrameRegisterOffset: 0 | (0 << 4),
-                UnwindCode: [UNWIND_CODE {
-                    CodeOffset: 0,
-                    UnwindOpInfo: UWOP_ALLOC_SMALL | (4 << 4),
-                }],
-            };
-            unsafe {
-                ops.extend(transmute_to_bytes(&entry));
-                ops.extend(transmute_to_bytes(&unwind_info));
-            }
-        }
+        arch::emit_unwind_data(&mut ops);
 
         ops.commit()?;
         let buf = ops.finalize().unwrap();
@@ -7528,21 +7128,11 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
         }
 
         // Generate prologue for jumping to JITed code
-        let mut ops = dynasmrt::x64::Assembler::new()?;
-        dynasm!(ops
-            ; .arch x64
-            ; ->jit_entry:
-            // Prepares the stack, then jumps to the JITed code
-            // Local variables:
-            // [rsp+0x28]: return address
-            // [rsp+0x20]: self
-            ; sub rsp, 0x28 // Align stack to 16 bytes
-            ; mov [rsp+0x20], rcx
-            ; jmp rdx
-        );
+        let mut ops = arch::new_assembler();
+        arch::emit_prologue(&mut ops);
         ops.commit()?;
         let prologue_buf = ops.finalize().unwrap();
-        let prologue_fn: unsafe extern "win64-unwind" fn(*mut EraVmExecSite<Callback>, usize) =
+        let prologue_fn: unsafe extern "C-unwind" fn(*mut EraVmExecSite<Callback>, usize) =
             unsafe { std::mem::transmute(prologue_buf.ptr(AssemblyOffset(0))) };
 
         // Run JIT loop

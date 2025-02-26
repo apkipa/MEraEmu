@@ -1024,7 +1024,6 @@ namespace winrt::MEraEmuWin::implementation {
                     // Convert 0-based to 1-based
                     resolved.loc.col += 1;
 
-                    // TODO: Also print code snippet
                     auto final_msg = format(L"{}({},{}): {}: {}\nSnippet: {}",
                         filename,
                         resolved.loc.line, resolved.loc.col,
@@ -1350,7 +1349,7 @@ namespace winrt::MEraEmuWin::implementation {
             }
             if (name == "LINECOUNT") {
                 return exec_ui_work_or([sd = m_sd] {
-                    return (int64_t)sd->ui_ctrl->m_ui_lines.size();
+                    return sd->ui_ctrl->GetCurrentUILinesCount();
                 });
             }
             std::string msg = "no such variable: ";
@@ -2299,6 +2298,7 @@ namespace winrt::MEraEmuWin::implementation {
         QueueEngineTask(std::make_unique<EngineThreadTask>(EngineThreadTaskKind::ReturnToTitle));
 
         m_ui_lines.clear();
+        m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
         check_hresult(m_vsis_noref->Resize(0, 0));
     }
     void EngineControl::ApplySettings(MEraEmuWin::AppSettingsVM settings) {
@@ -2793,8 +2793,8 @@ namespace winrt::MEraEmuWin::implementation {
                         auto cfg = engine.get_config();
                         update_config_fn(cfg);
                         engine.set_config(cfg);
-                        callback->reset_ui_cache();
                     }
+                    callback->reset_ui_cache();
 
                     // If not reached max instructions, we treat engine as halted
                     auto is_halted = [&] {
@@ -3033,6 +3033,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_vsis_d2d_noref = nullptr;
         m_d2d_ctx = nullptr;
         m_ui_lines.clear();
+        m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
         m_cur_composing_line = {};
         m_reused_last_line = false;
         m_cur_line_alignment = {};
@@ -3210,6 +3211,34 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
     void EngineControl::UpdateEngineImageOutputLayout(bool invalidate_all, bool recreate_ui_lines) {
+        // Before committing changes to user, handle soft-deleted lines from CLEARLINE
+        if (size_t soft_del_lines_count = std::exchange(m_soft_deleted_ui_lines_count, 0)) {
+            auto ie = begin(m_ui_lines) + m_soft_deleted_ui_lines_pos;
+            auto ib = ie - soft_del_lines_count;
+            // Check how many previous lines are affected
+            uint32_t min_line = ib - begin(m_ui_lines);
+            for (auto it = ib; it != ie; ++it) {
+                auto& line = *it;
+                uint32_t i = it - begin(m_ui_lines);
+                if (line.render_backward_height >= i) {
+                    min_line = 0;
+                    break;
+                }
+                min_line = std::min(min_line, i - line.render_backward_height);
+            }
+            auto& line = m_ui_lines[min_line];
+            const auto new_height = (line.acc_height - line.height) * m_ui_param_cache.line_height_px_f;
+            m_last_redraw_dirty_height = std::min(m_last_redraw_dirty_height, (uint32_t)new_height);
+
+            // Erase lines
+            m_ui_lines.erase(ib, ie);
+
+            // Fix line heights
+            for (size_t i = m_soft_deleted_ui_lines_pos - soft_del_lines_count; i < size(m_ui_lines); i++) {
+                UpdateLineAccMetrics(i);
+            }
+        }
+
         auto& ui_params = m_ui_param_cache;
         bool need_invalidate_line_metrics = recreate_ui_lines;
         bool fully_invalidate_line_metrics = recreate_ui_lines;
@@ -4190,94 +4219,6 @@ namespace winrt::MEraEmuWin::implementation {
         }
         float total_width = m_ui_lines[cur_line_no].get_actual_width() / m_ui_param_cache.ui_scale;
         return (int64_t)std::ceil(return_pixel ? total_width : (total_width * 2.0f / m_ui_param_cache.font_size_px_f));
-
-        //try {
-        //    float total_width = 0;
-
-        //    parser.parse([&](Parser::VisitEventKind event_kind, Parser::Tag const& tag, param::hstring const& param_text) {
-        //        hstring const& text = param_text;
-        //        if (event_kind == Parser::VisitEventKind::EnterTag) {
-        //            if (tag.name == L"shape") {
-        //                if (auto it = tag.attrs.find(L"type"); it != tag.attrs.end()) {
-        //                    if (it->second == L"rect") {
-        //                        // Rectangle shape
-        //                        if (auto it = tag.attrs.find(L"param"); it != tag.attrs.end()) {
-        //                            int32_t x{}, y{}, width{}, height{};
-        //                            int count = swscanf(it->second.c_str(), L"%d,%d,%d,%d", &x, &y, &width, &height);
-        //                            bool is_valid = false;
-        //                            if (count == 1) {
-        //                                width = x;
-        //                                x = y = {};
-        //                                height = 100;
-        //                                is_valid = true;
-        //                            }
-        //                            else if (count == 4) {
-        //                                is_valid = true;
-        //                            }
-        //                            if (is_valid) {
-        //                                total_width += ConvFontUnitToPixels(width);
-        //                            }
-        //                        }
-        //                    }
-        //                    else if (it->second == L"space") {
-        //                        // Space shape
-        //                        if (auto it = tag.attrs.find(L"param"); it != tag.attrs.end()) {
-        //                            int32_t width{};
-        //                            int count = swscanf(it->second.c_str(), L"%d", &width);
-        //                            if (count == 1) {
-        //                                total_width += ConvFontUnitToPixels(width);
-        //                            }
-        //                        }
-        //                    }
-        //                }
-        //            }
-        //        }
-        //        else if (event_kind == Parser::VisitEventKind::LeaveTag || event_kind == Parser::VisitEventKind::ImplicitlyLeaveTag) {
-        //            if (tag.name == L"img") {
-        //                hstring sprite_name;
-        //                if (auto it = tag.attrs.find(L"src"); it != tag.attrs.end()) {
-        //                    sprite_name = it->second;
-        //                }
-        //                else {
-        //                    throw std::runtime_error("Image tag missing src attribute");
-        //                }
-        //                auto sprite_it = m_sprite_objects.find(sprite_name);
-        //                if (sprite_it != m_sprite_objects.end()) {
-        //                    auto& sprite = sprite_it->second;
-        //                    int32_t width, height;
-        //                    if (auto it = tag.attrs.find(L"height"); it != tag.attrs.end()) {
-        //                        height = parse<int32_t>(it->second).value();
-        //                    }
-        //                    else {
-        //                        height = 100;
-        //                    }
-        //                    if (auto it = tag.attrs.find(L"width"); it != tag.attrs.end()) {
-        //                        width = parse<int32_t>(it->second).value();
-        //                    }
-        //                    else {
-        //                        width = sprite.width * height / sprite.height;
-        //                    }
-        //                    total_width += ConvFontUnitToPixels(width);
-        //                }
-        //                else {
-        //                    // Sprite does not exist or is invalid; print html content as plain text
-        //                    auto start_pos = tag.start_tag_pos_range.first;
-        //                    auto end_pos = tag.end_tag_pos_range.second;
-        //                    auto html = std::wstring_view(content).substr(start_pos, end_pos - start_pos);
-        //                    total_width += ConvFontUnitToPixels(width(html) / 2.0f);
-        //                }
-        //            }
-        //        }
-        //        else if (event_kind == Parser::VisitEventKind::OnText) {
-        //            total_width += ConvFontUnitToPixels(width(text) / 2.0f);
-        //        }
-        //    });
-
-        //    return (int64_t)std::ceil(return_pixel ? total_width : total_width * 2.0f / m_ui_param_cache.font_size_px_f);
-        //}
-        //catch (...) {
-        //    return {};
-        //}
     }
     void EngineControl::RoutineInput(std::unique_ptr<InputRequest> request) {
         assert(request);
@@ -4338,32 +4279,25 @@ namespace winrt::MEraEmuWin::implementation {
         m_reused_last_line = true;
     }
     void EngineControl::RoutineClearLine(uint64_t count) {
-        if (count == 0 || size(m_ui_lines) == 0) { return; }
-        auto old_count = (uint64_t)size(m_ui_lines);
+        auto old_count = (uint64_t)GetCurrentUILinesCount();
+        if (count == 0 || old_count == 0) { return; }
         if (count > old_count) {
             count = old_count;
         }
-        {
-            auto ie = end(m_ui_lines);
-            auto ib = ie - count;
-            // Check how many previous lines are affected
-            uint32_t min_line = ib - begin(m_ui_lines);
-            for (auto it = ib; it != ie; ++it) {
-                auto& line = *it;
-                uint32_t i = it - begin(m_ui_lines);
-                if (line.render_backward_height >= i) {
-                    min_line = 0;
-                    break;
-                }
-                min_line = std::min(min_line, i - line.render_backward_height);
-            }
-            auto& line = m_ui_lines[min_line];
-            const auto new_height = (line.acc_height - line.height) * m_ui_param_cache.line_height_px_f;
-            m_last_redraw_dirty_height = std::min(m_last_redraw_dirty_height, (uint32_t)new_height);
 
-            // Erase lines
-            m_ui_lines.erase(ib, ie);
+        // NOTE: Removal of lines is handled by `UpdateEngineImageOutputLayout` now.
+        if (m_soft_deleted_ui_lines_count == 0) {
+            m_soft_deleted_ui_lines_pos = old_count;
         }
+        else {
+            if (m_soft_deleted_ui_lines_pos != size(m_ui_lines)) {
+                // Multiple non-continuous CLEARLINE calls; force apply the old changes now
+                // TODO: Maybe fix the behavior to handle this case properly?
+                UpdateEngineImageOutputLayout(false);
+                m_soft_deleted_ui_lines_pos = size(m_ui_lines);
+            }
+        }
+        m_soft_deleted_ui_lines_count += count;
 
         if (m_auto_redraw) {
             UpdateEngineImageOutputLayout(false);
@@ -4472,6 +4406,9 @@ namespace winrt::MEraEmuWin::implementation {
         return m_sprite_objects.contains(name);
     }
 
+    int64_t EngineControl::GetCurrentUILinesCount() {
+        return (int64_t)m_ui_lines.size() - m_soft_deleted_ui_lines_count;
+    }
     void EngineControl::SetCurrentLineAlignment(int64_t value) {
         m_cur_line_alignment = (uint32_t)value;
     }

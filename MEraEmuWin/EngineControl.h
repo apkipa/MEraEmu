@@ -368,6 +368,7 @@ namespace winrt::MEraEmuWin::implementation {
         int64_t RoutineSpriteDispose(hstring const& name);
         int64_t RoutineSpriteCreated(hstring const& name);
 
+        int64_t GetCurrentUILinesCount();
         void SetCurrentLineAlignment(int64_t value);
         int64_t GetCurrentLineAlignment();
         void SetCurrentFontStyle(int64_t value);
@@ -401,8 +402,10 @@ namespace winrt::MEraEmuWin::implementation {
         com_ptr<ID2D1SpriteBatch> m_d2d_sprite_batch;
         std::unordered_map<uint32_t, com_ptr<ID2D1SolidColorBrush>> m_brush_map;
         std::unordered_map<hstring, com_ptr<IDWriteTextFormat>> m_font_map;
-        std::vector<EngineUIPrintLineData> m_ui_lines;
+        std::vector<EngineUIPrintLineData> m_ui_lines, m_ui_lines_alt;
         bool m_reused_last_line{ false };
+        // Introduced to handle issued CLEARLINE commands while REDRAW = 0. Range: [pos - count, pos)
+        uint32_t m_soft_deleted_ui_lines_count{}, m_soft_deleted_ui_lines_pos{};
         uint32_t m_cur_line_alignment{};
         uint32_t m_cur_font_style{};
         hstring m_cur_font_name{};

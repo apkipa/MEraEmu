@@ -1778,6 +1778,7 @@ pub struct DiagnosticResolveSrcSpanResult {
     pub len: u32,
 }
 
+#[repr(C)]
 #[modular_bitfield::bitfield]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1793,6 +1794,7 @@ pub struct EraPrintExtendedFlags {
 }
 impl_serde_for_modular_bitfield!(EraPrintExtendedFlags, u8);
 
+#[repr(C)]
 #[modular_bitfield::bitfield]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
@@ -1804,6 +1806,7 @@ pub struct EraWaitFlags {
 }
 impl_serde_for_modular_bitfield!(EraWaitFlags, u8);
 
+#[repr(C)]
 #[modular_bitfield::bitfield]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
@@ -1815,6 +1818,7 @@ pub struct EraPadStringFlags {
 }
 impl_serde_for_modular_bitfield!(EraPadStringFlags, u8);
 
+#[repr(C)]
 #[modular_bitfield::bitfield]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]

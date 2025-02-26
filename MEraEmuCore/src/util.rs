@@ -748,5 +748,6 @@ macro_rules! impl_serde_for_modular_bitfield {
 }
 
 pub(crate) use bmatch_caseless;
+pub(crate) use count_tts;
 pub(crate) use impl_serde_for_modular_bitfield;
 pub(crate) use uppercase_bliteral;
