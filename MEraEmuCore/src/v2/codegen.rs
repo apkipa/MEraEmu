@@ -6094,7 +6094,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 Ok(self.arena.get_extra_data_view(args))
             }
 
-            fn unpack_args<'a, const N: usize>(
+            fn unpack_args<const N: usize>(
                 &mut self,
                 args: EraNodeRef,
             ) -> CompileResult<[EraNodeRef; N]> {
@@ -6119,7 +6119,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 Ok(std::array::from_fn(|i| EraNodeRef(args[i])))
             }
 
-            fn unpack_opt_args<'a, const N: usize>(
+            fn unpack_opt_args<const N: usize>(
                 &mut self,
                 args: EraNodeRef,
                 min_cnt: usize,
@@ -7196,8 +7196,9 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
             }
             b"HTML_STRINGLEN" => {
                 site.result()?;
-                let [content, return_pixel] = site.unpack_args(args)?;
-                apply_args!(name_span, content:s, return_pixel:i);
+                let [content, return_pixel] = site.unpack_opt_args(args, 1)?;
+                unwrap!(content);
+                apply_args!(name_span, content:s, return_pixel:i?);
                 site.chunk.push_bc(BcKind::HtmlStringLen, name_span);
             }
             b"CLIENTWIDTH" => {

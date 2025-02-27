@@ -300,6 +300,132 @@ mod unwind {
     }
 }
 
+// TODO: Verify whether linux's unwind code is correct
+#[cfg(target_os = "linux")]
+mod unwind {
+    use super::*;
+    use gimli::{
+        write::{
+            Address, CallFrameInstruction, CommonInformationEntry, DwarfUnit, EndianVec,
+            FrameDescriptionEntry, FrameTable, Range, Writer,
+        },
+        Encoding, LittleEndian, Register,
+    };
+    use std::ffi::c_void;
+    use std::num::NonZeroUsize;
+    use std::ops::Deref;
+
+    unsafe fn do_register_frame(eh_frame_addr: *const c_void) {
+        // Assuming using libgcc's __register_frame
+        extern "C" {
+            fn __register_frame(eh_frame_addr: *const c_void);
+        }
+
+        unsafe {
+            __register_frame(eh_frame_addr);
+        }
+    }
+
+    unsafe fn do_unregister_frame(eh_frame_addr: *const c_void) {
+        // Assuming using libgcc's __deregister_frame
+        extern "C" {
+            fn __deregister_frame(eh_frame_addr: *const c_void);
+        }
+
+        unsafe {
+            __deregister_frame(eh_frame_addr);
+        }
+    }
+
+    pub fn emit_unwind_data(_ops: &mut Assembler) {
+        // Postpone the generation of unwind data
+    }
+
+    fn write_unwind_data(buf: &mut Vec<u8>, base_addr: usize) {
+        let func_size = buf.len() as u32;
+
+        // Create DWARF encoding
+        let encoding = Encoding {
+            address_size: 8,
+            format: gimli::Format::Dwarf32,
+            version: 4,
+        };
+
+        // Create a new frame table
+        let mut table = FrameTable::default();
+
+        // Create CIE (Common Information Entry)
+        let mut cie = CommonInformationEntry::new(
+            encoding,
+            4,            // Code Alignment Factor
+            -8,           // Data Alignment Factor
+            Register(16), // Return Address Register (RIP)
+        );
+
+        // Set up the CIE instructions
+        cie.add_instruction(CallFrameInstruction::Cfa(
+            Register(7), // RSP
+            8,           // Initial CFA = RSP+8 (because of CALL)
+        ));
+        cie.add_instruction(CallFrameInstruction::Offset(
+            Register(16), // RIP
+            1,            // RIP = CFA-8 (因为数据对齐因子是-8，所以这里用1)
+        ));
+
+        let cie_id = table.add_cie(cie);
+
+        // Create FDE (Frame Description Entry)
+        let mut fde = FrameDescriptionEntry::new(Address::Constant(base_addr as _), func_size);
+
+        // Add our unwind instructions to the FDE
+        // Corresponds to the prologue `sub rsp, 0x28`
+        // 由于数据对齐因子是-8，0x28要除以8得到5（向上取整）
+        fde.add_instruction(0, CallFrameInstruction::CfaOffset(5 + 1)); // +1 for the initial 8 bytes
+
+        // Add FDE to the table
+        table.add_fde(cie_id, fde);
+
+        // Write the table to the .eh_frame section
+        let mut eh_frame = gimli::write::EhFrame::from(EndianVec::new(LittleEndian));
+        table
+            .write_eh_frame(&mut eh_frame)
+            .expect("Failed to write eh_frame");
+
+        // Write the .eh_frame section to the buffer
+        buf.extend(eh_frame.slice());
+    }
+
+    pub struct JitUnwindRegistryGuard {
+        eh_frame: Vec<u8>,
+    }
+
+    impl JitUnwindRegistryGuard {
+        pub fn add_function_table(
+            _eh_frame: *const u8,
+            base_addr: usize,
+        ) -> Option<JitUnwindRegistryGuard> {
+            let mut buf = Vec::new();
+            let pos = buf.len();
+            write_unwind_data(&mut buf, base_addr);
+            let eh_frame = buf.as_ptr();
+
+            unsafe {
+                do_register_frame(eh_frame as *const c_void);
+
+                Some(JitUnwindRegistryGuard { eh_frame: buf })
+            }
+        }
+    }
+
+    impl Drop for JitUnwindRegistryGuard {
+        fn drop(&mut self) {
+            unsafe {
+                do_unregister_frame(self.eh_frame.as_ptr() as *const c_void);
+            }
+        }
+    }
+}
+
 pub(super) use unwind::*;
 
 pub(super) fn emit_prologue(ops: &mut Assembler) {

@@ -34,6 +34,7 @@ dependencies = [
  "enumset",
  "erasable",
  "full2half",
+ "gimli",
  "hashbrown 0.14.5",
  "html-escape",
  "htmlize",
@@ -44,6 +45,7 @@ dependencies = [
  "jsonrpsee",
  "lasso",
  "lending-iterator",
+ "libc",
  "lru",
  "lz4_flex",
  "memchr",
@@ -989,6 +991,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320bea982e85d42441eb25c49b41218e7eaa2657e8f90bc4eca7437376751e23"
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
 name = "feature-probe"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1151,6 +1159,11 @@ name = "gimli"
 version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
+dependencies = [
+ "fallible-iterator",
+ "indexmap",
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "hashbrown"

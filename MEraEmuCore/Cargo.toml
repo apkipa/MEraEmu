@@ -130,3 +130,7 @@ dhat-heap = []
 dhat-ad-hoc = []
 legacy_v1 = []
 legacy_cst = []
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+libc = "0.2"
+gimli = "0.31"
