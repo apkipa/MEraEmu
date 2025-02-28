@@ -44,7 +44,9 @@ namespace winrt::MEraEmuWin::implementation {
     X(bool, EnableFontSmoothing, enable_font_smoothing) \
     X(bool, EnablePixelSnapping, enable_pixel_snapping) \
     X(bool, EnableHtmlRendering, enable_html_rendering) \
-    X(bool, EnableGdiCompatRender, enable_gdi_compat_render)
+    X(bool, EnableGdiCompatRender, enable_gdi_compat_render) \
+    X(bool, EnableHardwareAcceleration, enable_hardware_acceleration) \
+    X(bool, DebugShowLayoutBounds, debug_show_layout_bounds)
 
 #define GenGetSetter(type, name, member)    \
         type name() { return member; }      \
@@ -105,6 +107,8 @@ namespace winrt::MEraEmuWin::implementation {
         bool enable_pixel_snapping = true;
         bool enable_html_rendering = true;
         bool enable_gdi_compat_render = false;
+        bool enable_hardware_acceleration = true;
+        bool debug_show_layout_bounds = false;
     };
 }
 

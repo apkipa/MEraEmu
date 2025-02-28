@@ -1491,13 +1491,16 @@ namespace winrt::MEraEmuWin::implementation {
                 return m_sd->ui_ctrl->RoutineGCreated(gid);
             });
         }
-        int64_t on_gdrawsprite(int64_t gid, std::string_view sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const& color_matrix) override {
-            // TODO: on_gdrawsprite
-            return 0;
+        int64_t on_gdrawsprite(int64_t gid, std::string_view sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const* color_matrix) override {
+            return exec_ui_work_or([&] {
+                return m_sd->ui_ctrl->RoutineGDrawSprite(gid, to_hstring(sprite_name), dest_x, dest_y, dest_width, dest_height, color_matrix);
+            });
         }
         int64_t on_gclear(int64_t gid, int64_t color) override {
-            // TODO: on_gclear
-            return 0;
+            // TODO: Use `queue_ui_work` for inexpensive graphics operations?
+            return exec_ui_work_or([&] {
+                return m_sd->ui_ctrl->RoutineGClear(gid, (uint32_t)color | 0xff000000);
+            });
         }
         int64_t on_spritecreate(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) override {
             return exec_ui_work_or([&] {
@@ -1523,12 +1526,14 @@ namespace winrt::MEraEmuWin::implementation {
             return 0;
         }
         int64_t on_spritewidth(std::string_view name) override {
-            // TODO: on_spritewidth
-            return 0;
+            return exec_ui_work_or([&] {
+                return m_sd->ui_ctrl->RoutineSpriteWidth(to_hstring(name));
+            });
         }
         int64_t on_spriteheight(std::string_view name) override {
-            // TODO: on_spriteheight
-            return 0;
+            return exec_ui_work_or([&] {
+                return m_sd->ui_ctrl->RoutineSpriteHeight(to_hstring(name));
+            });
         }
         std::unique_ptr<MEraEngineHostFile> on_open_host_file(std::string_view path, bool can_write) override {
             hstring actual_path;
@@ -1633,8 +1638,11 @@ namespace winrt::MEraEmuWin::implementation {
             return util::fs::file_exists(actual_path.c_str());
         }
         int64_t on_check_font(std::string_view font_name) override {
+            static bool first_time = true;
             com_ptr<IDWriteFontCollection> font_collection;
-            check_hresult(g_dwrite_factory->GetSystemFontCollection(font_collection.put(), true));
+            // NOTE: GetSystemFontCollection is *very* slow (~22ms), so cache the result.
+            check_hresult(g_dwrite_factory->GetSystemFontCollection(font_collection.put(), first_time));
+            first_time = false;
             uint32_t index;
             BOOL exists;
             check_hresult(font_collection->FindFamilyName(to_hstring(font_name).c_str(), &index, &exists));
@@ -1850,22 +1858,25 @@ namespace winrt::MEraEmuWin::implementation {
                     scale_effect->SetInputEffect(0, crop_effect.get());
                     d2d_ctx->DrawImage(scale_effect.get(), D2D1::Point2F(rect.left, rect.top),
                         D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR);*/
-                        /*auto src_rect = D2D1::RectF(sprite.x, sprite.y, sprite.x + sprite.width, sprite.y + sprite.height);
-                        d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f,
-                            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, src_rect);*/
-                            /*D2D1_RECT_U src_rect;
-                            src_rect.left = saturate_to_u32(sprite.x);
-                            src_rect.top = saturate_to_u32(sprite.y);
-                            src_rect.right = saturate_to_u32(src_rect.left + sprite.width);
-                            src_rect.bottom = saturate_to_u32(src_rect.top + sprite.height);
-                            auto const& sb = ctrl->m_d2d_sprite_batch;
-                            sb->Clear();
-                            sb->AddSprites(1, &rect, &src_rect);
-                            d2d_ctx->DrawSpriteBatch(sb.get(), img.bitmap.get(),
-                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_SPRITE_OPTIONS_CLAMP_TO_SOURCE_RECTANGLE);*/
+                    ;
+                    /*auto src_rect = D2D1::RectF(sprite.x, sprite.y, sprite.x + sprite.width, sprite.y + sprite.height);
+                    d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f,
+                        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, src_rect);*/
+                    ;
+                    /*D2D1_RECT_U src_rect;
+                    src_rect.left = saturate_to_u32(sprite.x);
+                    src_rect.top = saturate_to_u32(sprite.y);
+                    src_rect.right = saturate_to_u32(src_rect.left + sprite.width);
+                    src_rect.bottom = saturate_to_u32(src_rect.top + sprite.height);
+                    auto const& sb = ctrl->m_d2d_sprite_batch;
+                    sb->Clear();
+                    sb->AddSprites(1, &rect, &src_rect);
+                    d2d_ctx->DrawSpriteBatch(sb.get(), img.bitmap.get(),
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_SPRITE_OPTIONS_CLAMP_TO_SOURCE_RECTANGLE);*/
+                    ;
 
-                                // HACK: A terrible workaround trying to fix D2D sampling outside the source region,
-                                //       while avoiding degrading the quality under certain circumstances.
+                    // HACK: A terrible workaround trying to fix D2D sampling outside the source region,
+                    //       while avoiding degrading the quality under certain circumstances.
                     if (std::fabs(height_in_pixels - ctrl->m_ui_param_cache.font_size_px_f) < 1.0f) {
                         auto src_rect = D2D1::RectF(sprite.x, sprite.y, sprite.x + sprite.width, sprite.y + sprite.height);
                         d2d_ctx->DrawBitmap(img.bitmap.get(), rect, 1.0f,
@@ -1883,6 +1894,9 @@ namespace winrt::MEraEmuWin::implementation {
                         d2d_ctx->DrawSpriteBatch(sb.get(), img.bitmap.get(),
                             D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_SPRITE_OPTIONS_CLAMP_TO_SOURCE_RECTANGLE);
                     }
+                }
+                if (ctrl->m_app_settings->DebugShowLayoutBounds()) {
+                    d2d_ctx->DrawRectangle(rect, get_brush(), 1.0f);
                 }
                 return S_OK;
             };
@@ -3057,7 +3071,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_vsis_noref = img_src.as<IVirtualSurfaceImageSourceNative>().get();
         m_vsis_d2d_noref = img_src.as<ISurfaceImageSourceNativeWithD2D>().get();
         // Initialize Direct2D immediately after the creation of EngineOutputImage
-        InitD2DDevice(false);
+        InitD2DDevice(!m_app_settings->EnableHardwareAcceleration());
         // TODO: Handle Windows.UI.Xaml.Media.CompositionTarget.SurfaceContentsLost
         // TODO...
 
@@ -4387,15 +4401,107 @@ namespace winrt::MEraEmuWin::implementation {
     int64_t EngineControl::RoutineGCreated(int64_t gid) {
         return m_graphics_objects.contains(gid);
     }
+    int64_t EngineControl::RoutineGDrawSprite(int64_t gid, hstring const& sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const* color_matrix) {
+        auto graphics_it = m_graphics_objects.find(gid);
+        if (graphics_it == m_graphics_objects.end()) {
+            // Invalid gid
+            return 0;
+        }
+        auto& graphics = graphics_it->second;
+        if (!graphics.try_ensure_loaded(this)) {
+            return false;
+        }
+
+        auto sprite_it = m_sprite_objects.find(sprite_name);
+        if (sprite_it == m_sprite_objects.end()) {
+            // Invalid sprite name
+            return 0;
+        }
+        auto& sprite = sprite_it->second;
+        if (!sprite.try_ensure_loaded(this)) {
+            return false;
+        }
+        auto& sprite_graphics = sprite.get_graphics_object(this);
+
+        // Draw the sprite to the current graphics object
+        if (dest_width == -1) {
+            dest_width = graphics.get_dimensions().first;
+        }
+        if (dest_height == -1) {
+            dest_height = graphics.get_dimensions().second;
+        }
+        m_d2d_ctx->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+        m_d2d_ctx->SetTarget(graphics.bitmap.get());
+        return RunDrawingSession([&](ID2D1DeviceContext3* ctx) {
+            if (color_matrix && !is_identity(*color_matrix)) {
+                // Slow path: draw with color matrix effect
+                // TODO: Implement color matrix (https://learn.microsoft.com/en-us/windows/win32/direct2d/color-matrix)
+                RoutinePrint(L"UI ERROR: Color matrix is not supported yet.", ERA_PEF_IS_LINE);
+                return;
+            }
+            else {
+                // Fast path: draw bitmap directly
+                D2D1_RECT_F rect;
+                rect.left = float(dest_x);
+                rect.top = float(dest_y);
+                rect.right = float(rect.left + dest_width);
+                rect.bottom = float(rect.top + dest_height);
+                D2D1_RECT_U src_rect;
+                src_rect.left = saturate_to_u32(sprite.x);
+                src_rect.top = saturate_to_u32(sprite.y);
+                src_rect.right = saturate_to_u32(src_rect.left + sprite.width);
+                src_rect.bottom = saturate_to_u32(src_rect.top + sprite.height);
+                auto const& sb = m_d2d_sprite_batch;
+                sb->Clear();
+                sb->AddSprites(1, &rect, &src_rect);
+                ctx->DrawSpriteBatch(sb.get(), sprite_graphics.bitmap.get(),
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_SPRITE_OPTIONS_CLAMP_TO_SOURCE_RECTANGLE);
+            }
+        });
+    }
+    int64_t EngineControl::RoutineGClear(int64_t gid, uint32_t color) {
+        auto graphics_it = m_graphics_objects.find(gid);
+        if (graphics_it == m_graphics_objects.end()) {
+            // Invalid gid
+            return 0;
+        }
+        auto& graphics = graphics_it->second;
+        if (!graphics.try_ensure_loaded(this)) {
+            return false;
+        }
+
+        // Clear the bitmap to the specified color
+        m_d2d_ctx->SetTarget(graphics.bitmap.get());
+        return RunDrawingSession([&](ID2D1DeviceContext3* ctx) {
+            ctx->Clear(D2D1::ColorF(color));
+        });
+    }
     int64_t EngineControl::RoutineSpriteCreate(hstring const& name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) {
         if (m_sprite_objects.contains(name)) {
             // Already exists
             return 0;
         }
-        if (!m_graphics_objects.contains(gid)) {
+        auto graphics_it = m_graphics_objects.find(gid);
+        if (graphics_it == m_graphics_objects.end()) {
             // Invalid gid
             return 0;
         }
+        auto& graphics = graphics_it->second;
+
+        // Adjust width and height if negative
+        if (width == -1) {
+            if (!graphics.try_ensure_loaded(this)) {
+                return false;
+            }
+            width = graphics.get_dimensions().first;
+        }
+        if (height == -1) {
+            if (!graphics.try_ensure_loaded(this)) {
+                return false;
+            }
+            height = graphics.get_dimensions().second;
+        }
+
         m_sprite_objects.insert({ name, SpriteObject(gid, (int32_t)x, (int32_t)y, (int32_t)width, (int32_t)height) });
         return 1;
     }
@@ -4404,6 +4510,20 @@ namespace winrt::MEraEmuWin::implementation {
     }
     int64_t EngineControl::RoutineSpriteCreated(hstring const& name) {
         return m_sprite_objects.contains(name);
+    }
+    int64_t EngineControl::RoutineSpriteWidth(hstring const& name) {
+        auto it = m_sprite_objects.find(name);
+        if (it == m_sprite_objects.end()) {
+            return 0;
+        }
+        return it->second.width;
+    }
+    int64_t EngineControl::RoutineSpriteHeight(hstring const& name) {
+        auto it = m_sprite_objects.find(name);
+        if (it == m_sprite_objects.end()) {
+            return 0;
+        }
+        return it->second.height;
     }
 
     int64_t EngineControl::GetCurrentUILinesCount() {
@@ -4475,14 +4595,15 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::GraphicsObject::ensure_loaded(EngineControl* ctrl) {
         if (bitmap) { return; }
 
+        auto bitmap_props = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_TARGET,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
+        );
         if (file_path.empty()) {
             // Create an empty bitmap
             check_hresult(ctrl->m_d2d_ctx->CreateBitmap(
                 D2D1::SizeU(width, height),
-                D2D1::BitmapProperties(
-                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)
-                ),
-                bitmap.put()
+                nullptr, 0, bitmap_props, bitmap.put()
             ));
         }
         else {
@@ -4500,7 +4621,9 @@ namespace winrt::MEraEmuWin::implementation {
                 WICBitmapPaletteTypeMedianCut
             ));
             check_hresult(ctrl->m_d2d_ctx->CreateBitmapFromWicBitmap(
-                converter.get(), bitmap.put()
+                converter.get(),
+                bitmap_props,
+                bitmap.put()
             ));
         }
     }

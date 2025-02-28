@@ -439,7 +439,7 @@ struct MEraEngineSysCallback {
     virtual int64_t on_gcreatefromfile(int64_t gid, std::string_view path) = 0;
     virtual int64_t on_gdispose(int64_t gid) = 0;
     virtual int64_t on_gcreated(int64_t gid) = 0;
-    virtual int64_t on_gdrawsprite(int64_t gid, std::string_view sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const& color_matrix) = 0;
+    virtual int64_t on_gdrawsprite(int64_t gid, std::string_view sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const* color_matrix) = 0;
     virtual int64_t on_gclear(int64_t gid, int64_t color) = 0;
     virtual int64_t on_spritecreate(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) = 0;
     virtual int64_t on_spritedispose(std::string_view name) = 0;
@@ -605,3 +605,12 @@ inline bool is_execution_break_reason_fatal(EraExecutionBreakReason reason) {
         return true;
     }
 }
+
+inline bool is_identity(EraColorMatrix_t const& matrix) {
+    return matrix.m00 == 1.0f && matrix.m01 == 0.0f && matrix.m02 == 0.0f && matrix.m03 == 0.0f && matrix.m04 == 0.0f &&
+        matrix.m10 == 0.0f && matrix.m11 == 1.0f && matrix.m12 == 0.0f && matrix.m13 == 0.0f && matrix.m14 == 0.0f &&
+        matrix.m20 == 0.0f && matrix.m21 == 0.0f && matrix.m22 == 1.0f && matrix.m23 == 0.0f && matrix.m24 == 0.0f &&
+        matrix.m30 == 0.0f && matrix.m31 == 0.0f && matrix.m32 == 0.0f && matrix.m33 == 1.0f && matrix.m34 == 0.0f &&
+        matrix.m40 == 0.0f && matrix.m41 == 0.0f && matrix.m42 == 0.0f && matrix.m43 == 0.0f && matrix.m44 == 1.0f;
+}
+

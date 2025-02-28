@@ -36,6 +36,10 @@
                           IsOn="{x:Bind ParentPage.Settings.EnableHtmlRendering,Mode=TwoWay}" />
             <ToggleSwitch Header="启用 GDI 兼容渲染"
                           IsOn="{x:Bind ParentPage.Settings.EnableGdiCompatRender,Mode=TwoWay}" />
+            <ToggleSwitch Header="启用硬件加速 (需要重启)"
+                          IsOn="{x:Bind ParentPage.Settings.EnableHardwareAcceleration,Mode=TwoWay}" />
+            <ToggleSwitch Header="[DEBUG] 显示布局边界"
+                          IsOn="{x:Bind ParentPage.Settings.DebugShowLayoutBounds,Mode=TwoWay}" />
         </local:StackPanel>
     </ScrollViewer>
 </Page>

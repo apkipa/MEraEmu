@@ -32,5 +32,7 @@ namespace MEraEmuWin {
         Boolean EnablePixelSnapping;
         Boolean EnableHtmlRendering;
         Boolean EnableGdiCompatRender;
+        Boolean EnableHardwareAcceleration;
+        Boolean DebugShowLayoutBounds;
     };
 }

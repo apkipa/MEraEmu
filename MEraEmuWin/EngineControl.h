@@ -335,6 +335,24 @@ namespace winrt::MEraEmuWin::implementation {
         int32_t ConvLengthToPixelsI32(EngineUILength const& len) const noexcept {
             return static_cast<int32_t>(ConvLengthToPixels(len));
         }
+        // F: fn(ID2D1DeviceContext3* ctx)
+        // If successful, returns true. Otherwise, returns false.
+        template <typename F>
+        bool RunDrawingSession(F&& f) {
+            if (!m_d2d_ctx) {
+                return false;
+            }
+            m_d2d_ctx->BeginDraw();
+            try {
+                f(m_d2d_ctx.get());
+                m_d2d_ctx->EndDraw();
+                return true;
+            }
+            catch (...) {
+                m_d2d_ctx->EndDraw();
+                return false;
+            }
+        }
 
         void OnInputCountDownTick(IInspectable const&, IInspectable const&);
         void HandleEngineLeftClick(Windows::Foundation::Point groundtruth_pt, Windows::Foundation::Point engine_pt);
@@ -363,10 +381,14 @@ namespace winrt::MEraEmuWin::implementation {
         int64_t RoutineGCreateFromFile(int64_t gid, hstring const& path);
         int64_t RoutineGDispose(int64_t gid);
         int64_t RoutineGCreated(int64_t gid);
-        // TODO...
+        int64_t RoutineGDrawSprite(int64_t gid, hstring const& sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const* color_matrix);
+        int64_t RoutineGClear(int64_t gid, uint32_t color);
         int64_t RoutineSpriteCreate(hstring const& name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height);
         int64_t RoutineSpriteDispose(hstring const& name);
         int64_t RoutineSpriteCreated(hstring const& name);
+        // TODO...
+        int64_t RoutineSpriteWidth(hstring const& name);
+        int64_t RoutineSpriteHeight(hstring const& name);
 
         int64_t GetCurrentUILinesCount();
         void SetCurrentLineAlignment(int64_t value);
@@ -465,7 +487,7 @@ namespace winrt::MEraEmuWin::implementation {
         struct GraphicsObject {
             hstring file_path;
             uint32_t width{}, height{};
-            com_ptr<ID2D1Bitmap> bitmap;
+            com_ptr<ID2D1Bitmap1> bitmap;
             bool is_bad{};  // true if the file is not found or invalid
 
             GraphicsObject(hstring const& file_path) : file_path(file_path) {}
@@ -485,6 +507,28 @@ namespace winrt::MEraEmuWin::implementation {
 
             SpriteObject(int64_t gid, int32_t x, int32_t y, int32_t width, int32_t height) :
                 gid(gid), x(x), y(y), width(width), height(height) {
+            }
+
+            void ensure_loaded(EngineControl* ctrl) {
+                auto sprite_it = ctrl->m_graphics_objects.find(gid);
+                if (sprite_it == ctrl->m_graphics_objects.end()) {
+                    throw std::invalid_argument("Invalid sprite object");
+                }
+                sprite_it->second.ensure_loaded(ctrl);
+            }
+            bool try_ensure_loaded(EngineControl* ctrl) {
+                auto sprite_it = ctrl->m_graphics_objects.find(gid);
+                if (sprite_it == ctrl->m_graphics_objects.end()) {
+                    return false;
+                }
+                return sprite_it->second.try_ensure_loaded(ctrl);
+            }
+            auto& get_graphics_object(EngineControl* ctrl) const {
+                auto sprite_it = ctrl->m_graphics_objects.find(gid);
+                if (sprite_it == ctrl->m_graphics_objects.end()) {
+                    throw std::invalid_argument("Invalid sprite object");
+                }
+                return sprite_it->second;
             }
         };
         std::map<hstring, SpriteObject, std::less<>> m_sprite_objects;

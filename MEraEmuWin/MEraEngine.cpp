@@ -343,7 +343,7 @@ MEraEngineBuilder::MEraEngineBuilder(std::unique_ptr<MEraEngineSysCallback> call
             return ((MEraEngineSysCallback*)self)->on_gcreated(gid);
         },
         .on_gdrawsprite = [](Erased_t* self, int64_t gid, slice_ref_uint8_t sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const* color_matrix) noexcept {
-            return ((MEraEngineSysCallback*)self)->on_gdrawsprite(gid, STR_VIEW(sprite_name), dest_x, dest_y, dest_width, dest_height, *color_matrix);
+            return ((MEraEngineSysCallback*)self)->on_gdrawsprite(gid, STR_VIEW(sprite_name), dest_x, dest_y, dest_width, dest_height, color_matrix);
         },
         .on_gclear = [](Erased_t* self, int64_t gid, int64_t color) noexcept {
             return ((MEraEngineSysCallback*)self)->on_gclear(gid, color);
