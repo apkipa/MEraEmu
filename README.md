@@ -43,6 +43,6 @@ You should be able to build the project simply by opening the VS solution and cl
 
 MEraEmuWin is built upon XAML Islands v1, a modern UI framework supported by Windows 10 1903 and above. MEraEmuWin renders content with Direct2D + DirectWrite, currently to a infinite-sized virtual canvas provided by DWM, and so may be constrained by its limitations.
 
-> [!TODO]
+> [!TODO ?]
 >
 > MEraEmuDroid will use DWriteCore (the cross-platform version of DirectWrite) to layout and render texts.

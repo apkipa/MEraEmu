@@ -2854,7 +2854,7 @@ pub trait MEraEngineRpc {
 
 impl<Callback> MEraEngine<Callback> {
     pub fn get_version() -> &'static str {
-        "MEraEngine in MEraEmuCore v0.3.1"
+        "MEraEngine in MEraEmuCore v0.3.2"
     }
 }
 

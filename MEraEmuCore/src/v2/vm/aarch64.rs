@@ -219,11 +219,12 @@ pub(super) fn emit_prologue(ops: &mut Assembler) {
         ; ->jit_entry:
         // Prepares the stack, then jumps to the JITed code
         // Local variables:
-        // [sp+0x20]: self
-        // [sp+0x18]: return address
-        // [sp+0x10]: stack pointer
+        // [sp+0x20~0x30]: red zone (?)
+        // [sp+0x10]: self
+        // [sp+0x8]: return address
+        // [sp+0x0]: frame pointer
         ; stp x29, x30, [sp, #-0x30]!
-        ; str x0, [sp, #0x20]
+        ; str x0, [sp, #0x10]
         ; mov x29, sp
         ; br x1
     );
@@ -249,7 +250,7 @@ macro_rules! define_emit_call_subroutine {
                 dynasm!(ops
                     ; .arch aarch64
                     ;; emit_mov_i64(ops, 8, f as _)
-                    ; ldr x0, [sp, #0x20] // self
+                    ; ldr x0, [sp, #0x10] // self
                     $(;; [<a $arg_no>].[<emit_mov_to_arg_ $arg_no>](ops))*
                     ; blr x8
                 );

@@ -436,6 +436,7 @@ pub(super) fn emit_prologue(ops: &mut Assembler) {
         // Local variables:
         // [rsp+0x28]: return address
         // [rsp+0x20]: self
+        // [rsp+0x0~0x20]: red zone (for function calls)
         ; sub rsp, 0x28 // Align stack to 16 bytes
         ;; dynasm_arg_reg!(ops, {mov [rsp+0x20],} QWORD 1)
         ; jmp rdx
