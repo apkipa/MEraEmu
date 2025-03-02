@@ -290,6 +290,17 @@ pub fn is_event_name(name: &str) -> bool {
     matcher(name.as_bytes())
 }
 
+pub fn is_builtin_chara_var(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    match name.as_str() {
+        "ISASSI" | "NO" | "BASE" | "MAXBASE" | "ABL" | "TALENT" | "EXP" | "MARK" | "PALAM"
+        | "SOURCE" | "EX" | "CFLAG" | "JUEL" | "RELATION" | "EQUIP" | "TEQUIP" | "STAIN"
+        | "GOTJUEL" | "NOWEX" | "DOWNBASE" | "CUP" | "CDOWN" | "TCVAR" | "NAME" | "CALLNAME"
+        | "NICKNAME" | "MASTERNAME" | "CSTR" | "CDFLAG" => true,
+        _ => false,
+    }
+}
+
 pub fn is_chara_nodim(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
     match name.as_str() {

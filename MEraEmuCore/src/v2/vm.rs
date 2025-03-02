@@ -1616,11 +1616,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         // Write charas variables
         file.write_i64(charas_count as _)?;
         for chara_i in 0..charas_count {
-            for var in self.ctx.variables.chara_vars_iter() {
-                if !var.is_savedata || !var.is_charadata || var.is_global {
-                    continue;
-                }
+            let mut user_chara_vars = Vec::new();
 
+            fn write_one_chara_var(
+                file: &mut (impl std::io::Write + std::io::Seek),
+                var: &EraVarInfo,
+                chara_i: u32,
+            ) -> anyhow::Result<()> {
                 let is_str = var.val.is_arrstr();
                 let is_nodim = routines::is_chara_nodim(var.name.as_ref());
                 let var_dims_cnt = var.val.dims_cnt() - 1 - (is_nodim as usize);
@@ -1629,6 +1631,28 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
                 file.write_u8(var_type as _)?;
                 file.write_utf16_string(var.name.as_ref())?;
                 file.write_var(var_type, var, Some(chara_i as _))?;
+                Ok(())
+            }
+
+            // First write built-in chara variables
+            for var in self.ctx.variables.chara_vars_iter() {
+                if !var.is_savedata || !var.is_charadata || var.is_global {
+                    continue;
+                }
+
+                if routines::is_builtin_chara_var(var.name.as_ref()) {
+                    write_one_chara_var(&mut file, var, chara_i)?;
+                } else {
+                    user_chara_vars.push(var);
+                }
+            }
+
+            // Then write user-defined chara variables
+            if !user_chara_vars.is_empty() {
+                file.write_u8(EraSaveDataType::Separator as _)?;
+                for var in user_chara_vars {
+                    write_one_chara_var(&mut file, var, chara_i)?;
+                }
             }
 
             // Write separator
