@@ -164,6 +164,12 @@ namespace winrt::MEraEmuWin::implementation {
             auto self = weak_this.get();
             if (!self) { return; }
             self->BootstrapEngine();
+
+            // If folder `sound` exists, show volume control
+            auto sound_dir = GAME_BASE_DIR L"sound";
+            if (self->m_app_settings.ReadSoundDir() && util::fs::file_exists(sound_dir)) {
+                VisualStateManager::GoToState(*self, L"SoundControlVisible", true);
+            }
         });
     }
 
@@ -293,7 +299,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (tb_ex) {
                 //tb_ex.ButtonShape({ 46, 40 });
             }
-            TopElasticRightSpace().Width(GridLengthHelper::FromPixels(tb.RightInset() - 20));
+            TopElasticRightSpace().Width(GridLengthHelper::FromPixels(tb.RightInset()));
         }
         else {
             wnd.SetTitleBar(nullptr);
@@ -301,12 +307,15 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
     void MainPage::ShowSimpleContentDialog(hstring const& title, hstring const& content) {
-        ContentDialog cd;
-        cd.XamlRoot(XamlRoot());
-        cd.Title(box_value(title));
-        cd.Content(box_value(content));
-        cd.CloseButtonText(L"OK");
-        cd.DefaultButton(ContentDialogButton::Close);
-        cd.ShowAsync();
+        try {
+            ContentDialog cd;
+            cd.XamlRoot(XamlRoot());
+            cd.Title(box_value(title));
+            cd.Content(box_value(content));
+            cd.CloseButtonText(L"OK");
+            cd.DefaultButton(ContentDialogButton::Close);
+            cd.ShowAsync();
+        }
+        catch (...) {}
     }
 }

@@ -4,12 +4,6 @@
 #include "EngineControl.g.cpp"
 #endif
 
-#include <random>
-#include <fstream>
-#include <filesystem>
-#include <variant>
-#include <winrt/Tenkai.UI.ViewManagement.h>
-
 #include "EngineUnhandledExceptionEventArgs.g.cpp"
 #include "DevTools/MainPage.h"
 
@@ -1637,6 +1631,16 @@ namespace winrt::MEraEmuWin::implementation {
 
             return util::fs::file_exists(actual_path.c_str());
         }
+        int64_t on_play_sound(std::string_view path, int64_t loop_count, bool is_bgm) override {
+            return exec_ui_work_or([&] {
+                return m_sd->ui_ctrl->RoutinePlaySound(to_hstring(path), loop_count, is_bgm);
+            });
+        }
+        int64_t on_stop_sound(int64_t sound_id) override {
+            return exec_ui_work_or([&] {
+                return m_sd->ui_ctrl->RoutineStopSound(sound_id);
+            });
+        }
         int64_t on_check_font(std::string_view font_name) override {
             static bool first_time = true;
             com_ptr<IDWriteFontCollection> font_collection;
@@ -2314,6 +2318,8 @@ namespace winrt::MEraEmuWin::implementation {
         m_ui_lines.clear();
         m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
         check_hresult(m_vsis_noref->Resize(0, 0));
+
+        m_sound.hub.stop_all();
     }
     void EngineControl::ApplySettings(MEraEmuWin::AppSettingsVM settings) {
         com_ptr<implementation::AppSettingsVM> new_settings;
@@ -2370,6 +2376,22 @@ namespace winrt::MEraEmuWin::implementation {
     }
     bool EngineControl::IsDevToolsOpen() {
         return m_devtools_wnd != nullptr;
+    }
+    void EngineControl::AudioVolume(double value) {
+        [](com_ptr<EngineControl> self, double value) -> util::winrt::fire_forget {
+            try {
+                co_await self->m_sound.ensure_inited_async(self.get());
+                self->m_sound.hub.set_output_volume(value);
+            }
+            catch (...) {
+                // Failed to initialize sound system
+                self->EmitUnhandledExceptionEvent(std::current_exception());
+            }
+        }(get_strong(), value);
+    }
+    double EngineControl::AudioVolume() {
+        if (!m_sound.hub) { return 0.0; }
+        return m_sound.hub.get_output_volume();
     }
     void EngineControl::EngineOutputImage_PointerMoved(IInspectable const& sender, PointerRoutedEventArgs const& e) {
         e.Handled(true);
@@ -3065,6 +3087,14 @@ namespace winrt::MEraEmuWin::implementation {
         m_sprite_objects.clear();
         ClearValue(m_EngineForeColorProperty);
         ClearValue(m_EngineBackColorProperty);
+        if (m_sound.hub) {
+            double old_vol = -1;
+            old_vol = m_sound.hub.get_output_volume();
+            drop_background(std::exchange(m_sound, {}));
+            if (old_vol >= 0) {
+                AudioVolume(old_vol);
+            }
+        }
         UpdateEngineImageOutputLayout(true);
         VirtualSurfaceImageSource img_src(0, 0);
         EngineOutputImage().Source(img_src);
@@ -3095,7 +3125,7 @@ namespace winrt::MEraEmuWin::implementation {
         VisualStateManager::GoToState(*this, L"ExecutionStarted", true);
         UserInputTextBox().Focus(FocusState::Programmatic);
     }
-    void EngineControl::UpdateEngineUI() {
+    void EngineControl::UpdateEngineUI() try {
         // Process UI works sent from the engine thread
         while (auto work = m_ui_task_rx.try_recv()) {
             (*work)();
@@ -3113,10 +3143,13 @@ namespace winrt::MEraEmuWin::implementation {
             }
         }
     }
+    catch (...) {
+        EmitUnhandledExceptionEvent(std::current_exception());
+    }
     void EngineControl::EmitUnhandledExceptionEvent(std::exception_ptr ex) {
         hresult code;
         hstring ex_msg;
-        try { std::rethrow_exception(m_sd->thread_exception); }
+        try { std::rethrow_exception(ex); }
         catch (...) {
             code = to_hresult();
             ex_msg = to_message();
@@ -4524,6 +4557,49 @@ namespace winrt::MEraEmuWin::implementation {
             return 0;
         }
         return it->second.height;
+    }
+    int64_t EngineControl::RoutinePlaySound(hstring const& path, int64_t loop_count, bool is_bgm) {
+        if (!m_app_settings->ReadSoundDir()) { return -1; }
+
+        if (!m_sound.hub) {
+            [](com_ptr<EngineControl> self, hstring path, int64_t loop_count, bool is_bgm) -> util::winrt::fire_forget {
+                try {
+                    co_await self->m_sound.ensure_inited_async(self.get());
+                    self->RoutinePlaySound(path, loop_count, is_bgm);
+                }
+                catch (...) {
+                    // Failed to initialize sound system
+                    self->EmitUnhandledExceptionEvent(std::current_exception());
+                }
+            }(get_strong(), path, loop_count, is_bgm);
+            return 0;
+        }
+
+        auto real_path = winrt::format(L"{}sound\\{}", m_sd->game_base_dir, path);
+
+        if (is_bgm) {
+            // Play BGM
+            m_sound.hub.play_bgm(real_path);
+            return 0;
+        }
+        else {
+            // Play SE
+            return (int64_t)m_sound.hub.play_sfx(real_path);
+        }
+    }
+    int64_t EngineControl::RoutineStopSound(int64_t sound_id) {
+        if (!m_sound.hub) { return 0; }
+
+        if (sound_id == 0) {
+            // Stop all BGMs
+            m_sound.hub.stop_bgm();
+        }
+        if (sound_id == INT64_MAX) {
+            // Stop all SEs
+            m_sound.hub.stop_all_sfx();
+        }
+
+        return 1;
     }
 
     int64_t EngineControl::GetCurrentUILinesCount() {

@@ -210,6 +210,7 @@
       <SubType>Code</SubType>
     </ClInclude>
     <ClInclude Include="Shared.hpp" />
+    <ClInclude Include="SoundPlayer.hpp" />
     <ClInclude Include="StackPanel.h">
       <DependentUpon>StackPanel.idl</DependentUpon>
       <SubType>Code</SubType>
@@ -445,8 +446,8 @@ cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --fea
     <Import Project="packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets" Condition="Exists('packages\Microsoft.Windows.CppWinRT.2.0.240405.15\build\native\Microsoft.Windows.CppWinRT.targets')" />
     <Import Project="packages\Microsoft.Web.WebView2.1.0.2849.39\build\native\Microsoft.Web.WebView2.targets" Condition="Exists('packages\Microsoft.Web.WebView2.1.0.2849.39\build\native\Microsoft.Web.WebView2.targets')" />
     <Import Project="packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.targets" Condition="Exists('packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.targets')" />
-    <Import Project="packages\Tenkai.UWP.0.1.6-alpha\build\native\Tenkai.UWP.targets" Condition="Exists('packages\Tenkai.UWP.0.1.6-alpha\build\native\Tenkai.UWP.targets')" />
     <Import Project="packages\WinUIEdit.Uwp.0.0.4-prerelease\build\native\WinUIEdit.Uwp.targets" Condition="Exists('packages\WinUIEdit.Uwp.0.0.4-prerelease\build\native\WinUIEdit.Uwp.targets')" />
+    <Import Project="packages\Tenkai.UWP.0.1.7-alpha\build\native\Tenkai.UWP.targets" Condition="Exists('packages\Tenkai.UWP.0.1.7-alpha\build\native\Tenkai.UWP.targets')" />
   </ImportGroup>
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
@@ -457,7 +458,7 @@ cargo run --manifest-path ..\MEraEmuCore\Cargo.toml --bin generate-headers --fea
     <Error Condition="!Exists('packages\Microsoft.Web.WebView2.1.0.2849.39\build\native\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.Web.WebView2.1.0.2849.39\build\native\Microsoft.Web.WebView2.targets'))" />
     <Error Condition="!Exists('packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.props')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.props'))" />
     <Error Condition="!Exists('packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Microsoft.UI.Xaml.2.8.7-prerelease.241119001\build\native\Microsoft.UI.Xaml.targets'))" />
-    <Error Condition="!Exists('packages\Tenkai.UWP.0.1.6-alpha\build\native\Tenkai.UWP.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Tenkai.UWP.0.1.6-alpha\build\native\Tenkai.UWP.targets'))" />
     <Error Condition="!Exists('packages\WinUIEdit.Uwp.0.0.4-prerelease\build\native\WinUIEdit.Uwp.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\WinUIEdit.Uwp.0.0.4-prerelease\build\native\WinUIEdit.Uwp.targets'))" />
+    <Error Condition="!Exists('packages\Tenkai.UWP.0.1.7-alpha\build\native\Tenkai.UWP.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\Tenkai.UWP.0.1.7-alpha\build\native\Tenkai.UWP.targets'))" />
   </Target>
 </Project>

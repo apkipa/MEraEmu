@@ -9,10 +9,22 @@
     mc:Ignorable="d">
 
     <Grid x:Name="LayoutRoot">
+        <VisualStateManager.VisualStateGroups>
+            <VisualStateGroup x:Name="SoundControlStates">
+                <VisualState x:Name="SoundControlVisible">
+                    <VisualState.Setters>
+                        <Setter Target="TitleVolumeControlButton.Visibility" Value="Visible" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="SoundControlHidden" />
+            </VisualStateGroup>
+        </VisualStateManager.VisualStateGroups>
+
         <Grid.RowDefinitions>
             <RowDefinition Height="40" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
+
         <Rectangle x:Name="TopDragRectangle" Grid.Row="0" Fill="{ThemeResource SystemControlBackgroundBaseLowBrush}" />
         <Grid Grid.Row="0" Margin="0">
             <!--
@@ -54,7 +66,29 @@
                        HorizontalAlignment="Center" VerticalAlignment="Center"
                        FontSize="13"
                        Text="MEraEmu" />
+            <StackPanel x:Name="TitleControlButtons" Grid.Column="2" Orientation="Horizontal"
+                       HorizontalAlignment="Right" VerticalAlignment="Center">
+                <Button x:Name="TitleVolumeControlButton" Style="{StaticResource FlatButtonStyle}" Visibility="Collapsed"
+                        Padding="0" CornerRadius="99" Width="28" Height="28">
+                    <Button.Content>
+                        <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}" FontSize="16"
+                                  Glyph="{x:Bind VolumeToGlyph(VolumeControlSlider.Value),Mode=OneWay}" />
+                    </Button.Content>
+                    <Button.Flyout>
+                        <Flyout>
+                            <StackPanel Orientation="Horizontal">
+                                <Slider x:Name="VolumeControlSlider" Width="240" IsThumbToolTipEnabled="False"
+                                        Minimum="0" Maximum="100" Value="18" StepFrequency="0.5" />
+                                <TextBlock x:Name="VolumeControlTextBlock" Margin="8,0,0,0" VerticalAlignment="Center"
+                                           Width="24" FontSize="12"
+                                           Text="{x:Bind VolumeControlSlider.Value,Mode=OneWay}" />
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
+            </StackPanel>
         </Grid>
-        <local:EngineControl x:Name="MainEngineControl" Grid.Row="1" />
+        <local:EngineControl x:Name="MainEngineControl" Grid.Row="1"
+                             AudioVolume="{x:Bind NormalizeVolume(VolumeControlSlider.Value),Mode=OneWay}" />
     </Grid>
 </Page>

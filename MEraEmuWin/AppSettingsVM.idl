@@ -9,6 +9,7 @@ namespace MEraEmuWin {
         // General
         Boolean ReadResourcesDir;
         Boolean ReadFontsDir;
+        Boolean ReadSoundDir;
         Boolean EnableParallelLoading;
         Boolean EnableJIT;
         Boolean EnableEngineControlOnError;

@@ -1282,7 +1282,7 @@ pub trait EraCompilerCallback {
     fn on_var_set_int(&mut self, name: &str, idx: usize, val: i64) -> Result<(), anyhow::Error>;
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error>;
     fn on_print_button(&mut self, content: &str, value: &str, flags: EraPrintExtendedFlags);
-    // Graphics subsystem
+    // ----- Graphics subsystem -----
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64;
     fn on_gcreatefromfile(&mut self, gid: i64, path: &str) -> i64;
     fn on_gdispose(&mut self, gid: i64) -> i64;
@@ -1324,7 +1324,7 @@ pub trait EraCompilerCallback {
     ) -> i64;
     fn on_spritewidth(&mut self, name: &str) -> i64;
     fn on_spriteheight(&mut self, name: &str) -> i64;
-    // Filesystem subsystem
+    // ----- Filesystem subsystem -----
     fn on_open_host_file(
         &mut self,
         path: &str,
@@ -1333,7 +1333,12 @@ pub trait EraCompilerCallback {
     fn on_check_host_file_exists(&mut self, path: &str) -> anyhow::Result<bool>;
     fn on_delete_host_file(&mut self, path: &str) -> anyhow::Result<()>;
     fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>>;
-    // Others
+    // Multimedia subsystem
+    // NOTE: Returns sound id (always positive).
+    fn on_play_sound(&mut self, path: &str, loop_count: i64, is_bgm: bool) -> i64;
+    // NOTE: If id == 0, stops all bgms. If id == i64::MAX, stops all sounds.
+    fn on_stop_sound(&mut self, sound_id: i64) -> i64;
+    // ----- Others -----
     fn on_check_font(&mut self, font_name: &str) -> i64;
     // NOTE: Returns UTC timestamp (in milliseconds).
     fn on_get_host_time(&mut self) -> u64;
@@ -3875,10 +3880,10 @@ pub enum EraExtBytecode1 {
     HtmlGetPrintedStr,
     HtmlStringLen,
     PrintButton,
+    /// `(sprite_name: Str, sprite_name_button: Str, width: Int, height: Int, ypos: Int)`
     PrintImg,
-    // PrintImg2,
-    // PrintImg3,
-    PrintImg4,
+    /// `(sprite_name: Str, sprite_name_button: Str, color_matrix, width: Int, height: Int, ypos: Int)`
+    PrintImgWithColorMatrix,
     PrintRect,
     PrintSpace,
     SplitString,
@@ -3938,6 +3943,10 @@ pub enum EraExtBytecode1 {
     EvalStrExpr,
     Await,
     VarExists,
+    PlayBgm,
+    StopBgm,
+    PlaySound,
+    StopSound,
 }
 
 #[derive_ReprC]
@@ -4098,7 +4107,7 @@ pub enum EraBytecodeKind {
     HtmlStringLen,
     PrintButton { flags: EraPrintExtendedFlags },
     PrintImg,
-    PrintImg4,
+    PrintImgWithColorMatrix,
     PrintRect,
     PrintSpace,
     SplitString,
@@ -4158,6 +4167,10 @@ pub enum EraBytecodeKind {
     EvalStrExpr,
     Await,
     VarExists,
+    PlayBgm,
+    StopBgm,
+    PlaySound,
+    StopSound,
     // ----- ExtOp2 -----
     IntrinsicGetNextEventHandler,
 }
@@ -4416,7 +4429,7 @@ impl EraBytecodeKind {
                         flags: EraPrintExtendedFlags::from(reader.ru8()?),
                     }),
                     Ext1::PrintImg => Ok(PrintImg),
-                    Ext1::PrintImg4 => Ok(PrintImg4),
+                    Ext1::PrintImgWithColorMatrix => Ok(PrintImgWithColorMatrix),
                     Ext1::PrintRect => Ok(PrintRect),
                     Ext1::PrintSpace => Ok(PrintSpace),
                     Ext1::SplitString => Ok(SplitString),
@@ -4491,10 +4504,14 @@ impl EraBytecodeKind {
                     Ext1::EvalStrExpr => Ok(EvalStrExpr),
                     Ext1::Await => Ok(Await),
                     Ext1::VarExists => Ok(VarExists),
-                    _ => Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Invalid ext op1 kind",
-                    )),
+                    Ext1::PlayBgm => Ok(PlayBgm),
+                    Ext1::StopBgm => Ok(StopBgm),
+                    Ext1::PlaySound => Ok(PlaySound),
+                    Ext1::StopSound => Ok(StopSound),
+                    // _ => Err(std::io::Error::new(
+                    //     std::io::ErrorKind::InvalidData,
+                    //     "Invalid ext op1 kind",
+                    // )),
                 }
             }
             Pri::ExtOp2 => {
@@ -4502,10 +4519,10 @@ impl EraBytecodeKind {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid ext op1 kind")
                 })? {
                     Ext2::IntrinsicGetNextEventHandler => Ok(IntrinsicGetNextEventHandler),
-                    _ => Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "Invalid ext op2 kind",
-                    )),
+                    // _ => Err(std::io::Error::new(
+                    //     std::io::ErrorKind::InvalidData,
+                    //     "Invalid ext op2 kind",
+                    // )),
                 }
             }
             _ => Err(std::io::Error::new(
@@ -4800,9 +4817,9 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::PrintImg as u8);
             }
-            PrintImg4 => {
+            PrintImgWithColorMatrix => {
                 bytes.push(Pri::ExtOp1 as u8);
-                bytes.push(Ext1::PrintImg4 as u8);
+                bytes.push(Ext1::PrintImgWithColorMatrix as u8);
             }
             PrintRect => {
                 bytes.push(Pri::ExtOp1 as u8);
@@ -5044,6 +5061,22 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::VarExists as u8);
             }
+            PlayBgm => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::PlayBgm as u8);
+            }
+            StopBgm => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::StopBgm as u8);
+            }
+            PlaySound => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::PlaySound as u8);
+            }
+            StopSound => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::StopSound as u8);
+            }
             // ----- ExtOp2 -----
             IntrinsicGetNextEventHandler => {
                 bytes.push(Pri::ExtOp2 as u8);
@@ -5165,7 +5198,8 @@ impl EraBytecodeKind {
             HtmlGetPrintedStr => 0,
             HtmlStringLen => -1,
             PrintButton { .. } => -2,
-            PrintImg | PrintImg4 => return None,
+            PrintImg => -5,
+            PrintImgWithColorMatrix => -6,
             PrintRect => -4,
             PrintSpace => -1,
             SplitString => -6,
@@ -5211,6 +5245,10 @@ impl EraBytecodeKind {
             EvalStrForm | EvalIntExpr | EvalStrExpr => 0,
             Await => -1,
             VarExists => 0,
+            PlayBgm => -1,
+            StopBgm => 0,
+            PlaySound => -1,
+            StopSound => 0,
             // ----- ExtOp2 -----
             IntrinsicGetNextEventHandler => -2,
         })

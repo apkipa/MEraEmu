@@ -15,6 +15,7 @@ namespace MEraEmuWin {
 
         Boolean IsStarted{ get; };
         Boolean IsDevToolsOpen;
+        Double AudioVolume;
 
         event Windows.Foundation.EventHandler<EngineUnhandledExceptionEventArgs> UnhandledException;
 

@@ -247,7 +247,7 @@ pub trait MEraEngineSysCallback {
     fn on_var_set_str(&mut self, name: &str, idx: usize, val: &str) -> Result<(), anyhow::Error> {
         Ok(())
     }
-    // Graphics subsystem
+    // ----- Graphics subsystem -----
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64 {
         0
     }
@@ -315,7 +315,7 @@ pub trait MEraEngineSysCallback {
     fn on_spriteheight(&mut self, name: &str) -> i64 {
         0
     }
-    // Filesystem subsystem
+    // ----- Filesystem subsystem -----
     fn on_open_host_file(
         &mut self,
         path: &str,
@@ -332,7 +332,16 @@ pub trait MEraEngineSysCallback {
     fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
     }
-    // Others
+    // ----- Multimedia subsystem -----
+    // NOTE: Returns sound id (always positive).
+    fn on_play_sound(&mut self, path: &str, loop_count: i64, is_bgm: bool) -> i64 {
+        0
+    }
+    // NOTE: If id == 0, stops all bgms. If id == i64::MAX, stops all sounds.
+    fn on_stop_sound(&mut self, sound_id: i64) -> i64 {
+        0
+    }
+    // ----- Others -----
     fn on_check_font(&mut self, font_name: &str) -> i64 {
         0
     }
@@ -624,6 +633,14 @@ impl<T: MEraEngineSysCallback> EraCompilerCallback for T {
 
     fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>> {
         self.on_list_host_file(path)
+    }
+
+    fn on_play_sound(&mut self, path: &str, loop_count: i64, is_bgm: bool) -> i64 {
+        self.on_play_sound(path, loop_count, is_bgm)
+    }
+
+    fn on_stop_sound(&mut self, sound_id: i64) -> i64 {
+        self.on_stop_sound(sound_id)
     }
 
     fn on_check_font(&mut self, font_name: &str) -> i64 {
@@ -1634,6 +1651,11 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                         "汚れの初期値" => {
                             add_arr_i64_str(self, "DEFAULT_STAIN", value, index_span)
                         }
+                        "起動時簡略表示" => {
+                            let flags = EraPrintExtendedFlags::new().with_is_line(true);
+                            self.ctx.callback.on_print(value, flags);
+                            Ok(())
+                        }
                         _ => {
                             // TODO: Handle unknown _Replace.csv line
                             let mut diag =
@@ -2392,112 +2414,112 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         // ………………………………………………
         // 数値配列型変数
         // ………………………………………………
-        self.add_int(rcstr::literal!("DAY"), smallvec![1], true);
-        self.add_int(rcstr::literal!("MONEY"), smallvec![1], true);
-        self.add_int(rcstr::literal!("TIME"), smallvec![1], true);
-        self.add_int(rcstr::literal!("ITEM"), smallvec![1], true);
-        self.add_int(rcstr::literal!("ITEMSALES"), smallvec![1], true);
-        self.add_int(rcstr::literal!("NOITEM"), smallvec![1], true);
-        self.add_int(rcstr::literal!("BOUGHT"), smallvec![1], true);
-        self.add_int(rcstr::literal!("PBAND"), smallvec![1], true);
-        self.add_int(rcstr::literal!("FLAG"), smallvec![1], true);
-        self.add_int(rcstr::literal!("TFLAG"), smallvec![1], true);
-        self.add_int(rcstr::literal!("TARGET"), smallvec![1], true);
-        self.add_int(rcstr::literal!("MASTER"), smallvec![1], true);
-        self.add_int(rcstr::literal!("PLAYER"), smallvec![1], true);
-        self.add_int(rcstr::literal!("ASSI"), smallvec![1], true);
-        self.add_int(rcstr::literal!("ASSIPLAY"), smallvec![1], true);
-        self.add_int(rcstr::literal!("UP"), smallvec![1], true);
-        self.add_int(rcstr::literal!("DOWN"), smallvec![1], true);
-        self.add_int(rcstr::literal!("LOSEBASE"), smallvec![1], true);
-        self.add_int(rcstr::literal!("PALAMLV"), smallvec![1], true);
-        self.add_int(rcstr::literal!("EXPLV"), smallvec![1], true);
-        self.add_int(rcstr::literal!("EJAC"), smallvec![1], true);
-        self.add_int(rcstr::literal!("PREVCOM"), smallvec![1], true);
-        self.add_int(rcstr::literal!("SELECTCOM"), smallvec![1], true);
-        self.add_int(rcstr::literal!("NEXTCOM"), smallvec![1], true);
-        self.add_int(rcstr::literal!("RESULT"), smallvec![1], true);
-        self.add_int(rcstr::literal!("COUNT"), smallvec![1], true);
-        self.add_int(rcstr::literal!("A"), smallvec![1], true);
-        self.add_int(rcstr::literal!("B"), smallvec![1], true);
-        self.add_int(rcstr::literal!("C"), smallvec![1], true);
-        self.add_int(rcstr::literal!("D"), smallvec![1], true);
-        self.add_int(rcstr::literal!("E"), smallvec![1], true);
-        self.add_int(rcstr::literal!("F"), smallvec![1], true);
-        self.add_int(rcstr::literal!("G"), smallvec![1], true);
-        self.add_int(rcstr::literal!("H"), smallvec![1], true);
-        self.add_int(rcstr::literal!("I"), smallvec![1], true);
-        self.add_int(rcstr::literal!("J"), smallvec![1], true);
-        self.add_int(rcstr::literal!("K"), smallvec![1], true);
-        self.add_int(rcstr::literal!("L"), smallvec![1], true);
-        self.add_int(rcstr::literal!("M"), smallvec![1], true);
-        self.add_int(rcstr::literal!("N"), smallvec![1], true);
-        self.add_int(rcstr::literal!("O"), smallvec![1], true);
-        self.add_int(rcstr::literal!("P"), smallvec![1], true);
-        self.add_int(rcstr::literal!("Q"), smallvec![1], true);
-        self.add_int(rcstr::literal!("R"), smallvec![1], true);
-        self.add_int(rcstr::literal!("S"), smallvec![1], true);
-        self.add_int(rcstr::literal!("T"), smallvec![1], true);
-        self.add_int(rcstr::literal!("U"), smallvec![1], true);
-        self.add_int(rcstr::literal!("V"), smallvec![1], true);
-        self.add_int(rcstr::literal!("W"), smallvec![1], true);
-        self.add_int(rcstr::literal!("X"), smallvec![1], true);
-        self.add_int(rcstr::literal!("Y"), smallvec![1], true);
-        self.add_int(rcstr::literal!("Z"), smallvec![1], true);
-        self.add_const_int(rcstr::literal!("ITEMPRICE"), smallvec![1], false);
+        self.add_int(rcstr::literal!("DAY"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("MONEY"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("TIME"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("ITEM"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("ITEMSALES"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("NOITEM"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("BOUGHT"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("PBAND"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("FLAG"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("TFLAG"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("TARGET"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("MASTER"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("PLAYER"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("ASSI"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("ASSIPLAY"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("UP"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("DOWN"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("LOSEBASE"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("PALAMLV"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("EXPLV"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("EJAC"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("PREVCOM"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("SELECTCOM"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("NEXTCOM"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("RESULT"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("COUNT"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("A"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("B"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("C"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("D"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("E"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("F"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("G"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("H"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("I"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("J"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("K"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("L"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("M"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("N"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("O"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("P"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("Q"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("R"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("S"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("T"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("U"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("V"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("W"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("X"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("Y"), smallvec![1000], true);
+        self.add_int(rcstr::literal!("Z"), smallvec![1000], true);
+        self.add_const_int(rcstr::literal!("ITEMPRICE"), smallvec![1000], false);
         // ………………………………………………
         // 文字列配列型変数
         // ………………………………………………
-        self.add_str(rcstr::literal!("SAVESTR"), smallvec![1], true);
-        self.add_str(rcstr::literal!("RESULTS"), smallvec![1], false);
-        self.add_str(rcstr::literal!("TSTR"), smallvec![1], true);
-        self.add_str(rcstr::literal!("STR"), smallvec![1], false);
+        self.add_str(rcstr::literal!("SAVESTR"), smallvec![100], true);
+        self.add_str(rcstr::literal!("RESULTS"), smallvec![100], false);
+        self.add_str(rcstr::literal!("TSTR"), smallvec![100], true);
+        self.add_str(rcstr::literal!("STR"), smallvec![100], false);
         // ITEMNAMEとITEMPRICEは片方を変更すると他方も同じ値に変更されます
-        self.add_const_str(rcstr::literal!("ITEMNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("ABLNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("EXPNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("TALENTNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("PALAMNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("TRAINNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("MARKNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("BASENAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("SOURCENAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("EXNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("EQUIPNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("TEQUIPNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("FLAGNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("CFLAGNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("TFLAGNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("TCVARNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("CSTRNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("STAINNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("STRNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("TSTRNAME"), smallvec![1], false);
-        self.add_const_str(rcstr::literal!("SAVESTRNAME"), smallvec![1], false);
+        self.add_const_str(rcstr::literal!("ITEMNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("ABLNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("EXPNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("TALENTNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("PALAMNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("TRAINNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("MARKNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("BASENAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("SOURCENAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("EXNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("EQUIPNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("TEQUIPNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("FLAGNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("CFLAGNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("TFLAGNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("TCVARNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("CSTRNAME"), smallvec![100], false);
+        self.add_const_str(rcstr::literal!("STAINNAME"), smallvec![1000], false);
+        self.add_const_str(rcstr::literal!("STRNAME"), smallvec![100], false);
+        self.add_const_str(rcstr::literal!("TSTRNAME"), smallvec![100], false);
+        self.add_const_str(rcstr::literal!("SAVESTRNAME"), smallvec![100], false);
         // ………………………………………………
         // 角色変数
         // ………………………………………………
-        self.add_chara_int(rcstr::literal!("BASE"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("MAXBASE"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("DOWNBASE"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("ABL"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("TALENT"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("EXP"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("MARK"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("PALAM"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("SOURCE"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("EX"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("NOWEX"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("CFLAG"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("JUEL"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("GOTJUEL"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("CUP"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("CDOWN"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("RELATION"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("EQUIP"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("TEQUIP"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("STAIN"), smallvec![1], true);
-        self.add_chara_int(rcstr::literal!("TCVAR"), smallvec![1], true);
+        self.add_chara_int(rcstr::literal!("BASE"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("MAXBASE"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("DOWNBASE"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("ABL"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("TALENT"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("EXP"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("MARK"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("PALAM"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("SOURCE"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("EX"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("NOWEX"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("CFLAG"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("JUEL"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("GOTJUEL"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("CUP"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("CDOWN"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("RELATION"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("EQUIP"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("TEQUIP"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("STAIN"), smallvec![1000], true);
+        self.add_chara_int(rcstr::literal!("TCVAR"), smallvec![1000], true);
         // ………………………………………………
         // 角色文字列変数
         // ………………………………………………
@@ -2509,13 +2531,13 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         // ………………………………………………
         // 特殊一時変数・一時文字列変数
         // ………………………………………………
-        self.add_int(rcstr::literal!("LOCAL"), smallvec![1], false);
-        self.add_str(rcstr::literal!("LOCALS"), smallvec![1], false);
-        self.add_int(rcstr::literal!("ARG"), smallvec![1], false);
-        self.add_str(rcstr::literal!("ARGS"), smallvec![1], false);
+        self.add_int(rcstr::literal!("LOCAL"), smallvec![1000], false);
+        self.add_str(rcstr::literal!("LOCALS"), smallvec![100], false);
+        self.add_int(rcstr::literal!("ARG"), smallvec![1000], false);
+        self.add_str(rcstr::literal!("ARGS"), smallvec![100], false);
         self.add_item(
             rcstr::literal!("GLOBAL"),
-            smallvec![1],
+            smallvec![1000],
             false,
             false,
             false,
@@ -2524,7 +2546,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         );
         self.add_item(
             rcstr::literal!("GLOBALS"),
-            smallvec![1],
+            smallvec![100],
             true,
             false,
             false,

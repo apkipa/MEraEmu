@@ -171,6 +171,13 @@ fn emit_mov_i64(ops: &mut Assembler, dst: u32, imm: i64) {
         );
         return;
     }
+    if imm == -1 {
+        dynasm!(ops
+            ; .arch aarch64
+            ; movn X(dst), #0
+        );
+        return;
+    }
 
     let mut remaining = imm;
     let mut shift = 0;

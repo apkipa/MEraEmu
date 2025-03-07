@@ -367,6 +367,10 @@ pub enum EraNode {
     StmtAwait(EraNodeRef),
     StmtSetColorByName(EraNodeRef),
     StmtSetBgColorByName(EraNodeRef),
+    StmtPlayBgm(EraNodeRef),
+    StmtStopBgm,
+    StmtPlaySound(EraNodeRef),
+    StmtStopSound,
 
     SelectCaseCondSingle(EraNodeRef),
     SelectCaseCondRange(EraNodeRef, EraNodeRef),
@@ -2904,6 +2908,10 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 b"SETBGCOLORBYNAME" => {
                     make!(EraNode::StmtSetBgColorByName(self.cmd_arg_limit(1, 1)))
                 }
+                b"PLAYBGM" => make!(EraNode::StmtPlayBgm(self.cmd_arg_limit(1, 1))),
+                b"STOPBGM" => make!(EraNode::StmtStopBgm),
+                b"PLAYSOUND" => make!(EraNode::StmtPlaySound(self.cmd_arg_limit(1, 1))),
+                b"STOPSOUND" => make!(EraNode::StmtStopSound),
                 b"GCREATE"
                 | b"GCREATEFROMFILE"
                 | b"GDISPOSE"

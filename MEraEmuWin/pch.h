@@ -47,6 +47,9 @@
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.Media.h>
+#include <winrt/Windows.Media.Audio.h>
+#include <winrt/Windows.Media.Render.h>
 
 #include <winrt/Microsoft.UI.Xaml.Automation.Peers.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
@@ -60,6 +63,8 @@
 #include <winrt/Tenkai.UI.Xaml.h>
 #include <winrt/Tenkai.UI.Xaml.Data.h>
 #include <winrt/Tenkai.UI.Xaml.Controls.h>
+#include <winrt/Tenkai.Storage.h>
+#include <winrt/Tenkai.Storage.Streams.h>
 
 //#include <winrt/Microsoft.Xaml.Interactivity.h>
 //#include <winrt/Microsoft.Xaml.Interactions.Core.h>
@@ -91,6 +96,9 @@
 #include <atomic>
 #include <chrono>
 #include <set>
+#include <random>
+#include <fstream>
+#include <filesystem>
 
 #include "util.hpp"
 #include "Shared.hpp"

@@ -1421,7 +1421,6 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         &mut self,
         save_header: crate::v2::savefs::EraSaveFileHeader,
     ) -> anyhow::Result<CheckSaveHeaderResult> {
-        use crate::v2::savefs::*;
         use anyhow::bail;
 
         let version = save_header.version;
@@ -4533,6 +4532,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         anyhow::bail!("PrintImg is not yet implemented");
     }
 
+    fn instr_print_img_with_color_matrix(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        // TODO: PrintImg, PrintImg4 ?
+        anyhow::bail!("PrintImg is not yet implemented");
+    }
+
     fn instr_print_rect(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
@@ -6030,6 +6036,42 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         Ok(())
     }
 
+    fn instr_play_bgm(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, path:s);
+        self.o.ctx.callback.on_play_sound(path, 0, true);
+        self.o.stack.replace_tail(stack_count, []);
+        self.add_ip_offset(Bc::PlayBgm.bytes_len() as i32);
+        Ok(())
+    }
+
+    fn instr_stop_bgm(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        self.o.ctx.callback.on_stop_sound(0);
+        self.add_ip_offset(Bc::StopBgm.bytes_len() as i32);
+        Ok(())
+    }
+
+    fn instr_play_sound(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, path:s);
+        self.o.ctx.callback.on_play_sound(path, 1, false);
+        self.o.stack.replace_tail(stack_count, []);
+        self.add_ip_offset(Bc::PlaySound.bytes_len() as i32);
+        Ok(())
+    }
+
+    fn instr_stop_sound(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        self.o.ctx.callback.on_stop_sound(0);
+        self.add_ip_offset(Bc::StopSound.bytes_len() as i32);
+        Ok(())
+    }
+
     fn instr_intrinsic_get_next_event_handler(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
@@ -6248,7 +6290,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::HtmlGetPrintedStr => s.instr_html_get_printed_str()?,
             Bc::HtmlStringLen => s.instr_html_string_len()?,
             Bc::PrintButton { flags } => s.instr_print_button(flags)?,
-            Bc::PrintImg | Bc::PrintImg4 => s.instr_print_img()?,
+            Bc::PrintImg => s.instr_print_img()?,
+            Bc::PrintImgWithColorMatrix => s.instr_print_img_with_color_matrix()?,
             Bc::PrintRect => s.instr_print_rect()?,
             Bc::PrintSpace => s.instr_print_space()?,
             Bc::SplitString => s.instr_split_string()?,
@@ -6308,6 +6351,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::EvalStrExpr => s.instr_eval_str_expr()?,
             Bc::Await => s.instr_await()?,
             Bc::VarExists => s.instr_var_exists()?,
+            Bc::PlayBgm => s.instr_play_bgm()?,
+            Bc::StopBgm => s.instr_stop_bgm()?,
+            Bc::PlaySound => s.instr_play_sound()?,
+            Bc::StopSound => s.instr_stop_sound()?,
             Bc::IntrinsicGetNextEventHandler => s.instr_intrinsic_get_next_event_handler()?,
             // _ => s.instr_raise_illegal_instruction()?,
             // _ => {
@@ -6945,7 +6992,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 Bc::PrintButton { flags } => {
                     call_subroutine!(instr_print_button, flags: EraPrintExtendedFlags)
                 }
-                Bc::PrintImg | Bc::PrintImg4 => call_subroutine!(instr_print_img),
+                Bc::PrintImg => call_subroutine!(instr_print_img),
+                Bc::PrintImgWithColorMatrix => call_subroutine!(instr_print_img_with_color_matrix),
                 Bc::PrintRect => call_subroutine!(instr_print_rect),
                 Bc::PrintSpace => call_subroutine!(instr_print_space),
                 Bc::SplitString => call_subroutine!(instr_split_string),
@@ -7047,6 +7095,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 Bc::EvalStrExpr => call_subroutine_eval!(instr_eval_str_expr),
                 Bc::Await => call_subroutine!(instr_await),
                 Bc::VarExists => call_subroutine!(instr_var_exists),
+                Bc::PlayBgm => call_subroutine!(instr_play_bgm),
+                Bc::StopBgm => call_subroutine!(instr_stop_bgm),
+                Bc::PlaySound => call_subroutine!(instr_play_sound),
+                Bc::StopSound => call_subroutine!(instr_stop_sound),
                 Bc::IntrinsicGetNextEventHandler => {
                     call_subroutine!(instr_intrinsic_get_next_event_handler)
                 } // _ => anyhow::bail!("unimplemented bytecode {:?}", inst),

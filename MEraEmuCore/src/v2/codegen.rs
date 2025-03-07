@@ -2957,6 +2957,22 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
             EraNode::StmtSetBgColorByName(args) => {
                 self.stmt_setcolorbyname(stmt, "@BGCOLOR")?;
             }
+            EraNode::StmtPlayBgm(args) => {
+                let ([path], []) = self.unpack_list_expr(args)?;
+                self.str_expr(path)?;
+                self.chunk.push_bc(BcKind::PlayBgm, stmt_span);
+            }
+            EraNode::StmtStopBgm => {
+                self.chunk.push_bc(BcKind::StopBgm, stmt_span);
+            }
+            EraNode::StmtPlaySound(args) => {
+                let ([path], []) = self.unpack_list_expr(args)?;
+                self.str_expr(path)?;
+                self.chunk.push_bc(BcKind::PlaySound, stmt_span);
+            }
+            EraNode::StmtStopSound => {
+                self.chunk.push_bc(BcKind::StopSound, stmt_span);
+            }
             _ => {
                 let mut diag = self.make_diag();
                 diag.span_err(Default::default(), stmt_span, "invalid statement");

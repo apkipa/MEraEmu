@@ -8,6 +8,8 @@
 
 #include "MEraEngine.hpp"
 
+#include "SoundPlayer.hpp"
+
 #include "DPHelper.h"
 
 namespace winrt::MEraEmuWin::DevTools::implementation {
@@ -210,6 +212,8 @@ namespace winrt::MEraEmuWin::implementation {
         bool IsStarted();
         void IsDevToolsOpen(bool value);
         bool IsDevToolsOpen();
+        void AudioVolume(double value);
+        double AudioVolume();
 
         event_token UnhandledException(Windows::Foundation::EventHandler<MEraEmuWin::EngineUnhandledExceptionEventArgs> h) {
             return m_ev_UnhandledException.add(h);
@@ -389,6 +393,9 @@ namespace winrt::MEraEmuWin::implementation {
         // TODO...
         int64_t RoutineSpriteWidth(hstring const& name);
         int64_t RoutineSpriteHeight(hstring const& name);
+        // TODO...
+        int64_t RoutinePlaySound(hstring const& path, int64_t loop_count, bool is_bgm);
+        int64_t RoutineStopSound(int64_t sound_id);
 
         int64_t GetCurrentUILinesCount();
         void SetCurrentLineAlignment(int64_t value);
@@ -532,6 +539,37 @@ namespace winrt::MEraEmuWin::implementation {
             }
         };
         std::map<hstring, SpriteObject, std::less<>> m_sprite_objects;
+        struct SoundData {
+            concurrency::task<SoundPlaybackHub> init_task{};
+            SoundPlaybackHub hub{ nullptr };
+
+            auto ensure_inited_async(EngineControl* ctrl) {
+                return util::winrt::apartment_aware_task(ensure_inited_async_inner(ctrl));
+            }
+
+        private:
+            concurrency::task<void> ensure_inited_async_inner(EngineControl* ctrl) {
+                if (hub) { co_return; }
+                bool is_init = false;
+                if (init_task == decltype(init_task){}) {
+                    init_task = SoundPlaybackHub::create_async();
+                    is_init = true;
+                }
+                auto strong_this = ctrl->get_strong();
+                {
+                    auto task = init_task;
+                    hub = co_await task;
+                }
+                init_task = {};
+                if (is_init) {
+                    hub.register_on_exception([strong_this](std::exception_ptr ex) {
+                        if (auto ctrl = strong_this.get()) {
+                            ctrl->EmitUnhandledExceptionEvent(std::move(ex));
+                        }
+                    });
+                }
+            }
+        } m_sound;
     };
 }
 

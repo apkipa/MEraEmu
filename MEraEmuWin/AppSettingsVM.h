@@ -24,6 +24,7 @@ namespace winrt::MEraEmuWin::implementation {
     /* General */ \
     X(bool, ReadResourcesDir, read_resources_dir) \
     X(bool, ReadFontsDir, read_fonts_dir) \
+    X(bool, ReadSoundDir, read_sound_dir) \
     X(bool, EnableParallelLoading, enable_parallel_loading) \
     X(bool, EnableJIT, enable_jit) \
     X(bool, EnableEngineControlOnError, enable_engine_control_on_error) \
@@ -84,6 +85,7 @@ namespace winrt::MEraEmuWin::implementation {
         // General
         bool read_resources_dir = true;
         bool read_fonts_dir = true;
+        bool read_sound_dir = true;
         bool enable_parallel_loading = false;
         bool enable_jit = false;
         bool enable_engine_control_on_error = false;

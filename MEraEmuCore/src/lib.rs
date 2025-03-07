@@ -484,7 +484,7 @@ trait MEraEngineSysCallbackFfi {
         idx: usize,
         val: string::str_ref<'_>,
     ) -> FfiResult<()>;
-    // Graphics subsystem
+    // ----- Graphics subsystem -----
     fn on_gcreate(&mut self, gid: i64, width: i64, height: i64) -> i64;
     fn on_gcreatefromfile(&mut self, gid: i64, path: string::str_ref<'_>) -> i64;
     fn on_gdispose(&mut self, gid: i64) -> i64;
@@ -526,7 +526,7 @@ trait MEraEngineSysCallbackFfi {
     ) -> i64;
     fn on_spritewidth(&mut self, name: string::str_ref<'_>) -> i64;
     fn on_spriteheight(&mut self, name: string::str_ref<'_>) -> i64;
-    // Filesystem subsystem
+    // ----- Filesystem subsystem -----
     fn on_open_host_file(
         &mut self,
         path: string::str_ref<'_>,
@@ -538,6 +538,11 @@ trait MEraEngineSysCallbackFfi {
         &mut self,
         path: string::str_ref<'_>,
     ) -> FfiResult<VirtualPtr<dyn MEraEngineHostFileListingFfi>>;
+    // ----- Multimedia subsystem -----
+    // NOTE: Returns sound id (always positive).
+    fn on_play_sound(&mut self, path: string::str_ref<'_>, loop_count: i64, is_bgm: bool) -> i64;
+    // NOTE: If id == 0, stops all bgms. If id == i64::MAX, stops all sounds.
+    fn on_stop_sound(&mut self, sound_id: i64) -> i64;
     // Others
     fn on_check_font(&mut self, font_name: string::str_ref<'_>) -> i64;
     // NOTE: Returns UTC timestamp (in milliseconds).
@@ -876,6 +881,12 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackFfi> {
             files.push(name.to_string());
         }
         Ok(files)
+    }
+    fn on_play_sound(&mut self, path: &str, loop_count: i64, is_bgm: bool) -> i64 {
+        MEraEngineSysCallbackFfi::on_play_sound(self, path.into(), loop_count, is_bgm)
+    }
+    fn on_stop_sound(&mut self, sound_id: i64) -> i64 {
+        MEraEngineSysCallbackFfi::on_stop_sound(self, sound_id)
     }
     fn on_check_font(&mut self, font_name: &str) -> i64 {
         MEraEngineSysCallbackFfi::on_check_font(self, font_name.into())

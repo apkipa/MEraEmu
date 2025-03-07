@@ -13,6 +13,8 @@
                           IsOn="{x:Bind ParentPage.Settings.ReadResourcesDir,Mode=TwoWay}" />
             <ToggleSwitch Header="加载 fonts 文件夹"
                           IsOn="{x:Bind ParentPage.Settings.ReadFontsDir,Mode=TwoWay}" />
+            <ToggleSwitch Header="加载 sound 文件夹"
+                          IsOn="{x:Bind ParentPage.Settings.ReadSoundDir,Mode=TwoWay}" />
             <ToggleSwitch Header="启用并行加载 (实验性)"
                           IsOn="{x:Bind ParentPage.Settings.EnableParallelLoading,Mode=TwoWay}" />
             <ToggleSwitch Header="启用 JIT 缓存 (实验性)"

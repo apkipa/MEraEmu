@@ -399,6 +399,18 @@ namespace util {
         inline bool file_exists(const wchar_t* path) {
             return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
         }
+
+        inline std::wstring to_absolute_path(const wchar_t* path) {
+            DWORD len = GetFullPathNameW(path, 0, nullptr, nullptr);
+            if (len == 0) {
+                return path;
+            }
+            std::wstring abs_path(len, L'\0');
+            if (GetFullPathNameW(path, len, abs_path.data(), nullptr) == 0) {
+                return path;
+            }
+            return abs_path;
+        }
     }
 
     namespace winrt {
@@ -451,6 +463,43 @@ namespace util {
                 std::future<T> fut;
             };
             return Awaiter{ std::move(fut) };
+        }
+
+        template <typename T>
+        inline auto apartment_aware_task(concurrency::task<T> task) {
+            struct Awaiter {
+                Awaiter(concurrency::task<T> task) : task(std::move(task)) {}
+                bool await_ready() const { return task.is_done(); }
+                T await_resume() {
+                    if constexpr (std::is_same_v<T, void>) {
+                        task.get();
+                    }
+                    else {
+                        return task.get();
+                    }
+                }
+                void await_suspend(std::coroutine_handle<> handle) {
+                    ::winrt::apartment_context ui_ctx;
+                    task.then([=](concurrency::task<T> completed_task) {
+                        auto awaiter = ::winrt::operator co_await(ui_ctx);
+                        awaiter.await_suspend(handle);
+                    }, concurrency::task_continuation_context::use_default());
+                }
+                concurrency::task<T> task;
+            };
+            return Awaiter{ std::move(task) };
+        }
+
+        template <typename T>
+        void drop_background(T t) {
+            resume_background([t = std::move(t)] {
+                if constexpr (requires { t->Close(); }) {
+                    t->Close();
+                }
+                if constexpr (requires { t.Close(); }) {
+                    t.Close();
+                }
+            });
         }
 
         struct fire_forget {
@@ -581,4 +630,5 @@ namespace util {
 #pragma warning(pop)
 
 // Preludes
+using util::winrt::drop_background;
 using util::winrt::fire_forget;

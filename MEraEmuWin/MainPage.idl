@@ -2,5 +2,10 @@ namespace MEraEmuWin {
     [default_interface]
     runtimeclass MainPage : Windows.UI.Xaml.Controls.Page {
         MainPage();
-    }
+
+        String VolumeToGlyph(Double value);
+        Double NormalizeVolume(Double value);
+
+        Windows.UI.Xaml.Controls.Slider VolumeControlSlider{ get; };
+    };
 }

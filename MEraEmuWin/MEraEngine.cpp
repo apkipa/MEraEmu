@@ -428,6 +428,12 @@ MEraEngineBuilder::MEraEngineBuilder(std::unique_ptr<MEraEngineSysCallback> call
                 return VirtualPtr__Erased_ptr_MEraEngineHostFileListingFfiVTable_t{};
             });
         },
+        .on_play_sound = [](Erased_t* self, slice_ref_uint8_t path, int64_t loop_count, bool is_bgm) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_play_sound(STR_VIEW(path), loop_count, is_bgm);
+        },
+        .on_stop_sound = [](Erased_t* self, int64_t sound_id) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_stop_sound(sound_id);
+        },
         .on_check_font = [](Erased_t* self, slice_ref_uint8_t font_name) noexcept {
             return ((MEraEngineSysCallback*)self)->on_check_font(STR_VIEW(font_name));
         },
