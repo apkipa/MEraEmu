@@ -144,6 +144,10 @@
       <DependentUpon>AppSettingsVM.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClInclude>
+    <ClInclude Include="ColorPickerButton.h">
+      <DependentUpon>ColorPickerButton.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
     <ClInclude Include="DevTools\CodeEditControl.h">
       <DependentUpon>DevTools\CodeEditControl.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -221,6 +225,9 @@
     <ApplicationDefinition Include="App.xaml">
       <SubType>Designer</SubType>
     </ApplicationDefinition>
+    <Page Include="ColorPickerButton.xaml">
+      <SubType>Designer</SubType>
+    </Page>
     <Page Include="DevTools\CodeEditControl.xaml">
       <SubType>Designer</SubType>
     </Page>
@@ -272,6 +279,10 @@
   <ItemGroup>
     <ClCompile Include="AppSettingsVM.cpp">
       <DependentUpon>AppSettingsVM.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
+    <ClCompile Include="ColorPickerButton.cpp">
+      <DependentUpon>ColorPickerButton.xaml</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
     <ClCompile Include="DevTools\CodeEditControl.cpp">
@@ -360,6 +371,10 @@
     </Midl>
     <Midl Include="AppSettingsVM.idl">
       <SubType>Designer</SubType>
+    </Midl>
+    <Midl Include="ColorPickerButton.idl">
+      <DependentUpon>ColorPickerButton.xaml</DependentUpon>
+      <SubType>Code</SubType>
     </Midl>
     <Midl Include="DevTools\CodeEditControl.idl">
       <DependentUpon>DevTools\CodeEditControl.xaml</DependentUpon>

@@ -24,6 +24,12 @@
             <muxc:NumberBox Header="游戏行高" SpinButtonPlacementMode="Inline" Minimum="0" MaxWidth="300"
                             Value="{x:Bind ParentPage.Settings.GameLineHeight,Mode=TwoWay}" />
             <!-- TODO: Color picker -->
+            <TextBlock Text="游戏背景颜色" Margin="0,0,0,2" />
+            <local:ColorPickerButton SelectedColor="{x:Bind ParentPage.Settings.GameBackgroundColor,Mode=TwoWay}" />
+            <TextBlock Text="游戏字体颜色" Margin="0,0,0,2" />
+            <local:ColorPickerButton SelectedColor="{x:Bind ParentPage.Settings.GameForegroundColor,Mode=TwoWay}" />
+            <TextBlock Text="游戏高亮颜色" Margin="0,0,0,2" />
+            <local:ColorPickerButton SelectedColor="{x:Bind ParentPage.Settings.GameHighlightColor,Mode=TwoWay}" />
             <muxc:NumberBox Header="PRINTC 每行个数" SpinButtonPlacementMode="Inline" Minimum="0" MaxWidth="300"
                             Value="{x:Bind ParentPage.Settings.GamePrintCCountPerLine,Mode=TwoWay}" />
             <muxc:NumberBox Header="PRINTC 字符长度" SpinButtonPlacementMode="Inline" Minimum="0" MaxWidth="300"

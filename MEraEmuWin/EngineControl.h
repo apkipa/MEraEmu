@@ -220,17 +220,16 @@ namespace winrt::MEraEmuWin::implementation {
         }
         void UnhandledException(event_token et) noexcept { m_ev_UnhandledException.remove(et); }
 
-        DP_DECLARE_PROP_METHOD(EngineForeColor);
-        DP_DECLARE_PROP_METHOD(EngineBackColor);
         DP_DECLARE_PROP_METHOD(EngineTitle);
 
-        DP_DEFINE_GETSETTER(EngineForeColor, Windows::UI::Color);
-        DP_DEFINE_GETSETTER(EngineBackColor, Windows::UI::Color);
         DP_DEFINE_GETSETTER(EngineTitle, hstring const&);
 
-        // XAML helpers
-        Windows::UI::Xaml::Media::SolidColorBrush ColorToBrush(Windows::UI::Color value) {
-            return Windows::UI::Xaml::Media::SolidColorBrush(value);
+        Windows::UI::Color EngineForeColor() const noexcept { return m_cur_fore_color; }
+        void EngineForeColor(Windows::UI::Color value) noexcept { m_cur_fore_color = value; }
+        Windows::UI::Color EngineBackColor() const noexcept { return m_cur_back_color; }
+        void EngineBackColor(Windows::UI::Color value) noexcept {
+            m_cur_back_color = value;
+            BackgroundSolidBrush().Color(value);
         }
 
         void EngineOutputImage_PointerPressed(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
@@ -412,8 +411,6 @@ namespace winrt::MEraEmuWin::implementation {
         void PushNoSkipDisplay();
         void PopNoSkipDisplay();
 
-        DP_DECLARE_PROP(EngineForeColor);
-        DP_DECLARE_PROP(EngineBackColor);
         DP_DECLARE_PROP(EngineTitle);
 
         std::shared_ptr<EngineSharedData> m_sd;
@@ -438,6 +435,7 @@ namespace winrt::MEraEmuWin::implementation {
         uint32_t m_cur_line_alignment{};
         uint32_t m_cur_font_style{};
         hstring m_cur_font_name{};
+        Windows::UI::Color m_cur_fore_color{}, m_cur_back_color{};
         bool m_auto_redraw{};
         bool m_skip_display{};
         uint32_t m_no_skip_display_cnt{};

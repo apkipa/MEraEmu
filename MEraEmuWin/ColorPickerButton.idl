@@ -1,0 +1,9 @@
+namespace MEraEmuWin {
+    [default_interface]
+    runtimeclass ColorPickerButton : Windows.UI.Xaml.Controls.UserControl {
+        ColorPickerButton();
+
+        static Windows.UI.Xaml.DependencyProperty SelectedColorProperty{ get; };
+        Windows.UI.Color SelectedColor;
+    };
+}

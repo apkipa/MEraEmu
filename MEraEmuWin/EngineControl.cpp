@@ -2319,7 +2319,11 @@ namespace winrt::MEraEmuWin::implementation {
         m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
         check_hresult(m_vsis_noref->Resize(0, 0));
 
-        m_sound.hub.stop_all();
+        if (m_sound.hub) {
+            m_sound.hub.stop_all();
+        }
+        EngineForeColor(m_app_settings->GameForegroundColor());
+        EngineBackColor(m_app_settings->GameBackgroundColor());
     }
     void EngineControl::ApplySettings(MEraEmuWin::AppSettingsVM settings) {
         com_ptr<implementation::AppSettingsVM> new_settings;
@@ -3083,8 +3087,8 @@ namespace winrt::MEraEmuWin::implementation {
         m_font_map.clear();
         m_graphics_objects.clear();
         m_sprite_objects.clear();
-        ClearValue(m_EngineForeColorProperty);
-        ClearValue(m_EngineBackColorProperty);
+        EngineForeColor(m_app_settings->GameForegroundColor());
+        EngineBackColor(m_app_settings->GameBackgroundColor());
         if (m_sound.hub) {
             double old_vol = -1;
             old_vol = m_sound.hub.get_output_volume();
@@ -4714,8 +4718,6 @@ namespace winrt::MEraEmuWin::implementation {
         }
     }
 
-    DP_DEFINE_PROP(EngineForeColor, box_value(Windows::UI::Colors::Silver()));
-    DP_DEFINE_PROP(EngineBackColor, box_value(Windows::UI::Colors::Black()));
     DP_DEFINE_PROP(EngineTitle, box_value(L"MEraEmu"), [](DependencyObject const& sender, DependencyPropertyChangedEventArgs const& e) {
         auto that = sender.as<EngineControl>();
         that->UpdateDevToolsWindow();

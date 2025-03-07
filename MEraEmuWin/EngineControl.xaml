@@ -7,7 +7,11 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Grid x:Name="LayoutRoot" Background="{x:Bind ColorToBrush(EngineBackColor), Mode=OneWay}">
+    <Grid x:Name="LayoutRoot">
+        <Grid.Background>
+            <SolidColorBrush x:Name="BackgroundSolidBrush" Color="Black" />
+        </Grid.Background>
+
         <VisualStateManager.VisualStateGroups>
             <VisualStateGroup x:Name="EngineExecutionStates">
                 <VisualState x:Name="ExecutionStarted"/>
@@ -19,7 +23,7 @@
                 </VisualState>
             </VisualStateGroup>
         </VisualStateManager.VisualStateGroups>
-        
+
         <ScrollViewer x:Name="RootScrollViewer" HorizontalScrollMode="Auto" BringIntoViewOnFocusChange="False"
                       VerticalScrollMode="Enabled" VerticalScrollBarVisibility="Visible"
                       ZoomMode="Disabled">

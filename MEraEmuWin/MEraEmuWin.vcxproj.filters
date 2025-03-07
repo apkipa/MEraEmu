@@ -27,6 +27,7 @@
       <Filter>Settings</Filter>
     </Page>
     <Page Include="TextBox_themeresources.xaml" />
+    <Page Include="ColorPickerButton.xaml" />
   </ItemGroup>
   <ItemGroup>
     <Midl Include="App.idl" />
