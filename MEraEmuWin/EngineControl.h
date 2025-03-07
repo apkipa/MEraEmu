@@ -428,6 +428,7 @@ namespace winrt::MEraEmuWin::implementation {
         com_ptr<ID2D1SpriteBatch> m_d2d_sprite_batch;
         std::unordered_map<uint32_t, com_ptr<ID2D1SolidColorBrush>> m_brush_map;
         std::unordered_map<hstring, com_ptr<IDWriteTextFormat>> m_font_map;
+        com_ptr<IDWriteTextLayout4> m_empty_text_layout;
         std::vector<EngineUIPrintLineData> m_ui_lines, m_ui_lines_alt;
         bool m_reused_last_line{ false };
         // Introduced to handle issued CLEARLINE commands while REDRAW = 0. Range: [pos - count, pos)

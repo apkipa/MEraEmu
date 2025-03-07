@@ -24,6 +24,7 @@ namespace MEraEmuWin {
         String GameDefaultFontName;
         Double GameFontSize;
         Double GameLineHeight;
+        UInt32 GameHistoryLinesCount;
         Windows.UI.Color GameBackgroundColor;
         Windows.UI.Color GameForegroundColor;
         Windows.UI.Color GameHighlightColor;

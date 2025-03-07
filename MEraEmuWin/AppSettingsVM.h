@@ -37,6 +37,7 @@ namespace winrt::MEraEmuWin::implementation {
     X(hstring, GameDefaultFontName, game_default_font_name) \
     X(double, GameFontSize, game_font_size) \
     X(double, GameLineHeight, game_line_height) \
+    X(uint32_t, GameHistoryLinesCount, game_history_lines_count) \
     X(Windows::UI::Color, GameBackgroundColor, game_background_color) \
     X(Windows::UI::Color, GameForegroundColor, game_foreground_color) \
     X(Windows::UI::Color, GameHighlightColor, game_highlight_color) \
@@ -100,6 +101,7 @@ namespace winrt::MEraEmuWin::implementation {
         hstring game_default_font_name = L"MS Gothic";
         double game_font_size = 16.0;
         double game_line_height = 16.0;
+        uint32_t game_history_lines_count = 20000;
         Windows::UI::Color game_background_color = Windows::UI::Colors::Black();
         Windows::UI::Color game_foreground_color = Windows::UI::Colors::Silver();
         Windows::UI::Color game_highlight_color = Windows::UI::Colors::Yellow();

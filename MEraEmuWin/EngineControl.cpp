@@ -2041,6 +2041,20 @@ namespace winrt::MEraEmuWin::implementation {
 
         EngineUIPrintLineData(hstring const& txt) : txt(txt) {}
 
+        bool is_empty() const noexcept {
+            return txt.empty();
+        }
+
+        void put_empty(EngineControl* ctrl) {
+            if (is_empty()) { return; }
+            txt = {};
+            txt_layout = ctrl->m_empty_text_layout;
+            styles.clear();
+            buttons.clear();
+            inline_objs.clear();
+            // No need to flush metrics; it is OK to keep stale metrics until resized
+        }
+
         void update_width(EngineControl* ctrl, uint32_t width) {
             if (!txt_layout) { return ensure_layout(ctrl, width); }
             check_hresult(txt_layout->SetMaxWidth(static_cast<float>(width)));
@@ -2048,6 +2062,12 @@ namespace winrt::MEraEmuWin::implementation {
 
         void ensure_layout(EngineControl* ctrl, uint32_t width) {
             if (txt_layout) { return; }
+            if (is_empty() && ctrl->m_empty_text_layout) {
+                // Reuse empty text layout
+                txt_layout = ctrl->m_empty_text_layout;
+                return;
+            }
+
             com_ptr<IDWriteTextLayout> tmp_layout;
             if (ctrl->m_app_settings->EnableGdiCompatRender()) {
                 check_hresult(g_dwrite_factory->CreateGdiCompatibleTextLayout(
@@ -2090,6 +2110,13 @@ namespace winrt::MEraEmuWin::implementation {
             }
             for (auto const& inline_obj : inline_objs) {
                 txt_layout->SetInlineObject(inline_obj.obj.get(), { inline_obj.starti, inline_obj.len });
+            }
+
+            if (is_empty()) [[unlikely]] {
+                // Cache empty text layout
+                // NOTE: This should not result in data race since we always add the first empty line
+                //       before any other lines are added.
+                ctrl->m_empty_text_layout = txt_layout;
             }
         }
 
@@ -2248,6 +2275,8 @@ namespace winrt::MEraEmuWin::implementation {
         }
 
         void flush_metrics(EngineControl* ctrl) {
+            if (!txt_layout) { return; }
+
             //acc_height -= line_height;
             DWRITE_TEXT_METRICS1 metrics;
             check_hresult(txt_layout->GetMetrics(&metrics));
@@ -2331,8 +2360,12 @@ namespace winrt::MEraEmuWin::implementation {
         m_user_skipping = false;
         m_ui_lines.clear();
         m_cur_composing_line = {};
+        m_reused_last_line = false;
+        m_empty_text_layout = nullptr;
         FlushCurrentPrintLine(true);    // Add an empty line at the top of the screen
         m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
+        m_cur_font_name = m_app_settings->GameDefaultFontName();
+        m_cur_font_style = 0;
         check_hresult(m_vsis_noref->Resize(0, 0));
 
         if (m_sound.hub) {
@@ -3088,9 +3121,10 @@ namespace winrt::MEraEmuWin::implementation {
         m_d2d_ctx = nullptr;
         m_ui_lines.clear();
         m_cur_composing_line = {};
+        m_reused_last_line = false;
+        m_empty_text_layout = nullptr;
         FlushCurrentPrintLine(true);    // Add an empty line at the top of the screen
         m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
-        m_reused_last_line = false;
         m_cur_line_alignment = {};
         m_cur_font_style = {};
         m_cur_font_name = m_app_settings->GameDefaultFontName();
@@ -3424,6 +3458,7 @@ namespace winrt::MEraEmuWin::implementation {
     void EngineControl::RelayoutUILines(bool recreate_all) {
         const float new_width = m_ui_param_cache.canvas_width_px;
         if (recreate_all) {
+            m_empty_text_layout = nullptr;
             for (auto& line : m_ui_lines) {
                 line.txt_layout = nullptr;
             }
@@ -3954,6 +3989,20 @@ namespace winrt::MEraEmuWin::implementation {
         UpdateLineAccMetrics(line_i);
 
         m_cur_printc_count = 0;
+
+        // Truncate too long history
+        auto cur_line_count = GetAccUIHeightInLines();
+        if (cur_line_count > m_app_settings->GameHistoryLinesCount()) {
+            // No need to invalidate the area of the removed lines; they must be already out of view
+            uint32_t start_idx = cur_line_count - m_app_settings->GameHistoryLinesCount();
+            while (start_idx > 0) {
+                start_idx--;
+                auto& cur_line = m_ui_lines[start_idx];
+                bool is_empty = cur_line.is_empty();
+                cur_line.put_empty(this);
+                if (is_empty) { break; }
+            }
+        }
 
         return true;
     }

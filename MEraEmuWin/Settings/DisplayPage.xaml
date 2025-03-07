@@ -23,6 +23,8 @@
                             Value="{x:Bind ParentPage.Settings.GameFontSize,Mode=TwoWay}" />
             <muxc:NumberBox Header="游戏行高" SpinButtonPlacementMode="Inline" Minimum="0" MaxWidth="300"
                             Value="{x:Bind ParentPage.Settings.GameLineHeight,Mode=TwoWay}" />
+            <muxc:NumberBox Header="游戏历史行数" SpinButtonPlacementMode="Inline" Minimum="0" MaxWidth="300"
+                            Value="{x:Bind ParentPage.Settings.GameHistoryLinesCount,Mode=TwoWay}" />
             <!-- TODO: Color picker -->
             <TextBlock Text="游戏背景颜色" Margin="0,0,0,2" />
             <local:ColorPickerButton SelectedColor="{x:Bind ParentPage.Settings.GameBackgroundColor,Mode=TwoWay}" />
