@@ -2044,9 +2044,8 @@ namespace winrt::MEraEmuWin::implementation {
         void update_width(EngineControl* ctrl, uint32_t width) {
             if (!txt_layout) { return ensure_layout(ctrl, width); }
             check_hresult(txt_layout->SetMaxWidth(static_cast<float>(width)));
-
-            flush_metrics(ctrl);
         }
+
         void ensure_layout(EngineControl* ctrl, uint32_t width) {
             if (txt_layout) { return; }
             com_ptr<IDWriteTextLayout> tmp_layout;
@@ -2092,9 +2091,9 @@ namespace winrt::MEraEmuWin::implementation {
             for (auto const& inline_obj : inline_objs) {
                 txt_layout->SetInlineObject(inline_obj.obj.get(), { inline_obj.starti, inline_obj.len });
             }
-
-            flush_metrics(ctrl);
         }
+
+        // NOTE: This function may influence the layout, don't forget to call `flush_metrics` after this.
         void flush_effects(EngineControl* ctrl) {
             txt_layout->SetDrawingEffect(nullptr, { 0, txt.size() });
             for (auto const& style : styles) {
@@ -2136,6 +2135,21 @@ namespace winrt::MEraEmuWin::implementation {
             DWRITE_TEXT_METRICS1 metrics;
             check_hresult(txt_layout->GetMetrics(&metrics));
             return metrics.width;
+        }
+
+        D2D1_RECT_F get_visual_bounding_box() const {
+            if (!txt_layout) { return {}; }
+            DWRITE_TEXT_METRICS1 metrics;
+            DWRITE_OVERHANG_METRICS overhangs;
+            check_hresult(txt_layout->GetMetrics(&metrics));
+            check_hresult(txt_layout->GetOverhangMetrics(&overhangs));
+            metrics.left = metrics.top = 0;
+            return D2D1::RectF(
+                metrics.left - overhangs.left,
+                metrics.top - overhangs.top,
+                metrics.left + metrics.layoutWidth + overhangs.right,
+                metrics.top + overhangs.bottom
+            );
         }
 
         hstring to_html_string() const {
@@ -2233,7 +2247,6 @@ namespace winrt::MEraEmuWin::implementation {
             return hstring(result);
         }
 
-    private:
         void flush_metrics(EngineControl* ctrl) {
             //acc_height -= line_height;
             DWRITE_TEXT_METRICS1 metrics;
@@ -2312,10 +2325,13 @@ namespace winrt::MEraEmuWin::implementation {
     }
     void EngineControl::ReturnToTitle() {
         m_outstanding_input_req = nullptr;
-        m_cur_printc_count = 0;
         QueueEngineTask(std::make_unique<EngineThreadTask>(EngineThreadTaskKind::ReturnToTitle));
 
+        m_cur_printc_count = 0;
+        m_user_skipping = false;
         m_ui_lines.clear();
+        m_cur_composing_line = {};
+        FlushCurrentPrintLine(true);    // Add an empty line at the top of the screen
         m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
         check_hresult(m_vsis_noref->Resize(0, 0));
 
@@ -3071,8 +3087,9 @@ namespace winrt::MEraEmuWin::implementation {
         m_vsis_d2d_noref = nullptr;
         m_d2d_ctx = nullptr;
         m_ui_lines.clear();
-        m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
         m_cur_composing_line = {};
+        FlushCurrentPrintLine(true);    // Add an empty line at the top of the screen
+        m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
         m_reused_last_line = false;
         m_cur_line_alignment = {};
         m_cur_font_style = {};
@@ -3132,10 +3149,6 @@ namespace winrt::MEraEmuWin::implementation {
         while (auto work = m_ui_task_rx.try_recv()) {
             (*work)();
         }
-
-        // After processing works, update layout so that OS can fire redraw events
-        // TODO...
-        //m_vsis_noref->Resize();
 
         // Handle engine thread termination
         if (!m_sd->thread_is_alive.load(std::memory_order_relaxed)) {
@@ -3230,6 +3243,21 @@ namespace winrt::MEraEmuWin::implementation {
                 int offx = 0;
                 int offy = (line_data.acc_height - line_data.height) * m_ui_param_cache.line_height_px_f;
 
+                auto draw_fn = [&] {
+                    ctx->DrawTextLayout(D2D1::Point2F(offx, offy), line_data.txt_layout.get(),
+                        brush, text_options);
+
+                    if (m_app_settings->DebugShowLayoutBounds()) {
+                        D2D1_RECT_F rect = line_data.get_visual_bounding_box();
+                        rect.left += offx;
+                        rect.right += offx;
+                        rect.top += offy;
+                        rect.bottom += offy;
+                        auto bound_brush = GetOrCreateSolidColorBrush(D2D1::ColorF::Magenta | 0xff000000);
+                        ctx->DrawRectangle(rect, bound_brush, 1.0f);
+                    }
+                };
+
                 // If we have an active button at this line, apply and flush effects
                 if (m_cur_active_button.line == line && m_cur_active_button.button_idx < size(line_data.buttons)) {
                     auto const& btn_data = line_data.buttons[m_cur_active_button.button_idx];
@@ -3245,12 +3273,10 @@ namespace winrt::MEraEmuWin::implementation {
                         catch (...) {}
                     });
                     line_data.flush_effects(this);
-                    ctx->DrawTextLayout(D2D1::Point2F(offx, offy), line_data.txt_layout.get(),
-                        brush, text_options);
+                    draw_fn();
                 }
                 else {
-                    ctx->DrawTextLayout(D2D1::Point2F(offx, offy), line_data.txt_layout.get(),
-                        brush, text_options);
+                    draw_fn();
                 }
             }
         }
@@ -3419,6 +3445,7 @@ namespace winrt::MEraEmuWin::implementation {
                     for (size_t i = start_pos; i < end_pos; i++) {
                         auto& line = m_ui_lines[i];
                         line.update_width(this, new_width);
+                        line.flush_metrics(this);
                     }
                 }));
             }
@@ -3437,6 +3464,7 @@ namespace winrt::MEraEmuWin::implementation {
                     line.flush_effects(this);
                 }
 
+                line.flush_metrics(this);
                 UpdateLineAccMetrics(i);
             }
         }
@@ -3449,6 +3477,7 @@ namespace winrt::MEraEmuWin::implementation {
                     line.flush_effects(this);
                 }
 
+                line.flush_metrics(this);
                 UpdateLineAccMetrics(i);
             }
         }
@@ -3914,6 +3943,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         cur_line.ensure_layout(this, m_ui_param_cache.canvas_width_px);
         cur_line.flush_effects(this);
+        cur_line.flush_metrics(this);
         {
             // Invalidate the area of the line (and the previous line, if overlapping)
             size_t pos = cur_line.render_backward_height >= line_i ? 0 : line_i - cur_line.render_backward_height;
@@ -4334,17 +4364,21 @@ namespace winrt::MEraEmuWin::implementation {
             count = old_count;
         }
 
-        // NOTE: Removal of lines is handled by `UpdateEngineImageOutputLayout` now.
-        if (m_soft_deleted_ui_lines_count == 0) {
-            m_soft_deleted_ui_lines_pos = old_count;
+        // NOTE: Actual removal of lines is handled by `UpdateEngineImageOutputLayout` now.
+        //       We only soft-delete the lines here.
+        if (m_soft_deleted_ui_lines_count > 0) {
+            // Maybe a sequence of PRINT-CLEARLINE-PRINT-CLEARLINE... mixed calls.
+            // Pop the intermediate not-yet-drawn lines first.
+            auto intermediate_count = size(m_ui_lines) - m_soft_deleted_ui_lines_pos;
+            auto erase_count = std::min(count, intermediate_count);
+            auto ib = begin(m_ui_lines) + m_soft_deleted_ui_lines_pos;
+            auto ie = ib + erase_count;
+            m_ui_lines.erase(ib, ie);
+            count -= erase_count;
         }
-        else {
-            if (m_soft_deleted_ui_lines_pos != size(m_ui_lines)) {
-                // Multiple non-continuous CLEARLINE calls; force apply the old changes now
-                // TODO: Maybe fix the behavior to handle this case properly?
-                UpdateEngineImageOutputLayout(false);
-                m_soft_deleted_ui_lines_pos = size(m_ui_lines);
-            }
+        if (m_soft_deleted_ui_lines_count == 0) {
+            // First CLEARLINE call, the simplest case.
+            m_soft_deleted_ui_lines_pos = size(m_ui_lines);
         }
         m_soft_deleted_ui_lines_count += count;
 
@@ -4606,7 +4640,8 @@ namespace winrt::MEraEmuWin::implementation {
     }
 
     int64_t EngineControl::GetCurrentUILinesCount() {
-        return (int64_t)m_ui_lines.size() - m_soft_deleted_ui_lines_count;
+        // LogicalCount = PhysicalCount - TopEmptyLines - SoftDeletedLines
+        return (int64_t)m_ui_lines.size() - 1 - m_soft_deleted_ui_lines_count;
     }
     void EngineControl::SetCurrentLineAlignment(int64_t value) {
         m_cur_line_alignment = (uint32_t)value;
