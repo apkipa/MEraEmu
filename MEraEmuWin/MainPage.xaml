@@ -88,7 +88,6 @@
                 </Button>
             </StackPanel>
         </Grid>
-        <local:EngineControl x:Name="MainEngineControl" Grid.Row="1"
-                             AudioVolume="{x:Bind NormalizeVolume(VolumeControlSlider.Value),Mode=OneWay}" />
+        <local:EngineControl x:Name="MainEngineControl" Grid.Row="1" />
     </Grid>
 </Page>

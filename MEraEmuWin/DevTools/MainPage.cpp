@@ -156,13 +156,8 @@ static void UpdateSourcesTabWatchTabItemFromValue(MEraEmuWin::DevTools::SourcesT
 namespace winrt::MEraEmuWin::DevTools::implementation {
     MainPage::~MainPage() {
     }
-    fire_forget MainPage::final_release(std::unique_ptr<MainPage> self) noexcept {
-        auto dq = DispatcherQueue::GetForCurrentThread();
+    void MainPage::final_release(std::unique_ptr<MainPage> self) noexcept {
         self->CleanupEngineConnection();
-        // FIXME: Keep alive to prevent crash; should properly wait for all async tasks to finish instead.
-        using namespace std::chrono_literals;
-        co_await 1s;
-        co_await resume_foreground(dq);
     }
     void MainPage::InitializeComponent() {
         MainPageT::InitializeComponent();

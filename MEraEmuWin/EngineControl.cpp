@@ -2378,19 +2378,17 @@ namespace winrt::MEraEmuWin::implementation {
         return m_devtools_wnd != nullptr;
     }
     void EngineControl::AudioVolume(double value) {
-        [](com_ptr<EngineControl> self, double value) -> util::winrt::fire_forget {
-            try {
-                co_await self->m_sound.ensure_inited_async(self.get());
-                self->m_sound.hub.set_output_volume(value);
-            }
-            catch (...) {
-                // Failed to initialize sound system
-                self->EmitUnhandledExceptionEvent(std::current_exception());
-            }
-        }(get_strong(), value);
+        // Do not handle sound if sound functions are disabled
+        if (!m_app_settings->ReadSoundDir()) { return; }
+
+        if (!m_sound.hub) {
+            m_sound.initial_volume = value;
+            return;
+        }
+        m_sound.hub.set_output_volume(value);
     }
     double EngineControl::AudioVolume() {
-        if (!m_sound.hub) { return 0.0; }
+        if (!m_sound.hub) { return m_sound.initial_volume; }
         return m_sound.hub.get_output_volume();
     }
     void EngineControl::EngineOutputImage_PointerMoved(IInspectable const& sender, PointerRoutedEventArgs const& e) {
@@ -4559,6 +4557,7 @@ namespace winrt::MEraEmuWin::implementation {
         return it->second.height;
     }
     int64_t EngineControl::RoutinePlaySound(hstring const& path, int64_t loop_count, bool is_bgm) {
+        // Do not handle sound if sound functions are disabled
         if (!m_app_settings->ReadSoundDir()) { return -1; }
 
         if (!m_sound.hub) {

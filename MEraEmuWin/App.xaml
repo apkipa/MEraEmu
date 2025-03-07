@@ -20,6 +20,11 @@
             <tuxd:ContainerToBoolConverter x:Key="NegatedContainerToBoolConverter" IsNegated="True" />
             <tuxd:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
             <tuxd:BoolToVisibilityConverter x:Key="NegatedBoolToVisibilityConverter" IsNegated="True" />
+            <tuxd:InvertedValueConverter Converter="{StaticResource BoolToVisibilityConverter}" x:Key="VisibilityToBoolConverter" />
+            <tuxd:ConverterGroup x:Key="InvertedBoolConverter">
+                <tuxd:BoolToVisibilityConverter IsNegated="True" />
+                <tuxd:InvertedValueConverter Converter="{StaticResource BoolToVisibilityConverter}" />
+            </tuxd:ConverterGroup>
             <tuxd:ConverterGroup x:Key="ContainerToVisibilityConverter">
                 <tuxd:ContainerToBoolConverter />
                 <tuxd:BoolToVisibilityConverter />

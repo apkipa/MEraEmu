@@ -169,6 +169,17 @@ namespace winrt::MEraEmuWin::implementation {
             auto sound_dir = GAME_BASE_DIR L"sound";
             if (self->m_app_settings.ReadSoundDir() && util::fs::file_exists(sound_dir)) {
                 VisualStateManager::GoToState(*self, L"SoundControlVisible", true);
+
+                // Establish volume control binding
+                auto engine_ctrl = self->MainEngineControl().as<EngineControl>().get();
+                auto vol_slider = self->VolumeControlSlider();
+                auto callback_fn = [engine_ctrl](DependencyObject const& sender, DependencyProperty const&) {
+                    auto slider = sender.as<Windows::UI::Xaml::Controls::Slider>();
+                    engine_ctrl->AudioVolume(NormalizeVolume(slider.Value()));
+                };
+                auto dp_prop = Primitives::RangeBase::ValueProperty();
+                vol_slider.RegisterPropertyChangedCallback(dp_prop, callback_fn);
+                callback_fn(vol_slider, dp_prop);
             }
         });
     }

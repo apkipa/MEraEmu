@@ -14,7 +14,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         MainPage() = default;
         ~MainPage();
 
-        static fire_forget final_release(std::unique_ptr<MainPage> self) noexcept;
+        static void final_release(std::unique_ptr<MainPage> self) noexcept;
 
         void InitializeComponent();
 

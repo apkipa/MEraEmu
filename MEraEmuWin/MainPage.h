@@ -10,7 +10,7 @@ namespace winrt::MEraEmuWin::implementation {
         ~MainPage();
         void InitializeComponent();
 
-        hstring VolumeToGlyph(double value) {
+        static hstring VolumeToGlyph(double value) {
             // Range: [0, 100]
             if (value <= 0) { return L"\uE74F"; }
             if (value < 1) { return L"\uE992"; }
@@ -18,7 +18,7 @@ namespace winrt::MEraEmuWin::implementation {
             if (value < 66) { return L"\uE994"; }
             return L"\uE995";
         }
-        double NormalizeVolume(double value) {
+        static double NormalizeVolume(double value) {
             if (value < 0) { return 0; }
             if (value > 100) { return 1; }
             return value / 100;

@@ -542,6 +542,7 @@ namespace winrt::MEraEmuWin::implementation {
         struct SoundData {
             concurrency::task<SoundPlaybackHub> init_task{};
             SoundPlaybackHub hub{ nullptr };
+            double initial_volume{ 1.0 };
 
             auto ensure_inited_async(EngineControl* ctrl) {
                 return util::winrt::apartment_aware_task(ensure_inited_async_inner(ctrl));
@@ -562,11 +563,12 @@ namespace winrt::MEraEmuWin::implementation {
                 }
                 init_task = {};
                 if (is_init) {
-                    hub.register_on_exception([strong_this](std::exception_ptr ex) {
-                        if (auto ctrl = strong_this.get()) {
+                    hub.register_on_exception([weak_this = ctrl->get_weak()](std::exception_ptr ex) {
+                        if (auto ctrl = weak_this.get()) {
                             ctrl->EmitUnhandledExceptionEvent(std::move(ex));
                         }
                     });
+                    hub.set_output_volume(initial_volume);
                 }
             }
         } m_sound;

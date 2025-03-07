@@ -493,11 +493,16 @@ namespace util {
         template <typename T>
         void drop_background(T t) {
             resume_background([t = std::move(t)] {
-                if constexpr (requires { t->Close(); }) {
-                    t->Close();
+                try {
+                    if constexpr (requires { t->Close(); }) {
+                        t->Close();
+                    }
+                    if constexpr (requires { t.Close(); }) {
+                        t.Close();
+                    }
                 }
-                if constexpr (requires { t.Close(); }) {
-                    t.Close();
+                catch (...) {
+                    // Ignore
                 }
             });
         }
