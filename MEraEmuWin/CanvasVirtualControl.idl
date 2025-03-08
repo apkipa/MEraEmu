@@ -1,0 +1,6 @@
+namespace MEraEmuWin {
+    [default_interface]
+    runtimeclass CanvasVirtualControl : Windows.UI.Xaml.Controls.UserControl {
+        CanvasVirtualControl();
+    };
+}

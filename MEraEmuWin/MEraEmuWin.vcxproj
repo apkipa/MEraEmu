@@ -144,6 +144,10 @@
       <DependentUpon>AppSettingsVM.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClInclude>
+    <ClInclude Include="CanvasVirtualControl.h">
+      <DependentUpon>CanvasVirtualControl.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
     <ClInclude Include="ColorPickerButton.h">
       <DependentUpon>ColorPickerButton.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -225,6 +229,9 @@
     <ApplicationDefinition Include="App.xaml">
       <SubType>Designer</SubType>
     </ApplicationDefinition>
+    <Page Include="CanvasVirtualControl.xaml">
+      <SubType>Designer</SubType>
+    </Page>
     <Page Include="ColorPickerButton.xaml">
       <SubType>Designer</SubType>
     </Page>
@@ -279,6 +286,10 @@
   <ItemGroup>
     <ClCompile Include="AppSettingsVM.cpp">
       <DependentUpon>AppSettingsVM.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
+    <ClCompile Include="CanvasVirtualControl.cpp">
+      <DependentUpon>CanvasVirtualControl.xaml</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
     <ClCompile Include="ColorPickerButton.cpp">
@@ -371,6 +382,10 @@
     </Midl>
     <Midl Include="AppSettingsVM.idl">
       <SubType>Designer</SubType>
+    </Midl>
+    <Midl Include="CanvasVirtualControl.idl">
+      <DependentUpon>CanvasVirtualControl.xaml</DependentUpon>
+      <SubType>Code</SubType>
     </Midl>
     <Midl Include="ColorPickerButton.idl">
       <DependentUpon>ColorPickerButton.xaml</DependentUpon>

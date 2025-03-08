@@ -28,6 +28,7 @@
     </Page>
     <Page Include="TextBox_themeresources.xaml" />
     <Page Include="ColorPickerButton.xaml" />
+    <Page Include="CanvasVirtualControl.xaml" />
   </ItemGroup>
   <ItemGroup>
     <Midl Include="App.idl" />

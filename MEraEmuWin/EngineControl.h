@@ -4,6 +4,7 @@
 #include <winrt/Tenkai.UI.Xaml.h>
 #include "EngineUnhandledExceptionEventArgs.g.h"
 #include "EngineControl.g.h"
+#include "CanvasVirtualControl.h"
 #include "AppSettingsVM.h"
 
 #include "MEraEngine.hpp"
@@ -295,6 +296,7 @@ namespace winrt::MEraEmuWin::implementation {
         void UpdateDevToolsWindow();
 
         void InitEngineUI();
+        void ClearEngineUIState();
         void UpdateEngineUI();
         void EmitUnhandledExceptionEvent(std::exception_ptr ex);
         void RedrawDirtyEngineImageOutput();

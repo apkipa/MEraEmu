@@ -2356,23 +2356,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_outstanding_input_req = nullptr;
         QueueEngineTask(std::make_unique<EngineThreadTask>(EngineThreadTaskKind::ReturnToTitle));
 
-        m_cur_printc_count = 0;
-        m_user_skipping = false;
-        m_ui_lines.clear();
-        m_cur_composing_line = {};
-        m_reused_last_line = false;
-        m_empty_text_layout = nullptr;
-        FlushCurrentPrintLine(true);    // Add an empty line at the top of the screen
-        m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
-        m_cur_font_name = m_app_settings->GameDefaultFontName();
-        m_cur_font_style = 0;
-        check_hresult(m_vsis_noref->Resize(0, 0));
-
-        if (m_sound.hub) {
-            m_sound.hub.stop_all();
-        }
-        EngineForeColor(m_app_settings->GameForegroundColor());
-        EngineBackColor(m_app_settings->GameBackgroundColor());
+        ClearEngineUIState();
     }
     void EngineControl::ApplySettings(MEraEmuWin::AppSettingsVM settings) {
         com_ptr<implementation::AppSettingsVM> new_settings;
@@ -3119,21 +3103,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_vsis_noref = nullptr;
         m_vsis_d2d_noref = nullptr;
         m_d2d_ctx = nullptr;
-        m_ui_lines.clear();
-        m_cur_composing_line = {};
-        m_reused_last_line = false;
-        m_empty_text_layout = nullptr;
-        FlushCurrentPrintLine(true);    // Add an empty line at the top of the screen
-        m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
-        m_cur_line_alignment = {};
-        m_cur_font_style = {};
-        m_cur_font_name = m_app_settings->GameDefaultFontName();
-        m_auto_redraw = true;
-        m_skip_display = false;
-        m_no_skip_display_cnt = 0;
-        m_cur_printc_count = 0;
-        m_user_skipping = false;
-        m_cur_pointer.pt = { -1, -1 };
+        ClearEngineUIState();
         m_brush_map.clear();
         m_font_map.clear();
         m_graphics_objects.clear();
@@ -3149,10 +3119,14 @@ namespace winrt::MEraEmuWin::implementation {
             }
         }
         UpdateEngineImageOutputLayout(true);
-        VirtualSurfaceImageSource img_src(0, 0);
-        EngineOutputImage().Source(img_src);
-        m_vsis_noref = img_src.as<IVirtualSurfaceImageSourceNative>().get();
-        m_vsis_d2d_noref = img_src.as<ISurfaceImageSourceNativeWithD2D>().get();
+        {
+            auto vsis_noref = EngineOutputImage().as<CanvasVirtualControl>()->GetVsisNative();
+            com_ptr<IVirtualSurfaceImageSourceNative> vsis;
+            vsis.copy_from(vsis_noref);
+            vsis_noref->Resize(0, 0);
+            m_vsis_noref = vsis_noref;
+            m_vsis_d2d_noref = vsis.as<ISurfaceImageSourceNativeWithD2D>().get();
+        }
         // Initialize Direct2D immediately after the creation of EngineOutputImage
         InitD2DDevice(!m_app_settings->EnableHardwareAcceleration());
         // TODO: Handle Windows.UI.Xaml.Media.CompositionTarget.SurfaceContentsLost
@@ -3177,6 +3151,34 @@ namespace winrt::MEraEmuWin::implementation {
         // Set UI focus
         VisualStateManager::GoToState(*this, L"ExecutionStarted", true);
         UserInputTextBox().Focus(FocusState::Programmatic);
+    }
+    void EngineControl::ClearEngineUIState() {
+        // Clear UI logs & intermediate interaction states
+        m_outstanding_input_req = nullptr;
+        m_ui_lines.clear();
+        m_cur_composing_line = {};
+        m_reused_last_line = false;
+        m_empty_text_layout = nullptr;
+        FlushCurrentPrintLine(true);    // Add an empty line at the top of the screen
+        m_soft_deleted_ui_lines_count = m_soft_deleted_ui_lines_pos = 0;
+        m_cur_line_alignment = {};
+        m_cur_font_style = {};
+        m_cur_font_name = m_app_settings->GameDefaultFontName();
+        m_auto_redraw = true;
+        m_skip_display = false;
+        m_no_skip_display_cnt = 0;
+        m_cur_printc_count = 0;
+        m_user_skipping = false;
+        m_cur_pointer.pt = { -1, -1 };
+        EngineForeColor(m_app_settings->GameForegroundColor());
+        EngineBackColor(m_app_settings->GameBackgroundColor());
+        if (m_sound.hub) {
+            m_sound.hub.stop_all();
+        }
+        if (m_vsis_noref) {
+            // Deliberately ignores errors
+            m_vsis_noref->Resize(0, 0);
+        }
     }
     void EngineControl::UpdateEngineUI() try {
         // Process UI works sent from the engine thread
@@ -3414,8 +3416,6 @@ namespace winrt::MEraEmuWin::implementation {
         check_hresult(m_vsis_noref->Invalidate(
             { 0, (long)m_last_redraw_dirty_height, (long)ui_params.canvas_width_px, height }));
         m_last_redraw_dirty_height = height;
-        // TODO: Must call InvalidateMeasure() for updates to be visible. Is this an XAML bug?
-        EngineOutputImage().InvalidateMeasure();
     }
     void EngineControl::InitD2DDevice(bool force_software) {
         D3D_FEATURE_LEVEL feature_levels[]{
