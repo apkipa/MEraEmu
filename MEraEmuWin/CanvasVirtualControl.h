@@ -19,10 +19,11 @@ namespace winrt::MEraEmuWin::implementation {
     private:
         friend CanvasVirtualControlVsis;
 
-        IVirtualSurfaceImageSourceNative* m_inner_vsis_noref;
-        ISurfaceImageSourceNativeWithD2D* m_inner_vsis_d2d_noref;
-        com_ptr<CanvasVirtualControlVsis> m_canvas_vsis;
+        IVirtualSurfaceImageSourceNative* m_inner_vsis_noref{};
+        ISurfaceImageSourceNativeWithD2D* m_inner_vsis_d2d_noref{};
+        com_ptr<CanvasVirtualControlVsis> m_canvas_vsis{};
         uint32_t m_xoffset{}, m_yoffset{};
+        uint32_t m_full_width{}, m_full_height{};
     };
 }
 
