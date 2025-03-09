@@ -47,6 +47,7 @@
 #include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/Windows.Storage.h>
 #include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.Storage.Pickers.h>
 #include <winrt/Windows.Media.h>
 #include <winrt/Windows.Media.Audio.h>
 #include <winrt/Windows.Media.Render.h>
@@ -99,6 +100,8 @@
 #include <random>
 #include <fstream>
 #include <filesystem>
+#include <queue>
+#include <deque>
 
 #include "util.hpp"
 #include "Shared.hpp"

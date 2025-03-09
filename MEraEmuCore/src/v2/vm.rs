@@ -896,7 +896,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVmExecSite<'ctx, 'i, 's, Ca
         self.o.cur_frame.ip
     }
 
-    pub fn ensure_call_stack_and_get_o(
+    pub unsafe fn ensure_call_stack_and_get_o(
         &self,
     ) -> anyhow::Result<&'static mut EraVirtualMachineState> {
         // TODO: UB?
@@ -1974,7 +1974,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         }
 
         // Check call stack depth
-        let o = self.ensure_call_stack_and_get_o()?;
+        let o = unsafe { self.ensure_call_stack_and_get_o()? };
 
         // Now prepare arguments for the function
         // WARN: The following procedure must not fail until remake, or stack will be corrupted.
@@ -2261,7 +2261,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             }
 
             // Check call stack depth
-            let o = self.ensure_call_stack_and_get_o()?;
+            let o = unsafe { self.ensure_call_stack_and_get_o()? };
 
             // Now apply the arguments and call the function
             // WARN: The following procedure must not fail, or stack will be corrupted.
@@ -5673,14 +5673,14 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         // DANGER: Touches the site execution state. Watch out for UB.
         let instr_len = Bc::EvalStrForm.bytes_len() as u32;
         view_stack!(self, _, eval_str:s);
-        let eval_str = arcstr::ArcStr::from(eval_str.as_str());
+        let eval_str = eval_str.clone();
 
         // Check call stack depth
         let ret_ip = EraExecIp {
             chunk: self.o.cur_frame.ip.chunk,
             offset: self.o.cur_frame.ip.offset + instr_len,
         };
-        let o: &mut EraVirtualMachineState = self.ensure_call_stack_and_get_o()?;
+        let o = unsafe { self.ensure_call_stack_and_get_o()? };
         let mut new_frame = o
             .diverge_transient_exec_frame_from(o.frames.len() - 1)
             .context_unlikely("failed to diverge transient frame")?;
@@ -5696,50 +5696,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         new_frame.ignore_return_value = false;
 
         // Add to sources map and compile
-        let filename = ArcStr::from(self.o.ctx.generate_next_transient_src_name());
-        if !self.o.ctx.push_source_file(
-            filename.clone(),
-            eval_str.clone(),
-            EraSourceFileKind::Source,
-            true,
-        ) {
-            anyhow::bail!("source file `{filename}` already exists");
-        }
-        let ast = {
-            let mut lexer = EraLexer::new(filename.clone(), &eval_str, false);
-            lexer.set_ignore_newline_suppression(true);
-            let mut is_str_var_fn = |_: &str| false;
-            // TODO: Use interner from transient_ctx
-            let mut parser = EraParser::new(
-                &mut self.o.ctx.callback,
-                &self.o.ctx.i,
-                &mut lexer,
-                &self.o.ctx.i.interner(),
-                &self.o.ctx.i.global_replace,
-                &self.o.ctx.i.global_define,
-                &mut is_str_var_fn,
-                false,
-                true,
-            );
-            parser.parse_string_form()
-        };
-        let bc_chunk = {
-            // TODO: Use interner from transient_ctx
-            let func_entries = self.o.ctx.func_entries.clone();
-            let env_func = func_entries
-                .get_index(env_func)
-                .unwrap()
-                .1
-                .as_ref()
-                .unwrap();
-            let mut compiler = EraCodeGenerator::new(self.o.ctx, true, true, true);
-            let Ok(chunk) =
+        let (filename, ast) = (self.o.ctx)
+            .push_vm_source_and_parse(&eval_str, |mut parser| Ok(parser.parse_string_form()))?;
+        let bc_chunk = (self.o.ctx)
+            .compile_vm_ast(env_func, |mut compiler, env_func| {
                 compiler.compile_str_expr(filename.clone(), env_func, &ast.nodes, ast.root_node)
-            else {
-                anyhow::bail!("failed to compile `{}`", eval_str);
-            };
-            chunk
-        };
+            })
+            .with_context_unlikely(|| format!("failed to compile `{}`", eval_str))?;
         let bc_chunks =
             Arc::get_mut(&mut self.o.ctx.bc_chunks).context_unlikely("bc_chunks is shared")?;
         let chunk_idx = bc_chunks.len();
@@ -5789,14 +5752,14 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         // DANGER: Touches the site execution state. Watch out for UB.
         let instr_len = Bc::EvalStrForm.bytes_len() as u32;
         view_stack!(self, _, eval_str:s);
-        let eval_str = arcstr::ArcStr::from(eval_str.as_str());
+        let eval_str = eval_str.clone();
 
         // Check call stack depth
         let ret_ip = EraExecIp {
             chunk: self.o.cur_frame.ip.chunk,
             offset: self.o.cur_frame.ip.offset + instr_len,
         };
-        let o: &mut EraVirtualMachineState = self.ensure_call_stack_and_get_o()?;
+        let o = unsafe { self.ensure_call_stack_and_get_o()? };
         let mut new_frame = o
             .diverge_transient_exec_frame_from(o.frames.len() - 1)
             .context_unlikely("failed to diverge transient frame")?;
@@ -5812,50 +5775,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         new_frame.ignore_return_value = false;
 
         // Add to sources map and compile
-        let filename = ArcStr::from(self.o.ctx.generate_next_transient_src_name());
-        if !self.o.ctx.push_source_file(
-            filename.clone(),
-            eval_str.clone(),
-            EraSourceFileKind::Source,
-            true,
-        ) {
-            anyhow::bail!("source file `{filename}` already exists");
-        }
-        let ast = {
-            let mut lexer = EraLexer::new(filename.clone(), &eval_str, false);
-            lexer.set_ignore_newline_suppression(true);
-            let mut is_str_var_fn = |_: &str| false;
-            // TODO: Use interner from transient_ctx
-            let mut parser = EraParser::new(
-                &mut self.o.ctx.callback,
-                &self.o.ctx.i,
-                &mut lexer,
-                &self.o.ctx.i.interner(),
-                &self.o.ctx.i.global_replace,
-                &self.o.ctx.i.global_define,
-                &mut is_str_var_fn,
-                false,
-                true,
-            );
-            parser.parse_expression()
-        };
-        let bc_chunk = {
-            // TODO: Use interner from transient_ctx
-            let func_entries = self.o.ctx.func_entries.clone();
-            let env_func = func_entries
-                .get_index(env_func)
-                .unwrap()
-                .1
-                .as_ref()
-                .unwrap();
-            let mut compiler = EraCodeGenerator::new(self.o.ctx, true, true, true);
-            let Ok(chunk) =
+        let (filename, ast) = (self.o.ctx)
+            .push_vm_source_and_parse(&eval_str, |mut parser| Ok(parser.parse_expression()))?;
+        let bc_chunk = (self.o.ctx)
+            .compile_vm_ast(env_func, |mut compiler, env_func| {
                 compiler.compile_int_expr(filename.clone(), env_func, &ast.nodes, ast.root_node)
-            else {
-                anyhow::bail!("failed to compile `{}`", eval_str);
-            };
-            chunk
-        };
+            })
+            .with_context_unlikely(|| format!("failed to compile `{}`", eval_str))?;
         let bc_chunks =
             Arc::get_mut(&mut self.o.ctx.bc_chunks).context_unlikely("bc_chunks is shared")?;
         let chunk_idx = bc_chunks.len();
@@ -5912,7 +5838,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             chunk: self.o.cur_frame.ip.chunk,
             offset: self.o.cur_frame.ip.offset + instr_len,
         };
-        let o: &mut EraVirtualMachineState = self.ensure_call_stack_and_get_o()?;
+        let o = unsafe { self.ensure_call_stack_and_get_o()? };
         let mut new_frame = o
             .diverge_transient_exec_frame_from(o.frames.len() - 1)
             .context_unlikely("failed to diverge transient frame")?;
@@ -5928,50 +5854,13 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         new_frame.ignore_return_value = false;
 
         // Add to sources map and compile
-        let filename = ArcStr::from(self.o.ctx.generate_next_transient_src_name());
-        if !self.o.ctx.push_source_file(
-            filename.clone(),
-            eval_str.clone(),
-            EraSourceFileKind::Source,
-            true,
-        ) {
-            anyhow::bail!("source file `{filename}` already exists");
-        }
-        let ast = {
-            let mut lexer = EraLexer::new(filename.clone(), &eval_str, false);
-            lexer.set_ignore_newline_suppression(true);
-            let mut is_str_var_fn = |_: &str| false;
-            // TODO: Use interner from transient_ctx
-            let mut parser = EraParser::new(
-                &mut self.o.ctx.callback,
-                &self.o.ctx.i,
-                &mut lexer,
-                &self.o.ctx.i.interner(),
-                &self.o.ctx.i.global_replace,
-                &self.o.ctx.i.global_define,
-                &mut is_str_var_fn,
-                false,
-                true,
-            );
-            parser.parse_expression()
-        };
-        let bc_chunk = {
-            // TODO: Use interner from transient_ctx
-            let func_entries = self.o.ctx.func_entries.clone();
-            let env_func = func_entries
-                .get_index(env_func)
-                .unwrap()
-                .1
-                .as_ref()
-                .unwrap();
-            let mut compiler = EraCodeGenerator::new(self.o.ctx, true, true, true);
-            let Ok(chunk) =
+        let (filename, ast) = (self.o.ctx)
+            .push_vm_source_and_parse(&eval_str, |mut parser| Ok(parser.parse_expression()))?;
+        let bc_chunk = (self.o.ctx)
+            .compile_vm_ast(env_func, |mut compiler, env_func| {
                 compiler.compile_str_expr(filename.clone(), env_func, &ast.nodes, ast.root_node)
-            else {
-                anyhow::bail!("failed to compile `{}`", eval_str);
-            };
-            chunk
-        };
+            })
+            .with_context_unlikely(|| format!("failed to compile `{}`", eval_str))?;
         let bc_chunks =
             Arc::get_mut(&mut self.o.ctx.bc_chunks).context_unlikely("bc_chunks is shared")?;
         let chunk_idx = bc_chunks.len();

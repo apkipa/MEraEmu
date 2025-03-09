@@ -2389,6 +2389,23 @@ namespace winrt::MEraEmuWin::implementation {
         bool recreate_ui_lines = font_changed || layout_changed;
         UpdateEngineImageOutputLayout(true, recreate_ui_lines);
     }
+    IAsyncAction EngineControl::ExportLogsToStream(Windows::Storage::Streams::IRandomAccessStream stream) {
+        auto strong_this = get_strong();
+        auto buf_stm = make<util::winrt::BufferedOutputStream>(stream);
+        auto se_close = tenkai::cpp_utils::ScopeExit([&] {
+            buf_stm.Close();
+        });
+        // NB: Don't go to background thread, as we need to access UI elements (m_ui_lines).
+        //     We also must use indices instead of iterators, as the vector may be modified.
+        //co_await resume_background();
+        std::string utf8;
+        auto utf8_buf = util::winrt::make_buffer_wrapper(utf8);
+        for (size_t i = 0; i < m_ui_lines.size(); ++i) {
+            auto const& line = m_ui_lines[i];
+            utf8 = util::winrt::to_string_with_newline(line.txt);
+            co_await buf_stm.WriteAsync(utf8_buf);
+        }
+    }
     bool EngineControl::IsStarted() {
         return m_sd && m_sd->thread_is_alive.load(std::memory_order_relaxed);
     }

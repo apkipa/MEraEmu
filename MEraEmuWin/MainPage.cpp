@@ -197,6 +197,35 @@ namespace winrt::MEraEmuWin::implementation {
         auto ctrl = MainEngineControl();
         ctrl.IsDevToolsOpen(!ctrl.IsDevToolsOpen());
     }
+    fire_forget MainPage::MenuHelp_ExportGameLogs_Click(IInspectable const&, RoutedEventArgs const&) {
+        HWND hwnd = (HWND)Tenkai::UI::Xaml::Window::GetCurrentMain().View().Id().Value;
+        auto save_picker = Windows::Storage::Pickers::FileSavePicker();
+        save_picker.as<IInitializeWithWindow>()->Initialize(hwnd);
+        save_picker.SuggestedFileName(winrt::format(L"MEraEmu-game-{}.log", std::chrono::system_clock::now()));
+        save_picker.FileTypeChoices().Insert(L"文本文件", single_threaded_vector<hstring>({ L".log" }));
+        save_picker.DefaultFileExtension(L".log");
+
+        ContentDialog dlg;
+        auto se_cancel = tenkai::cpp_utils::ScopeExit([&dlg] {
+            DispatcherQueue::GetForCurrentThread().TryEnqueue(DispatcherQueuePriority::Low, [dlg] {
+                dlg.Hide();
+            });
+        });
+        dlg.XamlRoot(XamlRoot());
+        dlg.Title(box_value(L"导出游戏日志"));
+        dlg.Content(box_value(L"正在导出游戏日志，请稍候..."));
+        dlg.CloseButtonText(L"取消");
+        std::ignore = dlg.ShowAsync();
+
+        auto file = co_await save_picker.PickSaveFileAsync();
+        if (!file) { co_return; }
+        auto stream = co_await file.OpenAsync(Windows::Storage::FileAccessMode::ReadWrite);
+        auto op = MainEngineControl().ExportLogsToStream(stream);
+        dlg.CloseButtonClick([&](auto&&, auto&&) {
+            op.Cancel();
+        });
+        co_await op;
+    }
     void MainPage::MenuHelp_Settings_Click(IInspectable const&, RoutedEventArgs const&) {
         auto main_wnd = Tenkai::UI::Xaml::Window::GetCurrentMain();
         auto settings_wnd = Tenkai::UI::Xaml::Window();

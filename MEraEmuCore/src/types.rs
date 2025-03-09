@@ -25,11 +25,18 @@ use safer_ffi::derive_ReprC;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tinyvec::ArrayVec;
 
-use crate::util::{
-    impl_serde_for_modular_bitfield,
-    interning::ThreadedTokenInterner,
-    rcstr::{ArcStr, RcStr},
-    Ascii,
+use crate::{
+    util::{
+        impl_serde_for_modular_bitfield,
+        interning::ThreadedTokenInterner,
+        rcstr::{ArcStr, RcStr},
+        Ascii,
+    },
+    v2::{
+        codegen::EraCodeGenerator,
+        lexer::EraLexer,
+        parser::{EraParsedAst, EraParser},
+    },
 };
 
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
@@ -936,6 +943,62 @@ impl<'i, Callback: EraCompilerCallback> EraCompilerCtx<'i, Callback> {
 
     pub fn emit_diag(&mut self, diag: Diagnostic) {
         self.i.emit_diag_to(diag, &mut self.callback);
+    }
+
+    pub fn push_vm_source_and_parse<'a, F, T>(
+        &mut self,
+        src: &'a str,
+        f: F,
+    ) -> anyhow::Result<(ArcStr, T)>
+    where
+        F: for<'b> FnOnce(EraParser<'a, 'b, 'i>) -> anyhow::Result<T>,
+    {
+        // Add to sources map and compile
+        let filename = ArcStr::from(self.generate_next_transient_src_name());
+        if !self.push_source_file(
+            filename.clone(),
+            arcstr::ArcStr::from(src),
+            EraSourceFileKind::Source,
+            true,
+        ) {
+            anyhow::bail!("source file `{filename}` already exists");
+        }
+        let mut lexer = EraLexer::new(filename.clone(), src, false);
+        lexer.set_ignore_newline_suppression(true);
+        let mut is_str_var_fn = |_: &str| false;
+        // TODO: Use interner from transient_ctx
+        let parser = EraParser::new(
+            &mut self.callback,
+            &self.i,
+            &mut lexer,
+            &self.i.interner(),
+            &self.i.global_replace,
+            &self.i.global_define,
+            &mut is_str_var_fn,
+            false,
+            true,
+        );
+        f(parser).map(|x| (filename, x))
+    }
+
+    pub fn compile_vm_ast<'me, F, T>(&'me mut self, env_func: usize, f: F) -> anyhow::Result<T>
+    where
+        F: for<'a> FnOnce(
+            EraCodeGenerator<'me, 'i, Callback>,
+            &'a EraFuncInfo<'i>,
+        ) -> Result<T, ()>,
+    {
+        // TODO: Use interner from transient_ctx
+        let func_entries = self.func_entries.clone();
+        let env_func = func_entries
+            .get_index(env_func)
+            .and_then(|(_, x)| x.as_ref())
+            .with_context(|| format!("invalid env_func index: {}", env_func))?;
+        let compiler = EraCodeGenerator::new(self, true, true, true);
+        let Ok(result) = f(compiler, env_func) else {
+            anyhow::bail!("compiler returned an error");
+        };
+        Ok(result)
     }
 }
 

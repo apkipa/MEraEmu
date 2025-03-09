@@ -529,28 +529,265 @@ namespace util {
             ::winrt::Windows::Storage::Streams::IBuffer,
             details::IBufferByteAccess>
         {
-            BufferWrapper(T const& buffer) : m_buffer(buffer) {}
+            BufferWrapper(T&& buffer) : m_buffer(std::forward<T>(buffer)) {}
             uint32_t Capacity() const noexcept {
                 return static_cast<uint32_t>(m_buffer.size());
             }
             uint32_t Length() const noexcept {
                 return static_cast<uint32_t>(m_buffer.size());
             }
-            void Length(uint32_t) {
-                throw ::winrt::hresult_not_implemented();
+            void Length(uint32_t value) {
+                if constexpr (requires { m_buffer.resize(value); }) {
+                    m_buffer.resize(value);
+                }
+                else {
+                    throw ::winrt::hresult_not_implemented();
+                }
             }
             HRESULT __stdcall Buffer(uint8_t** value) override {
                 *value = (uint8_t*)m_buffer.data();
                 return S_OK;
             }
         private:
-            T const& m_buffer;
+            //T&& m_buffer;
+            std::conditional_t<std::is_rvalue_reference_v<T>, T, T&&> m_buffer;
         };
 
         template <typename T>
-        auto make_buffer_wrapper(T const& buffer) {
-            return ::winrt::make<BufferWrapper<T>>(buffer);
+        auto make_buffer_wrapper(T&& buffer) {
+            return ::winrt::make<BufferWrapper<T>>(std::forward<T>(buffer));
         }
+
+        struct OffsetBuffer : ::winrt::implements<OffsetBuffer,
+            ::winrt::Windows::Storage::Streams::IBuffer,
+            details::IBufferByteAccess>
+        {
+            OffsetBuffer(::winrt::Windows::Storage::Streams::IBuffer const& buffer, uint32_t offset) :
+                m_buffer(buffer), m_offset(offset) {
+                if (offset > buffer.Capacity()) {
+                    throw ::winrt::hresult_invalid_argument(L"Offset is out of range");
+                }
+            }
+            uint32_t Capacity() const noexcept {
+                return m_buffer.Capacity() - m_offset;
+            }
+            uint32_t Length() const noexcept {
+                auto len = m_buffer.Length();
+                if (len > m_offset) {
+                    return len - m_offset;
+                }
+                return 0;
+            }
+            void Length(uint32_t value) {
+                m_buffer.Length(value + m_offset);
+            }
+            HRESULT __stdcall Buffer(uint8_t** value) override {
+                uint8_t* data;
+                auto intrf = m_buffer.try_as<details::IBufferByteAccess>();
+                if (!intrf) { return E_NOINTERFACE; }
+                intrf->Buffer(&data);
+                *value = data + m_offset;
+                return S_OK;
+            }
+
+        private:
+            ::winrt::Windows::Storage::Streams::IBuffer m_buffer;
+            uint32_t m_offset;
+        };
+
+        struct BufferedOutputStream : ::winrt::implements<BufferedOutputStream,
+            ::winrt::Windows::Storage::Streams::IOutputStream,
+            ::winrt::Windows::Foundation::IClosable
+        >
+        {
+            BufferedOutputStream(
+                ::winrt::Windows::Storage::Streams::IRandomAccessStream const& stream,
+                size_t buffer_size = 16 * 1024
+            ) : m_stream(stream), m_buffer() {
+                m_buffer.reserve(buffer_size);
+            }
+            ~BufferedOutputStream() {
+                Close();
+            }
+
+            // WARN: Only closes the BufferedOutputStream (not the underlying stream).
+            void Close() {
+                if (!m_buffer.empty()) {
+                    auto box_buf = std::make_unique<std::vector<uint8_t>>(std::move(m_buffer));
+                    auto& buf = *box_buf;
+                    auto op = m_stream.WriteAsync(make_buffer_wrapper(buf));
+                    op.Completed([box_buf = std::move(box_buf)](auto&&, auto&&) {});
+                }
+            }
+
+            // ----- IOutputStream -----
+            ::winrt::Windows::Foundation::IAsyncOperationWithProgress<uint32_t, uint32_t> WriteAsync(
+                ::winrt::Windows::Storage::Streams::IBuffer buffer)
+            {
+                auto buf_len = buffer.Length();
+                if (buf_len + m_buffer.size() > m_buffer.capacity()) {
+                    auto strong_this = get_strong();
+                    auto write_len = co_await InternalFlushWriteAsync();
+                    write_len += co_await m_stream.WriteAsync(buffer);
+                    co_return write_len;
+                }
+                else {
+                    auto data = buffer.data();
+                    m_buffer.insert(m_buffer.end(), data, data + buf_len);
+                    co_return buf_len;
+                }
+
+            }
+            ::winrt::Windows::Foundation::IAsyncOperation<bool> FlushAsync() {
+                auto strong_this = get_strong();
+                co_await InternalFlushWriteAsync();
+                co_return co_await m_stream.FlushAsync();
+            }
+
+        private:
+            ::winrt::Windows::Foundation::IAsyncOperation<uint32_t> InternalFlushWriteAsync() {
+                uint32_t len = 0;
+                if (!m_buffer.empty()) {
+                    auto strong_this = get_strong();
+                    len = co_await m_stream.WriteAsync(make_buffer_wrapper(m_buffer));
+                    m_buffer.clear();
+                }
+                co_return len;
+            }
+
+            ::winrt::Windows::Storage::Streams::IRandomAccessStream m_stream;
+            std::vector<uint8_t> m_buffer;
+        };
+
+        //struct BufferedRandomAccessStream : ::winrt::implements<BufferedRandomAccessStream,
+        //    ::winrt::Windows::Storage::Streams::IInputStream,
+        //    ::winrt::Windows::Storage::Streams::IOutputStream,
+        //    ::winrt::Windows::Storage::Streams::IRandomAccessStream
+        //>
+        //{
+        //    BufferedRandomAccessStream(
+        //        ::winrt::Windows::Storage::Streams::IRandomAccessStream const& stream,
+        //        size_t buffer_size = 4096
+        //    ) : m_stream(stream), m_buffer() {
+        //        m_buffer.reserve(buffer_size);
+        //    }
+
+        //    void Close() {
+        //        m_stream.Close();
+        //    }
+
+        //    // ----- IInputStream -----
+        //    ::winrt::Windows::Foundation::IAsyncOperationWithProgress<::winrt::Windows::Storage::Streams::IBuffer, uint32_t> ReadAsync(
+        //        ::winrt::Windows::Storage::Streams::IBuffer buffer, uint32_t count, ::winrt::Windows::Storage::Streams::InputStreamOptions options)
+        //    {
+        //        if (m_mode != Mode::Read) {
+        //            // Transition to None
+        //            co_await FlushAsync();
+        //        }
+
+        //        size_t cur_write_pos = 0;
+        //        auto se_flush = tenkai::cpp_utils::scope_exit([&] {
+        //            buffer.Length(cur_write_pos);
+        //        });
+        //        auto input_buf_data = buffer.data();
+        //        while (true) {
+        //            if (m_buf_pos < m_buffer.size()) {
+        //                cur_write_pos = std::min(count, static_cast<uint32_t>(m_buffer.size() - m_buf_pos));
+        //                std::copy_n(m_buffer.data() + m_buf_pos, cur_write_pos, input_buf_data);
+        //                m_buf_pos += cur_write_pos;
+
+        //                // If the buffer is fully read, clear it
+        //                if (m_buffer.size() == m_buf_pos) {
+        //                    m_buffer.clear();
+        //                    m_buf_pos = 0;
+        //                }
+        //            }
+
+        //            if (cur_write_pos == count) {
+        //                // Fully read
+        //                co_return buffer;
+        //            }
+
+        //            // Check the remaining count
+        //            if (count - cur_write_pos > m_buffer.capacity()) {
+        //                // Too large, better to read directly
+        //                se_flush.release();
+        //                co_return co_await m_stream.ReadAsync(
+        //                    ::winrt::make<OffsetBuffer>(buffer, cur_write_pos), count - cur_write_pos, options);
+        //            }
+        //            else {
+        //                // Read to the internal buffer, then loop again
+        //                auto read_len = co_await m_stream.ReadAsync(make_buffer_wrapper(m_buffer), m_buffer.capacity(), options);
+        //                if (read_len == 0) {
+        //                    // End of stream
+        //                    co_return buffer;
+        //                }
+        //            }
+        //        }
+        //    }
+
+        //    // ----- IOutputStream -----
+        //    ::winrt::Windows::Foundation::IAsyncOperationWithProgress<uint32_t, uint32_t> WriteAsync(
+        //        ::winrt::Windows::Storage::Streams::IBuffer buffer)
+        //    {
+        //        if (m_mode != Mode::Write) {
+        //            // Transition to None
+        //            m_buffer.clear();
+        //            m_buf_pos = 0;
+        //            m_mode = Mode::Write;
+        //        }
+
+        //        auto buf_len = buffer.Length();
+        //        if (buf_len + m_buffer.size() > m_buffer.capacity()) {
+        //            auto write_len = co_await InternalFlushWriteAsync();
+        //            write_len += co_await m_stream.WriteAsync(buffer);
+        //            co_return write_len;
+        //        }
+        //        else {
+        //            auto data = buffer.data();
+        //            m_buffer.insert(m_buffer.end(), data, data + buf_len);
+        //            co_return buf_len;
+        //        }
+
+        //    }
+        //    ::winrt::Windows::Foundation::IAsyncOperation<bool> FlushAsync() {
+        //        co_await InternalFlushWriteAsync();
+        //        co_return co_await m_stream.FlushAsync();
+        //    }
+
+        //    // ----- IRandomAccessStream -----
+        //    bool CanRead() {
+        //        return m_stream.CanRead();
+        //    }
+        //    bool CanWrite() {
+        //        return m_stream.CanWrite();
+        //    }
+        //    uint64_t Position() {
+        //        return m_stream.Position() + m_buf_pos;
+        //    }
+
+        //private:
+        //    ::winrt::Windows::Foundation::IAsyncOperation<uint32_t> InternalFlushWriteAsync() {
+        //        uint32_t len = 0;
+        //        if (m_mode == Mode::Write) {
+        //            // Transition to None
+        //            len = co_await m_stream.WriteAsync(make_buffer_wrapper(m_buffer));
+        //            m_buffer.clear();
+        //            m_buf_pos = 0;
+        //            m_mode = Mode::None;
+        //        }
+        //        co_return len;
+        //    }
+
+        //    ::winrt::Windows::Storage::Streams::IRandomAccessStream m_stream;
+        //    std::vector<uint8_t> m_buffer;
+        //    size_t m_buf_pos{};
+        //    enum class Mode {
+        //        None,
+        //        Read,
+        //        Write
+        //    } m_mode;
+        //}
 
         // Must be run on UI thread
         template<typename Functor, typename T>
@@ -628,6 +865,16 @@ namespace util {
                 bool m_succeeded;
             };
             return Awaiter{ elem };
+        }
+
+        inline std::string to_string_with_newline(std::wstring_view value) {
+            int const size = WideCharToMultiByte(65001 /*CP_UTF8*/, 0, value.data(), static_cast<int32_t>(value.size()), nullptr, 0, nullptr, nullptr);
+            if (size == 0) {
+                return "\n";
+            }
+            std::string result(size + 1, '\n');
+            WINRT_VERIFY_(size, WideCharToMultiByte(65001 /*CP_UTF8*/, 0, value.data(), static_cast<int32_t>(value.size()), result.data(), size, nullptr, nullptr));
+            return result;
         }
     }
 }

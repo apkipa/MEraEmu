@@ -58,6 +58,7 @@
                         </MenuFlyoutItem.KeyboardAccelerators>
                     </MenuFlyoutItem>
                     <MenuFlyoutSeparator />
+                    <MenuFlyoutItem Text="导出游戏日志..." Click="MenuHelp_ExportGameLogs_Click" />
                     <MenuFlyoutItem Text="设置" Click="MenuHelp_Settings_Click" />
                     <MenuFlyoutItem Text="关于..." Click="MenuHelp_About_Click" />
                 </muxc:MenuBarItem>

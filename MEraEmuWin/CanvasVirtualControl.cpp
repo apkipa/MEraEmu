@@ -30,13 +30,14 @@ using namespace Windows::UI::Xaml::Media::Imaging;
 *
 * If the viewport intersects with the Danger Zone, we reposition the canvas so that the viewport is
 * in the middle of the Safe Zone again. This way, we can avoid the blurry outcome.
-* 
+*
 * Con: If the user has a very large screen, then this approach will not work. We may need to consider
 *      a different approach in that case.
 */
 
 #define CANVAS_DANGER_ZONE_HEIGHT 1024
-#define CANVAS_SAFE_ZONE_HEIGHT ((32768 - CANVAS_DANGER_ZONE_HEIGHT * 2) / 2)
+//#define CANVAS_SAFE_ZONE_HEIGHT ((32768 - CANVAS_DANGER_ZONE_HEIGHT * 2) / 2)
+#define CANVAS_SAFE_ZONE_HEIGHT (10240)
 #define CANVAS_TOTAL_HEIGHT (CANVAS_DANGER_ZONE_HEIGHT * 2 + CANVAS_SAFE_ZONE_HEIGHT)
 
 namespace winrt::MEraEmuWin::implementation {
@@ -168,7 +169,8 @@ namespace winrt::MEraEmuWin::implementation {
         CanvasVirtualControl* m_parent;
     };
 
-    CanvasVirtualControl::CanvasVirtualControl() {}
+    CanvasVirtualControl::CanvasVirtualControl() : m_safe_zone_height(CANVAS_SAFE_ZONE_HEIGHT) {
+    }
     CanvasVirtualControl::~CanvasVirtualControl() {
         m_canvas_vsis->Close();
     }
@@ -182,6 +184,14 @@ namespace winrt::MEraEmuWin::implementation {
         m_canvas_vsis = make_self<CanvasVirtualControlVsis>(this);
 
         EffectiveViewportChanged({ this, &CanvasVirtualControl::OnEffectiveViewportChanged });
+
+        // Check screen height to determine the safe zone height
+        uint32_t screen_height = 0;
+        screen_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        auto new_safe_zone_height = screen_height + CANVAS_DANGER_ZONE_HEIGHT * 2;
+        if (new_safe_zone_height > m_safe_zone_height) {
+            m_safe_zone_height = new_safe_zone_height;
+        }
     }
     void CanvasVirtualControl::OnEffectiveViewportChanged(IInspectable const&, EffectiveViewportChangedEventArgs const& e) {
         auto effective_viewport = e.EffectiveViewport();
@@ -194,7 +204,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         const auto danger_top = m_yoffset;
         const auto safe_top = m_yoffset + CANVAS_DANGER_ZONE_HEIGHT;
-        const auto safe_bottom = safe_top + CANVAS_SAFE_ZONE_HEIGHT;
+        const auto safe_bottom = safe_top + GetCanvasSafeZoneHeight();
         const auto danger_bottom = safe_bottom + CANVAS_DANGER_ZONE_HEIGHT;
         const auto viewport_top = uint32_t(effective_viewport.Y * ui_scale);
         const auto viewport_bottom = uint32_t((effective_viewport.Y + effective_viewport.Height) * ui_scale);
@@ -217,5 +227,8 @@ namespace winrt::MEraEmuWin::implementation {
     }
     IVirtualSurfaceImageSourceNative* CanvasVirtualControl::GetVsisNative() const noexcept {
         return m_canvas_vsis.get();
+    }
+    uint32_t CanvasVirtualControl::GetCanvasSafeZoneHeight() {
+        return m_safe_zone_height;
     }
 }

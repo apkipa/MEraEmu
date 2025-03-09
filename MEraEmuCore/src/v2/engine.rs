@@ -3372,7 +3372,6 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         count: u64,
         eval_limit: u64,
     ) -> anyhow::Result<EraEvaluateExprResult> {
-        let expr = arcstr::ArcStr::from(expr);
         let scope_idx = scope_idx
             .map(|x| x as usize)
             .unwrap_or_else(|| self.vm_state.get_exec_frames().len());
@@ -3396,57 +3395,23 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         new_frame.ignore_return_value = true;
 
         // Add to sources map and compile
-        let filename = ArcStr::from(self.ctx.generate_next_transient_src_name());
-        if !self.ctx.push_source_file(
-            filename.clone(),
-            expr.clone(),
-            EraSourceFileKind::Source,
-            true,
-        ) {
-            anyhow::bail!("source file `{filename}` already exists");
-        }
-        let ast = {
-            let mut lexer = EraLexer::new(filename.clone(), &expr, false);
-            lexer.set_ignore_newline_suppression(true);
-            let mut is_str_var_fn = |_: &str| false;
-            // TODO: Use interner from transient_ctx
-            let mut parser = EraParser::new(
-                &mut self.ctx.callback,
-                &self.ctx.i,
-                &mut lexer,
-                &self.ctx.i.interner(),
-                &self.ctx.i.global_replace,
-                &self.ctx.i.global_define,
-                &mut is_str_var_fn,
-                false,
-                true,
-            );
-            parser.parse_expression()
-        };
-        let (expr_ty, bc_chunk) = {
-            // TODO: Use interner from transient_ctx
-            let func_entries = self.ctx.func_entries.clone();
-            let env_func = func_entries
-                .get_index(env_func)
-                .unwrap()
-                .1
-                .as_ref()
-                .unwrap();
-            let mut compiler = EraCodeGenerator::new(&mut self.ctx, true, true, true);
-            let mut bc_builder = EraBcChunkBuilder::new();
-            let Ok(ty) = compiler.compile_expression(
-                filename.clone(),
-                env_func,
-                &ast.nodes,
-                ast.root_node,
-                &mut bc_builder,
-            ) else {
-                anyhow::bail!("failed to compile `{}`", expr);
-            };
-            // We choose DebugBreak because it can never be produced by the user code.
-            bc_builder.push_bc(EraBytecodeKind::DebugBreak, Default::default());
-            (ty, bc_builder.finish_with_name(filename.clone()))
-        };
+        let (filename, ast) = (self.ctx)
+            .push_vm_source_and_parse(expr, |mut parser| Ok(parser.parse_expression()))?;
+        let (expr_ty, bc_chunk) = (self.ctx)
+            .compile_vm_ast(env_func, |mut compiler, env_func| {
+                let mut bc_builder = EraBcChunkBuilder::new();
+                let ty = compiler.compile_expression(
+                    filename.clone(),
+                    env_func,
+                    &ast.nodes,
+                    ast.root_node,
+                    &mut bc_builder,
+                )?;
+                // We choose DebugBreak because it can never be produced by the user code.
+                bc_builder.push_bc(EraBytecodeKind::DebugBreak, Default::default());
+                Ok((ty, bc_builder.finish_with_name(filename.clone())))
+            })
+            .with_context(|| format!("failed to compile `{}`", expr))?;
         let bc_chunks =
             Arc::get_mut(&mut self.ctx.bc_chunks).context_unlikely("bc_chunks is shared")?;
         let chunk_idx = bc_chunks.len();

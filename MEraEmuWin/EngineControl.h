@@ -210,6 +210,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         void ReturnToTitle();
         void ApplySettings(MEraEmuWin::AppSettingsVM settings);
+        Windows::Foundation::IAsyncAction ExportLogsToStream(Windows::Storage::Streams::IRandomAccessStream stream);
         bool IsStarted();
         void IsDevToolsOpen(bool value);
         bool IsDevToolsOpen();

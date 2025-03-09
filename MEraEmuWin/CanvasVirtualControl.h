@@ -19,11 +19,14 @@ namespace winrt::MEraEmuWin::implementation {
     private:
         friend CanvasVirtualControlVsis;
 
+        uint32_t GetCanvasSafeZoneHeight();
+
         IVirtualSurfaceImageSourceNative* m_inner_vsis_noref{};
         ISurfaceImageSourceNativeWithD2D* m_inner_vsis_d2d_noref{};
         com_ptr<CanvasVirtualControlVsis> m_canvas_vsis{};
         uint32_t m_xoffset{}, m_yoffset{};
         uint32_t m_full_width{}, m_full_height{};
+        uint32_t m_safe_zone_height{};
     };
 }
 

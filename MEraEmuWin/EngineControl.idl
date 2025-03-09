@@ -12,6 +12,7 @@ namespace MEraEmuWin {
 
         void ReturnToTitle();
         void ApplySettings(MEraEmuWin.AppSettingsVM settings);
+        Windows.Foundation.IAsyncAction ExportLogsToStream(Windows.Storage.Streams.IRandomAccessStream stream);
 
         Boolean IsStarted{ get; };
         Boolean IsDevToolsOpen;
