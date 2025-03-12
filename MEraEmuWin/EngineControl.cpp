@@ -3145,7 +3145,7 @@ namespace winrt::MEraEmuWin::implementation {
             m_vsis_d2d_noref = vsis.as<ISurfaceImageSourceNativeWithD2D>().get();
         }
         // Initialize Direct2D immediately after the creation of EngineOutputImage
-        InitD2DDevice(!m_app_settings->EnableHardwareAcceleration());
+        InitD2DDevice();
         // TODO: Handle Windows.UI.Xaml.Media.CompositionTarget.SurfaceContentsLost
         // TODO...
 
@@ -3235,8 +3235,36 @@ namespace winrt::MEraEmuWin::implementation {
         for (auto const& update_rt : update_rts) {
             com_ptr<ID2D1DeviceContext> ctx;
             POINT offset{};
-            check_hresult(m_vsis_d2d_noref->BeginDraw(update_rt,
-                guid_of<decltype(ctx)>(), ctx.put_void(), &offset));
+            auto hr = m_vsis_d2d_noref->BeginDraw(update_rt,
+                guid_of<decltype(ctx)>(), ctx.put_void(), &offset);
+            if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET || hr == D2DERR_RECREATE_TARGET) {
+                // Device lost, recreate
+                InitD2DDevice();
+                return;
+            }
+            else if (hr == E_SURFACE_CONTENTS_LOST) {
+                // Contents lost, recreate
+                {
+                    com_ptr<ID2D1Bitmap> bitmap;
+                    auto props = D2D1::BitmapProperties(
+                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                    auto hr = m_d2d_ctx->CreateBitmap(D2D1::SizeU(1, 1),
+                        props,
+                        bitmap.put());
+                    if FAILED(hr) {
+                        // Likely device lost, recreate
+                        InitD2DDevice();
+                        return;
+                    }
+                }
+                com_ptr<ID2D1Device> d2d_dev;
+                m_d2d_ctx->GetDevice(d2d_dev.put());
+                check_hresult(m_vsis_d2d_noref->SetDevice(d2d_dev.get()));
+                return;
+            }
+            else {
+                check_hresult(hr);
+            }
             tenkai::cpp_utils::ScopeExit se_begin_draw([&] {
                 // Deliberately ignores errors
                 m_vsis_d2d_noref->EndDraw();
@@ -3470,7 +3498,18 @@ namespace winrt::MEraEmuWin::implementation {
         check_hresult(m_d2d_ctx->CreateSpriteBatch(m_d2d_sprite_batch.put()));
 
         // Associate output image with created Direct2D device
+        //m_vsis_noref->Resize(0, 0);
         check_hresult(m_vsis_d2d_noref->SetDevice(d2d_dev.get()));
+        //UpdateEngineImageOutputLayout(false);
+
+        // Reset device-dependent resources
+        m_brush_map.clear();
+        for (auto& [gid, gobj] : m_graphics_objects) {
+            gobj.bitmap = nullptr;
+        }
+        for (auto& line : m_ui_lines) {
+            line.flush_effects(this);
+        }
     }
     void EngineControl::RelayoutUILines(bool recreate_all) {
         const float new_width = m_ui_param_cache.canvas_width_px;

@@ -305,6 +305,9 @@ namespace winrt::MEraEmuWin::implementation {
         //       UI metrics are unchanged. Only the newly added lines are redrawn.
         void UpdateEngineImageOutputLayout(bool invalidate_all, bool recreate_ui_lines = false);
         void InitD2DDevice(bool force_software);
+        void InitD2DDevice() {
+            InitD2DDevice(!m_app_settings->EnableHardwareAcceleration());
+        }
         void RelayoutUILines(bool recreate_all);
         uint64_t GetAccUIHeightInLines(size_t line_idx = -1);
         // NOTE: Returns count of lines if height exceeds all lines
