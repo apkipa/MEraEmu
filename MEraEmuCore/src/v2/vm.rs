@@ -4646,23 +4646,30 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     fn instr_gdraw_sprite_with_color_matrix(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
-        view_stack!(self, stack_count, gid:i, sprite_name:s, dest_x:i, dest_y:i, dest_width:i, dest_height:i, color_matrix:a);
+        view_stack!(self, stack_count, gid:i, sprite_name:s, dest_x:i, dest_y:i, dest_width:i, dest_height:i,
+            color_matrix:a, color_matrix_idx:i);
         // Parse ColorMatrix
         let color_matrix = {
-            // TODO: EmuEra uses VariableTerm to convey indices info,
-            //       support this by adding full indices as a single
-            //       VM stack value.
             resolve_array!(self, color_matrix:i);
             if color_matrix.dims.len() < 2 {
                 anyhow::bail!("expected 2D array for color matrix");
             }
+            let dim_last_1 = color_matrix.dims[color_matrix.dims.len() - 1] as usize;
+            let dim_last_2 = color_matrix.dims[color_matrix.dims.len() - 2] as usize;
+            let stride = dim_last_1 * dim_last_2;
+            let idx_offset = color_matrix_idx as usize / stride * stride;
+            if dim_last_1 < 5 || dim_last_2 < 5 || idx_offset + stride > color_matrix.vals.len() {
+                anyhow::bail!(
+                    "invalid dimensions {:?} for color matrix",
+                    color_matrix.dims
+                );
+            }
             let mut clr_mat = [[0.0; 5]; 5];
             for i in 0..5 {
                 for j in 0..5 {
-                    let idxs = &[i as _, j as _];
-                    let Some(val) = color_matrix.get(idxs) else {
-                        anyhow::bail!("invalid indices into array");
-                    };
+                    let val = color_matrix
+                        .flat_get(idx_offset + i * dim_last_1 + j)
+                        .unwrap();
                     clr_mat[i][j] = val.val as f32 / 256.0;
                 }
             }
@@ -4698,7 +4705,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, sprite_name:s, gid:i, x:i, y:i, width:i, height:i);
-        let r = (self.o.ctx.callback).on_spritecreate(sprite_name, gid, x, y, width, height);
+        let r = (self.o.ctx.callback).on_spritecreate(sprite_name, gid, x, y, width, height, 0, 0);
         let r = StackValue::new_int(r);
         self.o.stack.replace_tail(stack_count, [r]);
         self.add_ip_offset(Bc::SpriteCreate.bytes_len() as i32);

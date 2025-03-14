@@ -168,6 +168,48 @@ struct ValueCache {
     std::optional<T> m_value;
 };
 
+template <typename K, typename V>
+struct MapValueCache {
+    MapValueCache() : m_map{} {}
+    void set(K key, V value) {
+        m_map[key] = value;
+    }
+    template <typename T, typename F>
+    V& get_or_update(T key, F&& f) {
+        auto it = m_map.find(key);
+        if (it == m_map.end()) {
+            it = m_map.emplace(K(key), f()).first;
+        }
+        return it->second;
+    }
+    template <typename T>
+    std::optional<V> get_opt(T key) const {
+        auto it = m_map.find(key);
+        if (it == m_map.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+    template <typename T>
+    void invalidate(T key) {
+        m_map.erase(key);
+    }
+    void invalidate_all() {
+        m_map.clear();
+    }
+    template <typename T, typename F>
+    void update_value(T key, F&& f) {
+        auto it = m_map.find(key);
+        if (it != m_map.end()) {
+            f(it->second);
+        }
+    }
+    operator bool() const noexcept {
+        return !m_map.empty();
+    }
+    std::map<K, V, std::less<>> m_map;
+};
+
 static inline bool key_is_value(auto&& map, auto&& key, auto&& value) {
     auto it = map.find(std::forward<decltype(key)>(key));
     if (it == map.end()) { return false; }
@@ -1496,20 +1538,26 @@ namespace winrt::MEraEmuWin::implementation {
                 return m_sd->ui_ctrl->RoutineGClear(gid, (uint32_t)color | 0xff000000);
             });
         }
-        int64_t on_spritecreate(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) override {
+        int64_t on_spritecreate(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height, int64_t offset_x, int64_t offset_y) override {
+            m_ui_cache.sprite_objects.invalidate(name);
             return exec_ui_work_or([&] {
-                return m_sd->ui_ctrl->RoutineSpriteCreate(to_hstring(name), gid, x, y, width, height);
+                return m_sd->ui_ctrl->RoutineSpriteCreate(to_hstring(name), gid, x, y, width, height, offset_x, offset_y);
             });
         }
         int64_t on_spritedispose(std::string_view name) override {
+            m_ui_cache.sprite_objects.invalidate(name);
             return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineSpriteDispose(to_hstring(name));
             });
         }
         int64_t on_spritecreated(std::string_view name) override {
-            return exec_ui_work_or([&] {
-                return m_sd->ui_ctrl->RoutineSpriteCreated(to_hstring(name));
-            });
+            return m_ui_cache.sprite_objects.get_or_update(name, [&] {
+                return exec_ui_work_or([&] {
+                    SpriteObjectInfo info;
+                    info.created = m_sd->ui_ctrl->RoutineSpriteCreated(to_hstring(name)) != 0;
+                    return info;
+                });
+            }).created;
         }
         int64_t on_spriteanimecreate(std::string_view name, int64_t width, int64_t height) override {
             // TODO: on_spriteanimecreate
@@ -1754,9 +1802,13 @@ namespace winrt::MEraEmuWin::implementation {
         std::mt19937_64 m_rand_gen{ std::random_device{}() };
 
         // UI value caches
+        struct SpriteObjectInfo {
+            bool created{};
+        };
         struct {
             ValueCache<uint32_t> fore_color;
             ValueCache<uint32_t> back_color;
+            MapValueCache<std::string, SpriteObjectInfo> sprite_objects;
         } m_ui_cache;
 
     public:
@@ -1829,6 +1881,7 @@ namespace winrt::MEraEmuWin::implementation {
                     originX = std::round(originX);
                     originY = std::round(originY);
                 }
+                // TODO: Do we need to handle sprite offset_x and offset_y?
                 rect.left = originX;
                 rect.top = originY;
                 rect.right = rect.left + ctrl->ConvLengthToPixels(v.width);
@@ -4607,24 +4660,62 @@ namespace winrt::MEraEmuWin::implementation {
         m_d2d_ctx->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
         m_d2d_ctx->SetTarget(graphics.bitmap.get());
         return RunDrawingSession([&](ID2D1DeviceContext3* ctx) {
+            D2D1_RECT_F rect;
+            /*rect.left = float(dest_x);
+            rect.top = float(dest_y);*/
+            rect.left = float(dest_x + sprite.offset_x);
+            rect.top = float(dest_y + sprite.offset_y);
+            rect.right = float(rect.left + dest_width);
+            rect.bottom = float(rect.top + dest_height);
+            D2D1_RECT_U src_rect;
+            src_rect.left = saturate_to_u32(sprite.x);
+            src_rect.top = saturate_to_u32(sprite.y);
+            src_rect.right = saturate_to_u32(src_rect.left + sprite.width);
+            src_rect.bottom = saturate_to_u32(src_rect.top + sprite.height);
+
             if (color_matrix && !is_identity(*color_matrix)) {
                 // Slow path: draw with color matrix effect
-                // TODO: Implement color matrix (https://learn.microsoft.com/en-us/windows/win32/direct2d/color-matrix)
-                RoutinePrint(L"UI ERROR: Color matrix is not supported yet.", ERA_PEF_IS_LINE);
-                return;
+                com_ptr<ID2D1Effect> color_matrix_effect;
+                ctx->CreateEffect(CLSID_D2D1ColorMatrix, color_matrix_effect.put());
+                color_matrix_effect->SetInput(0, sprite_graphics.bitmap.get());
+                color_matrix_effect->SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX, D2D1::Matrix5x4F(
+                    color_matrix->m00, color_matrix->m01, color_matrix->m02, color_matrix->m03,
+                    color_matrix->m10, color_matrix->m11, color_matrix->m12, color_matrix->m13,
+                    color_matrix->m20, color_matrix->m21, color_matrix->m22, color_matrix->m23,
+                    color_matrix->m30, color_matrix->m31, color_matrix->m32, color_matrix->m33,
+                    color_matrix->m40, color_matrix->m41, color_matrix->m42, color_matrix->m43
+                ));
+                auto pt = D2D1::Point2F(rect.left, rect.top);
+                D2D1_MATRIX_3X2_F oldTransform;
+                ctx->GetTransform(&oldTransform);
+                ctx->SetTransform(
+                    D2D1::Matrix3x2F::Translation(pt.x, pt.y) *
+                    D2D1::Matrix3x2F::Scale((float)dest_width / sprite.width, (float)dest_height / sprite.height, pt) *
+                    oldTransform
+                );
+                D2D1_RECT_F src_rect_f;
+                src_rect_f.left = (float)src_rect.left;
+                src_rect_f.top = (float)src_rect.top;
+                src_rect_f.right = (float)src_rect.right;
+                src_rect_f.bottom = (float)src_rect.bottom;
+                ctx->DrawImage(color_matrix_effect.get(), nullptr, &src_rect_f,
+                    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                ctx->SetTransform(oldTransform);
+                /*com_ptr<ID2D1Effect> atlas_effect;
+                ctx->CreateEffect(CLSID_D2D1Atlas, atlas_effect.put());
+                atlas_effect->SetInputEffect(0, color_matrix_effect.get());
+                atlas_effect->SetValue(D2D1_ATLAS_PROP_INPUT_RECT,
+                    D2D1::Vector4F(src_rect.left, src_rect.top, src_rect.right - src_rect.left, src_rect.bottom - src_rect.top));
+                com_ptr<ID2D1Effect> scale_effect;
+                ctx->CreateEffect(CLSID_D2D1Scale, scale_effect.put());
+                scale_effect->SetInputEffect(0, atlas_effect.get());
+                scale_effect->SetValue(D2D1_SCALE_PROP_SCALE, D2D1::Vector2F(
+                    (float)dest_width / sprite.width, (float)dest_height / sprite.height
+                ));
+                ctx->DrawImage(scale_effect.get());*/
             }
             else {
                 // Fast path: draw bitmap directly
-                D2D1_RECT_F rect;
-                rect.left = float(dest_x);
-                rect.top = float(dest_y);
-                rect.right = float(rect.left + dest_width);
-                rect.bottom = float(rect.top + dest_height);
-                D2D1_RECT_U src_rect;
-                src_rect.left = saturate_to_u32(sprite.x);
-                src_rect.top = saturate_to_u32(sprite.y);
-                src_rect.right = saturate_to_u32(src_rect.left + sprite.width);
-                src_rect.bottom = saturate_to_u32(src_rect.top + sprite.height);
                 auto const& sb = m_d2d_sprite_batch;
                 sb->Clear();
                 sb->AddSprites(1, &rect, &src_rect);
@@ -4650,7 +4741,7 @@ namespace winrt::MEraEmuWin::implementation {
             ctx->Clear(D2D1::ColorF(color));
         });
     }
-    int64_t EngineControl::RoutineSpriteCreate(hstring const& name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) {
+    int64_t EngineControl::RoutineSpriteCreate(hstring const& name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height, int64_t offset_x, int64_t offset_y) {
         if (m_sprite_objects.contains(name)) {
             // Already exists
             return 0;
@@ -4676,7 +4767,7 @@ namespace winrt::MEraEmuWin::implementation {
             height = graphics.get_dimensions().second;
         }
 
-        m_sprite_objects.insert({ name, SpriteObject(gid, (int32_t)x, (int32_t)y, (int32_t)width, (int32_t)height) });
+        m_sprite_objects.insert({ name, SpriteObject(gid, (int32_t)x, (int32_t)y, (int32_t)width, (int32_t)height, (int32_t)offset_x, (int32_t)offset_y) });
         return 1;
     }
     int64_t EngineControl::RoutineSpriteDispose(hstring const& name) {

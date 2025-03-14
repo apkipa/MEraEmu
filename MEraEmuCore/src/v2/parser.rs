@@ -2463,6 +2463,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         // width
         if self.o.peek_token(mode).token.kind != terminal_token
             && self.eat_sync(mode, Token::Comma, terminals).is_some()
+            && self.o.peek_token(mode).token.kind != terminal_token
         {
             let node = self.or_sync_to(|s| s.expression_bp(0, true, terminal.into()), terminals);
             self.o.b.push_child(node);
@@ -2470,6 +2471,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         // alignment
         if self.o.peek_token(mode).token.kind != terminal_token
             && self.eat_sync(mode, Token::Comma, terminals).is_some()
+            && self.o.peek_token(mode).token.kind != terminal_token
         {
             // self.eat(mode, Token::Identifier)?;
             let node = self.or_sync_to(|s| s.expression_bp(0, true, terminal.into()), terminals);

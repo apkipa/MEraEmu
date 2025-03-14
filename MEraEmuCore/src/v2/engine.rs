@@ -283,6 +283,8 @@ pub trait MEraEngineSysCallback {
         y: i64,
         width: i64,
         height: i64,
+        offset_x: i64,
+        offset_y: i64,
     ) -> i64 {
         0
     }
@@ -576,8 +578,10 @@ impl<T: MEraEngineSysCallback> EraCompilerCallback for T {
         y: i64,
         width: i64,
         height: i64,
+        offset_x: i64,
+        offset_y: i64,
     ) -> i64 {
-        self.on_spritecreate(name, gid, x, y, width, height)
+        self.on_spritecreate(name, gid, x, y, width, height, offset_x, offset_y)
     }
 
     fn on_spritedispose(&mut self, name: &str) -> i64 {
@@ -1561,8 +1565,11 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
                         let y = parse_int_literal(get_col_bytes(3)).unwrap_or(0);
                         let width = parse_int_literal(get_col_bytes(4)).unwrap_or(0);
                         let height = parse_int_literal(get_col_bytes(5)).unwrap_or(0);
+                        let x_pos = parse_int_literal(get_col_bytes(6)).unwrap_or(0);
+                        let y_pos = parse_int_literal(get_col_bytes(7)).unwrap_or(0);
                         if let Ok(gid) = load_graphics(self, &format!("{dir_prefix}{file_path}")) {
-                            (self.ctx.callback).on_spritecreate(&sprite, gid, x, y, width, height);
+                            (self.ctx.callback)
+                                .on_spritecreate(&sprite, gid, x, y, width, height, x_pos, y_pos);
                         }
                     }
                 }

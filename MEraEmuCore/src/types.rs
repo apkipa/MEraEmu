@@ -1369,6 +1369,8 @@ pub trait EraCompilerCallback {
         y: i64,
         width: i64,
         height: i64,
+        offset_x: i64,
+        offset_y: i64,
     ) -> i64;
     fn on_spritedispose(&mut self, name: &str) -> i64;
     fn on_spritecreated(&mut self, name: &str) -> i64;
@@ -5270,7 +5272,7 @@ impl EraBytecodeKind {
             GCreateFromFile => -1,
             GDispose | GCreated => 0,
             GDrawSprite => -5,
-            GDrawSpriteWithColorMatrix => -6,
+            GDrawSpriteWithColorMatrix => -7,
             GClear => -1,
             SpriteCreate => -5,
             SpriteDispose | SpriteCreated => 0,

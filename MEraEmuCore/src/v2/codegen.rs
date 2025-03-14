@@ -6339,7 +6339,7 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                     dest_height:i || -1,
                 );
                 if let Some(color_matrix) = a_cm {
-                    apply_one_arg!(name_span, color_matrix:vi);
+                    apply_one_arg!(name_span, color_matrix:vii);
                     site.chunk
                         .push_bc(BcKind::GDrawSpriteWithColorMatrix, name_span);
                 } else {

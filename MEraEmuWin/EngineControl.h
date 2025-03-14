@@ -392,7 +392,7 @@ namespace winrt::MEraEmuWin::implementation {
         int64_t RoutineGCreated(int64_t gid);
         int64_t RoutineGDrawSprite(int64_t gid, hstring const& sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const* color_matrix);
         int64_t RoutineGClear(int64_t gid, uint32_t color);
-        int64_t RoutineSpriteCreate(hstring const& name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height);
+        int64_t RoutineSpriteCreate(hstring const& name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height, int64_t offset_x, int64_t offset_y);
         int64_t RoutineSpriteDispose(hstring const& name);
         int64_t RoutineSpriteCreated(hstring const& name);
         // TODO...
@@ -515,10 +515,10 @@ namespace winrt::MEraEmuWin::implementation {
         std::map<int64_t, GraphicsObject> m_graphics_objects;
         struct SpriteObject {
             int64_t gid;
-            int32_t x, y, width, height;
+            int32_t x, y, width, height, offset_x, offset_y;
 
-            SpriteObject(int64_t gid, int32_t x, int32_t y, int32_t width, int32_t height) :
-                gid(gid), x(x), y(y), width(width), height(height) {
+            SpriteObject(int64_t gid, int32_t x, int32_t y, int32_t width, int32_t height, int32_t offset_x, int32_t offset_y) :
+                gid(gid), x(x), y(y), width(width), height(height), offset_x(offset_x), offset_y(offset_y) {
             }
 
             void ensure_loaded(EngineControl* ctrl) {

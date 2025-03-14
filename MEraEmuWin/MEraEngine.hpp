@@ -441,7 +441,7 @@ struct MEraEngineSysCallback {
     virtual int64_t on_gcreated(int64_t gid) = 0;
     virtual int64_t on_gdrawsprite(int64_t gid, std::string_view sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const* color_matrix) = 0;
     virtual int64_t on_gclear(int64_t gid, int64_t color) = 0;
-    virtual int64_t on_spritecreate(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height) = 0;
+    virtual int64_t on_spritecreate(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height, int64_t offset_x, int64_t offset_y) = 0;
     virtual int64_t on_spritedispose(std::string_view name) = 0;
     virtual int64_t on_spritecreated(std::string_view name) = 0;
     virtual int64_t on_spriteanimecreate(std::string_view name, int64_t width, int64_t height) = 0;

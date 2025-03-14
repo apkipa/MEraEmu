@@ -508,6 +508,8 @@ trait MEraEngineSysCallbackFfi {
         y: i64,
         width: i64,
         height: i64,
+        offset_x: i64,
+        offset_y: i64,
     ) -> i64;
     fn on_spritedispose(&mut self, name: string::str_ref<'_>) -> i64;
     fn on_spritecreated(&mut self, name: string::str_ref<'_>) -> i64;
@@ -802,8 +804,20 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackFfi> {
         y: i64,
         width: i64,
         height: i64,
+        offset_x: i64,
+        offset_y: i64,
     ) -> i64 {
-        MEraEngineSysCallbackFfi::on_spritecreate(self, name.into(), gid, x, y, width, height)
+        MEraEngineSysCallbackFfi::on_spritecreate(
+            self,
+            name.into(),
+            gid,
+            x,
+            y,
+            width,
+            height,
+            offset_x,
+            offset_y,
+        )
     }
     fn on_spritedispose(&mut self, name: &str) -> i64 {
         MEraEngineSysCallbackFfi::on_spritedispose(self, name.into())
@@ -1540,6 +1554,8 @@ mod tests {
             y: i64,
             width: i64,
             height: i64,
+            offset_x: i64,
+            offset_y: i64,
         ) -> i64 {
             0
         }
