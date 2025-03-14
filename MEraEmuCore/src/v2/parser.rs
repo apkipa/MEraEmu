@@ -2927,6 +2927,8 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 | b"SPRITEANIMEADDFRAME"
                 | b"SPRITEWIDTH"
                 | b"SPRITEHEIGHT"
+                | b"SPRITEPOSX"
+                | b"SPRITEPOSY"
                 | b"GETBIT"
                 | b"GETSTYLE"
                 | b"CHKFONT"
@@ -3033,7 +3035,9 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
                 | b"HTML_GETPRINTEDSTR"
                 | b"HTML_STRINGLEN"
                 | b"CLIENTWIDTH"
-                | b"CLIENTHEIGHT" => {
+                | b"CLIENTHEIGHT"
+                | b"MOUSEX"
+                | b"MOUSEY" => {
                     // NOTE: Cannot use `make!` because we cannot bump the token here.
                     let node = EraNode::StmtResultCmdCall(
                         self.identifier().unwrap(),

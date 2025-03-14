@@ -369,6 +369,12 @@ MEraEngineBuilder::MEraEngineBuilder(std::unique_ptr<MEraEngineSysCallback> call
         .on_spriteheight = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
             return ((MEraEngineSysCallback*)self)->on_spriteheight(STR_VIEW(name));
         },
+        .on_spriteposx = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_spriteposx(STR_VIEW(name));
+        },
+        .on_spriteposy = [](Erased_t* self, slice_ref_uint8_t name) noexcept {
+            return ((MEraEngineSysCallback*)self)->on_spriteposy(STR_VIEW(name));
+        },
         .on_open_host_file = [](Erased_t* self, slice_ref_uint8_t path, bool can_write) noexcept {
             return rust_exception_boundary<RustResult_VirtualPtr__Erased_ptr_MEraEngineHostFileFfiVTable_char_const_ptr_t>([&] {
                 auto r = ((MEraEngineSysCallback*)self)->on_open_host_file(STR_VIEW(path), can_write);

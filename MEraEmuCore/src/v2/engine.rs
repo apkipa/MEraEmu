@@ -317,6 +317,12 @@ pub trait MEraEngineSysCallback {
     fn on_spriteheight(&mut self, name: &str) -> i64 {
         0
     }
+    fn on_spriteposx(&mut self, name: &str) -> i64 {
+        0
+    }
+    fn on_spriteposy(&mut self, name: &str) -> i64 {
+        0
+    }
     // ----- Filesystem subsystem -----
     fn on_open_host_file(
         &mut self,
@@ -617,6 +623,14 @@ impl<T: MEraEngineSysCallback> EraCompilerCallback for T {
 
     fn on_spriteheight(&mut self, name: &str) -> i64 {
         self.on_spriteheight(name)
+    }
+
+    fn on_spriteposx(&mut self, name: &str) -> i64 {
+        self.on_spriteposx(name)
+    }
+
+    fn on_spriteposy(&mut self, name: &str) -> i64 {
+        self.on_spriteposy(name)
     }
 
     fn on_open_host_file(
@@ -2788,6 +2802,17 @@ pub struct EraEvaluateExprResult {
     pub children_total_count: Option<u64>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub enum EraEvaluateStmtResult {
+    /// The statement was successfully executed.
+    Ok,
+    /// The statement was successfully executed and returned a value.
+    Value(ScalarValue),
+    /// The statement was successfully executed and returned a variable.
+    /// For extended information, evaluate the variable with `evaluate_var`.
+    Var(String),
+}
+
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct EraEngineSnapshotKind: u32 {
@@ -2820,6 +2845,63 @@ pub struct EraEngineSnapshotChunkHeader {
 pub struct EraEngineDecodeBytecodeResult {
     pub bc: EraBytecodeKind,
     pub len: u8,
+}
+
+impl EraEvaluateExprResult {
+    fn from_arr_var(var: &ArrayValue, offset: u64, count: u64) -> Self {
+        let mut children = Vec::new();
+        let children_total_count = var.dims().iter().map(|&x| x as u64).product();
+        let digest;
+        let digest_limit = 4;
+        let has_ellipsis = children_total_count > digest_limit;
+        let ellipsis_str = if has_ellipsis { ", ..." } else { "" };
+        let vals_range = offset as usize..(offset + count).min(children_total_count) as usize;
+        match var.as_unpacked() {
+            FlatArrayValueRef::ArrInt(x) => {
+                // NOTE: Must chain with infinite zeros in case the variable is not `ensure_alloc`ed.
+                digest = format!(
+                    "[{:?}{}] (ArrInt{:?})",
+                    x.vals
+                        .iter()
+                        .map(|x| x.val)
+                        .chain(std::iter::repeat(0))
+                        .take(digest_limit.min(children_total_count) as _)
+                        .format(", "),
+                    ellipsis_str,
+                    x.dims
+                );
+                for i in vals_range {
+                    let val = x.flat_get_val_safe(i).map(|x| x.val).unwrap();
+                    children.push((format!("[{i}]"), ScalarValue::Int(val)));
+                }
+            }
+            FlatArrayValueRef::ArrStr(x) => {
+                // NOTE: Must chain with infinite zeros in case the variable is not `ensure_alloc`ed.
+                digest = format!(
+                    "[{:?}{}] (ArrStr{:?})",
+                    x.vals
+                        .iter()
+                        .map(|x| x.val.as_str())
+                        .chain(std::iter::repeat(""))
+                        .take(digest_limit.min(children_total_count) as _)
+                        .format(", "),
+                    ellipsis_str,
+                    x.dims
+                );
+                for i in vals_range {
+                    let val = x.flat_get_val_safe(i).map(|x| x.val.to_string()).unwrap();
+                    children.push((format!("[{i}]"), ScalarValue::Str(val)));
+                }
+            }
+        }
+        EraEvaluateExprResult {
+            value: ScalarValue::Str(digest),
+            children,
+            offset,
+            count,
+            children_total_count: Some(children_total_count),
+        }
+    }
 }
 
 #[easy_jsonrpc::rpc]
@@ -2864,6 +2946,19 @@ pub trait MEraEngineRpc {
         offset: u64,
         count: u64,
         eval_limit: u64,
+    ) -> Result<EraEvaluateExprResult, MEraEngineError>;
+    fn evaluate_statement(
+        &mut self,
+        stmt: &str,
+        scope_idx: Option<u32>,
+        eval_limit: u64,
+    ) -> Result<EraEvaluateStmtResult, MEraEngineError>;
+    fn evaluate_var(
+        &mut self,
+        var: &str,
+        scope_idx: Option<u32>,
+        offset: u64,
+        count: u64,
     ) -> Result<EraEvaluateExprResult, MEraEngineError>;
     fn get_functions_list(&self) -> Vec<String>;
     fn dump_function_bytecode(
@@ -3221,63 +3316,40 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
         eval_limit: u64,
     ) -> Result<EraEvaluateExprResult, MEraEngineError> {
         if let Some(var) = self.try_evaluate_var_at_scope(expr, scope_idx)? {
-            let mut children = Vec::new();
-            let children_total_count = var.dims().iter().map(|&x| x as u64).product();
-            let digest;
-            let digest_limit = 4;
-            let has_ellipsis = children_total_count > digest_limit;
-            let ellipsis_str = if has_ellipsis { ", ..." } else { "" };
-            let vals_range = offset as usize..(offset + count).min(children_total_count) as usize;
-            match var.as_unpacked() {
-                FlatArrayValueRef::ArrInt(x) => {
-                    // NOTE: Must chain with infinite zeros in case the variable is not `ensure_alloc`ed.
-                    digest = format!(
-                        "[{:?}{}] (ArrInt{:?})",
-                        x.vals
-                            .iter()
-                            .map(|x| x.val)
-                            .chain(std::iter::repeat(0))
-                            .take(digest_limit.min(children_total_count) as _)
-                            .format(", "),
-                        ellipsis_str,
-                        x.dims
-                    );
-                    for i in vals_range {
-                        let val = x.flat_get_val_safe(i).map(|x| x.val).unwrap();
-                        children.push((format!("[{i}]"), ScalarValue::Int(val)));
-                    }
-                }
-                FlatArrayValueRef::ArrStr(x) => {
-                    // NOTE: Must chain with infinite zeros in case the variable is not `ensure_alloc`ed.
-                    digest = format!(
-                        "[{:?}{}] (ArrStr{:?})",
-                        x.vals
-                            .iter()
-                            .map(|x| x.val.as_str())
-                            .chain(std::iter::repeat(""))
-                            .take(digest_limit.min(children_total_count) as _)
-                            .format(", "),
-                        ellipsis_str,
-                        x.dims
-                    );
-                    for i in vals_range {
-                        let val = x.flat_get_val_safe(i).map(|x| x.val.to_string()).unwrap();
-                        children.push((format!("[{i}]"), ScalarValue::Str(val)));
-                    }
-                }
-            }
-            return Ok(EraEvaluateExprResult {
-                value: ScalarValue::Str(digest),
-                children,
-                offset,
-                count,
-                children_total_count: Some(children_total_count),
-            });
+            return Ok(EraEvaluateExprResult::from_arr_var(
+                var,
+                offset as _,
+                count as _,
+            ));
         }
 
         // Evaluate as expression
         self.evaluate_expr_inner(expr, scope_idx, offset, count, eval_limit)
             .map_err(|e| MEraEngineError::new(format!("{:?}", e)))
+    }
+
+    fn evaluate_statement(
+        &mut self,
+        stmt: &str,
+        scope_idx: Option<u32>,
+        eval_limit: u64,
+    ) -> Result<EraEvaluateStmtResult, MEraEngineError> {
+        self.evaluate_stmt_inner(stmt, scope_idx, eval_limit)
+            .map_err(|e| MEraEngineError::new(format!("{:?}", e)))
+    }
+
+    fn evaluate_var(
+        &mut self,
+        var: &str,
+        scope_idx: Option<u32>,
+        offset: u64,
+        count: u64,
+    ) -> Result<EraEvaluateExprResult, MEraEngineError> {
+        if let Some(var) = self.try_evaluate_var_at_scope(var, scope_idx)? {
+            return Ok(EraEvaluateExprResult::from_arr_var(var, offset, count));
+        }
+
+        Err(MEraEngineError::new(format!("variable `{var}` not found")))
     }
 
     fn get_functions_list(&self) -> Vec<String> {
@@ -3371,14 +3443,15 @@ impl<Callback: MEraEngineSysCallback> MEraEngineRpc for MEraEngine<Callback> {
 }
 
 impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
-    fn evaluate_expr_inner(
+    fn evaluate_something_inner(
         &mut self,
-        expr: &str,
+        gen_chunk_fn: impl for<'me> FnOnce(
+            &'me mut EraCompilerCtx<Callback>,
+            usize,
+        ) -> anyhow::Result<EraBcChunk>,
         scope_idx: Option<u32>,
-        offset: u64,
-        count: u64,
         eval_limit: u64,
-    ) -> anyhow::Result<EraEvaluateExprResult> {
+    ) -> anyhow::Result<Option<StackValue>> {
         let scope_idx = scope_idx
             .map(|x| x as usize)
             .unwrap_or_else(|| self.vm_state.get_exec_frames().len());
@@ -3402,23 +3475,8 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         new_frame.ignore_return_value = true;
 
         // Add to sources map and compile
-        let (filename, ast) = (self.ctx)
-            .push_vm_source_and_parse(expr, |mut parser| Ok(parser.parse_expression()))?;
-        let (expr_ty, bc_chunk) = (self.ctx)
-            .compile_vm_ast(env_func, |mut compiler, env_func| {
-                let mut bc_builder = EraBcChunkBuilder::new();
-                let ty = compiler.compile_expression(
-                    filename.clone(),
-                    env_func,
-                    &ast.nodes,
-                    ast.root_node,
-                    &mut bc_builder,
-                )?;
-                // We choose DebugBreak because it can never be produced by the user code.
-                bc_builder.push_bc(EraBytecodeKind::DebugBreak, Default::default());
-                Ok((ty, bc_builder.finish_with_name(filename.clone())))
-            })
-            .with_context(|| format!("failed to compile `{}`", expr))?;
+        let bc_chunk = gen_chunk_fn(&mut self.ctx, env_func)?;
+        let func_name = bc_chunk.name.clone();
         let bc_chunks =
             Arc::get_mut(&mut self.ctx.bc_chunks).context_unlikely("bc_chunks is shared")?;
         let chunk_idx = bc_chunks.len();
@@ -3426,7 +3484,6 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         bc_chunks.push(bc_chunk);
         let func_entries =
             Arc::get_mut(&mut self.ctx.func_entries).context_unlikely("func_entries is shared")?;
-        let func_name = filename.clone();
         func_entries.insert(
             Ascii::new(func_name.clone()),
             Some(crate::types::EraFuncInfo {
@@ -3436,7 +3493,7 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
                 chunk_idx: chunk_idx as _,
                 bc_offset: 0,
                 bc_size: bc_chunk_len as _,
-                ret_kind: expr_ty,
+                ret_kind: ScalarValueKind::Empty,
                 is_transient: true,
             }),
         );
@@ -3454,6 +3511,7 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
         let mut vm = EraVirtualMachine::new(&mut self.ctx, &mut self.vm_state);
         vm.set_enable_jit(self.config.vm_cache_strategy == MEraEngineVmCacheStrategy::FastJit);
         // TODO: Guard against BEGIN TRAIN?
+        // TODO: Can we modify content of DYNAMIC variables?
         let break_reason = vm.execute(&AtomicBool::new(true), eval_limit);
         // Remove from sources map
         let end_vm_counter = self.ctx.eval_id_counter;
@@ -3466,15 +3524,7 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
             let func_name = filename;
             func_entries.swap_remove(Ascii::new_str(&func_name));
         }
-        let value = if expr_ty.is_value() {
-            self.vm_state
-                .get_stack()
-                .last()
-                .cloned()
-                .context("no value on stack")?
-        } else {
-            StackValue::new_int(0)
-        };
+        let value = self.vm_state.get_stack().last().cloned();
         self.vm_state.clone_from(&vm_state);
         drop(vm_state);
         match break_reason {
@@ -3488,6 +3538,52 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
             _ => anyhow::bail!("unexpected break reason: {:?}", break_reason),
         }
 
+        Ok(value)
+    }
+
+    fn evaluate_expr_inner(
+        &mut self,
+        expr: &str,
+        scope_idx: Option<u32>,
+        offset: u64,
+        count: u64,
+        eval_limit: u64,
+    ) -> anyhow::Result<EraEvaluateExprResult> {
+        let mut expr_ty = ScalarValueKind::Empty;
+        let value = self.evaluate_something_inner(
+            |ctx, env_func| {
+                let (filename, ast) =
+                    ctx.push_vm_source_and_parse(expr, |mut parser| Ok(parser.parse_expression()))?;
+                let bc_chunk;
+                (expr_ty, bc_chunk) = ctx
+                    .compile_vm_ast(env_func, |mut compiler, env_func| {
+                        let mut bc_builder = EraBcChunkBuilder::new();
+                        let ty = compiler.compile_expression(
+                            filename.clone(),
+                            env_func,
+                            &ast.nodes,
+                            ast.root_node,
+                            &mut bc_builder,
+                        )?;
+                        // We choose DebugBreak because it can never be produced by the user code.
+                        bc_builder.push_bc(EraBytecodeKind::DebugBreak, Default::default());
+                        Ok((ty, bc_builder.finish_with_name(filename.clone())))
+                    })
+                    .with_context(|| format!("failed to compile `{}`", expr))?;
+                Ok(bc_chunk)
+            },
+            scope_idx,
+            eval_limit,
+        )?;
+
+        let value = if let Some(value) = value {
+            value
+        } else {
+            if !expr_ty.is_value() {
+                anyhow::bail!("expression does not return a value");
+            }
+            StackValue::new_int(0)
+        };
         let value = match value.into_unpacked() {
             _ if !expr_ty.is_value() => ScalarValue::Void,
             FlatStackValue::Int(x) => ScalarValue::Int(x.val),
@@ -3501,6 +3597,45 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
             count,
             children_total_count: None,
         })
+    }
+
+    fn evaluate_stmt_inner(
+        &mut self,
+        stmt: &str,
+        scope_idx: Option<u32>,
+        eval_limit: u64,
+    ) -> anyhow::Result<EraEvaluateStmtResult> {
+        let value = self.evaluate_something_inner(
+            |ctx, env_func| {
+                let (filename, ast) = ctx.push_vm_source_and_parse(stmt, |mut parser| {
+                    Ok(parser.parse_statements_list())
+                })?;
+                let bc_chunk = ctx
+                    .compile_vm_ast(env_func, |mut compiler, env_func| {
+                        // TODO: Push DebugBreak at the end of the statement list?
+                        // let mut bc_builder = EraBcChunkBuilder::new();
+                        let bc_chunk = compiler.compile_statements_list(
+                            filename.clone(),
+                            env_func,
+                            &ast.nodes,
+                            ast.root_node,
+                            // &mut bc_builder,
+                        )?;
+                        // // We choose DebugBreak because it can never be produced by the user code.
+                        // bc_builder.push_bc(EraBytecodeKind::DebugBreak, Default::default());
+                        // Ok(bc_builder.finish_with_name(filename.clone()))
+                        Ok(bc_chunk)
+                    })
+                    .with_context(|| format!("failed to compile `{}`", stmt))?;
+                Ok(bc_chunk)
+            },
+            scope_idx,
+            eval_limit,
+        )?;
+
+        // TODO: Read value from expression statement
+
+        Ok(EraEvaluateStmtResult::Ok)
     }
 
     fn goto_next_safe_ip_inner(&mut self) -> anyhow::Result<()> {

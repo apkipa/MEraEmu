@@ -398,6 +398,8 @@ namespace winrt::MEraEmuWin::implementation {
         // TODO...
         int64_t RoutineSpriteWidth(hstring const& name);
         int64_t RoutineSpriteHeight(hstring const& name);
+        int64_t RoutineSpritePosX(hstring const& name);
+        int64_t RoutineSpritePosY(hstring const& name);
         // TODO...
         int64_t RoutinePlaySound(hstring const& path, int64_t loop_count, bool is_bgm);
         int64_t RoutineStopSound(int64_t sound_id);

@@ -4783,6 +4783,28 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         Ok(())
     }
 
+    fn instr_sprite_pos_x(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, name:s);
+        let r = self.o.ctx.callback.on_spriteposx(name);
+        let r = StackValue::new_int(r);
+        self.o.stack.replace_tail(stack_count, [r]);
+        self.add_ip_offset(Bc::SpritePosX.bytes_len() as i32);
+        Ok(())
+    }
+
+    fn instr_sprite_pos_y(&mut self) -> anyhow::Result<()> {
+        self.ensure_pre_step_instruction()?;
+
+        view_stack!(self, stack_count, name:s);
+        let r = self.o.ctx.callback.on_spriteposy(name);
+        let r = StackValue::new_int(r);
+        self.o.stack.replace_tail(stack_count, [r]);
+        self.add_ip_offset(Bc::SpritePosY.bytes_len() as i32);
+        Ok(())
+    }
+
     fn instr_check_font(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
@@ -6205,6 +6227,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             Bc::SpriteAnimeAddFrame => s.instr_sprite_anime_add_frame()?,
             Bc::SpriteWidth => s.instr_sprite_width()?,
             Bc::SpriteHeight => s.instr_sprite_height()?,
+            Bc::SpritePosX => s.instr_sprite_pos_x()?,
+            Bc::SpritePosY => s.instr_sprite_pos_y()?,
             Bc::CheckFont => s.instr_check_font()?,
             Bc::SaveText => s.instr_save_text()?,
             Bc::LoadText => s.instr_load_text()?,
@@ -6909,6 +6933,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 Bc::SpriteAnimeAddFrame => call_subroutine!(instr_sprite_anime_add_frame),
                 Bc::SpriteWidth => call_subroutine!(instr_sprite_width),
                 Bc::SpriteHeight => call_subroutine!(instr_sprite_height),
+                Bc::SpritePosX => call_subroutine!(instr_sprite_pos_x),
+                Bc::SpritePosY => call_subroutine!(instr_sprite_pos_y),
                 Bc::CheckFont => call_subroutine!(instr_check_font),
                 Bc::SaveText => call_subroutine!(instr_save_text),
                 Bc::LoadText => call_subroutine!(instr_load_text),

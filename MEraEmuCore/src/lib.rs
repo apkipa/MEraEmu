@@ -528,6 +528,8 @@ trait MEraEngineSysCallbackFfi {
     ) -> i64;
     fn on_spritewidth(&mut self, name: string::str_ref<'_>) -> i64;
     fn on_spriteheight(&mut self, name: string::str_ref<'_>) -> i64;
+    fn on_spriteposx(&mut self, name: string::str_ref<'_>) -> i64;
+    fn on_spriteposy(&mut self, name: string::str_ref<'_>) -> i64;
     // ----- Filesystem subsystem -----
     fn on_open_host_file(
         &mut self,
@@ -858,6 +860,12 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackFfi> {
     }
     fn on_spriteheight(&mut self, name: &str) -> i64 {
         MEraEngineSysCallbackFfi::on_spriteheight(self, name.into())
+    }
+    fn on_spriteposx(&mut self, name: &str) -> i64 {
+        MEraEngineSysCallbackFfi::on_spriteposx(self, name.into())
+    }
+    fn on_spriteposy(&mut self, name: &str) -> i64 {
+        MEraEngineSysCallbackFfi::on_spriteposy(self, name.into())
     }
     // Filesystem subsystem
     fn on_open_host_file(
@@ -1592,6 +1600,14 @@ mod tests {
         }
 
         fn on_spriteheight(&mut self, name: &str) -> i64 {
+            0
+        }
+
+        fn on_spriteposx(&mut self, name: &str) -> i64 {
+            0
+        }
+
+        fn on_spriteposy(&mut self, name: &str) -> i64 {
             0
         }
 

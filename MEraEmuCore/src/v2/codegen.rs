@@ -2947,8 +2947,8 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 self.chunk.push_bc(BcKind::SetArrValFlat, stmt_span);
             }
             EraNode::StmtAwait(args) => {
-                let ([milliseconds], []) = self.unpack_list_expr(args)?;
-                self.int_expr(milliseconds)?;
+                let ([], [milliseconds]) = self.unpack_list_expr(args)?;
+                self.int_expr_or(milliseconds, 0)?;
                 self.chunk.push_bc(BcKind::Await, stmt_span);
             }
             EraNode::StmtSetColorByName(args) => {
@@ -6415,6 +6415,18 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 apply_args!(name_span, name:s);
                 site.chunk.push_bc(BcKind::SpriteHeight, name_span);
             }
+            b"SPRITEPOSX" => {
+                site.result()?;
+                let [name] = site.unpack_args(args)?;
+                apply_args!(name_span, name:s);
+                site.chunk.push_bc(BcKind::SpritePosX, name_span);
+            }
+            b"SPRITEPOSY" => {
+                site.result()?;
+                let [name] = site.unpack_args(args)?;
+                apply_args!(name_span, name:s);
+                site.chunk.push_bc(BcKind::SpritePosY, name_span);
+            }
             b"GETBIT" => {
                 site.result()?;
                 let [val, bit] = site.unpack_args(args)?;
@@ -7227,6 +7239,18 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 site.result()?;
                 let [] = site.unpack_args(args)?;
                 site.int_var_static_idx("@CLIENTHEIGHT", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"MOUSEX" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@MOUSEX", name_span, 0)?;
+                site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
+            }
+            b"MOUSEY" => {
+                site.result()?;
+                let [] = site.unpack_args(args)?;
+                site.int_var_static_idx("@MOUSEY", name_span, 0)?;
                 site.chunk.push_bc(BcKind::GetArrValFlat, name_span);
             }
             _ if name.eq_ignore_ascii_case("SYSINTRINSIC_LoadGameInit") => {

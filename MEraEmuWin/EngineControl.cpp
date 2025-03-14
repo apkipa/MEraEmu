@@ -1577,6 +1577,16 @@ namespace winrt::MEraEmuWin::implementation {
                 return m_sd->ui_ctrl->RoutineSpriteHeight(to_hstring(name));
             });
         }
+        int64_t on_spriteposx(std::string_view name) override {
+            return exec_ui_work_or([&] {
+                return m_sd->ui_ctrl->RoutineSpritePosX(to_hstring(name));
+            });
+        }
+        int64_t on_spriteposy(std::string_view name) override {
+            return exec_ui_work_or([&] {
+                return m_sd->ui_ctrl->RoutineSpritePosY(to_hstring(name));
+            });
+        }
         std::unique_ptr<MEraEngineHostFile> on_open_host_file(std::string_view path, bool can_write) override {
             hstring actual_path;
             if (path.ends_with(".sav")) {
@@ -4789,6 +4799,20 @@ namespace winrt::MEraEmuWin::implementation {
             return 0;
         }
         return it->second.height;
+    }
+    int64_t EngineControl::RoutineSpritePosX(hstring const& name) {
+        auto it = m_sprite_objects.find(name);
+        if (it == m_sprite_objects.end()) {
+            return 0;
+        }
+        return it->second.x;
+    }
+    int64_t EngineControl::RoutineSpritePosY(hstring const& name) {
+        auto it = m_sprite_objects.find(name);
+        if (it == m_sprite_objects.end()) {
+            return 0;
+        }
+        return it->second.y;
     }
     int64_t EngineControl::RoutinePlaySound(hstring const& path, int64_t loop_count, bool is_bgm) {
         // Do not handle sound if sound functions are disabled

@@ -448,6 +448,8 @@ struct MEraEngineSysCallback {
     virtual int64_t on_spriteanimeaddframe(std::string_view name, int64_t gid, int64_t x, int64_t y, int64_t width, int64_t height, int64_t offset_x, int64_t offset_y, int64_t delay) = 0;
     virtual int64_t on_spritewidth(std::string_view name) = 0;
     virtual int64_t on_spriteheight(std::string_view name) = 0;
+    virtual int64_t on_spriteposx(std::string_view name) = 0;
+    virtual int64_t on_spriteposy(std::string_view name) = 0;
     // NOTE: Can throw std::exception
     virtual std::unique_ptr<MEraEngineHostFile> on_open_host_file(std::string_view path, bool can_write) = 0;
     // NOTE: Can throw std::exception

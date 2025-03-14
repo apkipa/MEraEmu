@@ -1389,6 +1389,8 @@ pub trait EraCompilerCallback {
     ) -> i64;
     fn on_spritewidth(&mut self, name: &str) -> i64;
     fn on_spriteheight(&mut self, name: &str) -> i64;
+    fn on_spriteposx(&mut self, name: &str) -> i64;
+    fn on_spriteposy(&mut self, name: &str) -> i64;
     // ----- Filesystem subsystem -----
     fn on_open_host_file(
         &mut self,
@@ -3966,6 +3968,8 @@ pub enum EraExtBytecode1 {
     SpriteAnimeAddFrame,
     SpriteWidth,
     SpriteHeight,
+    SpritePosX,
+    SpritePosY,
     CheckFont,
     SaveText,
     LoadText,
@@ -4190,6 +4194,8 @@ pub enum EraBytecodeKind {
     SpriteAnimeAddFrame,
     SpriteWidth,
     SpriteHeight,
+    SpritePosX,
+    SpritePosY,
     CheckFont,
     SaveText,
     LoadText,
@@ -4512,6 +4518,8 @@ impl EraBytecodeKind {
                     Ext1::SpriteAnimeAddFrame => Ok(SpriteAnimeAddFrame),
                     Ext1::SpriteWidth => Ok(SpriteWidth),
                     Ext1::SpriteHeight => Ok(SpriteHeight),
+                    Ext1::SpritePosX => Ok(SpritePosX),
+                    Ext1::SpritePosY => Ok(SpritePosY),
                     Ext1::CheckFont => Ok(CheckFont),
                     Ext1::SaveText => Ok(SaveText),
                     Ext1::LoadText => Ok(LoadText),
@@ -4954,6 +4962,14 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::SpriteHeight as u8);
             }
+            SpritePosX => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SpritePosX as u8);
+            }
+            SpritePosY => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::SpritePosY as u8);
+            }
             CheckFont => {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::CheckFont as u8);
@@ -5278,7 +5294,7 @@ impl EraBytecodeKind {
             SpriteDispose | SpriteCreated => 0,
             SpriteAnimeCreate => -2,
             SpriteAnimeAddFrame => -8,
-            SpriteWidth | SpriteHeight => 0,
+            SpriteWidth | SpriteHeight | SpritePosX | SpritePosY => 0,
             CheckFont => 0,
             SaveText => -3,
             LoadText => -2,
