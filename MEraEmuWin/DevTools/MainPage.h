@@ -10,7 +10,32 @@
 #include "util.hpp"
 
 namespace winrt::MEraEmuWin::DevTools::implementation {
-    struct MainPage : MainPageT<MainPage> {
+    template <typename Derived>
+    struct UIDebounceHelper {
+        UIDebounceHelper() = default;
+
+        /// Returns true if the action can be executed (i.e. the action is not debounced).
+        bool debounce() {
+            using namespace Windows::System;
+
+            if (m_debounce_action) {
+                return false;
+            }
+
+            m_debounce_action = true;
+            DispatcherQueue::GetForCurrentThread().TryEnqueue([strong_this = static_cast<Derived*>(this)->get_strong()] {
+                auto self = static_cast<UIDebounceHelper*>(strong_this.get());
+                self->m_debounce_action = false;
+            });
+
+            return true;
+        }
+
+    private:
+        bool m_debounce_action{};
+    };
+
+    struct MainPage : MainPageT<MainPage>, UIDebounceHelper<MainPage> {
         MainPage() = default;
         ~MainPage();
 
@@ -35,6 +60,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         void PageFlyoutContainer_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
 
         void TopTabViewMoreMenuRunCommandItem_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        void TopTabViewMoreMenuSwitchConsoleDrawerItem_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
 
         void SourceFilesTreeView_ItemInvoked(Windows::Foundation::IInspectable const& sender, Microsoft::UI::Xaml::Controls::TreeViewItemInvokedEventArgs const& e);
         void SourceFilesTabView_TabCloseRequested(Windows::Foundation::IInspectable const& sender, Microsoft::UI::Xaml::Controls::TabViewTabCloseRequestedEventArgs const& e);
@@ -53,6 +79,9 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         void SourcesTabWatchTabCurrentItemTextBox_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
         fire_forget SourcesTabBreakpointsTabItem_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
         fire_forget SourcesTabCallStackTabItem_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+
+        void LayoutRootBottomPartCloseButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        fire_forget ConsolePaneInputTextBox_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
 
     private:
         void CleanupEngineConnection();
@@ -85,6 +114,8 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         // Note that temporary breakpoints will also be deleted if do_apply is false.
         Windows::Foundation::IAsyncOperation<bool> ApplyEngineBreakpointsAsync(bool do_apply);
         void ResumeEngineExecutionPossiblySteppingPastBreakpoint();
+        void SwitchConsoleDrawerVisibility();
+        void SwitchConsoleDrawerVisibility(bool visible);
 
         winrt::MEraEmuWin::implementation::EngineControl* m_engine_ctrl{ nullptr };
         weak_ref<MEraEmuWin::EngineControl> m_weak_engine_ctrl;

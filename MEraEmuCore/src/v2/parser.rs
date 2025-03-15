@@ -735,6 +735,12 @@ impl EraNodeArena {
         &self.extra_data[start..end]
     }
 
+    pub fn get_extra_data_view_mut(&mut self, data_ref: EraExtraDataRefWithLen) -> &mut [u32] {
+        let start = data_ref.data.0 as usize;
+        let end = start + data_ref.len as usize;
+        &mut self.extra_data[start..end]
+    }
+
     pub fn get_extra_data_view_given_len(&self, data_ref: EraExtraDataRef, len: u32) -> &[u32] {
         let start = data_ref.0 as usize;
         let end = start + len as usize;
@@ -1701,10 +1707,7 @@ impl<'a, 'b, 'i> EraParserSite<'a, 'b, 'i> {
         let children = self.o.b.finish_node(cp).map(|x| x.0);
         let data = self.o.node_arena.make_extra_data_ref_with_len(children);
         let span = self.span_to_now(span);
-        let node = self
-            .o
-            .node_arena
-            .add_node(EraNode::ListStmt(data), span, span);
+        let node = (self.o.node_arena).add_node(EraNode::ListStmt(data), span, span);
         (node, found_terminal)
     }
 

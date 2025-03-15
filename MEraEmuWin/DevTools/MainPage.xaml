@@ -179,7 +179,7 @@
     <Grid x:Name="LayoutRoot" Background="{ThemeResource AppBarBackgroundThemeBrush}">
         <Grid.RowDefinitions>
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition x:Name="LayoutRootBottomPartRowDef" Height="160" />
         </Grid.RowDefinitions>
 
         <VisualStateManager.VisualStateGroups>
@@ -189,8 +189,22 @@
                     <VisualState.Setters>
                         <Setter Target="MainNotLoadedIndicator.Visibility" Value="Visible" />
                         <Setter Target="TopTabView.Visibility" Value="Collapsed" />
-                        <Setter Target="BottomTabView.Visibility" Value="Collapsed" />
+                        <Setter Target="LayoutRootBottomPart.Visibility" Value="Collapsed" />
+                        <Setter Target="LayoutRootVerticalSizer.Visibility" Value="Collapsed" />
                         <Setter Target="MainNotLoadedIndicatorProgRing.IsActive" Value="True" />
+                    </VisualState.Setters>
+                </VisualState>
+            </VisualStateGroup>
+            <VisualStateGroup x:Name="MainConsoleDrawerStates">
+                <VisualState x:Name="MainConsoleDrawerOpen">
+                    <VisualState.Setters>
+                        <Setter Target="LayoutRootBottomPart.Visibility" Value="Visible" />
+                        <Setter Target="LayoutRootVerticalSizer.Visibility" Value="Visible" />
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="MainConsoleDrawerClosed">
+                    <VisualState.Setters>
+                        <Setter Target="LayoutRootBottomPartRowDef.Height" Value="0" />
                     </VisualState.Setters>
                 </VisualState>
             </VisualStateGroup>
@@ -241,6 +255,12 @@
         </StackPanel>
 
         <muxc:TabView x:Name="TopTabView" Grid.Row="0" IsAddTabButtonVisible="False" TabWidthMode="SizeToContent" VerticalAlignment="Stretch">
+            <!--
+            <muxc:TabView.Resources>
+                <x:Double x:Key="TabViewItemMinHeight">28</x:Double>
+            </muxc:TabView.Resources>
+            -->
+
             <muxc:TabView.TabStripFooter>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="4,0">
                     <Button x:Name="TopTabViewMoreButton" Style="{StaticResource FlatButtonStyle}" Width="24" Height="24" CornerRadius="999">
@@ -249,6 +269,11 @@
                                 <MenuFlyoutItem Text="Run command" Click="TopTabViewMoreMenuRunCommandItem_Click">
                                     <MenuFlyoutItem.KeyboardAccelerators>
                                         <KeyboardAccelerator Key="P" Modifiers="Control,Shift" />
+                                    </MenuFlyoutItem.KeyboardAccelerators>
+                                </MenuFlyoutItem>
+                                <MenuFlyoutItem Text="Switch console drawer" Click="TopTabViewMoreMenuSwitchConsoleDrawerItem_Click">
+                                    <MenuFlyoutItem.KeyboardAccelerators>
+                                        <KeyboardAccelerator Key="Escape" />
                                     </MenuFlyoutItem.KeyboardAccelerators>
                                 </MenuFlyoutItem>
                             </MenuFlyout>
@@ -501,7 +526,7 @@
                             </StackPanel>
                         </ScrollViewer>
                     </Grid>
-                    
+
                     <!-- Sizer -->
                     <tuxc:GridSplitter x:Name="SourcesTabLeftPaneSizer" Grid.Column="1"
                                        ResizeDirection="Columns" Width="8" Padding="0" HorizontalAlignment="Left">
@@ -518,14 +543,42 @@
                 </Grid>
             </muxc:TabViewItem>
         </muxc:TabView>
-        <muxc:TabView x:Name="BottomTabView" Grid.Row="1" IsAddTabButtonVisible="True">
-            <!--
-            TODO: Console, Time Travel, etc.
-            -->
-        </muxc:TabView>
-        
+
+        <Grid x:Name="LayoutRootBottomPart" Grid.Row="1" Visibility="Collapsed" BorderBrush="LightGray" BorderThickness="0,1,0,0">
+            <muxc:TabView x:Name="BottomTabView" IsAddTabButtonVisible="False" TabWidthMode="SizeToContent"
+                          VerticalAlignment="Stretch" VerticalContentAlignment="Top">
+                <muxc:TabView.Resources>
+                    <x:Double x:Key="TabViewItemMinHeight">28</x:Double>
+                </muxc:TabView.Resources>
+
+                <muxc:TabView.TabStripFooter>
+                    <Button Style="{StaticResource FlatButtonStyle}" Width="24" Height="24" CornerRadius="999"
+                            Padding="0" Margin="4,0" HorizontalAlignment="Right"
+                            Click="LayoutRootBottomPartCloseButton_Click">
+                        <!-- Cancel -->
+                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE711;" FontSize="14" />
+                    </Button>
+                </muxc:TabView.TabStripFooter>
+
+                <!--
+                TODO: Console, Time Travel, etc.
+                -->
+                <muxc:TabViewItem Header="Console" IsClosable="False">
+                    <ScrollViewer x:Name="ConsolePaneOutputPartScrollViewer" VerticalScrollBarVisibility="Auto" VerticalAlignment="Top">
+                        <StackPanel Orientation="Vertical">
+                            <StackPanel x:Name="ConsolePaneOutputPanel" Orientation="Vertical" />
+                            <TextBox x:Name="ConsolePaneInputTextBox" IsSpellCheckEnabled="False"
+                                     Margin="0" Padding="4,2" MinHeight="4" Height="24"
+                                     KeyDown="ConsolePaneInputTextBox_KeyDown" />
+                        </StackPanel>
+                    </ScrollViewer>
+                </muxc:TabViewItem>
+            </muxc:TabView>
+        </Grid>
+
         <!-- Sizer -->
-        <tuxc:GridSplitter Grid.Row="1" ResizeDirection="Rows" Height="8" Padding="0" VerticalAlignment="Top">
+        <tuxc:GridSplitter x:Name="LayoutRootVerticalSizer" Grid.Row="1" ResizeDirection="Rows"
+                           Height="8" Padding="0" VerticalAlignment="Top" Visibility="Collapsed">
             <tuxc:GridSplitter.RenderTransform>
                 <TranslateTransform Y="-4" />
             </tuxc:GridSplitter.RenderTransform>

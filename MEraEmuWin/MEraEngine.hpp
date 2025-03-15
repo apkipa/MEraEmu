@@ -537,6 +537,11 @@ struct MEraEngine {
     void patch_bytecode(uint32_t chunk_idx, uint32_t offset, std::span<const uint8_t> data) const;
     EraEvaluateExprResult evaluate_expr(std::string_view expr, std::optional<uint32_t> scope_idx,
         uint64_t offset, uint64_t count, uint64_t eval_limit) const;
+    // TODO: Properly type the returned result
+    nlohmann::json evaluate_statement(std::string_view stmt, std::optional<uint32_t> scope_idx,
+        uint64_t eval_limit) const;
+    EraEvaluateExprResult evaluate_var(std::string_view var, std::optional<uint32_t> scope_idx,
+        uint64_t offset, uint64_t count) const;
     std::vector<std::string> get_functions_list() const;
     std::vector<EraDumpFunctionBytecodeEntry> dump_function_bytecode(std::string_view name) const;
     // TODO: Properly type the returned result

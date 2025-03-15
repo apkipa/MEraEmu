@@ -614,6 +614,12 @@ void MEraEngine::patch_bytecode(uint32_t chunk_idx, uint32_t offset, std::span<c
 EraEvaluateExprResult MEraEngine::evaluate_expr(std::string_view expr, std::optional<uint32_t> scope_idx, uint64_t offset, uint64_t count, uint64_t eval_limit) const {
     return do_rpc("evaluate_expr", { { "expr", expr }, { "scope_idx", scope_idx }, { "offset", offset }, { "count", count }, { "eval_limit", eval_limit } }).get<EraEvaluateExprResult>();
 }
+nlohmann::json MEraEngine::evaluate_statement(std::string_view stmt, std::optional<uint32_t> scope_idx, uint64_t eval_limit) const {
+    return do_rpc("evaluate_statement", { { "stmt", stmt }, { "scope_idx", scope_idx }, { "eval_limit", eval_limit } });
+}
+EraEvaluateExprResult MEraEngine::evaluate_var(std::string_view var, std::optional<uint32_t> scope_idx, uint64_t offset, uint64_t count) const {
+    return do_rpc("evaluate_var", { { "var", var }, { "scope_idx", scope_idx }, { "offset", offset }, { "count", count } }).get<EraEvaluateExprResult>();
+}
 std::vector<std::string> MEraEngine::get_functions_list() const {
     return do_rpc("get_functions_list", {}).get<std::vector<std::string>>();
 }

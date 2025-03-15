@@ -678,21 +678,19 @@ impl<'ctx, 'i, Callback: EraCompilerCallback> EraCodeGenerator<'ctx, 'i, Callbac
         env_func: &EraFuncInfo<'i>,
         arena: &EraNodeArena,
         root_node: EraNodeRef,
-    ) -> Result<EraBcChunk, ()> {
-        let mut chunk = EraBcChunkBuilder::new();
+        bc_builder: &mut EraBcChunkBuilder,
+    ) -> Result<(), ()> {
         let mut site = EraCodeGenSite::with_func(
             &mut self.ctx.callback,
             &self.ctx.i,
             filename,
-            &mut chunk,
+            bc_builder,
             arena,
             env_func,
             self.transient_ctx.as_deref(),
         );
         site.statements_list(root_node, 1)?;
-        let filename = site.filename;
-        chunk.push_bc(BcKind::ReturnVoid, Default::default());
-        Ok(chunk.finish_with_name(filename))
+        Ok(())
     }
 }
 

@@ -21,6 +21,18 @@ namespace muxc = Microsoft::UI::Xaml::Controls;
 
 using winrt::MEraEmuWin::implementation::EngineThreadTaskKind;
 
+#define ENGINE_EVAL_LIMIT (100'000)
+
+static constexpr Color WUIColor_Transparent = { 0x00, 0x00, 0x00, 0x00 };
+static constexpr Color WUIColor_Black = { 0xFF, 0x00, 0x00, 0x00 };
+static constexpr Color WUIColor_White = { 0xFF, 0xFF, 0xFF, 0xFF };
+static constexpr Color WUIColor_Red = { 0xFF, 0xFF, 0x00, 0x00 };
+static constexpr Color WUIColor_Green = { 0xFF, 0x00, 0xFF, 0x00 };
+static constexpr Color WUIColor_Blue = { 0xFF, 0x00, 0x00, 0xFF };
+static constexpr Color WUIColor_Gray = { 0xFF, 0x80, 0x80, 0x80 };
+static constexpr Color WUIColor_BlueViolet = { 0xFF, 0x8A, 0x2B, 0xE2 };
+static constexpr Color WUIColor_LightSeaGreen = { 0xFF, 0x20, 0xB2, 0xAA };
+
 static constexpr int32_t BreakPointMargin = 1;
 static constexpr int32_t LineNumberMargin = 2;
 static constexpr int32_t BreakPointMarker = 11;
@@ -162,7 +174,17 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void MainPage::InitializeComponent() {
         MainPageT::InitializeComponent();
 
+        // Set up console output scroll viewer auto-scroll
+        ConsolePaneOutputPartScrollViewer().RegisterPropertyChangedCallback(ScrollViewer::ScrollableHeightProperty(), [this](auto&& sender, auto&&) {
+            auto sv = sender.as<ScrollViewer>();
+            // HACK: We must defer the change view call to the next tick, otherwise it won't work reliably
+            DispatcherQueue::GetForCurrentThread().TryEnqueue([sv] {
+                sv.ChangeView(nullptr, 1e9, nullptr, true);
+            });
+        });
+
         VisualStateManager::GoToState(*this, L"EngineUnconnected", false);
+        VisualStateManager::GoToState(*this, L"MainConsoleDrawerClosed", false);
     }
     void MainPage::SetConnectedEngineControl(MEraEmuWin::EngineControl engine) {
         // Close self first
@@ -276,16 +298,12 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void MainPage::PageFlyoutContainer_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
         if (e.Key() == VirtualKey::Escape) {
             // Close flyout
+            e.Handled(true);
             CloseGlobalQuickActionsBaseFlyout();
         }
     }
 
     void MainPage::TopTabViewMoreMenuRunCommandItem_Click(IInspectable const& sender, RoutedEventArgs const& e) {
-        using namespace Windows::UI::Xaml::Core::Direct;
-
-        /*GlobalQuickActionsBaseFlyout().ShowAt(LayoutRoot());
-        return;*/
-
         // Workaround KeyboarAccelerator having too-global scope, by checking if main window is in foreground
         if (auto wnd = Tenkai::UI::Xaml::Window::GetCurrentMain()) {
             auto active_mode = wnd.View().ActivationMode();
@@ -293,6 +311,9 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
                 return;
             }
         }
+
+        // Workaround https://github.com/microsoft/microsoft-ui-xaml/issues/8212
+        if (!debounce()) { return; }
 
         auto flyout = GlobalQuickActionsBaseFlyout();
         auto flyout_content = flyout.Content().as<FrameworkElement>();
@@ -312,7 +333,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         presenter.Shadow(shadow);
         presenter.Translation({ 0, 0, 32 });
         PageFlyoutContainer().Children().Append(presenter);
-        PageFlyoutContainerBackground().Fill(SolidColorBrush(Colors::Transparent()));
+        PageFlyoutContainerBackground().Fill(SolidColorBrush(WUIColor_Transparent));
         PageFlyoutContainer().UpdateLayout();
         /*if (!TryFocusToFirstFocusableElement(presenter)) {
             presenter.IsTabStop(true);
@@ -325,6 +346,18 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         // Avoid items flickering because of TextChanged event delay
         UpdateFilteredQuickActionItemsAsync();
+    }
+
+    void MainPage::TopTabViewMoreMenuSwitchConsoleDrawerItem_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        // Workaround KeyboarAccelerator having too-global scope, by checking if main window is in foreground
+        if (auto wnd = Tenkai::UI::Xaml::Window::GetCurrentMain()) {
+            auto active_mode = wnd.View().ActivationMode();
+            if (active_mode == Tenkai::UI::ViewManagement::WindowActivationMode::ActivatedInForeground) {
+                return;
+            }
+        }
+
+        SwitchConsoleDrawerVisibility();
     }
 
     void MainPage::SourceFilesTreeView_ItemInvoked(IInspectable const& sender, muxc::TreeViewItemInvokedEventArgs const& e) {
@@ -464,10 +497,13 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void MainPage::SourcesTabWatchTabCurrentItemTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
         auto key = e.Key();
         if (key == VirtualKey::Enter) {
+            e.Handled(true);
             CommitSourcesTabWatchTabCurrentItemTextBox();
         }
         else if (key == VirtualKey::Escape) {
             // Cancel editing
+            e.Handled(true);
+
             auto tb = SourcesTabWatchTabCurrentItemTextBox();
             auto index = unbox_value<uint32_t>(tb.Tag());
             tb.Text(m_sources_tab_watch_tab_items.GetAt(index).Expression());
@@ -482,6 +518,73 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         auto item = sender.as<FrameworkElement>().DataContext().as<MEraEmuWin::DevTools::SourcesTabCallStackTabItem>();
         co_await OpenOrCreateSourcesFileTabAtSrcSpanAsync(item.FileName(), { item.SrcSpanStart(), item.SrcSpanLen() });
     }
+    void MainPage::LayoutRootBottomPartCloseButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        SwitchConsoleDrawerVisibility(false);
+    }
+    fire_forget MainPage::ConsolePaneInputTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
+        auto key = e.Key();
+        if (key == VirtualKey::Enter) {
+            // Execute command
+            e.Handled(true);
+            auto cmd = ConsolePaneInputTextBox().Text();
+            if (cmd.empty()) { co_return; }
+            // Clear input
+            ConsolePaneInputTextBox().Text({});
+
+            auto op = ConsolePaneOutputPanel();
+            auto op_children = op.Children();
+            {
+                auto tb = TextBlock();
+                tb.Margin({ 2, 0, 0, 0 });
+                tb.Text(cmd);
+                tb.Foreground(SolidColorBrush(WUIColor_BlueViolet));
+                op_children.Append(tb);
+            }
+
+            // Execute command
+            nlohmann::json eval_result;
+            try {
+                eval_result = co_await m_engine_ctrl->ExecEngineTask([&](MEraEngine const& e) {
+                    return e.evaluate_statement(to_string(cmd), std::nullopt, ENGINE_EVAL_LIMIT);
+                });
+            }
+            catch (const std::exception& e) {
+                eval_result = { { "Err", e.what() } };
+            }
+            {
+                auto tb = TextBlock();
+                tb.Margin({ 2, 0, 0, 0 });
+                if (eval_result == "Ok") {
+                    tb.Text(L"undefined");
+                    tb.Foreground(SolidColorBrush(WUIColor_Gray));
+                }
+                else if (auto it = eval_result.find("Err"); it != eval_result.end()) {
+                    tb.Text(to_hstring(it->get<std::string>()));
+                    tb.Foreground(SolidColorBrush(WUIColor_Red));
+                }
+                else if (auto it = eval_result.find("Value"); it != eval_result.end()) {
+                    auto v = it->get<ScalarValue>();
+                    //tb.Text(to_hstring(it->dump(4)));
+                    if (auto p = v.as_int()) {
+                        tb.Text(to_hstring(*p));
+                    }
+                    else if (auto p = v.as_str()) {
+                        tb.Text(to_hstring(nlohmann::json(*p).dump()));
+                    }
+                    else {
+                        tb.Text(to_hstring(L"<void>"));
+                    }
+                    tb.Foreground(SolidColorBrush(WUIColor_LightSeaGreen));
+                }
+                else {
+                    // Unknown result
+                    tb.Text(to_hstring(eval_result.dump(4)));
+                }
+                op_children.Append(tb);
+            }
+        }
+    }
+
     void MainPage::CleanupEngineConnection() {
         // WARN: Init & Uninit operations must not be async because of APIs exposed to EngineControl
         if (m_engine_ctrl) {
@@ -1009,7 +1112,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
 
         try {
             auto watch_value = co_await m_engine_ctrl->ExecEngineTask([expression](MEraEngine const& e) {
-                return e.evaluate_expr(expression, std::nullopt, 0, 16, 100'000);
+                return e.evaluate_expr(expression, std::nullopt, 0, 16, ENGINE_EVAL_LIMIT);
             });
             UpdateSourcesTabWatchTabItemFromValue(item, watch_value);
         }
@@ -1448,6 +1551,28 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         }
         else {
             m_engine_ctrl->QueueEngineTask(EngineThreadTaskKind::ClearHaltState);
+        }
+    }
+    void MainPage::SwitchConsoleDrawerVisibility() {
+        auto is_open = LayoutRootBottomPart().Visibility() == Visibility::Visible;
+        SwitchConsoleDrawerVisibility(!is_open);
+    }
+    void MainPage::SwitchConsoleDrawerVisibility(bool visible) {
+        VisualStateManager::GoToState(*this,
+            visible ? L"MainConsoleDrawerOpen" : L"MainConsoleDrawerClosed",
+            true);
+
+        if (visible) {
+            // Focus the input box
+            util::winrt::run_when_loaded([](auto&& tb) {
+                tb.Focus(FocusState::Programmatic);
+            }, ConsolePaneInputTextBox());
+        }
+        else {
+            // Focus the first focusable element
+            if (auto elem = FocusManager::FindFirstFocusableElement(LayoutRoot())) {
+                elem.as<Control>().Focus(FocusState::Pointer);
+            }
         }
     }
 }

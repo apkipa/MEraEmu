@@ -26,6 +26,7 @@ use crate::{
 use super::{
     codegen::EraCodeGenerator,
     lexer::EraLexer,
+    parser::{EraNode, EraNodeRef},
     vm::{EraExecIp, EraFuncExecFrame, EraVirtualMachine, EraVirtualMachineState},
 };
 
@@ -2902,6 +2903,35 @@ impl EraEvaluateExprResult {
             children_total_count: Some(children_total_count),
         }
     }
+
+    fn from_type_and_stack_value(
+        ty: ScalarValueKind,
+        value: Option<StackValue>,
+        offset: u64,
+        count: u64,
+    ) -> anyhow::Result<Self> {
+        let value = if let Some(value) = value {
+            value
+        } else {
+            if !ty.is_value() {
+                anyhow::bail!("expression does not return a value");
+            }
+            StackValue::new_int(0)
+        };
+        let value = match value.into_unpacked() {
+            _ if !ty.is_value() => ScalarValue::Void,
+            FlatStackValue::Int(x) => ScalarValue::Int(x.val),
+            FlatStackValue::Str(x) => ScalarValue::Str(x.val.to_string()),
+            x => anyhow::bail!("unexpected stack value: {:?}", x),
+        };
+        Ok(EraEvaluateExprResult {
+            value,
+            children: Vec::new(),
+            offset,
+            count,
+            children_total_count: None,
+        })
+    }
 }
 
 #[easy_jsonrpc::rpc]
@@ -3565,11 +3595,78 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
                             ast.root_node,
                             &mut bc_builder,
                         )?;
-                        // We choose DebugBreak because it can never be produced by the user code.
+                        // We choose DebugBreak because it can never be produced by user code.
                         bc_builder.push_bc(EraBytecodeKind::DebugBreak, Default::default());
                         Ok((ty, bc_builder.finish_with_name(filename.clone())))
                     })
                     .with_context(|| format!("failed to compile `{}`", expr))?;
+                Ok(bc_chunk)
+            },
+            scope_idx,
+            eval_limit,
+        )?;
+
+        EraEvaluateExprResult::from_type_and_stack_value(expr_ty, value, offset, count)
+    }
+
+    fn evaluate_stmt_inner(
+        &mut self,
+        stmt: &str,
+        scope_idx: Option<u32>,
+        eval_limit: u64,
+    ) -> anyhow::Result<EraEvaluateStmtResult> {
+        let mut expr_ty = ScalarValueKind::Empty;
+        let value = self.evaluate_something_inner(
+            |ctx, env_func| {
+                let (filename, mut ast) = ctx.push_vm_source_and_parse(stmt, |mut parser| {
+                    Ok(parser.parse_statements_list())
+                })?;
+                let data = if let EraNode::ListStmt(data_ref) = ast.nodes.get_node(ast.root_node) {
+                    let data = ast.nodes.get_extra_data_view(data_ref);
+                    let last_stmt = data.last().map(|x| EraNodeRef(*x));
+                    if let Some(EraNode::StmtExpr(expr_ref)) =
+                        last_stmt.map(|x| ast.nodes.get_node(x))
+                    {
+                        // Replace the last expression statement with a nop, so that
+                        // we can handle the expression separately.
+                        let span = ast.nodes.get_node_span(expr_ref);
+                        let nop = ast.nodes.add_node(EraNode::StmtNop, span, span);
+                        *ast.nodes
+                            .get_extra_data_view_mut(data_ref)
+                            .last_mut()
+                            .unwrap() = nop.0;
+                        Some(expr_ref)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let bc_chunk = ctx
+                    .compile_vm_ast(env_func, |mut compiler, env_func| {
+                        let mut bc_builder = EraBcChunkBuilder::new();
+                        compiler.compile_statements_list(
+                            filename.clone(),
+                            env_func,
+                            &ast.nodes,
+                            ast.root_node,
+                            &mut bc_builder,
+                        )?;
+                        if let Some(expr_ref) = data {
+                            let ty = compiler.compile_expression(
+                                filename.clone(),
+                                env_func,
+                                &ast.nodes,
+                                expr_ref,
+                                &mut bc_builder,
+                            )?;
+                            expr_ty = ty;
+                        }
+                        // We choose DebugBreak because it can never be produced by user code.
+                        bc_builder.push_bc(EraBytecodeKind::DebugBreak, Default::default());
+                        Ok(bc_builder.finish_with_name(filename.clone()))
+                    })
+                    .with_context(|| format!("failed to compile `{}`", stmt))?;
                 Ok(bc_chunk)
             },
             scope_idx,
@@ -3584,58 +3681,17 @@ impl<Callback: MEraEngineSysCallback> MEraEngine<Callback> {
             }
             StackValue::new_int(0)
         };
-        let value = match value.into_unpacked() {
-            _ if !expr_ty.is_value() => ScalarValue::Void,
-            FlatStackValue::Int(x) => ScalarValue::Int(x.val),
-            FlatStackValue::Str(x) => ScalarValue::Str(x.val.to_string()),
+        let result = match value.into_unpacked() {
+            _ if expr_ty == ScalarValueKind::Empty => EraEvaluateStmtResult::Ok,
+            _ if !expr_ty.is_value() => EraEvaluateStmtResult::Value(ScalarValue::Void),
+            FlatStackValue::Int(x) => EraEvaluateStmtResult::Value(ScalarValue::Int(x.val)),
+            FlatStackValue::Str(x) => {
+                EraEvaluateStmtResult::Value(ScalarValue::Str(x.val.to_string()))
+            }
             x => anyhow::bail!("unexpected stack value: {:?}", x),
         };
-        Ok(EraEvaluateExprResult {
-            value,
-            children: Vec::new(),
-            offset,
-            count,
-            children_total_count: None,
-        })
-    }
 
-    fn evaluate_stmt_inner(
-        &mut self,
-        stmt: &str,
-        scope_idx: Option<u32>,
-        eval_limit: u64,
-    ) -> anyhow::Result<EraEvaluateStmtResult> {
-        let value = self.evaluate_something_inner(
-            |ctx, env_func| {
-                let (filename, ast) = ctx.push_vm_source_and_parse(stmt, |mut parser| {
-                    Ok(parser.parse_statements_list())
-                })?;
-                let bc_chunk = ctx
-                    .compile_vm_ast(env_func, |mut compiler, env_func| {
-                        // TODO: Push DebugBreak at the end of the statement list?
-                        // let mut bc_builder = EraBcChunkBuilder::new();
-                        let bc_chunk = compiler.compile_statements_list(
-                            filename.clone(),
-                            env_func,
-                            &ast.nodes,
-                            ast.root_node,
-                            // &mut bc_builder,
-                        )?;
-                        // // We choose DebugBreak because it can never be produced by the user code.
-                        // bc_builder.push_bc(EraBytecodeKind::DebugBreak, Default::default());
-                        // Ok(bc_builder.finish_with_name(filename.clone()))
-                        Ok(bc_chunk)
-                    })
-                    .with_context(|| format!("failed to compile `{}`", stmt))?;
-                Ok(bc_chunk)
-            },
-            scope_idx,
-            eval_limit,
-        )?;
-
-        // TODO: Read value from expression statement
-
-        Ok(EraEvaluateStmtResult::Ok)
+        Ok(result)
     }
 
     fn goto_next_safe_ip_inner(&mut self) -> anyhow::Result<()> {
