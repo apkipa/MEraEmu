@@ -521,6 +521,9 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
     void MainPage::LayoutRootBottomPartCloseButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
         SwitchConsoleDrawerVisibility(false);
     }
+    void MainPage::ConsolePaneClearHistoryButton_Click(IInspectable const& sender, RoutedEventArgs const& e) {
+        ConsolePaneOutputPanel().Children().Clear();
+    }
     fire_forget MainPage::ConsolePaneInputTextBox_KeyDown(IInspectable const& sender, KeyRoutedEventArgs const& e) {
         auto key = e.Key();
         if (key == VirtualKey::Enter) {
@@ -540,6 +543,12 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
                 tb.Foreground(SolidColorBrush(WUIColor_BlueViolet));
                 op_children.Append(tb);
             }
+
+            // Add to history
+            if (m_console_input_history.empty() || m_console_input_history.back() != cmd) {
+                m_console_input_history.push_back(cmd);
+            }
+            m_console_input_history_pos = m_console_input_history.size();
 
             // Execute command
             nlohmann::json eval_result;
@@ -581,6 +590,37 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
                     tb.Text(to_hstring(eval_result.dump(4)));
                 }
                 op_children.Append(tb);
+            }
+        }
+        else if (key == VirtualKey::Up || key == VirtualKey::Down) {
+            // Move history
+            e.Handled(true);
+            auto& history = m_console_input_history;
+            if (history.empty()) { co_return; }
+            auto tb = ConsolePaneInputTextBox();
+            auto cur_text = tb.Text();
+            auto& cur_index = m_console_input_history_pos;
+            bool moved = false;
+            if (key == VirtualKey::Up) {
+                if (cur_index > 0) {
+                    cur_index--;
+                    moved = true;
+                }
+            }
+            else {
+                if (cur_index < history.size()) {
+                    cur_index++;
+                    moved = true;
+                }
+            }
+            if (moved) {
+                if (cur_index < history.size()) {
+                    tb.Text(history[cur_index]);
+                }
+                else {
+                    tb.Text({});
+                }
+                tb.Select(INT32_MAX, 0);
             }
         }
     }

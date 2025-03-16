@@ -552,12 +552,26 @@
                 </muxc:TabView.Resources>
 
                 <muxc:TabView.TabStripFooter>
-                    <Button Style="{StaticResource FlatButtonStyle}" Width="24" Height="24" CornerRadius="999"
-                            Padding="0" Margin="4,0" HorizontalAlignment="Right"
-                            Click="LayoutRootBottomPartCloseButton_Click">
-                        <!-- Cancel -->
-                        <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE711;" FontSize="14" />
-                    </Button>
+                    <StackPanel HorizontalAlignment="Right" Orientation="Horizontal" Margin="4,0" Spacing="4">
+                        <!-- TODO: Bind to tab attached property UIElement in the future -->
+                        <ContentPresenter x:Name="LayoutRootBottomPartTitleContentPresenter" VerticalAlignment="Center">
+                            <Button Style="{StaticResource FlatButtonStyle}" Width="22" Height="22" CornerRadius="999"
+                                Padding="0"
+                                Click="ConsolePaneClearHistoryButton_Click">
+                                <Button.KeyboardAccelerators>
+                                    <KeyboardAccelerator Key="L" Modifiers="Control" />
+                                </Button.KeyboardAccelerators>
+                                <!-- StatusCircleBlock -->
+                                <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xF140;" FontSize="14" />
+                            </Button>
+                        </ContentPresenter>
+                        <Button Style="{StaticResource FlatButtonStyle}" Width="22" Height="22" CornerRadius="999"
+                                Padding="0"
+                                Click="LayoutRootBottomPartCloseButton_Click">
+                            <!-- Cancel -->
+                            <FontIcon FontFamily="{StaticResource SymbolThemeFontFamily}" Glyph="&#xE711;" FontSize="14" />
+                        </Button>
+                    </StackPanel>
                 </muxc:TabView.TabStripFooter>
 
                 <!--

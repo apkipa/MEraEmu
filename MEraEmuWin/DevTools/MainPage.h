@@ -81,6 +81,7 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
         fire_forget SourcesTabCallStackTabItem_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
 
         void LayoutRootBottomPartCloseButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
+        void ConsolePaneClearHistoryButton_Click(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& e);
         fire_forget ConsolePaneInputTextBox_KeyDown(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::KeyRoutedEventArgs const& e);
 
     private:
@@ -137,6 +138,8 @@ namespace winrt::MEraEmuWin::DevTools::implementation {
             single_threaded_observable_vector<MEraEmuWin::DevTools::SourcesTabCallStackTabItem>()
         };
         std::vector<MEraEmuWin::DevTools::QuickActionItem> m_quick_action_source_file_items;
+        std::vector<hstring> m_console_input_history;
+        size_t m_console_input_history_pos{};
         bool m_engine_running{};
         // TODO: Implement StepOver
         // NOTE: StepOut is implemented by setting a temporary breakpoint at the caller's next instruction,
