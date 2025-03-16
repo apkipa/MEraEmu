@@ -37,6 +37,14 @@ using namespace Windows::System::Threading;
 template<class... Ts>
 struct overloaded : Ts... { using Ts::operator()...; };
 
+static inline bool is_break_reason_error(EraExecutionBreakReason reason) {
+    return reason != ERA_EXECUTION_BREAK_REASON_CALLBACK_BREAK &&
+        reason != ERA_EXECUTION_BREAK_REASON_STOP_FLAG &&
+        reason != ERA_EXECUTION_BREAK_REASON_DEBUG_BREAK_INSTRUCTION &&
+        reason != ERA_EXECUTION_BREAK_REASON_CODE_QUIT &&
+        reason != ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS;
+}
+
 static inline std::string to_string(DiagnosticLevel value) {
     switch (value) {
     case DIAGNOSTIC_LEVEL_ERROR: return "错误";
@@ -2984,9 +2992,8 @@ namespace winrt::MEraEmuWin::implementation {
 
                     callback->m_tick_compensation = 0;
 
-                    if (sd->has_execution_error) {
+                    if (std::exchange(sd->has_execution_error, false) && is_break_reason_error(stop_reason)) {
                         // Dump stack trace when execution error occurs
-                        sd->has_execution_error = false;
                         struct SrcData {
                             hstring path;
                             uint32_t line, column;
@@ -3157,12 +3164,7 @@ namespace winrt::MEraEmuWin::implementation {
 
         // If engine control is enabled, print control buttons after the error
         if (m_app_settings->EnableEngineControlOnError()) {
-            if (reason != ERA_EXECUTION_BREAK_REASON_CALLBACK_BREAK &&
-                reason != ERA_EXECUTION_BREAK_REASON_STOP_FLAG &&
-                reason != ERA_EXECUTION_BREAK_REASON_DEBUG_BREAK_INSTRUCTION &&
-                reason != ERA_EXECUTION_BREAK_REASON_CODE_QUIT &&
-                reason != ERA_EXECUTION_BREAK_REASON_REACHED_MAX_INSTRUCTIONS)
-            {
+            if (is_break_reason_error(reason)) {
                 using ButtonType = EngineUIPrintLineDataButton::EngineErrorControlButton::ButtonType;
                 RoutinePrint(L"由于发生错误, 引擎已经停止运行。接下来要做什么? ", 0);
                 RoutinePrintEngineErrorControlButton(L"[重试]", ButtonType::Retry);
