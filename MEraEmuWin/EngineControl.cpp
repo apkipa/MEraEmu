@@ -4632,8 +4632,8 @@ namespace winrt::MEraEmuWin::implementation {
             // Pop the intermediate not-yet-drawn lines first.
             auto intermediate_count = size(m_ui_lines) - m_soft_deleted_ui_lines_pos;
             auto erase_count = std::min(count, intermediate_count);
-            auto ib = begin(m_ui_lines) + m_soft_deleted_ui_lines_pos;
-            auto ie = ib + erase_count;
+            auto ib = end(m_ui_lines) - erase_count;
+            auto ie = end(m_ui_lines);
             m_ui_lines.erase(ib, ie);
             count -= erase_count;
         }
