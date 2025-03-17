@@ -1106,6 +1106,10 @@ impl<'i> EraCompilerCtxInner<'i> {
         format!(".\\sav\\save{save_id:02}.sav")
     }
 
+    pub fn get_save_text_path(&self, save_id: u32) -> String {
+        format!(".\\sav\\txt{save_id:02}.txt")
+    }
+
     pub fn get_var_save_path(&self, save_id: &str) -> String {
         format!(".\\dat\\var_{save_id}.dat")
     }

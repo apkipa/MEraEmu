@@ -1757,6 +1757,46 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         self.ctx.variables.reinit_variables();
         Ok(())
     }
+
+    fn routine_save_text(&mut self, text: &str, save_path: &str) -> anyhow::Result<()> {
+        use std::io::Write;
+
+        let mut file = (self.ctx.callback)
+            .on_open_host_file(save_path, true)
+            .with_context_unlikely(|| format!("failed to open file {:?}", save_path))?;
+
+        // Write UTF-8 BOM
+        file.write_all(&[0xEF, 0xBB, 0xBF])?;
+        // Write text
+        file.write_all(text.as_bytes())?;
+
+        Ok(())
+    }
+
+    fn routine_load_text(&mut self, save_path: &str) -> anyhow::Result<String> {
+        use std::io::Read;
+
+        if !self.ctx.callback.on_check_host_file_exists(save_path)? {
+            // File does not exist, return empty string
+            return Ok(String::new());
+        }
+
+        let file = (self.ctx.callback)
+            .on_open_host_file(save_path, false)
+            .with_context_unlikely(|| format!("failed to open file {:?}", save_path))?;
+        let mut file = std::io::BufReader::new(file);
+
+        let mut text = Vec::new();
+        file.read_to_end(&mut text)?;
+        let text = if text.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            &text[3..]
+        } else {
+            &text
+        };
+        let text = String::from_utf8_lossy(text).into_owned();
+
+        Ok(text)
+    }
 }
 
 impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
@@ -4859,13 +4899,42 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
     fn instr_save_text(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
-        anyhow::bail!("SaveText not yet implemented");
+        view_stack!(self, stack_count, text:s, file_no:i, force_save_dir:i, force_utf8:i);
+        let text = &text.clone();
+        let file = self.o.ctx.get_save_text_path(file_no as _);
+        let r = match self.o.routine_save_text(text, &file) {
+            Ok(()) => StackValue::new_int(1),
+            Err(e) => {
+                let mut diag = Diagnostic::new();
+                let msg = format!("failed to save text: {:?}", e);
+                diag.span_err(self.o.cur_filename(), self.o.cur_bc_span(), msg);
+                self.o.ctx.emit_diag(diag);
+                StackValue::new_int(0)
+            }
+        };
+        self.o.stack.replace_tail(stack_count, [r]);
+        self.add_ip_offset(Bc::SaveText.bytes_len() as i32);
+        Ok(())
     }
 
     fn instr_load_text(&mut self) -> anyhow::Result<()> {
         self.ensure_pre_step_instruction()?;
 
-        anyhow::bail!("LoadText not yet implemented");
+        view_stack!(self, stack_count, file_no:i, _force_save_dir:i, _force_utf8:i);
+        let file = self.o.ctx.get_save_text_path(file_no as _);
+        let r = match self.o.routine_load_text(&file) {
+            Ok(text) => StackValue::new_str(text.into()),
+            Err(e) => {
+                let mut diag = Diagnostic::new();
+                let msg = format!("failed to load text: {:?}", e);
+                diag.span_err(self.o.cur_filename(), self.o.cur_bc_span(), msg);
+                self.o.ctx.emit_diag(diag);
+                StackValue::new_str(ArcStr::new())
+            }
+        };
+        self.o.stack.replace_tail(stack_count, [r]);
+        self.add_ip_offset(Bc::LoadText.bytes_len() as i32);
+        Ok(())
     }
 
     fn instr_generic_find_element<const INSTR_LEN: usize>(
