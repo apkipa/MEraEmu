@@ -1501,11 +1501,84 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         Ok(())
     }
 
+    fn routine_write_chara(
+        &self,
+        chara_i: u32,
+        file: &mut (impl std::io::Write + std::io::Seek),
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryWriter;
+        use crate::v2::savefs::*;
+
+        let mut user_chara_vars = Vec::new();
+
+        fn write_one_chara_var(
+            file: &mut (impl std::io::Write + std::io::Seek),
+            var: &EraVarInfo,
+            chara_i: u32,
+        ) -> anyhow::Result<()> {
+            let is_str = var.val.is_arrstr();
+            let is_nodim = routines::is_chara_nodim(var.name.as_ref());
+            let var_dims_cnt = var.val.dims_cnt() - 1 - (is_nodim as usize);
+            let var_type = EraSaveDataType::new_var(is_str, var_dims_cnt)
+                .with_context_unlikely(|| format!("cannot save variable `{}`", var.name))?;
+            file.write_u8(var_type as _)?;
+            file.write_utf16_string(var.name.as_ref())?;
+            file.write_var(var_type, var, Some(chara_i as _))?;
+            Ok(())
+        }
+
+        // First write built-in chara variables
+        for var in self.ctx.variables.chara_vars_iter() {
+            if !var.is_savedata || !var.is_charadata || var.is_global {
+                continue;
+            }
+
+            if routines::is_builtin_chara_var(var.name.as_ref()) {
+                write_one_chara_var(file, var, chara_i)?;
+            } else {
+                user_chara_vars.push(var);
+            }
+        }
+
+        // Then write user-defined chara variables
+        if !user_chara_vars.is_empty() {
+            file.write_u8(EraSaveDataType::Separator as _)?;
+            for var in user_chara_vars {
+                write_one_chara_var(file, var, chara_i)?;
+            }
+        }
+
+        // Write separator
+        file.write_u8(EraSaveDataType::EOC as _)?;
+
+        Ok(())
+    }
+
+    fn routine_write_normal_var(
+        &self,
+        var: &EraVarInfo,
+        file: &mut (impl std::io::Write + std::io::Seek),
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryWriter;
+        use crate::v2::savefs::*;
+
+        let is_str = var.val.is_arrstr();
+        let var_dims_cnt = var.val.dims_cnt();
+        let var_type = EraSaveDataType::new_var(is_str, var_dims_cnt)
+            .with_context_unlikely(|| format!("cannot save variable `{}`", var.name))?;
+        file.write_u8(var_type as _)?;
+        file.write_utf16_string(var.name.as_ref())?;
+        file.write_var(var_type, var, None)?;
+
+        Ok(())
+    }
+
     fn routine_load_data(
         &mut self,
         save_path: &str,
         reset: bool,
-        expected_file_type: crate::v2::savefs::EraSaveFileType,
+        expected_file_type: EraSaveFileType,
+        old_charas_count: u32,
     ) -> anyhow::Result<LoadDataResult> {
         use crate::util::io::CSharpBinaryReader;
         use crate::v2::savefs::*;
@@ -1538,24 +1611,34 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
             anyhow::bail!("invalid save file type {file_type:?}, expected {expected_file_type:?}");
         }
 
-        let charas_count = if file_type == EraSaveFileType::Normal {
-            // Load character variables
-            let charas_count = file
+        // Load character variables
+        let charas_count = if matches!(
+            file_type,
+            EraSaveFileType::Normal | EraSaveFileType::CharVar
+        ) {
+            let charas_count: u32 = file
                 .read_i64()?
                 .try_into()
                 .context_unlikely("invalid character count")?;
+            let chara_start_idx = if file_type == EraSaveFileType::CharVar {
+                // Loading a CharVar save file appends characters
+                old_charas_count
+            } else {
+                0
+            };
+            let chara_end_idx = chara_start_idx + charas_count;
             let old_charas_cap = (self.ctx.variables)
                 .charas_var_capacity()
                 .context_unlikely("no chara variables")?;
-            if charas_count > old_charas_cap {
+            if chara_end_idx > old_charas_cap {
                 // Grow chara variables
                 use crate::v2::engine::CHARA_CAP_GROWTH_STEP;
-                let grow_count = (charas_count - old_charas_cap + CHARA_CAP_GROWTH_STEP - 1)
+                let grow_count = (chara_end_idx - old_charas_cap + CHARA_CAP_GROWTH_STEP - 1)
                     / CHARA_CAP_GROWTH_STEP
                     * CHARA_CAP_GROWTH_STEP;
                 self.ctx.variables.grow_charas_var_capacity(grow_count);
             }
-            for chara_i in 0..charas_count {
+            for chara_i in chara_start_idx..chara_end_idx {
                 loop {
                     let var_type = EraSaveDataType::from_u8(file.read_u8()?)
                         .context_unlikely("invalid save data type")?;
@@ -1580,29 +1663,33 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
                     }
                 }
             }
-            Some(charas_count)
+            Some(chara_end_idx)
         } else {
             None
         };
 
         // Load normal variables
-        loop {
-            let var_type = EraSaveDataType::from_u8(file.read_u8()?)
-                .context_unlikely("invalid save data type")?;
-            match var_type {
-                EraSaveDataType::EOF => break,
-                _ => {
-                    let var_name = file.read_utf16_string()?;
-                    let var = (self.ctx.variables)
-                        .get_var_info_by_name_mut(&var_name)
-                        .with_context_unlikely(|| {
-                            format!("variable `{}` does not exist", var_name)
-                        })?;
-                    if var.is_charadata {
-                        bail!("variable `{}` is CHARADATA", var_name);
+        if file_type != EraSaveFileType::CharVar {
+            loop {
+                let var_type = EraSaveDataType::from_u8(file.read_u8()?)
+                    .context_unlikely("invalid save data type")?;
+                match var_type {
+                    EraSaveDataType::EOF => break,
+                    _ => {
+                        let var_name = file.read_utf16_string()?;
+                        let var = (self.ctx.variables)
+                            .get_var_info_by_name_mut(&var_name)
+                            .with_context_unlikely(|| {
+                                format!("variable `{}` does not exist", var_name)
+                            })?;
+                        if var.is_charadata {
+                            bail!("variable `{}` is CHARADATA", var_name);
+                        }
+                        file.read_var(var_type, var, None)
+                            .with_context_unlikely(|| {
+                                format!("read variable `{}` failed", var_name)
+                            })?;
                     }
-                    file.read_var(var_type, var, None)
-                        .with_context_unlikely(|| format!("read variable `{}` failed", var_name))?;
                 }
             }
         }
@@ -1630,47 +1717,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         // Write charas variables
         file.write_i64(charas_count as _)?;
         for chara_i in 0..charas_count {
-            let mut user_chara_vars = Vec::new();
-
-            fn write_one_chara_var(
-                file: &mut (impl std::io::Write + std::io::Seek),
-                var: &EraVarInfo,
-                chara_i: u32,
-            ) -> anyhow::Result<()> {
-                let is_str = var.val.is_arrstr();
-                let is_nodim = routines::is_chara_nodim(var.name.as_ref());
-                let var_dims_cnt = var.val.dims_cnt() - 1 - (is_nodim as usize);
-                let var_type = EraSaveDataType::new_var(is_str, var_dims_cnt)
-                    .with_context_unlikely(|| format!("cannot save variable `{}`", var.name))?;
-                file.write_u8(var_type as _)?;
-                file.write_utf16_string(var.name.as_ref())?;
-                file.write_var(var_type, var, Some(chara_i as _))?;
-                Ok(())
-            }
-
-            // First write built-in chara variables
-            for var in self.ctx.variables.chara_vars_iter() {
-                if !var.is_savedata || !var.is_charadata || var.is_global {
-                    continue;
-                }
-
-                if routines::is_builtin_chara_var(var.name.as_ref()) {
-                    write_one_chara_var(&mut file, var, chara_i)?;
-                } else {
-                    user_chara_vars.push(var);
-                }
-            }
-
-            // Then write user-defined chara variables
-            if !user_chara_vars.is_empty() {
-                file.write_u8(EraSaveDataType::Separator as _)?;
-                for var in user_chara_vars {
-                    write_one_chara_var(&mut file, var, chara_i)?;
-                }
-            }
-
-            // Write separator
-            file.write_u8(EraSaveDataType::EOC as _)?;
+            self.routine_write_chara(chara_i, &mut file)?;
         }
 
         // Write normal variables
@@ -1679,13 +1726,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
                 continue;
             }
 
-            let is_str = var.val.is_arrstr();
-            let var_dims_cnt = var.val.dims_cnt();
-            let var_type = EraSaveDataType::new_var(is_str, var_dims_cnt)
-                .with_context_unlikely(|| format!("cannot save variable `{}`", var.name))?;
-            file.write_u8(var_type as _)?;
-            file.write_utf16_string(var.name.as_ref())?;
-            file.write_var(var_type, var, None)?;
+            self.routine_write_normal_var(var, &mut file)?;
         }
 
         // Write EOF
@@ -1709,13 +1750,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
                 continue;
             }
 
-            let is_str = var.val.is_arrstr();
-            let var_dims_cnt = var.val.dims_cnt();
-            let var_type = EraSaveDataType::new_var(is_str, var_dims_cnt)
-                .with_context_unlikely(|| format!("cannot save variable `{}`", var.name))?;
-            file.write_u8(var_type as _)?;
-            file.write_utf16_string(var.name.as_ref())?;
-            file.write_var(var_type, var, None)?;
+            self.routine_write_normal_var(var, &mut file)?;
         }
 
         // Write EOF
@@ -1796,6 +1831,32 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         let text = String::from_utf8_lossy(text).into_owned();
 
         Ok(text)
+    }
+
+    fn routine_save_chara(
+        &mut self,
+        save_path: &str,
+        memo: &str,
+        chara_nos: Vec<u32>,
+    ) -> anyhow::Result<()> {
+        use crate::util::io::CSharpBinaryWriter;
+        use crate::v2::savefs::*;
+
+        let file = self.ctx.callback.on_open_host_file(save_path, true)?;
+        let mut file = std::io::BufWriter::new(file);
+
+        self.routine_write_save_header(EraSaveFileType::CharVar, memo, &mut file)?;
+
+        // Write charas variables
+        file.write_i64(chara_nos.len() as _)?;
+        for chara_i in chara_nos {
+            self.routine_write_chara(chara_i, &mut file)?;
+        }
+
+        // Write EOF
+        file.write_u8(EraSaveDataType::EOF as _)?;
+
+        Ok(())
     }
 }
 
@@ -5533,10 +5594,12 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, save_id:i);
         let file = self.o.ctx.get_save_path(save_id as _);
-        let r = match self
-            .o
-            .routine_load_data(&file, true, EraSaveFileType::Normal)
-        {
+        let r = match (self.o).routine_load_data(
+            &file,
+            true,
+            EraSaveFileType::Normal,
+            self.charas_count,
+        ) {
             Ok(r) => {
                 if let Some(charas_count) = r.charas_count {
                     self.charas_count = charas_count;
@@ -5644,10 +5707,12 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         use crate::v2::savefs::EraSaveFileType;
 
         let file = self.o.ctx.get_global_save_path();
-        let r = match self
-            .o
-            .routine_load_data(&file, false, EraSaveFileType::Global)
-        {
+        let r = match (self.o).routine_load_data(
+            &file,
+            false,
+            EraSaveFileType::Global,
+            self.charas_count,
+        ) {
             Ok(_) => 1,
             Err(e) => {
                 let mut diag = Diagnostic::new();
@@ -5725,16 +5790,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
 
         view_stack!(self, stack_count, filename:s, memo:s, chara_nos:any:charas_cnt);
         let chara_nos = dedup_chara_numbers(chara_nos, self.charas_count)?;
-        // TODO: Bc::SaveChara
-        {
-            let mut diag = Diagnostic::new();
-            diag.span_err(
-                self.o.cur_filename(),
-                self.o.cur_bc_span(),
-                "SaveChara not yet implemented",
-            );
-            self.o.ctx.emit_diag(diag);
-        }
+        let filename = self.o.ctx.get_chara_save_path(filename);
+        let memo = &memo.clone();
+        self.o.routine_save_chara(&filename, memo, chara_nos)?;
         self.o.stack.replace_tail(stack_count, []);
         self.add_ip_offset(Bc::SaveChara { charas_cnt }.bytes_len() as i32);
         Ok(())
@@ -5744,17 +5802,33 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         self.ensure_pre_step_instruction()?;
 
         view_stack!(self, stack_count, filename:s);
-        // TODO: Bc::LoadChara
-        {
-            let mut diag = Diagnostic::new();
-            diag.span_err(
-                self.o.cur_filename(),
-                self.o.cur_bc_span(),
-                "LoadChara not yet implemented",
-            );
-            self.o.ctx.emit_diag(diag);
-        }
-        self.o.stack.replace_tail(stack_count, []);
+        let filename = self.o.ctx.get_chara_save_path(filename);
+        // RESULT:0に、読み取りに失敗した場合は0を、成功した場合は1を代入します。
+        let r = match (self.o).routine_load_data(
+            &filename,
+            false,
+            EraSaveFileType::CharVar,
+            self.charas_count,
+        ) {
+            Ok(r) => {
+                if let Some(charas_count) = r.charas_count {
+                    self.charas_count = charas_count;
+                }
+                r.file_exists.into()
+            }
+            Err(e) => {
+                let mut diag = Diagnostic::new();
+                diag.span_err(
+                    self.o.cur_filename(),
+                    self.o.cur_bc_span(),
+                    format!("failed to load data from `{}`: {}", filename, e),
+                );
+                self.o.ctx.emit_diag(diag);
+                0
+            }
+        };
+        let r = StackValue::new_int(r);
+        self.o.stack.replace_tail(stack_count, [r]);
         self.add_ip_offset(Bc::LoadChara.bytes_len() as i32);
         Ok(())
     }
@@ -5795,7 +5869,9 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             );
             self.o.ctx.emit_diag(diag);
         }
-        self.o.stack.replace_tail(stack_count, []);
+        // TODO: Will also assign to RESULTS
+        let r = StackValue::new_int(0);
+        self.o.stack.replace_tail(stack_count, [r]);
         self.add_ip_offset(Bc::FindCharaDataFile.bytes_len() as i32);
         Ok(())
     }
@@ -7209,7 +7285,7 @@ impl<'ctx, 'i, 's, Callback: EraCompilerCallback> EraVirtualMachine<'ctx, 'i, 's
         //       advances the instruction pointer at the same time. This allows us to implement JIT
         //       compilation more easily.
 
-        // TODO: In JIT, we compile an entire function at a time, and then executes from the instruction
+        // NOTE: In JIT, we compile an entire function at a time, and then executes from the instruction
         //       corresponding to the current IP. If there are errors, we panic and recover from the loop,
         //       then pass the caught error to the caller. For ill-formed instructions, we panic with
         //       FireEscapeError(IllegalInstruction) and fall back to bytecode interpretation (to emit

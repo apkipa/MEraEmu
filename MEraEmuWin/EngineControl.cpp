@@ -1620,18 +1620,7 @@ namespace winrt::MEraEmuWin::implementation {
             });
         }
         std::unique_ptr<MEraEngineHostFile> on_open_host_file(std::string_view path, bool can_write) override {
-            hstring actual_path;
-            if (path.ends_with(".sav")) {
-                // Try to isolate save file by adding `MEraEmu` to the path
-                auto temp = path.substr(0, path.size() - 4);
-                actual_path = to_hstring(temp) + L".MEraEmu.sav";
-                if (!can_write && !util::fs::file_exists(actual_path.c_str())) {
-                    actual_path = to_hstring(path);
-                }
-            }
-            else {
-                actual_path = to_hstring(path);
-            }
+            hstring actual_path = auto_isolate_path(path, can_write);
 
             auto create_file_fn = [&] {
                 file_handle fh(CreateFileW(
@@ -1706,18 +1695,7 @@ namespace winrt::MEraEmuWin::implementation {
             return std::make_unique<Win32File>(std::move(fh));
         }
         bool on_check_host_file_exists(std::string_view path) override {
-            hstring actual_path;
-            if (path.ends_with(".sav")) {
-                // Try to isolate save file by adding `MEraEmu` to the path
-                auto temp = path.substr(0, path.size() - 4);
-                actual_path = to_hstring(temp) + L".MEraEmu.sav";
-                if (!util::fs::file_exists(actual_path.c_str())) {
-                    actual_path = to_hstring(path);
-                }
-            }
-            else {
-                actual_path = to_hstring(path);
-            }
+            hstring actual_path = auto_isolate_path(path, false);
 
             return util::fs::file_exists(actual_path.c_str());
         }
@@ -1836,6 +1814,26 @@ namespace winrt::MEraEmuWin::implementation {
                     throw;
                 }
             }
+        }
+        hstring auto_isolate_path(std::string_view path, bool can_write) {
+            const std::string_view exts[] = { ".sav", ".dat" };
+            for (auto ext : exts) {
+                if (path.ends_with(ext)) {
+                    // Try to isolate save file by adding `MEraEmu` to the path
+                    std::string actual_path{ path.substr(0, path.size() - ext.size()) };
+                    actual_path += ".MEraEmu";
+                    actual_path += ext;
+                    auto wide_actual_path = to_hstring(actual_path);
+                    if (!can_write && !util::fs::file_exists(wide_actual_path.c_str())) {
+                        // File not found or is going to overwrite
+                        return to_hstring(path);
+                    }
+                    // Isolated path
+                    return wide_actual_path;
+                }
+            }
+            // Not required to isolate
+            return to_hstring(path);
         }
 
         EngineSharedData* const m_sd;
