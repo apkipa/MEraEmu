@@ -22,6 +22,14 @@
                     </VisualState.Setters>
                 </VisualState>
             </VisualStateGroup>
+            <VisualStateGroup x:Name="EngineTooltipStates">
+                <VisualState x:Name="TooltipShown">
+                    <VisualState.Setters>
+                        <Setter Target="EngineTooltipBorder.Visibility" Value="Visible"/>
+                    </VisualState.Setters>
+                </VisualState>
+                <VisualState x:Name="TooltipHidden" />
+            </VisualStateGroup>
         </VisualStateManager.VisualStateGroups>
 
         <ScrollViewer x:Name="RootScrollViewer" HorizontalScrollMode="Auto" BringIntoViewOnFocusChange="False"
@@ -45,5 +53,12 @@
                 </StackPanel>
             </Grid>
         </ScrollViewer>
+        
+        <!-- Tooltip element -->
+        <Border x:Name="EngineTooltipBorder" Background="Gray" BorderBrush="White"
+                BorderThickness="1" CornerRadius="4" Padding="4" Margin="4"
+                VerticalAlignment="Top" HorizontalAlignment="Left" Visibility="Collapsed">
+            <TextBlock x:Name="EngineTooltipTextBlock" Foreground="White" FontSize="13.5"/>
+        </Border>
     </Grid>
 </UserControl>

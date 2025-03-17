@@ -866,6 +866,30 @@ namespace winrt::MEraEmuWin::implementation {
             .B = static_cast<uint8_t>(value >> 0),
         };
     }
+    constexpr D2D1_COLOR_F to_d2d_color_f(uint32_t value) noexcept {
+        return {
+            .r = (float)((value >> 16) & 0xff) / 255.0f,
+            .g = (float)((value >> 8) & 0xff) / 255.0f,
+            .b = (float)((value >> 0) & 0xff) / 255.0f,
+            .a = (float)((value >> 24) & 0xff) / 255.0f,
+        };
+    }
+    constexpr D2D1_COLOR_F to_d2d_color_f(winrt::Windows::UI::Color value) noexcept {
+        return {
+            .r = (float)value.R / 255.0f,
+            .g = (float)value.G / 255.0f,
+            .b = (float)value.B / 255.0f,
+            .a = (float)value.A / 255.0f,
+        };
+    }
+    constexpr D2D1_COLOR_F to_opaque_d2d_color_f(winrt::Windows::UI::Color value) noexcept {
+        return {
+            .r = (float)value.R / 255.0f,
+            .g = (float)value.G / 255.0f,
+            .b = (float)value.B / 255.0f,
+            .a = 1.0f,
+        };
+    }
     constexpr wchar_t ascii_tolower(wchar_t ch) noexcept {
         if (L'A' <= ch && ch <= L'Z') {
             return ch - 'A' + 'a';
@@ -1888,7 +1912,12 @@ namespace winrt::MEraEmuWin::implementation {
                 return S_OK;
             };
             auto image = [&](EngineUIPrintLineDataInlineObject::Image const& v) -> HRESULT {
-                auto it = ctrl->m_sprite_objects.find(v.sprite);
+                hstring const* sprite_to_find = &v.sprite;
+                if (clientDrawingEffect == ctrl->m_active_button_brush.get()) {
+                    // Active button
+                    sprite_to_find = &v.sprite_button;
+                }
+                auto it = ctrl->m_sprite_objects.find(*sprite_to_find);
                 if (it == ctrl->m_sprite_objects.end()) {
                     // Sprite not found
                     return S_OK;
@@ -2422,6 +2451,9 @@ namespace winrt::MEraEmuWin::implementation {
         // Initialize input countdown timer
         m_input_countdown_timer.Interval(std::chrono::milliseconds{ 1 });
         m_input_countdown_timer.Tick({ get_weak(), &EngineControl::OnInputCountDownTick });
+
+        // Initialize tooltip timer
+        m_tooltip_timer.Tick({ get_weak(), &EngineControl::OnTooltipTimerTick });
     }
     void EngineControl::ReturnToTitle() {
         m_outstanding_input_req = nullptr;
@@ -3190,6 +3222,12 @@ namespace winrt::MEraEmuWin::implementation {
         m_font_map.clear();
         m_graphics_objects.clear();
         m_sprite_objects.clear();
+        {
+            // https://learn.microsoft.com/en-us/windows/win32/controls/ttm-setdelaytime
+            auto dbl_click_time = GetDoubleClickTime();
+            m_tooltip_delay = dbl_click_time;
+            m_tooltip_duration = dbl_click_time * 10;
+        }
         EngineForeColor(m_app_settings->GameForegroundColor());
         EngineBackColor(m_app_settings->GameBackgroundColor());
         if (m_sound.hub) {
@@ -3252,6 +3290,7 @@ namespace winrt::MEraEmuWin::implementation {
         m_cur_printc_count = 0;
         m_user_skipping = false;
         m_cur_pointer.pt = { -1, -1 };
+        m_tooltip_timer.Stop();
         EngineForeColor(m_app_settings->GameForegroundColor());
         EngineBackColor(m_app_settings->GameBackgroundColor());
         if (m_sound.hub) {
@@ -3353,7 +3392,7 @@ namespace winrt::MEraEmuWin::implementation {
             int dip_rt_top = update_rt.top;
             int dip_rt_bottom = update_rt.bottom;
             // Clear stale bitmap area
-            ctx->Clear(D2D1::ColorF(D2D1::ColorF::White, 0));
+            ctx->Clear(D2D1::ColorF(D2D1::ColorF::Black, 0.f));
             // Obtain lines requiring redraws
             auto ib = begin(m_ui_lines), ie = end(m_ui_lines);
             int line_start = std::ranges::upper_bound(ib, ie, dip_rt_top,
@@ -3407,18 +3446,17 @@ namespace winrt::MEraEmuWin::implementation {
                 // If we have an active button at this line, apply and flush effects
                 if (m_cur_active_button.line == line && m_cur_active_button.button_idx < size(line_data.buttons)) {
                     auto const& btn_data = line_data.buttons[m_cur_active_button.button_idx];
-                    EngineUIPrintLineDataStyle style{
-                        .starti = btn_data.starti,
-                        .len = btn_data.len,
-                        .data = EngineUIPrintLineDataStyle::Color(to_u32(m_app_settings->GameHighlightColor()) | 0xff000000)
-                    };
-                    line_data.styles.push_back(style);
+                    // Apply highlight effect
+                    auto color = to_opaque_d2d_color_f(m_app_settings->GameHighlightColor());
+                    m_active_button_brush->SetColor(color);
+                    // HACK: Manually set the range to highlight. This also helps with identifying the button
+                    //       to highlight where applicable.
+                    DWRITE_TEXT_RANGE range{ btn_data.starti, btn_data.len };
+                    line_data.txt_layout->SetDrawingEffect(m_active_button_brush.get(), range);
                     tenkai::cpp_utils::ScopeExit se_style([&] {
-                        line_data.styles.pop_back();
                         try { line_data.flush_effects(this); }
                         catch (...) {}
                     });
-                    line_data.flush_effects(this);
                     draw_fn();
                 }
                 else {
@@ -3575,6 +3613,8 @@ namespace winrt::MEraEmuWin::implementation {
         for (auto& line : m_ui_lines) {
             line.flush_effects(this);
         }
+        auto color = to_opaque_d2d_color_f(m_app_settings->GameHighlightColor());
+        check_hresult(m_d2d_ctx->CreateSolidColorBrush(color, m_active_button_brush.put()));
     }
     void EngineControl::RelayoutUILines(bool recreate_all) {
         const float new_width = m_ui_param_cache.canvas_width_px;
@@ -3585,6 +3625,7 @@ namespace winrt::MEraEmuWin::implementation {
             }
         }
 
+        // TODO: Can we do better when we have a lot of truncated logs?
         constexpr size_t PARALLEL_THRESHOLD = 4000;
         if (size(m_ui_lines) > PARALLEL_THRESHOLD) {
             // Multi-threaded process
@@ -3700,6 +3741,8 @@ namespace winrt::MEraEmuWin::implementation {
         auto pt_y = pt.Y * m_ui_param_cache.yscale;
         auto line = GetLineIndexFromHeight(pt_y);
 
+        hstring tooltip_title{};
+
         // Check for buttons
         ActiveButtonData new_active_button;
         if ((pt_x >= 0 && pt_y >= 0) && line < size(m_ui_lines)) {
@@ -3729,10 +3772,15 @@ namespace winrt::MEraEmuWin::implementation {
                         // Found the target button
                         new_active_button.line = i;
                         new_active_button.button_idx = j;
+
+                        // Show tooltip if needed
+                        if (auto p = std::get_if<EngineUIPrintLineDataButton::InputButton>(&cur_btn.data)) {
+                            tooltip_title = p->title;
+                        }
+
                         break;
                     }
                 }
-
             }
         }
 
@@ -3741,6 +3789,25 @@ namespace winrt::MEraEmuWin::implementation {
             InvalidateLineAtIndex(m_cur_active_button.line);
             m_cur_active_button = new_active_button;
             InvalidateLineAtIndex(new_active_button.line);
+        }
+
+        auto tooltip_tb = EngineTooltipTextBlock();
+        if (tooltip_title != tooltip_tb.Text()) {
+            // Update tooltip text
+            tooltip_tb.Text(tooltip_title);
+
+            if (tooltip_title.empty()) {
+                // Hide tooltip
+                if (m_tooltip_timer.IsEnabled()) {
+                    m_tooltip_timer.Stop();
+                    VisualStateManager::GoToState(*this, L"TooltipHidden", true);
+                }
+            }
+            else if (!m_tooltip_timer.IsEnabled()) {
+                // Show tooltip
+                m_tooltip_timer.Interval(std::chrono::milliseconds(m_tooltip_delay));
+                m_tooltip_timer.Start();
+            }
         }
     }
     bool EngineControl::TryFulfillInputRequest(bool clear_input) {
@@ -3836,6 +3903,21 @@ namespace winrt::MEraEmuWin::implementation {
                     UpdateEngineImageOutputLayout(false);
                 }
             }
+        }
+    }
+    void EngineControl::OnTooltipTimerTick(IInspectable const&, IInspectable const&) {
+        m_tooltip_timer.Stop();
+
+        const bool going_to_show = EngineTooltipBorder().Visibility() == Visibility::Collapsed;
+        if (going_to_show) {
+            VisualStateManager::GoToState(*this, L"TooltipShown", true);
+
+            // Prepare hide timer
+            m_tooltip_timer.Interval(std::chrono::milliseconds(m_tooltip_duration));
+            m_tooltip_timer.Start();
+        }
+        else {
+            VisualStateManager::GoToState(*this, L"TooltipHidden", true);
         }
     }
     void EngineControl::HandleEngineLeftClick(Windows::Foundation::Point groundtruth_pt, Windows::Foundation::Point engine_pt) {
@@ -4364,8 +4446,12 @@ namespace winrt::MEraEmuWin::implementation {
                         if (auto it = tag.attrs.find(L"value"); it != tag.attrs.end()) {
                             value = it->second;
                         }
+                        hstring title;
+                        if (auto it = tag.attrs.find(L"title"); it != tag.attrs.end()) {
+                            title = it->second;
+                        }
                         EndPrintButtonRegion(ctx, [&] {
-                            return EngineUIPrintLineDataButton::InputButton{ .input = value };
+                            return EngineUIPrintLineDataButton::InputButton{ .input = value, .title = title };
                         });
                     }
                     else if (tag.name == L"img") {
@@ -4374,6 +4460,10 @@ namespace winrt::MEraEmuWin::implementation {
                         auto sprite_it = m_sprite_objects.find(sprite_name);
                         if (sprite_it != m_sprite_objects.end()) {
                             auto& sprite = sprite_it->second;
+                            hstring sprite_button;
+                            if (auto it = tag.attrs.find(L"srcb"); it != tag.attrs.end()) {
+                                sprite_button = it->second;
+                            }
                             EngineUILength width, height = EngineUILength::FontPercent(100), ypos;
                             if (auto it = tag.attrs.find(L"ypos"); it != tag.attrs.end()) {
                                 ypos = parse_comma_separated_ui_length(it->second, 1, 1)[0];
@@ -4389,9 +4479,10 @@ namespace winrt::MEraEmuWin::implementation {
                             }
                             auto obj = make_self<EngineUIPrintLineDataInlineObject::InlineObject>(
                                 this, EngineUIPrintLineDataInlineObject::Image{
-                                    .sprite = sprite_name, .width = width, .height = height, .ypos = ypos
+                                    .sprite = sprite_name, .sprite_button = sprite_button,
+                                    .width = width, .height = height, .ypos = ypos,
                                 }
-                            );
+                                );
                             m_cur_composing_line.parts.push_back({
                                 .str = hstring(L"�"), .inline_obj = std::move(obj), .forbid_button = true,
                                 });

@@ -150,6 +150,7 @@ namespace winrt::MEraEmuWin::implementation {
         // For input command
         struct InputButton {
             hstring input;
+            hstring title; // For tooltip
         };
         // For source errors & warnings
         struct SourceButton {
@@ -178,7 +179,7 @@ namespace winrt::MEraEmuWin::implementation {
             EngineUILength size;
         };
         struct Image {
-            hstring sprite;
+            hstring sprite, sprite_button;
             EngineUILength width, height, ypos;
         };
 
@@ -364,6 +365,7 @@ namespace winrt::MEraEmuWin::implementation {
         }
 
         void OnInputCountDownTick(IInspectable const&, IInspectable const&);
+        void OnTooltipTimerTick(IInspectable const&, IInspectable const&);
         void HandleEngineLeftClick(Windows::Foundation::Point groundtruth_pt, Windows::Foundation::Point engine_pt);
         bool FlushCurrentPrintLine(bool force_push = false);
         // NOTE: Wait flag is ignored deliberately
@@ -434,6 +436,7 @@ namespace winrt::MEraEmuWin::implementation {
         ISurfaceImageSourceNativeWithD2D* m_vsis_d2d_noref{};
         com_ptr<ID2D1DeviceContext3> m_d2d_ctx;
         com_ptr<ID2D1SpriteBatch> m_d2d_sprite_batch;
+        com_ptr<ID2D1SolidColorBrush> m_active_button_brush;
         std::unordered_map<uint32_t, com_ptr<ID2D1SolidColorBrush>> m_brush_map;
         std::unordered_map<hstring, com_ptr<IDWriteTextFormat>> m_font_map;
         com_ptr<IDWriteTextLayout4> m_empty_text_layout;
@@ -445,6 +448,8 @@ namespace winrt::MEraEmuWin::implementation {
         uint32_t m_cur_font_style{};
         hstring m_cur_font_name{};
         Windows::UI::Color m_cur_fore_color{}, m_cur_back_color{};
+        uint32_t m_tooltip_delay{}, m_tooltip_duration{};
+        Windows::UI::Xaml::DispatcherTimer m_tooltip_timer;
         bool m_auto_redraw{};
         bool m_skip_display{};
         uint32_t m_no_skip_display_cnt{};
