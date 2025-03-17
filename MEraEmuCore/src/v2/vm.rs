@@ -38,6 +38,8 @@ use crate::{
 };
 use EraBytecodeKind as Bc;
 
+use super::savefs::EraSaveFileType;
+
 type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 type FxHashSet<T> = HashSet<T, FxBuildHasher>;
 
@@ -1469,6 +1471,36 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         })
     }
 
+    fn routine_write_save_header(
+        &mut self,
+        file_type: EraSaveFileType,
+        save_info: &str,
+        file: &mut (impl std::io::Write + std::io::Seek),
+    ) -> anyhow::Result<()> {
+        use crate::v2::savefs::*;
+        use binrw::BinWrite;
+
+        let game_code = (self.ctx.variables)
+            .get_var_i_0("GAMEBASE_GAMECODE")
+            .unwrap_or(0);
+        let game_ver = (self.ctx.variables)
+            .get_var_i_0("GAMEBASE_VERSION")
+            .unwrap_or(0);
+
+        // Write save file header
+        let header = EraSaveFileHeader {
+            version: 1808,
+            data: Vec::new(),
+            file_type,
+            game_code,
+            game_version: game_ver,
+            save_info: save_info.to_owned(),
+        };
+        header.write_le(file)?;
+
+        Ok(())
+    }
+
     fn routine_load_data(
         &mut self,
         save_path: &str,
@@ -1589,28 +1621,11 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
     ) -> anyhow::Result<()> {
         use crate::util::io::CSharpBinaryWriter;
         use crate::v2::savefs::*;
-        use binrw::BinWrite;
 
         let file = self.ctx.callback.on_open_host_file(save_path, true)?;
         let mut file = std::io::BufWriter::new(file);
 
-        let game_code = (self.ctx.variables)
-            .get_var_i_0("GAMEBASE_GAMECODE")
-            .unwrap_or(0);
-        let game_ver = (self.ctx.variables)
-            .get_var_i_0("GAMEBASE_VERSION")
-            .unwrap_or(0);
-
-        // Write save file header
-        let header = EraSaveFileHeader {
-            version: 1808,
-            data: Vec::new(),
-            file_type: EraSaveFileType::Normal,
-            game_code,
-            game_version: game_ver,
-            save_info: save_info.to_owned(),
-        };
-        header.write_le(&mut file)?;
+        self.routine_write_save_header(EraSaveFileType::Normal, save_info, &mut file)?;
 
         // Write charas variables
         file.write_i64(charas_count as _)?;
@@ -1680,8 +1695,33 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
     }
 
     fn routine_save_global_data(&mut self, save_path: &str) -> anyhow::Result<()> {
-        // todo!()
-        anyhow::bail!("routine_save_global_data not yet implemented")
+        use crate::util::io::CSharpBinaryWriter;
+        use crate::v2::savefs::*;
+
+        let file = self.ctx.callback.on_open_host_file(save_path, true)?;
+        let mut file = std::io::BufWriter::new(file);
+
+        self.routine_write_save_header(EraSaveFileType::Global, "", &mut file)?;
+
+        // Write normal global variables
+        for var in self.ctx.variables.iter() {
+            if !var.is_savedata || var.is_charadata || !var.is_global {
+                continue;
+            }
+
+            let is_str = var.val.is_arrstr();
+            let var_dims_cnt = var.val.dims_cnt();
+            let var_type = EraSaveDataType::new_var(is_str, var_dims_cnt)
+                .with_context_unlikely(|| format!("cannot save variable `{}`", var.name))?;
+            file.write_u8(var_type as _)?;
+            file.write_utf16_string(var.name.as_ref())?;
+            file.write_var(var_type, var, None)?;
+        }
+
+        // Write EOF
+        file.write_u8(EraSaveDataType::EOF as _)?;
+
+        Ok(())
     }
 
     fn routine_check_data(&mut self, save_path: &str) -> anyhow::Result<CheckDataResult> {
