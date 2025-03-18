@@ -1495,7 +1495,9 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
 
                     let get_col_bytes = |idx: usize| row.get(idx).map_or(&[][..], |x| x.as_bytes());
                     let load_graphics = |this: &mut Self, file_path: &str| -> Result<i64, ()> {
-                        let next_gid = (this.gid_file_cache.len() + 1) as i64;
+                        // HACK: Emuera does not allocate GID for CSV images; we move the GID allocation
+                        //       to the higher half of the GID space to avoid conflicts.
+                        let next_gid = (this.gid_file_cache.len() + 1 + (1 << 31)) as i64;
                         match this.gid_file_cache.raw_entry_mut().from_key(file_path) {
                             hashbrown::hash_map::RawEntryMut::Occupied(e) => {
                                 let gid = *e.get();

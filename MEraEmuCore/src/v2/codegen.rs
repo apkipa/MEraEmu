@@ -2122,8 +2122,12 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                     factor
                 };
                 self.int_norm_var_idx(var, true)?;
+                self.chunk.push_duplicate_all(2, stmt_span);
+                self.chunk.push_bc(BcKind::GetArrValFlat, stmt_span);
                 self.chunk.push_load_imm(factor.to_bits() as _, factor_span);
                 self.chunk.push_bc(BcKind::TimesFloat, stmt_span);
+                self.chunk.push_bc(BcKind::SetArrValFlat, stmt_span);
+                self.chunk.push_pop_all(1, stmt_span);
             }
             EraNode::StmtSetBit(args) => {
                 let args_span = self.arena.get_node_span(args);
