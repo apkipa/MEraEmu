@@ -403,6 +403,12 @@ struct MEraEngineHostFile {
     virtual uint64_t seek(int64_t pos, EraCompilerFileSeekMode mode) = 0;
 };
 
+struct MEraEngineHostFileListing {
+    MEraEngineHostFileListing() {}
+    virtual ~MEraEngineHostFileListing() {}
+    virtual MEraEngineHostFileListingEntryFfi_t next() = 0;
+};
+
 struct MEraEngineSysCallback {
     MEraEngineSysCallback() {}
     virtual ~MEraEngineSysCallback() {}
@@ -456,9 +462,9 @@ struct MEraEngineSysCallback {
     virtual bool on_check_host_file_exists(std::string_view path) = 0;
     //// NOTE: Can throw std::exception
     //virtual void on_delete_host_file(std::string_view path) = 0;
-    //// NOTE: Can throw std::exception
-    //virtual std::unique_ptr<MEraEngineHostFileListing> on_list_host_file(std::string_view path) = 0;
-    // TODO: FFI callbacks: on_delete_host_file, on_list_host_file
+    // TODO: FFI callbacks: on_delete_host_file
+    // NOTE: Can throw std::exception
+    virtual std::unique_ptr<MEraEngineHostFileListing> on_list_host_file(std::string_view path) = 0;
     virtual int64_t on_play_sound(std::string_view path, int64_t loop_count, bool is_bgm) = 0;
     virtual int64_t on_stop_sound(int64_t sound_id) = 0;
     virtual int64_t on_check_font(std::string_view font_name) = 0;

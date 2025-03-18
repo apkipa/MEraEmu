@@ -6590,8 +6590,9 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
             }
             b"CHKCHARADATA" => {
                 site.result()?;
-                // TODO: CHKCHARADATA
-                site.chunk.push_load_imm(0, name_span);
+                let [filename] = site.unpack_args(args)?;
+                apply_args!(name_span, filename:s);
+                site.chunk.push_bc(BcKind::CheckCharaDataFile, name_span);
             }
             b"SAVETEXT" => {
                 site.result()?;

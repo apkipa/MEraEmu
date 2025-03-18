@@ -731,6 +731,31 @@ where
     }
 }
 
+pub trait StrExt {
+    fn make_native_path_separator(&mut self);
+}
+
+impl StrExt for str {
+    fn make_native_path_separator(&mut self) {
+        for c in unsafe { self.as_bytes_mut() } {
+            if *c == b'/' || *c == b'\\' {
+                *c = std::path::MAIN_SEPARATOR as u8;
+            }
+        }
+    }
+}
+
+pub trait StringExt {
+    fn into_native_path_separator(self) -> Self;
+}
+
+impl StringExt for String {
+    fn into_native_path_separator(mut self) -> Self {
+        self.make_native_path_separator();
+        self
+    }
+}
+
 macro_rules! impl_serde_for_modular_bitfield {
     ($name:ident, $type:ty) => {
         impl serde::Serialize for $name {

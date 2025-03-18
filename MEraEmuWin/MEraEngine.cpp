@@ -428,10 +428,21 @@ MEraEngineBuilder::MEraEngineBuilder(std::unique_ptr<MEraEngineSysCallback> call
         },
         .on_list_host_file = [](Erased_t* self, slice_ref_uint8_t path) noexcept {
             return rust_exception_boundary<RustResult_VirtualPtr__Erased_ptr_MEraEngineHostFileListingFfiVTable_char_const_ptr_t>([&] {
-                // TODO: Implement this
-                //return ((MEraEngineSysCallback*)self)->on_list_host_file(STR_VIEW(path));
-                throw std::runtime_error("Not implemented");
-                return VirtualPtr__Erased_ptr_MEraEngineHostFileListingFfiVTable_t{};
+                auto r = ((MEraEngineSysCallback*)self)->on_list_host_file(STR_VIEW(path));
+                MEraEngineHostFileListingFfiVTable_t vtable{
+                    .release_vptr = [](Erased_t* self) noexcept {
+                        delete (MEraEngineHostFileListing*)self;
+                    },
+                    .next = [](Erased_t* self) noexcept {
+                        return rust_exception_boundary<RustResult_MEraEngineHostFileListingEntryFfi_char_const_ptr_t>([&] {
+                            return ((MEraEngineHostFileListing*)self)->next();
+                        });
+                    },
+                };
+                return VirtualPtr__Erased_ptr_MEraEngineHostFileListingFfiVTable_t{
+                    .ptr = (Erased_t*)r.release(),
+                    .vtable = vtable,
+                };
             });
         },
         .on_play_sound = [](Erased_t* self, slice_ref_uint8_t path, int64_t loop_count, bool is_bgm) noexcept {

@@ -578,7 +578,7 @@ struct MEraEngineHostFileListingEntryFfi<'a> {
 
 #[derive_ReprC(dyn)]
 trait MEraEngineHostFileListingFfi {
-    fn next(&mut self) -> MEraEngineHostFileListingEntryFfi<'_>;
+    fn next(&mut self) -> FfiResult<MEraEngineHostFileListingEntryFfi<'_>>;
 }
 
 impl MEraEngineHostFile for VirtualPtr<dyn MEraEngineHostFileFfi> {
@@ -888,7 +888,7 @@ impl MEraEngineSysCallback for VirtualPtr<dyn MEraEngineSysCallbackFfi> {
             MEraEngineSysCallbackFfi::on_list_host_file(self, path.into()).into_anyhow()?;
         let mut files = Vec::new();
         loop {
-            let entry = file_listing.next();
+            let entry = file_listing.next().into_anyhow()?;
             let MEraEngineHostFileListingEntryFfi {
                 name: Some(name),
                 is_file,

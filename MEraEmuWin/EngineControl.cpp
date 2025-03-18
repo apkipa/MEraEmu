@@ -1699,6 +1699,53 @@ namespace winrt::MEraEmuWin::implementation {
 
             return util::fs::file_exists(actual_path.c_str());
         }
+        std::unique_ptr<MEraEngineHostFileListing> on_list_host_file(std::string_view path) override {
+            // Assuming `path` always contains wildcards
+            hstring actual_path = to_hstring(path);
+            struct Win32FileListing : MEraEngineHostFileListing {
+                Win32FileListing(hstring path) : m_path(std::move(path)) {
+                    m_h_find = FindFirstFileW(m_path.c_str(), &m_find_data);
+                    if (m_h_find == INVALID_HANDLE_VALUE) {
+                        m_h_find = nullptr;
+                    }
+                }
+                ~Win32FileListing() {
+                    if (m_h_find) {
+                        FindClose(m_h_find);
+                    }
+                }
+                MEraEngineHostFileListingEntryFfi_t next() override {
+                    if (!m_h_find) {
+                        return {};
+                    }
+                    if (!m_first) {
+                        if (!FindNextFileW(m_h_find, &m_find_data)) {
+                            FindClose(m_h_find);
+                            m_h_find = nullptr;
+                            return {};
+                        }
+                    }
+                    m_first = false;
+                    bool has_dir_flag = (m_find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                    auto path_base = std::wstring_view(m_path);
+                    path_base = path_base.substr(0, path_base.find_last_of(L"\\") + 1);
+                    // We need to return in format passed from the engine
+                    m_name_cache = to_string(path_base) + to_string(m_find_data.cFileName);
+                    return {
+                        .name = m_name_cache.c_str(),
+                        .is_file = !has_dir_flag,
+                        .is_dir = has_dir_flag,
+                    };
+                }
+            private:
+                hstring m_path;
+                WIN32_FIND_DATAW m_find_data;
+                HANDLE m_h_find{ nullptr };
+                std::string m_name_cache;
+                bool m_first{ true };
+            };
+            return std::make_unique<Win32FileListing>(std::move(actual_path));
+        }
         int64_t on_play_sound(std::string_view path, int64_t loop_count, bool is_bgm) override {
             return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutinePlaySound(to_hstring(path), loop_count, is_bgm);

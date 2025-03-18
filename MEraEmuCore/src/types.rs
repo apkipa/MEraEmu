@@ -27,10 +27,9 @@ use tinyvec::ArrayVec;
 
 use crate::{
     util::{
-        impl_serde_for_modular_bitfield,
         interning::ThreadedTokenInterner,
         rcstr::{ArcStr, RcStr},
-        Ascii,
+        *,
     },
     v2::{
         codegen::EraCodeGenerator,
@@ -1099,23 +1098,23 @@ impl<'i> EraCompilerCtxInner<'i> {
     }
 
     pub fn get_global_save_path(&self) -> String {
-        format!(".\\sav\\global.sav")
+        format!(".\\sav\\global.sav").into_native_path_separator()
     }
 
     pub fn get_save_path(&self, save_id: u32) -> String {
-        format!(".\\sav\\save{save_id:02}.sav")
+        format!(".\\sav\\save{save_id:02}.sav").into_native_path_separator()
     }
 
     pub fn get_save_text_path(&self, save_id: u32) -> String {
-        format!(".\\sav\\txt{save_id:02}.txt")
+        format!(".\\sav\\txt{save_id:02}.txt").into_native_path_separator()
     }
 
     pub fn get_var_save_path(&self, save_id: &str) -> String {
-        format!(".\\dat\\var_{save_id}.dat")
+        format!(".\\dat\\var_{save_id}.dat").into_native_path_separator()
     }
 
     pub fn get_chara_save_path(&self, save_id: &str) -> String {
-        format!(".\\dat\\chara_{save_id}.dat")
+        format!(".\\dat\\chara_{save_id}.dat").into_native_path_separator()
     }
 
     pub fn get_transient_src_name(&self, idx: u32) -> String {
@@ -1403,6 +1402,7 @@ pub trait EraCompilerCallback {
     ) -> anyhow::Result<Box<dyn EraCompilerHostFile>>;
     fn on_check_host_file_exists(&mut self, path: &str) -> anyhow::Result<bool>;
     fn on_delete_host_file(&mut self, path: &str) -> anyhow::Result<()>;
+    // NOTE: Path is like `path/to/folder/` or `path/to/folder/*.*`. The two are equivalent.
     fn on_list_host_file(&mut self, path: &str) -> anyhow::Result<Vec<String>>;
     // Multimedia subsystem
     // NOTE: Returns sound id (always positive).
@@ -4010,6 +4010,7 @@ pub enum EraExtBytecode1 {
     LoadChara,
     GetConfig,
     GetConfigS,
+    CheckCharaDataFile,
     FindCharaDataFile,
     EvalStrForm,
     EvalIntExpr,
@@ -4236,6 +4237,7 @@ pub enum EraBytecodeKind {
     LoadChara,
     GetConfig,
     GetConfigS,
+    CheckCharaDataFile,
     FindCharaDataFile,
     EvalStrForm,
     EvalIntExpr,
@@ -4575,6 +4577,7 @@ impl EraBytecodeKind {
                     Ext1::LoadChara => Ok(LoadChara),
                     Ext1::GetConfig => Ok(GetConfig),
                     Ext1::GetConfigS => Ok(GetConfigS),
+                    Ext1::CheckCharaDataFile => Ok(CheckCharaDataFile),
                     Ext1::FindCharaDataFile => Ok(FindCharaDataFile),
                     Ext1::EvalStrForm => Ok(EvalStrForm),
                     Ext1::EvalIntExpr => Ok(EvalIntExpr),
@@ -5122,6 +5125,10 @@ impl EraBytecodeKind {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::GetConfigS as u8);
             }
+            CheckCharaDataFile => {
+                bytes.push(Pri::ExtOp1 as u8);
+                bytes.push(Ext1::CheckCharaDataFile as u8);
+            }
             FindCharaDataFile => {
                 bytes.push(Pri::ExtOp1 as u8);
                 bytes.push(Ext1::FindCharaDataFile as u8);
@@ -5326,7 +5333,7 @@ impl EraBytecodeKind {
             SaveChara { charas_cnt } => -(charas_cnt as i32 + 2),
             LoadChara => 0,
             GetConfig | GetConfigS => 0,
-            FindCharaDataFile => 0,
+            CheckCharaDataFile | FindCharaDataFile => 0,
             EvalStrForm | EvalIntExpr | EvalStrExpr => 0,
             Await => -1,
             VarExists => 0,
