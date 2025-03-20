@@ -15,8 +15,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE, _In_ PWSTR pCmdL
     Tenkai::AppService::RunLoop();
     Tenkai::AppService::UninitializeForApplication();
 
+#if 0
     // Remove reference to threadpoolwinrt.dll to prevent crashes
     clear_factory_cache();
+#endif
 
     return 0;
 }

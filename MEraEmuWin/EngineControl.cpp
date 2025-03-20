@@ -3418,6 +3418,7 @@ namespace winrt::MEraEmuWin::implementation {
                 // Deliberately ignores errors
                 m_vsis_d2d_noref->EndDraw();
             });
+
             // NOTE: Scale is applied to font size, so do nothing here
             ctx->SetTransform(
                 //D2D1::Matrix3x2F::Scale(m_xscale, m_yscale) *
