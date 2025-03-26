@@ -5,6 +5,19 @@
 
 using namespace winrt;
 
+#if 0
+void fix_threadpoolwinrt() {
+    // Remove reference to threadpoolwinrt.dll to prevent crashes
+    clear_factory_cache();
+}
+#else
+#include <FixThreadpoolwinrt.h>
+void fix_threadpoolwinrt() {
+    // Import early
+    EnsureFixThreadpoolwinrtLoaded();
+}
+#endif
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE, _In_ PWSTR pCmdLine, _In_ int nCmdShow) {
     init_apartment(apartment_type::single_threaded);
     Tenkai::AppService::InitializeForApplication([&](auto&&) {
@@ -15,10 +28,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE, _In_ PWSTR pCmdL
     Tenkai::AppService::RunLoop();
     Tenkai::AppService::UninitializeForApplication();
 
-#if 0
-    // Remove reference to threadpoolwinrt.dll to prevent crashes
-    clear_factory_cache();
-#endif
+    fix_threadpoolwinrt();
 
     return 0;
 }
