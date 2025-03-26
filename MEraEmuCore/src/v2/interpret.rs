@@ -679,7 +679,7 @@ impl<'ctx, 'i, 'n, T: EraEmitDiagnostic + ?Sized> EraInterpreter<'ctx, 'i, 'n, T
         }
         // HACK: Handle CHARADATA variable dimensions
         if is_charadata {
-            dims.insert(0, crate::v2::engine::INITIAL_CHARA_CAP);
+            dims.insert(0, self.ctx.get_recommend_initial_charas_cap_u32());
         }
 
         // Initializers (& value)

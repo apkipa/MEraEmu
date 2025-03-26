@@ -7270,6 +7270,10 @@ impl<'diag, 'ctx, 'i, 'b, 'arena, 'f> EraCodeGenSite<'diag, 'ctx, 'i, 'b, 'arena
                 site.chunk
                     .push_bc(BcKind::IntrinsicGetNextEventHandler, name_span);
             }
+            _ if name.eq_ignore_ascii_case("SYSINTRINSIC_PreallocVariables") => {
+                // TODO: Preallocate variables that are SAVEDATA
+                // Do nothing
+            }
             _ => {
                 let mut diag = self.make_diag();
                 diag.span_err(

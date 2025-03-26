@@ -1234,7 +1234,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
     }
 
     fn routine_write_chara(
-        &self,
+        &mut self,
         chara_i: u32,
         file: &mut (impl std::io::Write + std::io::Seek),
     ) -> anyhow::Result<()> {
@@ -1260,10 +1260,12 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         }
 
         // First write built-in chara variables
-        for var in self.ctx.variables.chara_vars_iter() {
+        for var in self.ctx.variables.chara_vars_iter_mut() {
             if !var.is_savedata || !var.is_charadata || var.is_global {
                 continue;
             }
+
+            var.val.ensure_alloc();
 
             if routines::is_builtin_chara_var(var.name.as_ref()) {
                 write_one_chara_var(file, var, chara_i)?;
@@ -1364,10 +1366,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
                 .context_unlikely("no chara variables")?;
             if chara_end_idx > old_charas_cap {
                 // Grow chara variables
-                use crate::v2::engine::CHARA_CAP_GROWTH_STEP;
-                let grow_count = (chara_end_idx - old_charas_cap + CHARA_CAP_GROWTH_STEP - 1)
-                    / CHARA_CAP_GROWTH_STEP
-                    * CHARA_CAP_GROWTH_STEP;
+                use crate::v2::engine::calc_chara_cap_grow_count;
+                let grow_count = calc_chara_cap_grow_count(chara_end_idx - old_charas_cap);
                 self.ctx.variables.grow_charas_var_capacity(grow_count);
             }
             for chara_i in chara_start_idx..chara_end_idx {
@@ -1441,6 +1441,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
         use crate::util::io::CSharpBinaryWriter;
         use crate::v2::savefs::*;
 
+        self.ctx.preallocate_variables();
+
         let file = self.ctx.callback.on_open_host_file(save_path, true)?;
         let mut file = std::io::BufWriter::new(file);
 
@@ -1470,6 +1472,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
     fn routine_save_global_data(&mut self, save_path: &str) -> anyhow::Result<()> {
         use crate::util::io::CSharpBinaryWriter;
         use crate::v2::savefs::*;
+
+        self.ctx.preallocate_variables();
 
         let file = self.ctx.callback.on_open_host_file(save_path, true)?;
         let mut file = std::io::BufWriter::new(file);
@@ -1581,6 +1585,8 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSiteOuter<'_, 'i, '_, Callback>
     ) -> anyhow::Result<()> {
         use crate::util::io::CSharpBinaryWriter;
         use crate::v2::savefs::*;
+
+        self.ctx.preallocate_variables();
 
         let file = self.ctx.callback.on_open_host_file(save_path, true)?;
         let mut file = std::io::BufWriter::new(file);

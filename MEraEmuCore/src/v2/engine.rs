@@ -78,6 +78,10 @@ pub struct MEraEngine<Callback> {
 pub const INITIAL_CHARA_CAP: u32 = 128;
 pub const CHARA_CAP_GROWTH_STEP: u32 = 8;
 
+pub fn calc_chara_cap_grow_count(cap: u32) -> u32 {
+    (cap + CHARA_CAP_GROWTH_STEP - 1) / CHARA_CAP_GROWTH_STEP * CHARA_CAP_GROWTH_STEP
+}
+
 #[derive(thiserror::Error, Debug, Serialize, Deserialize)]
 #[error("{msg}")]
 pub struct MEraEngineError {
@@ -1712,6 +1716,8 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
     }
 
     pub fn finish_load_csv(&mut self) -> Result<(), MEraEngineError> {
+        let initial_chara_cap = self.get_recommend_initial_charas_cap_u32();
+
         let Some(initial_vars) = self.initial_vars.take() else {
             // Already loaded
             return Ok(());
@@ -1720,7 +1726,7 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         for (name, mut var_desc) in initial_vars {
             let name = name.into_inner();
             if var_desc.is_charadata {
-                var_desc.dims.insert(0, INITIAL_CHARA_CAP);
+                var_desc.dims.insert(0, initial_chara_cap);
             }
             // NOTE: May need ensure_alloc() later
             let val = if var_desc.is_string {
@@ -2686,6 +2692,10 @@ impl<T: MEraEngineSysCallback, U: MEraEngineBuilderCallback> MEraEngineBuilder<T
         }
 
         rows
+    }
+
+    fn get_recommend_initial_charas_cap_u32(&self) -> u32 {
+        self.ctx.get_recommend_initial_charas_cap_u32()
     }
 }
 

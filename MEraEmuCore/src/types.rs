@@ -1038,6 +1038,17 @@ impl<'i> EraCompilerCtxInner<'i> {
         self.interner().resolve(key)
     }
 
+    pub fn preallocate_variables(&mut self) {
+        // Preallocate SAVEDATA variables
+        for var in self.variables.iter_mut() {
+            if !var.is_savedata {
+                continue;
+            }
+
+            var.val.ensure_alloc();
+        }
+    }
+
     pub fn source_info_from_chunk_pos(
         &self,
         chunk_idx: usize,
@@ -1095,6 +1106,17 @@ impl<'i> EraCompilerCtxInner<'i> {
             .get(Ascii::new_str(name))
             .and_then(|x| x.iter().find(|x| x.0 == kind))
             .map(|x| x.1)
+    }
+
+    pub fn get_recommend_initial_charas_cap_u32(&self) -> u32 {
+        use crate::v2::engine::{
+            calc_chara_cap_grow_count, CHARA_CAP_GROWTH_STEP, INITIAL_CHARA_CAP,
+        };
+
+        let charas_csv_count = self.chara_templates.len();
+        let charas_csv_count = charas_csv_count.try_into().unwrap_or(u32::MAX);
+        let charas_csv_count = charas_csv_count.max(INITIAL_CHARA_CAP);
+        calc_chara_cap_grow_count(charas_csv_count + CHARA_CAP_GROWTH_STEP)
     }
 
     pub fn get_global_save_path(&self) -> String {
