@@ -20,6 +20,16 @@ void fix_threadpoolwinrt() {
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInst, _In_opt_ HINSTANCE, _In_ PWSTR pCmdLine, _In_ int nCmdShow) {
     init_apartment(apartment_type::single_threaded);
+
+    // Show splash screen eagerly
+    {
+        auto callback = Tenkai::ApplicationInitializationCallback([](auto const& o) {
+            auto params = o.as<Tenkai::ApplicationInitializationCallbackParams>();
+            params.MainWindow().ExtendsContentIntoTitleBar(true);
+        });
+        Tenkai::AppService::SetStartupSplashScreenParams(Tenkai::SplashScreenKind::Simple, true, callback);
+    }
+
     Tenkai::AppService::InitializeForApplication([&](auto&&) {
         // HACK: Keep application alive FOREVER to prevent crashes on
         //       application shutdown
