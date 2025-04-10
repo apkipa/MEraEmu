@@ -2833,6 +2833,9 @@ namespace winrt::MEraEmuWin::implementation {
                     }
                 };
 
+                // Source loading takes a lot of time, so mark thread as started here
+                mark_thread_started();
+
                 // Collect files used by engine
                 {
                     std::vector<std::filesystem::path> misc_csvs;
@@ -2874,9 +2877,6 @@ namespace winrt::MEraEmuWin::implementation {
                             // Do nothing
                         }
                     }
-
-                    // Source loading takes a lot of time, so mark thread as started here
-                    mark_thread_started();
 
                     // Use a dedicated thread to read ERB files
                     auto [erb_tx, erb_rx] = util::sync::spsc::sync_channel<std::tuple<std::filesystem::path, std::unique_ptr<uint8_t[]>, size_t>>(64);
