@@ -2316,6 +2316,11 @@ namespace winrt::MEraEmuWin::implementation {
             check_hresult(txt_layout->GetMetrics(&metrics));
             check_hresult(txt_layout->GetOverhangMetrics(&overhangs));
             metrics.left = metrics.top = 0;
+            if (has_underline()) {
+                // TODO: Properly calculate the underline position (we don't know how Direct2D does this)
+                // Take into account underline
+                overhangs.bottom = metrics.height + (metrics.height / metrics.lineCount) * 0.1f;
+            }
             return D2D1::RectF(
                 metrics.left - overhangs.left,
                 metrics.top - overhangs.top,
@@ -2430,7 +2435,25 @@ namespace winrt::MEraEmuWin::implementation {
             check_hresult(txt_layout->GetOverhangMetrics(&overhangs));
             render_backward_height = (uint32_t)std::ceil(std::max(overhangs.top, 0.0f) / ctrl->m_ui_param_cache.line_height_px_f);
             render_forward_height = (uint32_t)std::ceil(overhangs.bottom / ctrl->m_ui_param_cache.line_height_px_f);
+            if (has_underline()) {
+                // TODO: Properly calculate the underline position (we don't know how Direct2D does this)
+                // Take into account underline
+                render_forward_height++;
+            }
             //acc_height += line_height;
+        }
+
+    private:
+        bool has_underline() const {
+            for (auto const& style : styles) {
+                if (std::holds_alternative<EngineUIPrintLineDataStyle::Style>(style.data)) {
+                    auto& s = std::get<EngineUIPrintLineDataStyle::Style>(style.data);
+                    if (s.style & ERA_FONT_STYLE_UNDERLINE) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
     };
 
