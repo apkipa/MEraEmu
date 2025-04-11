@@ -584,6 +584,21 @@ namespace winrt::MEraEmuWin::implementation {
                 }
             }
         } m_sound;
+
+        GraphicsObject* get_graphics_object(int64_t gid) {
+            auto it = m_graphics_objects.find(gid);
+            if (it == m_graphics_objects.end()) {
+                return nullptr;
+            }
+            return &it->second;
+        }
+        SpriteObject* get_sprite_object(hstring const& name) {
+            auto it = m_sprite_objects.find(name);
+            if (it == m_sprite_objects.end()) {
+                return nullptr;
+            }
+            return &it->second;
+        }
     };
 }
 

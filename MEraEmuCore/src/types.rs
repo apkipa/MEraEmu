@@ -2213,6 +2213,9 @@ impl ArrIntValue {
         self.vals.clear();
         self.vals.shrink_to_fit();
     }
+    pub fn is_allocated(&self) -> bool {
+        !self.vals.is_empty()
+    }
 }
 impl ArrStrValue {
     #[must_use]
@@ -2246,6 +2249,9 @@ impl ArrStrValue {
     pub fn clear_alloc(&mut self) {
         self.vals.clear();
         self.vals.shrink_to_fit();
+    }
+    pub fn is_allocated(&self) -> bool {
+        !self.vals.is_empty()
     }
 }
 
@@ -2425,6 +2431,9 @@ pub trait ArrayValueExt: Sized {
     }
     fn clear_alloc(&mut self) {
         self.as_unpacked_mut().clear_alloc()
+    }
+    fn is_allocated(&self) -> bool {
+        self.as_unpacked().is_allocated()
     }
     fn as_arrint(&self) -> Option<&ArrIntValue> {
         match self.as_unpacked() {
@@ -2627,6 +2636,14 @@ impl<'a> FlatArrayValueRef<'a> {
         match self {
             ArrInt(x) => x.calc_idx(idxs),
             ArrStr(x) => x.calc_idx(idxs),
+        }
+    }
+
+    pub fn is_allocated(&self) -> bool {
+        use FlatArrayValueRef::*;
+        match self {
+            ArrInt(x) => x.is_allocated(),
+            ArrStr(x) => x.is_allocated(),
         }
     }
 }
@@ -3167,7 +3184,12 @@ impl EraVarPool {
         }
 
         for var in self.chara_vars_iter_mut() {
-            var.val.ensure_alloc();
+            if !var.val.is_allocated() {
+                // Do not grow if the variable is not allocated.
+                // This is to prevent growing the variable if it is not used.
+                continue;
+            }
+
             let val = var.val.as_unpacked_mut();
             match val {
                 FlatArrayValueRefMut::ArrInt(x) => {
@@ -3186,7 +3208,6 @@ impl EraVarPool {
                     x.vals.resize(new_cap, Default::default());
                     x.dims[0] += additional_cap;
                 }
-                _ => unreachable!(),
             }
         }
     }

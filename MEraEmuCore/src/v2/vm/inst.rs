@@ -3777,6 +3777,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 .with_context_unlikely(|| format!("chara template {} not found", chara_tmpl_no))?;
             for chara_var in self.o.ctx.i.variables.chara_vars_iter_mut() {
                 chara_var.val.ensure_alloc();
+
                 let dims = chara_var.val.dims();
                 let stride: usize = dims.iter().skip(1).map(|&x| x as usize).product();
                 let start_idx = chara_reg_slot * stride;
@@ -3852,6 +3853,7 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
             let chara_reg_slot = chara_reg_slot as usize;
             for chara_var in self.o.ctx.i.variables.chara_vars_iter_mut() {
                 chara_var.val.ensure_alloc();
+
                 let dims = chara_var.val.dims();
                 let stride: usize = dims.iter().skip(1).map(|&x| x as usize).product();
                 let start_idx = chara_reg_slot * stride;
@@ -3888,6 +3890,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
                 continue;
             }
             for chara_var in self.o.ctx.variables.chara_vars_iter_mut() {
+                if !chara_var.val.is_allocated() {
+                    continue;
+                }
+
                 match chara_var.val.as_unpacked_mut() {
                     FlatArrayValueRefMut::ArrInt(x) => {
                         let stride: usize = x.dims.iter().skip(1).map(|&x| x as usize).product();
@@ -3922,6 +3928,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         // Delete characters
         let charas_count = self.charas_count as usize;
         for chara_var in self.o.ctx.variables.chara_vars_iter_mut() {
+            if !chara_var.val.is_allocated() {
+                continue;
+            }
+
             let mut rd = 0;
             let mut wr = 0;
             let mut chara_nos = chara_nos.iter().map(|&x| x as usize).peekable();
@@ -3976,6 +3986,10 @@ impl<'i, Callback: EraCompilerCallback> EraVmExecSite<'_, 'i, '_, Callback> {
         let chara_no2 = sanitize_chara_no(chara_no2, self.charas_count)? as usize;
 
         for chara_var in self.o.ctx.variables.chara_vars_iter_mut() {
+            if !chara_var.val.is_allocated() {
+                continue;
+            }
+
             let dims = chara_var.val.dims();
             let stride: usize = dims.iter().skip(1).map(|&x| x as usize).product();
             match chara_var.val.as_unpacked_mut() {

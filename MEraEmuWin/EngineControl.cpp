@@ -1540,24 +1540,25 @@ namespace winrt::MEraEmuWin::implementation {
             });
         }
         int64_t on_gcreate(int64_t gid, int64_t width, int64_t height) override {
+            m_ui_cache.graphics_objects.invalidate(gid);
             return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineGCreate(gid, width, height);
             });
         }
         int64_t on_gcreatefromfile(int64_t gid, std::string_view path) override {
+            m_ui_cache.graphics_objects.invalidate(gid);
             return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineGCreateFromFile(gid, to_hstring(path));
             });
         }
         int64_t on_gdispose(int64_t gid) override {
+            m_ui_cache.graphics_objects.invalidate(gid);
             return exec_ui_work_or([&] {
                 return m_sd->ui_ctrl->RoutineGDispose(gid);
             });
         }
         int64_t on_gcreated(int64_t gid) override {
-            return exec_ui_work_or([&] {
-                return m_sd->ui_ctrl->RoutineGCreated(gid);
-            });
+            return get_graphics_object_info(gid).created;
         }
         int64_t on_gdrawsprite(int64_t gid, std::string_view sprite_name, int64_t dest_x, int64_t dest_y, int64_t dest_width, int64_t dest_height, EraColorMatrix_t const* color_matrix) override {
             return exec_ui_work_or([&] {
@@ -1583,13 +1584,7 @@ namespace winrt::MEraEmuWin::implementation {
             });
         }
         int64_t on_spritecreated(std::string_view name) override {
-            return m_ui_cache.sprite_objects.get_or_update(name, [&] {
-                return exec_ui_work_or([&] {
-                    SpriteObjectInfo info;
-                    info.created = m_sd->ui_ctrl->RoutineSpriteCreated(to_hstring(name)) != 0;
-                    return info;
-                });
-            }).created;
+            return get_sprite_object_info(name).created;
         }
         int64_t on_spriteanimecreate(std::string_view name, int64_t width, int64_t height) override {
             // TODO: on_spriteanimecreate
@@ -1600,24 +1595,16 @@ namespace winrt::MEraEmuWin::implementation {
             return 0;
         }
         int64_t on_spritewidth(std::string_view name) override {
-            return exec_ui_work_or([&] {
-                return m_sd->ui_ctrl->RoutineSpriteWidth(to_hstring(name));
-            });
+            return get_sprite_object_info(name).width;
         }
         int64_t on_spriteheight(std::string_view name) override {
-            return exec_ui_work_or([&] {
-                return m_sd->ui_ctrl->RoutineSpriteHeight(to_hstring(name));
-            });
+            return get_sprite_object_info(name).height;
         }
         int64_t on_spriteposx(std::string_view name) override {
-            return exec_ui_work_or([&] {
-                return m_sd->ui_ctrl->RoutineSpritePosX(to_hstring(name));
-            });
+            return get_sprite_object_info(name).pos_x;
         }
         int64_t on_spriteposy(std::string_view name) override {
-            return exec_ui_work_or([&] {
-                return m_sd->ui_ctrl->RoutineSpritePosY(to_hstring(name));
-            });
+            return get_sprite_object_info(name).pos_y;
         }
         std::unique_ptr<MEraEngineHostFile> on_open_host_file(std::string_view path, bool can_write) override {
             hstring actual_path = auto_isolate_path(path, can_write);
@@ -1889,14 +1876,46 @@ namespace winrt::MEraEmuWin::implementation {
         std::mt19937_64 m_rand_gen{ std::random_device{}() };
 
         // UI value caches
+        struct GraphicsObjectInfo {
+            bool created{};
+        };
         struct SpriteObjectInfo {
             bool created{};
+            int32_t width{}, height{}, pos_x{}, pos_y{};
         };
         struct {
             ValueCache<uint32_t> fore_color;
             ValueCache<uint32_t> back_color;
+            MapValueCache<int64_t, GraphicsObjectInfo> graphics_objects;
             MapValueCache<std::string, SpriteObjectInfo> sprite_objects;
         } m_ui_cache;
+
+        GraphicsObjectInfo& get_graphics_object_info(int64_t gid) {
+            return m_ui_cache.graphics_objects.get_or_update(gid, [&] {
+                return exec_ui_work_or([&] {
+                    GraphicsObjectInfo info;
+                    if (auto p = m_sd->ui_ctrl->get_graphics_object(gid)) {
+                        info.created = true;
+                    }
+                    return info;
+                });
+            });
+        }
+        SpriteObjectInfo& get_sprite_object_info(std::string_view name) {
+            return m_ui_cache.sprite_objects.get_or_update(name, [&] {
+                return exec_ui_work_or([&] {
+                    SpriteObjectInfo info;
+                    if (auto p = m_sd->ui_ctrl->get_sprite_object(to_hstring(name))) {
+                        info.created = true;
+                        info.width = p->width;
+                        info.height = p->height;
+                        info.pos_x = p->x;
+                        info.pos_y = p->y;
+                    }
+                    return info;
+                });
+            });
+        }
 
     public:
         int64_t m_tick_compensation{};
