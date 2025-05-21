@@ -38,11 +38,3 @@ This project requires:
 You may also need the NuGet package *Tenkai.UWP* (see https://github.com/apkipa/TenkaiXamlSample), which is required by the UI part when building for Windows.
 
 You should be able to build the project simply by opening the VS solution and clicking Build button, VS will automatically invoke the Rust compiler to build the engine core and link it with the C++ UI part.
-
-## Technical Details
-
-MEraEmuWin is built upon XAML Islands v1, a modern UI framework supported by Windows 10 1903 and above. MEraEmuWin renders content with Direct2D + DirectWrite, currently to a infinite-sized virtual canvas provided by DWM, and so may be constrained by its limitations.
-
-> [!TODO ?]
->
-> MEraEmuDroid will use DWriteCore (the cross-platform version of DirectWrite) to layout and render texts.

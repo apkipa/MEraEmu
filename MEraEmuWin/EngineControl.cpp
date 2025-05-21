@@ -2783,6 +2783,9 @@ namespace winrt::MEraEmuWin::implementation {
             try {
                 sd->ui_is_alive.wait(false, std::memory_order_acquire);
 
+                auto t0 = std::chrono::high_resolution_clock::now();
+                std::chrono::high_resolution_clock::time_point t1;
+
                 // TODO: Enable threaded loading when we upgrade mimalloc to v2.1.9
                 //       (see https://github.com/microsoft/mimalloc/issues/944)
                 auto& appcfg = sd->app_settings;
@@ -3003,6 +3006,8 @@ namespace winrt::MEraEmuWin::implementation {
                     }
                     builder.finish_load_csv();
 
+                    t1 = std::chrono::high_resolution_clock::now();
+
                     auto try_handle_thread_event = [&] {
                         if (auto task = engine_task_rx.try_recv()) {
                             run_ui_task(std::move(*task), false);
@@ -3045,9 +3050,29 @@ namespace winrt::MEraEmuWin::implementation {
                     }
                 }
 
+                auto t2 = std::chrono::high_resolution_clock::now();
+
                 // Finialize compilation
                 if (!sd->ui_is_alive.load(std::memory_order_relaxed)) { return; }
                 engine = builder.build();
+
+                auto t3 = std::chrono::high_resolution_clock::now();
+
+                // Print loading time
+                {
+                    auto calc_dur = [](std::chrono::high_resolution_clock::time_point t0, std::chrono::high_resolution_clock::time_point t1) {
+                        return std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+                    };
+                    auto msg = winrt::format(L"Loaded game in {}ms (CSV {}ms, ERB {}ms, build {}ms).",
+                        calc_dur(t0, t3),
+                        calc_dur(t0, t1),
+                        calc_dur(t1, t2),
+                        calc_dur(t2, t3)
+                    );
+                    queue_ui_work([sd, msg = std::move(msg)] {
+                        sd->ui_ctrl->RoutinePrint(msg, ERA_PEF_IS_LINE);
+                    });
+                }
 
                 return_to_title();
 

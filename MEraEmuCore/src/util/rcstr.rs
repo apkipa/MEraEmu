@@ -219,6 +219,10 @@ impl RcStr {
             Err(self)
         }
     }
+    /// Allocates a new `BoxedRcStr` from the `RcStr`.
+    pub fn to_boxed(&self) -> BoxedRcStr {
+        BoxedRcStr::from_str(self.as_str())
+    }
     pub fn try_repeat(s: &str, n: usize) -> Option<Self> {
         BoxedRcStr::try_repeat(s, n).map(|s| s.into_rc())
     }
