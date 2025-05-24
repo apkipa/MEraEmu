@@ -41,8 +41,18 @@ using namespace Windows::UI::Xaml::Media::Imaging;
 #define CANVAS_TOTAL_HEIGHT (CANVAS_DANGER_ZONE_HEIGHT * 2 + CANVAS_SAFE_ZONE_HEIGHT)
 
 namespace winrt::MEraEmuWin::implementation {
+	template <typename T>
+    struct EndDrawImplHelper : T {
+        STDMETHOD(EndDrawT)(T*) = 0;
+        STDMETHOD(EndDraw)(void) override {
+            return EndDrawT(nullptr);
+        }
+    };
+
     struct CanvasVirtualControlVsis : implements<CanvasVirtualControlVsis,
-        ISurfaceImageSourceNative, IVirtualSurfaceImageSourceNative, ISurfaceImageSourceNativeWithD2D
+        EndDrawImplHelper<ISurfaceImageSourceNative>,
+        EndDrawImplHelper<IVirtualSurfaceImageSourceNative>,
+        EndDrawImplHelper<ISurfaceImageSourceNativeWithD2D>
     > {
         CanvasVirtualControlVsis(CanvasVirtualControl* parent) : m_parent(parent) {}
 
@@ -66,7 +76,7 @@ namespace winrt::MEraEmuWin::implementation {
 
             return m_parent->m_inner_vsis_noref->BeginDraw(updateRect, surface, offset);
         }
-        STDMETHOD(ISurfaceImageSourceNative::EndDraw)(void) override {
+        STDMETHOD(EndDrawT)(ISurfaceImageSourceNative*) override {
             CHECK_CLOSED();
 
             return m_parent->m_inner_vsis_noref->EndDraw();
@@ -134,6 +144,9 @@ namespace winrt::MEraEmuWin::implementation {
             }
             return hr;
         }
+        STDMETHOD(EndDrawT)(IVirtualSurfaceImageSourceNative*) override {
+			return EndDrawT(static_cast<ISurfaceImageSourceNative*>(nullptr));
+        }
         // ----- ISurfaceImageSourceNativeWithD2D -----
         STDMETHOD(SetDevice)(IUnknown* device) override {
             CHECK_CLOSED();
@@ -149,7 +162,7 @@ namespace winrt::MEraEmuWin::implementation {
 
             return m_parent->m_inner_vsis_d2d_noref->BeginDraw(realUpdateRect, iid, updateObject, offset);
         }
-        STDMETHOD(ISurfaceImageSourceNativeWithD2D::EndDraw)(void) override {
+        STDMETHOD(EndDrawT)(ISurfaceImageSourceNativeWithD2D*) override {
             CHECK_CLOSED();
 
             return m_parent->m_inner_vsis_d2d_noref->EndDraw();

@@ -1070,6 +1070,33 @@ namespace winrt::MEraEmuWin::implementation {
     };
 
     struct MEraEmuWinEngineSysCallback : ::MEraEngineSysCallback {
+    private:
+        template <typename F>
+        auto exec_ui_work(F&& f) {
+            using ReturnType = std::invoke_result_t<F>;
+            std::promise<ReturnType> promise;
+            auto future = promise.get_future();
+            queue_ui_work([f = std::forward<F>(f), promise = std::move(promise)]() mutable {
+                promise.set_value(f());
+                });
+            return future.get();
+        }
+        template <typename F>
+        auto exec_ui_work_or(F&& f, std::invoke_result_t<F> def_val = {}) {
+            try { return exec_ui_work(std::forward<F>(f)); }
+            catch (std::future_error const& e) {
+                if (e.code() == std::future_errc::broken_promise) {
+                    // UI thread is dead
+                    return def_val;
+                }
+                else {
+                    throw;
+                }
+            }
+        }
+
+    public:
+
         // SAFETY: Engine is destructed before EngineSharedData
         MEraEmuWinEngineSysCallback(EngineSharedData* sd, util::sync::spsc::Sender<std::move_only_function<void()>> const* ui_task_tx) :
             m_sd(sd), m_ui_task_tx(ui_task_tx) {
@@ -1824,29 +1851,6 @@ namespace winrt::MEraEmuWin::implementation {
                     //         EngineControl.
                     sd->ui_ctrl->UpdateEngineUI();
                 });
-            }
-        }
-        template <typename F>
-        auto exec_ui_work(F&& f) {
-            using ReturnType = std::invoke_result_t<F>;
-            std::promise<ReturnType> promise;
-            auto future = promise.get_future();
-            queue_ui_work([f = std::forward<F>(f), promise = std::move(promise)]() mutable {
-                promise.set_value(f());
-            });
-            return future.get();
-        }
-        template <typename F>
-        auto exec_ui_work_or(F&& f, std::invoke_result_t<F> def_val = {}) {
-            try { return exec_ui_work(std::forward<F>(f)); }
-            catch (std::future_error const& e) {
-                if (e.code() == std::future_errc::broken_promise) {
-                    // UI thread is dead
-                    return def_val;
-                }
-                else {
-                    throw;
-                }
             }
         }
         hstring auto_isolate_path(std::string_view path, bool can_write) {

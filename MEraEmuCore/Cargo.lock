@@ -3,102 +3,6 @@
 version = 4
 
 [[package]]
-name = "MEraEmuCore"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arcstr",
- "arrayvec",
- "atoi_simd",
- "atomic-wait",
- "bidiff",
- "bincode",
- "binrw",
- "bio",
- "bitflags",
- "bitvec",
- "bstr",
- "bumpalo",
- "bytemuck",
- "byteorder",
- "chrono",
- "colored",
- "cstree",
- "csv",
- "dhat",
- "dynasm",
- "dynasmrt",
- "easy-jsonrpc",
- "educe",
- "either",
- "enumset",
- "erasable",
- "full2half",
- "gimli",
- "hashbrown 0.14.5",
- "html-escape",
- "htmlize",
- "indexmap",
- "indoc",
- "itertools 0.13.0",
- "itoa",
- "jsonrpsee",
- "lasso",
- "lending-iterator",
- "libc",
- "lru",
- "lz4_flex",
- "memchr",
- "memory-stats",
- "mimalloc",
- "modular-bitfield",
- "muldiv",
- "nanohtml2text",
- "num-derive",
- "num-integer",
- "num-ordinal",
- "num-traits",
- "once_cell",
- "orx-concurrent-vec",
- "pariter",
- "paste",
- "phf",
- "polonius-the-crab 0.4.2",
- "ptr-union",
- "ptr_iter",
- "rand",
- "rayon",
- "rclite",
- "regex",
- "rustc-hash 2.1.1",
- "safer-ffi",
- "scc",
- "scopeguard",
- "serde",
- "serde_json",
- "sha2",
- "simdutf8",
- "similar",
- "sinter",
- "size",
- "smallvec",
- "stacker",
- "strum",
- "sublime_fuzzy",
- "text_io",
- "thiserror 1.0.69",
- "tinyvec",
- "unicase",
- "unicode-width",
- "walkdir",
- "wide",
- "windows-sys 0.59.0",
- "yoke",
- "zerocopy",
- "zstd",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -196,12 +100,12 @@ dependencies = [
 
 [[package]]
 name = "anstyle-wincon"
-version = "3.0.7"
+version = "3.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca3534e77181a9cc07539ad51f2141fe32f6c3ffd4df76db8ad92346b003ae4e"
+checksum = "6680de5231bd6ee4c6191b8a1325daa282b415391ec9d3a37bd34f2060dc73fa"
 dependencies = [
  "anstyle",
- "once_cell",
+ "once_cell_polyfill",
  "windows-sys 0.59.0",
 ]
 
@@ -320,7 +224,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d4bca59c20d6f40c2cc0802afbe1e788b89096f61bdf7aeea6bf00f10c2909b"
 dependencies = [
  "array-init",
- "binrw_derive",
+ "binrw_derive 0.14.1",
+ "bytemuck",
+]
+
+[[package]]
+name = "binrw"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81419ff39e6ed10a92a7f125290859776ced35d9a08a665ae40b23e7ca702f30"
+dependencies = [
+ "array-init",
+ "binrw_derive 0.15.0",
  "bytemuck",
 ]
 
@@ -331,10 +246,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8ba42866ce5bced2645bfa15e97eef2c62d2bdb530510538de8dd3d04efff3c"
 dependencies = [
  "either",
- "owo-colors",
+ "owo-colors 3.5.0",
  "proc-macro2 1.0.95",
  "quote 1.0.40",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "binrw_derive"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "376404e55ec40d0d6f8b4b7df3f87b87954bd987f0cf9a7207ea3b6ea5c9add4"
+dependencies = [
+ "either",
+ "owo-colors 4.2.1",
+ "proc-macro2 1.0.95",
+ "quote 1.0.40",
+ "syn 2.0.101",
 ]
 
 [[package]]
@@ -492,9 +420,9 @@ checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
 name = "cc"
-version = "1.2.23"
+version = "1.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f4ac86a9e5bc1e2b3449ab9d7d3a6a405e3d1bb28d7b9be8614f55846ae3766"
+checksum = "16595d3be041c03b09d08d0858631facccee9221e579704070e6e9e4915d3bc7"
 dependencies = [
  "jobserver",
  "libc",
@@ -1223,15 +1151,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d231dfb89cfffdbc30e7fc41579ed6066ad03abda9e567ccafae602b97ec5024"
 
 [[package]]
-name = "higher-kinded-types"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "561985554c8b8d4808605c90a5f1979cc6c31a5d20b78465cd59501233c6678e"
-dependencies = [
- "never-say-never",
-]
-
-[[package]]
 name = "html-escape"
 version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1299,7 +1218,6 @@ checksum = "cea70ddb795996207ad57735b50c5982d8844f38ba9ee5f1aedcfb708a2aa11e"
 dependencies = [
  "equivalent",
  "hashbrown 0.15.3",
- "rayon",
  "serde",
 ]
 
@@ -1468,7 +1386,7 @@ dependencies = [
  "macro_rules_attribute",
  "never-say-never",
  "nougat",
- "polonius-the-crab 0.2.1",
+ "polonius-the-crab",
 ]
 
 [[package]]
@@ -1562,6 +1480,122 @@ checksum = "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08"
 dependencies = [
  "autocfg",
  "rawpointer",
+]
+
+[[package]]
+name = "mee_bridge"
+version = "0.1.0"
+dependencies = [
+ "mee_engine",
+]
+
+[[package]]
+name = "mee_engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arcstr",
+ "arrayvec",
+ "atoi_simd",
+ "atomic-wait",
+ "bidiff",
+ "bincode",
+ "binrw 0.14.1",
+ "bio",
+ "bitflags",
+ "bitvec",
+ "bstr",
+ "bumpalo",
+ "bytemuck",
+ "byteorder",
+ "chrono",
+ "colored",
+ "cstree",
+ "dhat",
+ "dynasm",
+ "dynasmrt",
+ "easy-jsonrpc",
+ "educe",
+ "either",
+ "enumset",
+ "erasable",
+ "full2half",
+ "gimli",
+ "hashbrown 0.14.5",
+ "html-escape",
+ "htmlize",
+ "indexmap",
+ "indoc",
+ "itertools 0.13.0",
+ "itoa",
+ "jsonrpsee",
+ "lasso",
+ "lending-iterator",
+ "libc",
+ "lru",
+ "lz4_flex",
+ "memchr",
+ "memory-stats",
+ "mimalloc",
+ "modular-bitfield",
+ "muldiv",
+ "nanohtml2text",
+ "num-derive",
+ "num-integer",
+ "num-ordinal",
+ "num-traits",
+ "once_cell",
+ "orx-parallel",
+ "pariter",
+ "paste",
+ "phf",
+ "ptr-union",
+ "ptr_iter",
+ "rand",
+ "rclite",
+ "regex",
+ "rustc-hash 2.1.1",
+ "safer-ffi",
+ "scc",
+ "scopeguard",
+ "serde",
+ "serde_json",
+ "sha2",
+ "simdutf8",
+ "similar",
+ "sinter",
+ "size",
+ "smallvec",
+ "stacker",
+ "strum",
+ "sublime_fuzzy",
+ "text_io",
+ "thiserror 1.0.69",
+ "tinyvec",
+ "unicode-width",
+ "walkdir",
+ "wide",
+ "windows-sys 0.59.0",
+ "yoke",
+ "zerocopy",
+ "zstd",
+]
+
+[[package]]
+name = "mee_utils"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "binrw 0.15.0",
+ "byteorder",
+ "hashbrown 0.15.3",
+ "indexmap",
+ "itertools 0.14.0",
+ "lasso",
+ "rustc-hash 2.1.1",
+ "serde",
+ "smallvec",
+ "wide",
 ]
 
 [[package]]
@@ -1815,12 +1849,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
 
 [[package]]
+name = "once_cell_polyfill"
+version = "1.70.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4895175b425cb1f87721b59f0f286c2092bd4af812243672510e1ac53e2e0ad"
+
+[[package]]
 name = "ordered-float"
 version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2c1f9f56e534ac6a9b8a4600bdf0f530fb393b5f393e7b4d03489c3cf0c3f01"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "orx-concurrent-bag"
+version = "2.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f156623074563cd287cefadd2b623377f955866c50f06a1d9a5a2874bf085e38"
+dependencies = [
+ "orx-fixed-vec",
+ "orx-pinned-concurrent-col",
+ "orx-pinned-vec",
+ "orx-pseudo-default",
+ "orx-split-vec",
 ]
 
 [[package]]
@@ -1834,24 +1887,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "orx-concurrent-option"
-version = "1.5.0"
+name = "orx-concurrent-ordered-bag"
+version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "842a5c05d6f02368d1cdfebec87ae6e2277ca0cf544ab3778e6f2e6c5c947da3"
-
-[[package]]
-name = "orx-concurrent-vec"
-version = "3.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "384cd6cd25e3cf031091ca7cfe947a59be14e62e1a28480a5e92d46b792b6303"
+checksum = "82b21bc1434394aac1461d91d74d87279370227ea42852a4990aa85324644c6e"
 dependencies = [
- "orx-concurrent-option",
  "orx-fixed-vec",
  "orx-pinned-concurrent-col",
  "orx-pinned-vec",
- "orx-pseudo-default",
  "orx-split-vec",
- "serde",
 ]
 
 [[package]]
@@ -1876,6 +1920,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "orx-parallel"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e647c62495407026fa34b33dbddc6d2cbea0a7882e360a889820f99ec86aac3"
+dependencies = [
+ "orx-concurrent-bag",
+ "orx-concurrent-iter",
+ "orx-concurrent-ordered-bag",
+ "orx-fixed-vec",
+ "orx-iterable",
+ "orx-pinned-concurrent-col",
+ "orx-pinned-vec",
+ "orx-priority-queue",
+ "orx-pseudo-default",
+ "orx-split-vec",
+]
+
+[[package]]
 name = "orx-pinned-concurrent-col"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1896,6 +1958,12 @@ dependencies = [
  "orx-iterable",
  "orx-pseudo-default",
 ]
+
+[[package]]
+name = "orx-priority-queue"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8706de0d8349fc6e720343aca4b28aad38010d0bc966a4bc573df0beaed99091"
 
 [[package]]
 name = "orx-pseudo-default"
@@ -1926,6 +1994,12 @@ name = "owo-colors"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1b04fb49957986fdce4d6ee7a65027d55d4b6d2265e5848bbb507b58ccfdb6f"
+
+[[package]]
+name = "owo-colors"
+version = "4.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26995317201fa17f3656c36716aed4a7c81743a9634ac4c99c0eeda495db0cec"
 
 [[package]]
 name = "pariter"
@@ -2050,16 +2124,6 @@ name = "polonius-the-crab"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a69ee997a6282f8462abf1e0d8c38c965e968799e912b3bed8c9e8a28c2f9f"
-
-[[package]]
-name = "polonius-the-crab"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e97ca2c89572ae41bbec1c99498251f87dd5a94e500c5ec19c382dd593dd5ce9"
-dependencies = [
- "higher-kinded-types",
- "never-say-never",
-]
 
 [[package]]
 name = "portable-atomic"
@@ -2360,9 +2424,9 @@ dependencies = [
 
 [[package]]
 name = "rustversion"
-version = "1.0.20"
+version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eded382c5f5f786b989652c49544c4877d9f015cc22e145a5ea8ea66c2921cd2"
+checksum = "8a0d197bd2c9dc6e53b84da9556a69ba4cdfab8619eb41a8bd1cc2027a0f6b1d"
 
 [[package]]
 name = "ryu"
@@ -2935,12 +2999,6 @@ name = "typenum"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
-
-[[package]]
-name = "unicase"
-version = "2.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75b844d17643ee918803943289730bec8aac480150456169e647ed0b576ba539"
 
 [[package]]
 name = "unicode-ident"

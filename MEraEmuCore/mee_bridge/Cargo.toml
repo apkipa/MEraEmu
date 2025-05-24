@@ -1,0 +1,16 @@
+[package]
+name = "mee_bridge"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+# cpp_build = "0.5"
+# cxx-build = "1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mee_engine = { path = "../mee_engine" }
