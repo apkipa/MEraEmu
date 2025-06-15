@@ -8,6 +8,14 @@ MEraEmu (Modern Era Emulator) is an EraBasic script emulator for modern Windows.
 > [!WARNING]
 > This project is WIP (work-in-progress), and while some games are able to boot into gameplay, do expect absence of functions, glitches and crashes. Expect its worst-case performance (with JIT enabled) to be ~4x worse than Emuera (on .NET 8).
 
+## Getting Started
+
+Try out the ~~[web version (TBD)](https://www.example.com)~~ without downloading, or head to the Releases page.
+
+> [!WARNING]
+>
+> The web version will be slower, have fewer features, and come with limitations (such as 2GiB maximum memory). Prefer the native version where possible.
+
 ## Features
 
 * Uses modern platform abilities to deliver beautiful and fluid UI experience with minimal interaction latency.
@@ -21,28 +29,14 @@ MEraEmu (Modern Era Emulator) is an EraBasic script emulator for modern Windows.
 
 ## Requirements
 
-* Windows 10 1903+
+Web:
+
+* Browsers with SIMD support (check out https://wasm-feature-detect.surma.technology/). Prefer the latest browsers for best performance.
+
+~~Windows:~~
+
+* ~~Windows 10 1903+.~~
 
 ## Building
 
-This project requires:
-
-* The latest version of Rust compiler (at the time of writing 1.84, although MSRV is not strictly defined).
-* The latest version of Visual Studio 2022, with C++ & UWP workload.
-* [vcpkg](https://github.com/microsoft/vcpkg) for providing C++ dependencies. Run the following command to install them:
-
-  ```shell
-  vcpkg install nlohmann-json
-  ```
-
-You may also need the NuGet package *Tenkai.UWP* (see https://github.com/apkipa/TenkaiXamlSample), which is required by the UI part when building for Windows.
-
-You should be able to build the project simply by opening the VS solution and clicking Build button, VS will automatically invoke the Rust compiler to build the engine core and link it with the C++ UI part.
-
-## Technical Details
-
-MEraEmuWin is built upon XAML Islands v1, a modern UI framework supported by Windows 10 1903 and above. MEraEmuWin renders content with Direct2D + DirectWrite, currently to a infinite-sized virtual canvas provided by DWM, and so may be constrained by its limitations.
-
-> [!TODO ?]
->
-> MEraEmuDroid will use DWriteCore (the cross-platform version of DirectWrite) to layout and render texts.
+See [docs/Building.md](docs/Building.md).

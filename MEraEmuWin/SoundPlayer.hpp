@@ -10,6 +10,46 @@ struct SoundPlaybackSession {
 
 // Sound playback hub for BGM and SFX playback management
 struct SoundPlaybackHub {
+private:
+    template <typename F>
+    auto exception_boundary(F&& f) {
+        using RetT = std::invoke_result_t<F>;
+
+        auto emit_ex_fn = [](std::shared_ptr<SharedData> const& data, std::exception_ptr ex) {
+            if (data->on_exception_handler) {
+                if (!data->dispatcher_queue || data->dispatcher_queue.HasThreadAccess()) {
+                    data->on_exception_handler(std::move(ex));
+                }
+                else {
+                    data->dispatcher_queue.TryEnqueue([data, ex]() {
+                        data->on_exception_handler(std::move(ex));
+                        });
+                }
+            }
+            };
+
+        try {
+            if constexpr (std::is_convertible_v<RetT, winrt::Windows::Foundation::IAsyncInfo>) {
+                f().Completed([data = m_data, emit_ex_fn](auto&& op, auto&&) {
+                    try {
+                        op.GetResults();
+                    }
+                    catch (...) {
+                        emit_ex_fn(data, std::current_exception());
+                    }
+                    });
+            }
+            else {
+                f();
+            }
+        }
+        catch (...) {
+            emit_ex_fn(m_data, std::current_exception());
+        }
+    }
+
+public:
+
     SoundPlaybackHub() : m_data(nullptr) {}
     ~SoundPlaybackHub() {}
     SoundPlaybackHub(std::nullptr_t) : m_data(nullptr) {}
@@ -215,42 +255,6 @@ private:
     size_t get_new_session_id() const noexcept {
         // NOTE: 0 is reserved for BGM, which is managed separately
         return m_data->sessions.empty() ? 1 : m_data->sessions.rbegin()->first + 1;
-    }
-    template <typename F>
-    auto exception_boundary(F&& f) {
-        using RetT = std::invoke_result_t<F>;
-
-        auto emit_ex_fn = [](std::shared_ptr<SharedData> const& data, std::exception_ptr ex) {
-            if (data->on_exception_handler) {
-                if (!data->dispatcher_queue || data->dispatcher_queue.HasThreadAccess()) {
-                    data->on_exception_handler(std::move(ex));
-                }
-                else {
-                    data->dispatcher_queue.TryEnqueue([data, ex]() {
-                        data->on_exception_handler(std::move(ex));
-                    });
-                }
-            }
-        };
-
-        try {
-            if constexpr (std::is_convertible_v<RetT, winrt::Windows::Foundation::IAsyncInfo>) {
-                f().Completed([data = m_data, emit_ex_fn](auto&& op, auto&&) {
-                    try {
-                        op.GetResults();
-                    }
-                    catch (...) {
-                        emit_ex_fn(data, std::current_exception());
-                    }
-                });
-            }
-            else {
-                f();
-            }
-        }
-        catch (...) {
-            emit_ex_fn(m_data, std::current_exception());
-        }
     }
     void trim() {
         if (m_data->sessions.empty()) {
