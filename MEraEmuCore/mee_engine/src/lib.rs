@@ -1,7 +1,9 @@
-mod parser;
-mod lexer;
-mod engine;
-mod types;
-mod routines;
+mod ast;
 mod codegen;
+mod engine;
+mod lexer;
+mod parser;
+mod routines;
+mod runtime;
+mod types;
 mod vm;

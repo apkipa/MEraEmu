@@ -99,16 +99,10 @@ impl<S: AsRef<str> + ?Sized> PartialOrd for UpCase<S> {
 }
 impl<S: AsRef<str> + ?Sized> Ord for UpCase<S> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // TODO: Use a more efficient way (SIMD) to compare caseless ASCII strings
-        // Convert to ASCII uppercase for comparison
-        for (x, y) in self.0.as_ref().bytes().zip(other.0.as_ref().bytes()) {
-            let (x, y) = (x.to_ascii_uppercase(), y.to_ascii_uppercase());
-            let r = x.cmp(&y);
-            if r != std::cmp::Ordering::Equal {
-                return r;
-            }
-        }
-        self.0.as_ref().len().cmp(&other.0.as_ref().len())
+        crate::string::cmp_ignore_ascii_case(
+            self.0.as_ref().as_bytes(),
+            other.0.as_ref().as_bytes(),
+        )
     }
 }
 

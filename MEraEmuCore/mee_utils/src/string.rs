@@ -1,3 +1,7 @@
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+#[cfg(target_arch = "wasm32")]
+use std::arch::wasm32::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 use std::mem;
@@ -5,9 +9,129 @@ use wide::CmpEq;
 
 /// Helper function to convert a byte array to uppercase ASCII.
 #[inline]
-pub fn to_ascii_uppercase_n<const N: usize>(mut s: [u8; N]) -> [u8; N] {
+pub(crate) fn to_ascii_uppercase_n<const N: usize>(mut s: [u8; N]) -> [u8; N] {
     s.make_ascii_uppercase();
     s
+}
+
+pub(crate) fn packed_byte(b: u8) -> u64 {
+    // replicate the byte 8 times
+    (b as u64) * 0x0101010101010101
+}
+
+// Source: https://github.com/lemire/Code-used-on-Daniel-Lemire-s-blog/blob/master/2020/04/30/tolower.cpp
+pub(crate) fn to_ascii_lowercase_8(chars: u64) -> u64 {
+    let ascii_chars = chars & packed_byte(0x7f);
+    let is_not_ascii_chars = chars & packed_byte(0x80);
+    // MSB[i] is set if chars[i] is greater or equal than 'A'
+    let a = ascii_chars + packed_byte(128 - b'A');
+    // MSB[i] is set if chars[i] is greater than 'Z'
+    let z = ascii_chars + packed_byte(128 - b'Z' - 1);
+    let mut mask_lower = (a ^ z) & packed_byte(0x80);
+    mask_lower &= !is_not_ascii_chars; // only transform when ASCII
+    chars ^ (mask_lower >> 2)
+}
+
+pub(crate) fn to_ascii_uppercase_8(s: u64) -> u64 {
+    let ascii_chars = s & packed_byte(0x7f);
+    let is_not_ascii_chars = s & packed_byte(0x80);
+    // MSB[i] is set if chars[i] is greater or equal than 'a'
+    let a = ascii_chars + packed_byte(128 - b'a');
+    // MSB[i] is set if chars[i] is greater than 'z'
+    let z = ascii_chars + packed_byte(128 - b'z' - 1);
+    let mut mask_upper = (a ^ z) & packed_byte(0x80);
+    mask_upper &= !is_not_ascii_chars; // only transform when ASCII
+    s ^ (mask_upper >> 2)
+}
+
+#[inline(always)]
+pub(crate) fn to_ascii_uppercase_16_plain(s: [u8; 16]) -> [u8; 16] {
+    to_ascii_uppercase_n(s)
+}
+
+#[cfg(any(
+    target_arch = "wasm32",
+    target_arch = "x86_64",
+    target_arch = "aarch64"
+))]
+#[inline]
+pub(crate) fn to_ascii_uppercase_16_simd(s: [u8; 16]) -> [u8; 16] {
+    // NOTE: Compiler is able to auto-vectorize this.
+    to_ascii_uppercase_16_plain(s)
+}
+
+fn load_arr_u8_16_simd(s: &[u8; 16]) -> [u8; 16] {
+    // TODO: Remove this function when the compiler can optimize loading of 16 bytes.
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::_mm_loadu_si128;
+        let xmm = _mm_loadu_si128(s.as_ptr() as *const _);
+        mem::transmute(xmm)
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::vld1q_u8;
+        let v = vld1q_u8(s.as_ptr());
+        mem::transmute(v)
+    }
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        use std::arch::wasm32::v128_load;
+        let v = v128_load(s.as_ptr() as *const u8);
+        mem::transmute(v)
+    }
+}
+
+/// Compares two byte slices for ordering, ignoring case.
+pub fn cmp_ignore_ascii_case(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let l = a.len().min(b.len());
+
+    if l < 8 {
+        let mut a_chunk = 0;
+        let mut b_chunk = 0;
+        if l > 4 {
+            a_chunk = (u32::from_be_bytes(a[0..4].try_into().unwrap()) as u64) << 32;
+            a_chunk |= u32::from_be_bytes(a[l - 4..l].try_into().unwrap()) as u64;
+            b_chunk = (u32::from_be_bytes(b[0..4].try_into().unwrap()) as u64) << 32;
+            b_chunk |= u32::from_be_bytes(b[l - 4..l].try_into().unwrap()) as u64;
+        } else if l > 2 {
+            a_chunk = (u16::from_be_bytes(a[0..2].try_into().unwrap()) as u64) << 16;
+            a_chunk |= u16::from_be_bytes(a[l - 2..l].try_into().unwrap()) as u64;
+            b_chunk = (u16::from_be_bytes(b[0..2].try_into().unwrap()) as u64) << 16;
+            b_chunk |= u16::from_be_bytes(b[l - 2..l].try_into().unwrap()) as u64;
+        } else if l > 0 {
+            a_chunk = (a[0] as u64) << 8;
+            a_chunk |= a[l - 1] as u64;
+            b_chunk = (b[0] as u64) << 8;
+            b_chunk |= b[l - 1] as u64;
+        }
+        return match to_ascii_uppercase_8(a_chunk).cmp(&to_ascii_uppercase_8(b_chunk)) {
+            std::cmp::Ordering::Equal => a.len().cmp(&b.len()),
+            non_eq => non_eq,
+        };
+    }
+
+    let lhs = &a[..l];
+    let rhs = &b[..l];
+
+    let mut i = 0;
+    while i < l - 8 {
+        let a_chunk = u64::from_be_bytes(lhs[i..i + 8].try_into().unwrap());
+        let b_chunk = u64::from_be_bytes(rhs[i..i + 8].try_into().unwrap());
+        match to_ascii_uppercase_8(a_chunk).cmp(&to_ascii_uppercase_8(b_chunk)) {
+            std::cmp::Ordering::Equal => {}
+            non_eq => return non_eq,
+        }
+        i += 8;
+    }
+
+    // Handle the remaining bytes
+    let a_chunk = u64::from_be_bytes(lhs[l - 8..l].try_into().unwrap());
+    let b_chunk = u64::from_be_bytes(rhs[l - 8..l].try_into().unwrap());
+    match to_ascii_uppercase_8(a_chunk).cmp(&to_ascii_uppercase_8(b_chunk)) {
+        std::cmp::Ordering::Equal => a.len().cmp(&b.len()),
+        non_eq => non_eq,
+    }
 }
 
 /// Compares two byte slices for equality, ignoring case.
@@ -17,73 +141,108 @@ pub fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
     }
     let len = a.len();
 
-    // TODO: Fallback to a safer version for Miri.
+    // TODO: Fallback to a safer version for Miri (if we are going to read OOB).
 
     #[cfg(target_arch = "x86_64")]
-    // SAFETY: x86_64 arch always has SSE2 support.
-    unsafe {
-        if len < 16 {
-            // Read small pieces of the string into 128-bit registers
-            let mut i = 0;
-            let mut a_chunk = _mm_setzero_si128();
-            let mut b_chunk = _mm_setzero_si128();
-            if len & 0x8 != 0 {
-                a_chunk = mem::transmute(_mm_load_sd(a.as_ptr().add(i) as *const f64));
-                b_chunk = mem::transmute(_mm_load_sd(b.as_ptr().add(i) as *const f64));
-                i += 8;
-            }
-            if len & 0x4 != 0 {
-                a_chunk = _mm_insert_epi32::<2>(
-                    a_chunk,
-                    i32::from_ne_bytes(a.get_unchecked(i..i + 4).try_into().unwrap()),
-                );
-                b_chunk = _mm_insert_epi32::<2>(
-                    b_chunk,
-                    i32::from_ne_bytes(b.get_unchecked(i..i + 4).try_into().unwrap()),
-                );
-                i += 4;
-            }
-            if len & 0x2 != 0 {
-                a_chunk = _mm_insert_epi16::<6>(
-                    a_chunk,
-                    i16::from_ne_bytes(a.get_unchecked(i..i + 2).try_into().unwrap()) as _,
-                );
-                b_chunk = _mm_insert_epi16::<6>(
-                    b_chunk,
-                    i16::from_ne_bytes(b.get_unchecked(i..i + 2).try_into().unwrap()) as _,
-                );
-                i += 2;
-            }
-            if len & 0x1 != 0 {
-                a_chunk = _mm_insert_epi8::<14>(a_chunk, *a.get_unchecked(i) as _);
-                b_chunk = _mm_insert_epi8::<14>(b_chunk, *b.get_unchecked(i) as _);
-                // i += 1;
-            }
-            let a_chunk: [u8; 16] = mem::transmute(a_chunk);
-            let b_chunk: [u8; 16] = mem::transmute(b_chunk);
-            to_ascii_uppercase_n(a_chunk) == to_ascii_uppercase_n(b_chunk)
-        } else {
-            // Read 128-bit chunks of the string into 128-bit registers
-            let mut i = 0;
-            while i < len - 16 {
-                let a_chunk = _mm_loadu_si128(a.as_ptr().add(i) as *const _);
-                let b_chunk = _mm_loadu_si128(b.as_ptr().add(i) as *const _);
-                let a_chunk: [u8; 16] = mem::transmute(a_chunk);
-                let b_chunk: [u8; 16] = mem::transmute(b_chunk);
-                if to_ascii_uppercase_n(a_chunk) != to_ascii_uppercase_n(b_chunk) {
-                    return false;
-                }
-
-                i += 16;
-            }
-
-            // Handle the remaining bytes
-            let a_chunk = _mm_loadu_si128(a.as_ptr().add(len - 16) as *const _);
-            let b_chunk = _mm_loadu_si128(b.as_ptr().add(len - 16) as *const _);
-            let a_chunk: [u8; 16] = mem::transmute(a_chunk);
-            let b_chunk: [u8; 16] = mem::transmute(b_chunk);
-            to_ascii_uppercase_n(a_chunk) == to_ascii_uppercase_n(b_chunk)
+    fn load_partial_arr_u8_16_simd(s: &[u8]) -> [u8; 16] {
+        let len = s.len();
+        assert!(len <= 16);
+        unsafe {
+            let xmm = if len >= 8 {
+                let a = u64::from_ne_bytes(s[0..8].try_into().unwrap());
+                let b = u64::from_ne_bytes(s[len - 8..len].try_into().unwrap());
+                _mm_set_epi64x(b as i64, a as i64)
+            } else if len >= 4 {
+                let a = u32::from_ne_bytes(s[0..4].try_into().unwrap());
+                let b = u32::from_ne_bytes(s[len - 4..len].try_into().unwrap());
+                _mm_set_epi32(0, 0, b as _, a as _)
+            } else if len > 0 {
+                let a = s[0];
+                let b = s[len - 1];
+                let mid = s[len / 2];
+                _mm_set_epi8(
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, a as _, b as _, mid as _,
+                )
+            } else {
+                _mm_setzero_si128()
+            };
+            mem::transmute(xmm)
         }
+    }
+    #[cfg(target_arch = "aarch64")]
+    fn load_partial_arr_u8_16_simd(s: &[u8]) -> [u8; 16] {
+        let len = s.len();
+        assert!(len < 16);
+        unsafe {
+            let xmm = if len >= 8 {
+                let a = u64::from_ne_bytes(s[0..8].try_into().unwrap());
+                let b = u64::from_ne_bytes(s[len - 8..len].try_into().unwrap());
+                vcombine_u64(vcreate_u64(a), vcreate_u64(b))
+            } else if len >= 4 {
+                let a = u32::from_ne_bytes(s[0..4].try_into().unwrap());
+                let b = u32::from_ne_bytes(s[len - 4..len].try_into().unwrap());
+                vcombine_u64(vcreate_u64(a as _), vcreate_u64(b as _))
+            } else if len > 0 {
+                let a = s[0];
+                let b = s[len - 1];
+                let mid = s[len / 2];
+                vcombine_u64(
+                    vcreate_u64((a as u64) << 8 | (mid as u64)),
+                    vcreate_u64((b as u64) << 8 | (0u64)),
+                )
+            } else {
+                vdupq_n_u64(0)
+            };
+            mem::transmute(xmm)
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    fn load_partial_arr_u8_16_simd(s: &[u8]) -> [u8; 16] {
+        let len = s.len();
+        assert!(len < 16);
+        unsafe {
+            let xmm = if len >= 8 {
+                let a = u64::from_ne_bytes(s[0..8].try_into().unwrap());
+                let b = u64::from_ne_bytes(s[len - 8..len].try_into().unwrap());
+                u64x2(a, b)
+            } else if len >= 4 {
+                let a = u32::from_ne_bytes(s[0..4].try_into().unwrap());
+                let b = u32::from_ne_bytes(s[len - 4..len].try_into().unwrap());
+                u64x2(a as _, b as _)
+            } else if len > 0 {
+                let a = s[0];
+                let b = s[len - 1];
+                let mid = s[len / 2];
+                u64x2((a as u64) << 8 | (mid as u64), (b as u64) << 8 | (0u64))
+            } else {
+                u64x2(0, 0)
+            };
+            mem::transmute(xmm)
+        }
+    }
+
+    if len < 16 {
+        // Read small pieces of the string into 128-bit registers
+        let a_chunk = load_partial_arr_u8_16_simd(a);
+        let b_chunk = load_partial_arr_u8_16_simd(b);
+        to_ascii_uppercase_16_simd(a_chunk) == to_ascii_uppercase_16_simd(b_chunk)
+    } else {
+        // Read 128-bit chunks of the string into 128-bit registers
+        let mut i = 0;
+        while i < len - 16 {
+            let a_chunk = load_arr_u8_16_simd(a[i..i + 16].try_into().unwrap());
+            let b_chunk = load_arr_u8_16_simd(b[i..i + 16].try_into().unwrap());
+            if to_ascii_uppercase_16_simd(a_chunk) != to_ascii_uppercase_16_simd(b_chunk) {
+                return false;
+            }
+
+            i += 16;
+        }
+
+        // Handle the remaining bytes
+        let a_chunk = load_arr_u8_16_simd(a[len - 16..len].try_into().unwrap());
+        let b_chunk = load_arr_u8_16_simd(b[len - 16..len].try_into().unwrap());
+        to_ascii_uppercase_16_simd(a_chunk) == to_ascii_uppercase_16_simd(b_chunk)
     }
 }
 
@@ -138,58 +297,66 @@ pub fn rustc_hash_bytes_ascii_uppercase(s: &[u8]) -> u64 {
         }
     }
 
-    #[target_feature(enable = "sse2")]
-    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    fn uppercase_u64x2(in_a: [u64; 2]) -> [u64; 2] {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            // TODO: Remove this when the compiler can optimize loading of 8x2 bytes in x86_64.
+            let mut a = _mm_setzero_si128();
+            std::arch::asm!(
+                "movq {xmm0}, {a0}",
+                "movq {xmm1}, {a1}",
+                "punpcklqdq {xmm0}, {xmm1}",
+                a0 = in(reg) in_a[0],
+                a1 = in(reg) in_a[1],
+                xmm0 = out(xmm_reg) a,
+                xmm1 = out(xmm_reg) _,
+            );
+            let a = mem::transmute(a);
+            mem::transmute(to_ascii_uppercase_16_simd(a))
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        unsafe {
+            let a: [u8; 16] = mem::transmute(make_arr_u64_2_simd(in_a));
+            mem::transmute(to_ascii_uppercase_16_simd(a))
+        }
+    }
+
     fn hash_bytes(bytes: &[u8]) -> u64 {
         let len = bytes.len();
         let mut s0 = SEED1;
         let mut s1 = SEED2;
-
-        fn uppercase_m128i_to_u64x2(xmm0: __m128i) -> [u64; 2] {
-            unsafe {
-                let bytes: [u8; 16] = mem::transmute(xmm0);
-                let bytes = to_ascii_uppercase_n(bytes);
-                mem::transmute(bytes)
-            }
-        }
 
         if len <= 16 {
             // XOR the input into s0, s1.
             if len >= 8 {
                 let v0 = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
                 let v1 = u64::from_le_bytes(bytes[len - 8..].try_into().unwrap());
-                // TODO: Rust generates terrible code when auto vectorizing this,
-                //       so use intrinsics explicitly for now.
-                let xmm0 = mm_load_128i_from_64(v1 as i64, v0 as i64);
-                let xmm0 = uppercase_m128i_to_u64x2(xmm0);
-                s0 ^= xmm0[0];
-                s1 ^= xmm0[1];
+                let [v0, v1] = uppercase_u64x2([v0, v1]);
+                s0 ^= v0;
+                s1 ^= v1;
             } else if len >= 4 {
                 let v0 = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
                 let v1 = u32::from_le_bytes(bytes[len - 4..].try_into().unwrap());
-                let xmm0 = mm_load_128i_from_64(v1 as i64, v0 as i64);
-                let xmm0 = uppercase_m128i_to_u64x2(xmm0);
-                s0 ^= xmm0[0];
-                s1 ^= xmm0[1];
+                let [v0, v1] = uppercase_u64x2([v0 as u64, v1 as u64]);
+                s0 ^= v0;
+                s1 ^= v1;
             } else if len > 0 {
                 let lo = bytes[0];
                 let mid = bytes[len / 2];
                 let hi = bytes[len - 1];
                 let v0 = lo as u64;
                 let v1 = ((hi as u64) << 8) | mid as u64;
-                let xmm0 = mm_load_128i_from_64(v1 as i64, v0 as i64);
-                let xmm0 = uppercase_m128i_to_u64x2(xmm0);
-                s0 ^= xmm0[0];
-                s1 ^= xmm0[1];
+                let [v0, v1] = uppercase_u64x2([v0, v1]);
+                s0 ^= v0;
+                s1 ^= v1;
             }
         } else {
             // Handle bulk (can partially overlap with suffix).
             let mut off = 0;
             while off < len - 16 {
-                let x = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
-                let y = u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap());
-                let xmm0 = mm_load_128i_from_64(y as i64, x as i64);
-                let [x, y] = uppercase_m128i_to_u64x2(xmm0);
+                let xy = load_arr_u8_16_simd(bytes[off..off + 16].try_into().unwrap());
+                let [x, y]: [u64; 2] = unsafe { mem::transmute(to_ascii_uppercase_16_simd(xy)) };
 
                 // Replace s1 with a mix of s0, x, and y, and s0 with s1.
                 // This ensures the compiler can unroll this loop into two
@@ -204,10 +371,8 @@ pub fn rustc_hash_bytes_ascii_uppercase(s: &[u8]) -> u64 {
             }
 
             let suffix = &bytes[len - 16..];
-            let x = u64::from_le_bytes(suffix[0..8].try_into().unwrap());
-            let y = u64::from_le_bytes(suffix[8..16].try_into().unwrap());
-            let xmm0 = mm_load_128i_from_64(y as i64, x as i64);
-            let [x, y] = uppercase_m128i_to_u64x2(xmm0);
+            let xy = load_arr_u8_16_simd(suffix[0..16].try_into().unwrap());
+            let [x, y]: [u64; 2] = unsafe { mem::transmute(to_ascii_uppercase_16_simd(xy)) };
             s0 ^= x;
             s1 ^= y;
         }
@@ -215,8 +380,7 @@ pub fn rustc_hash_bytes_ascii_uppercase(s: &[u8]) -> u64 {
         multiply_mix(s0, s1) ^ (len as u64)
     }
 
-    // SAFETY: x86_64 arch always has SSE2 support.
-    unsafe { hash_bytes(s) }
+    hash_bytes(s)
 }
 
 /// Scans a byte slice for line start positions. Line start positions refer to the
@@ -264,25 +428,33 @@ pub fn scan_line_positions_u32(s: &[u8]) -> Vec<u32> {
     newlines
 }
 
-#[target_feature(enable = "sse2")]
-#[cfg(target_arch = "x86_64")]
-fn mm_load_128i_from_64(v1: i64, v0: i64) -> __m128i {
-    let xmm0 = unsafe { _mm_load_sd(&v0 as *const _ as *const f64) };
-    let xmm0 = unsafe { _mm_loadh_pd(xmm0, &v1 as *const _ as *const f64) };
-    _mm_castpd_si128(xmm0)
-}
-
-#[target_feature(enable = "sse2")]
-#[cfg(target_arch = "x86_64")]
-fn mm_seth_128i(a: __m128i, h: i64) -> __m128i {
-    let a = _mm_castsi128_pd(a);
-    let a = unsafe { _mm_loadh_pd(a, &h as *const _ as *const f64) };
-    _mm_castpd_si128(a)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cmp_ignore_ascii_case() {
+        assert_eq!(
+            cmp_ignore_ascii_case(b"hello", b"HELLO"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            cmp_ignore_ascii_case(b"hello", b"world"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            cmp_ignore_ascii_case(b"Hello World", b"hello world"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            cmp_ignore_ascii_case(b"Hello World", b"HelloWorld"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            cmp_ignore_ascii_case(b"Hello Very Long String", b"hello very long string"),
+            std::cmp::Ordering::Equal
+        );
+    }
 
     #[test]
     fn test_eq_ignore_ascii_case() {
@@ -290,12 +462,16 @@ mod tests {
         assert!(!eq_ignore_ascii_case(b"hello", b"world"));
         assert!(eq_ignore_ascii_case(b"Hello World", b"hello world"));
         assert!(!eq_ignore_ascii_case(b"Hello World", b"HelloWorld"));
+        assert!(eq_ignore_ascii_case(
+            b"Hello Very Long String",
+            b"hello very long string"
+        ));
     }
 
     #[test]
     fn test_rustc_hash_bytes_ascii_uppercase() {
         use std::hash::{Hash, Hasher};
-        
+
         fn hash_a(s: &[u8]) -> u64 {
             let mut hasher = rustc_hash::FxHasher::default();
             s.to_ascii_uppercase().hash(&mut hasher);
@@ -311,6 +487,12 @@ mod tests {
         let s = b"Hello World";
         assert_eq!(hash_a(s), hash_b(s));
         assert_eq!(hash_a(b"Hello"), hash_b(b"Hello"));
+        assert_eq!(hash_a(b"Hello World!"), hash_b(b"Hello World!"));
+        assert_eq!(hash_a(b"Hello World!"), hash_b(b"HELLO WORLD!"));
+        assert_eq!(
+            hash_a(b"Hello Very Long String"),
+            hash_b(b"hello very long string")
+        );
     }
 
     #[test]

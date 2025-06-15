@@ -28,7 +28,7 @@ impl TokenInterner {
             map: IndexSet::with_hasher(FxBuildHasher::default()),
         }
     }
-    
+
     pub fn try_intern(&mut self, value: crate::rcstr::ArcStr) -> Option<TokenKey> {
         let index = self.map.insert_full(value).0;
         Some(TokenKey(index.try_into().ok()?))

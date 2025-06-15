@@ -1,3 +1,4 @@
+use likely_stable::unlikely;
 use std::{
     mem::{ManuallyDrop, MaybeUninit},
     num::NonZeroUsize,
@@ -5,7 +6,7 @@ use std::{
     sync::atomic::AtomicU32,
 };
 
-const MAX_INLINE_DATA_LEN: usize = std::mem::size_of::<NonNull<()>>() - 1;
+const MAX_INLINE_DATA_LEN: usize = size_of::<NonNull<()>>() - 1;
 #[cfg(target_endian = "little")]
 const INLINE_DATA_OFFSET: usize = 1;
 #[cfg(target_endian = "big")]
@@ -496,8 +497,10 @@ impl ArcStr {
 
 impl Drop for ArcStr {
     fn drop(&mut self) {
+        // NOTE: ArcStr is immutable, so AcqRel is not required.
+        // TODO: But is it really safe to use Relaxed here? Will CPU reorder the read after the
+        //       atomic_dec_ref?
         if self.i.safe_atomic_dec_ref() == 0 {
-            // NOTE: ArcStr is immutable, so AcqRel is not required.
             RcStrInnerPtr::drop_ptr(self.i.clone());
         }
     }
@@ -726,7 +729,7 @@ impl RcStrInnerPtr {
     unsafe fn inc_ref(&self) -> u32 {
         unsafe {
             let refcnt = self.refcnt();
-            if refcnt == u32::MAX {
+            if unlikely(refcnt == u32::MAX) {
                 panic!("refcnt overflow");
             }
             self.put_refcnt(refcnt + 1);
@@ -751,7 +754,7 @@ impl RcStrInnerPtr {
         unsafe {
             let refcnt = &*(self.0.as_ptr().add(INNER_REFCNT_OFFSET).cast::<AtomicU32>());
             let r = refcnt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if r == u32::MAX {
+            if unlikely(r == u32::MAX) {
                 panic!("refcnt overflow");
             }
             r + 1
@@ -763,7 +766,8 @@ impl RcStrInnerPtr {
     unsafe fn atomic_dec_ref(&self) -> u32 {
         unsafe {
             let refcnt = &*(self.0.as_ptr().add(INNER_REFCNT_OFFSET).cast::<AtomicU32>());
-            refcnt.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1
+            // NB: Prevent reordering of the read after the atomic_dec_ref.
+            refcnt.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) - 1
         }
     }
     /// # Safety
@@ -836,7 +840,7 @@ impl RcStrInnerPtr {
     }
     /// # Safety
     ///
-    /// `self` must be a inline pointer. Can be used only during construction.
+    /// `self` must be an inline pointer. Can be used only during construction.
     unsafe fn inline_bytes_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         unsafe {
             let len = self.inline_len() as usize;

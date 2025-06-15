@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["mee_engine", "mee_bridge", "mee_utils"]
+members = ["mee_engine", "mee_bridge", "mee_utils", "mee_cli"]
 
 [profile.release]
 debug = true
